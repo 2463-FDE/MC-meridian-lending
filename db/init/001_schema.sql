@@ -1,5 +1,18 @@
--- Meridian Lending — schema (Halcyon v1)
+-- Meridian Lending — schema (Halcyon v1, extended in-place over the years)
 -- NOTE: money is stored as double precision throughout. Keeps the app code simple.
+
+-- Staff + borrower logins. Passwords are sha256 hex (no salt, no bcrypt — Halcyon's
+-- "we'll harden it later"). Roles: admin | underwriter | csr | borrower.
+CREATE TABLE IF NOT EXISTS users (
+    id            SERIAL PRIMARY KEY,
+    username      TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,        -- sha256(password), unsalted
+    role          TEXT NOT NULL DEFAULT 'csr',
+    display_name  TEXT,
+    applicant_id  INTEGER,              -- set for borrower logins
+    is_active     BOOLEAN DEFAULT TRUE,
+    created_at    TIMESTAMPTZ DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS applicants (
     id          SERIAL PRIMARY KEY,
@@ -8,20 +21,27 @@ CREATE TABLE IF NOT EXISTS applicants (
     ssn         TEXT,            -- plaintext
     ein         TEXT,            -- for entity applicants
     is_entity   BOOLEAN DEFAULT FALSE,
+    email       TEXT,
+    phone       TEXT,
     address     TEXT,
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS applications (
-    id              SERIAL PRIMARY KEY,
-    applicant_id    INTEGER REFERENCES applicants(id),
-    amount          DOUBLE PRECISION NOT NULL,   -- money as float
-    term_months     INTEGER NOT NULL,
-    purpose         TEXT,
-    income          DOUBLE PRECISION,            -- money as float
-    status          TEXT DEFAULT 'submitted',
-    created_at      TIMESTAMPTZ DEFAULT now()
+    id                SERIAL PRIMARY KEY,
+    applicant_id      INTEGER REFERENCES applicants(id),
+    amount            DOUBLE PRECISION NOT NULL,   -- money as float
+    term_months       INTEGER NOT NULL,
+    purpose           TEXT,
+    income            DOUBLE PRECISION,            -- money as float
+    employer          TEXT,
+    job_title         TEXT,
+    employment_years  DOUBLE PRECISION,
+    status            TEXT DEFAULT 'submitted',
+    created_at        TIMESTAMPTZ DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
+CREATE INDEX IF NOT EXISTS idx_applications_applicant ON applications(applicant_id);
 
 -- KYC: CIP only. No sanctions/OFAC, no beneficial owner, no monitoring.
 CREATE TABLE IF NOT EXISTS kyc_checks (
@@ -93,3 +113,9 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     deleted_at  TIMESTAMPTZ,        -- soft-delete column on an "audit" trail
     created_at  TIMESTAMPTZ DEFAULT now()
 );
+
+-- A few indexes added over time for the servicing dashboard. (No idempotency index on
+-- payments — there is no idempotency key to index. No reason/driver columns on decisions.)
+CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
+CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
+CREATE INDEX IF NOT EXISTS idx_offers_app ON offers(app_id);
