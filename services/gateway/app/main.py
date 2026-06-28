@@ -1,18 +1,37 @@
 """API gateway / BFF — FastAPI.
 
-Routes the Next.js portal to the LOS, LSS, and AI services. Auth is a thin bearer-token
-pass-through; the gateway does not enforce roles (downstream services don't either).
+Fronts the Next.js portal and routes to the LOS and LSS services. Adds a session-auth
+layer: `/auth/*` for login/logout, and a guard on the servicing (`/lss/*`) routes. The
+resolved identity is forwarded downstream as `X-User-Id` / `X-User-Role` headers.
+
+NOTE (brownfield): the gateway authenticates the caller but does NOT enforce role
+authorization on money-moving servicing actions — that is left to the downstream
+servicing-service, which also doesn't check. Any authenticated user can adjust balances
+or waive fees. (weak authz — kept on purpose)
 """
+import logging
 import os
+
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
-ORIGINATION_URL = os.getenv("ORIGINATION_URL", "http://origination-service:8001")
-SERVICING_URL = os.getenv("SERVICING_URL", "http://servicing-service:8002")
-AI_URL = os.getenv("AI_ORCHESTRATOR_URL", "http://ai-orchestrator:8003")
+from . import auth
+from .config import ORIGINATION_URL, SERVICING_URL
 
-app = FastAPI(title="Meridian Gateway (BFF)", version="1.0.0")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+log = logging.getLogger("gateway")
+
+app = FastAPI(title="Meridian Gateway (BFF)", version="2.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # wide-open CORS (brownfield)
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")
@@ -20,15 +39,55 @@ def health():
     return {"status": "ok", "service": "gateway"}
 
 
-async def _proxy(base: str, path: str, request: Request):
+# --------------------------------------------------------------------------- auth
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/auth/login")
+def login(body: LoginIn):
+    try:
+        user = auth.authenticate(body.username, body.password)
+    except Exception as e:  # DB/redis down
+        log.warning("login backend error: %s", e)
+        raise HTTPException(status_code=503, detail="auth backend unavailable")
+    if not user:
+        raise HTTPException(status_code=401, detail="invalid username or password")
+    token = auth.create_session(user)
+    return {"token": token, "user": user}
+
+
+@app.post("/auth/logout")
+def logout(authorization: str | None = Header(None)):
+    auth.delete_session(auth.bearer_token(authorization))
+    return {"ok": True}
+
+
+@app.get("/auth/me")
+def me(authorization: str | None = Header(None)):
+    user = auth.get_session(auth.bearer_token(authorization))
+    if not user:
+        raise HTTPException(status_code=401, detail="not authenticated")
+    return user
+
+
+# -------------------------------------------------------------------------- proxy
+
+async def _proxy(base: str, path: str, request: Request, user: dict | None):
     method = request.method
     body = await request.body()
+    headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in ("host", "content-length", "authorization")
+    }
+    if user:
+        headers["X-User-Id"] = str(user.get("id", ""))
+        headers["X-User-Role"] = str(user.get("role", ""))
     async with httpx.AsyncClient(timeout=35) as client:
         resp = await client.request(
-            method, f"{base}{path}",
-            content=body,
-            headers={k: v for k, v in request.headers.items()
-                     if k.lower() not in ("host", "content-length")},
+            method, f"{base}{path}", content=body, headers=headers,
             params=request.query_params,
         )
     try:
@@ -37,16 +96,23 @@ async def _proxy(base: str, path: str, request: Request):
         return JSONResponse(status_code=resp.status_code, content={"raw": resp.text})
 
 
+def _require_user(authorization: str | None) -> dict:
+    user = auth.get_session(auth.bearer_token(authorization))
+    if not user:
+        raise HTTPException(status_code=401, detail="not authenticated")
+    return user
+
+
 @app.api_route("/los/{path:path}", methods=["GET", "POST"])
-async def los(path: str, request: Request):
-    return await _proxy(ORIGINATION_URL, f"/{path}", request)
+async def los(path: str, request: Request, authorization: str | None = Header(None)):
+    # Origination is borrower-facing; an applicant can apply without an account.
+    # If a session is present we forward it, otherwise we proxy anonymously.
+    user = auth.get_session(auth.bearer_token(authorization))
+    return await _proxy(ORIGINATION_URL, f"/{path}", request, user)
 
 
 @app.api_route("/lss/{path:path}", methods=["GET", "POST"])
-async def lss(path: str, request: Request):
-    return await _proxy(SERVICING_URL, f"/{path}", request)
-
-
-@app.api_route("/ai/{path:path}", methods=["GET", "POST"])
-async def ai(path: str, request: Request):
-    return await _proxy(AI_URL, f"/{path}", request)
+async def lss(path: str, request: Request, authorization: str | None = Header(None)):
+    # Servicing requires authentication (but not a specific role — see module docstring).
+    user = _require_user(authorization)
+    return await _proxy(SERVICING_URL, f"/{path}", request, user)
