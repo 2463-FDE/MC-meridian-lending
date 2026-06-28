@@ -15,6 +15,11 @@ def get_balance(loan_id: int) -> float:
     return rows[0]["balance"] if rows else 0.0
 
 
+def get_past_due(loan_id: int) -> float:
+    rows = db.query("SELECT past_due FROM balances WHERE loan_id = %s", (loan_id,))
+    return rows[0]["past_due"] if rows else 0.0
+
+
 def apply_payment(loan_id: int, amount: float) -> float:
     """Read-modify-write with no lock. Float math. No waterfall (fees/interest/principal)."""
     current = get_balance(loan_id)             # READ

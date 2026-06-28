@@ -1,17 +1,33 @@
 """Servicing service (LSS) — FastAPI.
 
-Endpoints: payments, balances, delinquency. Money-affecting endpoints accept ANY
-authenticated caller — no role check, no second approver / maker-checker. (D8, #6)
+Read API (loan list / detail / schedule / payment history) uses SQLAlchemy. The
+money-moving endpoints (payments, balance adjust, fee waiver) keep their original raw
+implementation and accept ANY authenticated caller — no role check, no maker-checker.
+(weak authz — kept on purpose)
 """
-from fastapi import FastAPI, Header
+import logging
+import os
+
+from fastapi import FastAPI, Header, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 
-from . import payments, balance, delinquency, reconciliation
+from . import balance, delinquency, payments, reconciliation
 from .logging_config import get_logger
+from .routers import loans
 
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = get_logger("servicing")
-app = FastAPI(title="Meridian Servicing Service (LSS)", version="1.0.0")
+
+app = FastAPI(title="Meridian Servicing Service (LSS)", version="2.0.0")
+app.include_router(loans.router)
+
+
+@app.exception_handler(Exception)
+async def unhandled(request: Request, exc: Exception):
+    log.error("unhandled error on %s: %s", request.url.path, exc)
+    return JSONResponse(status_code=500, content={"detail": "internal error"})
 
 
 @app.get("/health")
@@ -31,7 +47,7 @@ class PaymentIn(BaseModel):
 
 @app.post("/payments")
 def post_payment(body: PaymentIn):
-    # No idempotency key accepted or checked. Retried POST = second charge.
+    # No idempotency key accepted or checked. Retried POST = second charge. (debt D2)
     return payments.charge(
         body.loan_id, body.pan, body.cvv, body.amount, body.ssn, body.name, body.method
     )
@@ -39,7 +55,11 @@ def post_payment(body: PaymentIn):
 
 @app.get("/accounts/{loan_id}/balance")
 def get_account_balance(loan_id: int):
-    return {"loan_id": loan_id, "balance": balance.get_balance(loan_id)}
+    return {
+        "loan_id": loan_id,
+        "balance": balance.get_balance(loan_id),
+        "past_due": balance.get_past_due(loan_id),
+    }
 
 
 class AdjustIn(BaseModel):
@@ -48,8 +68,8 @@ class AdjustIn(BaseModel):
 
 @app.post("/accounts/{loan_id}/adjust-balance")
 def adjust_balance(loan_id: int, body: AdjustIn,
-                   authorization: Optional[str] = Header(None)):
-    # ANY authenticated user. No role check, no second approver, no ledger entry.
+                   x_user_role: Optional[str] = Header(None)):
+    # ANY authenticated user. No role check, no second approver, no ledger entry. (debt D8)
     return {"loan_id": loan_id, "balance": balance.adjust_balance(loan_id, body.new_balance)}
 
 
@@ -59,8 +79,8 @@ class WaiveIn(BaseModel):
 
 @app.post("/accounts/{loan_id}/waive-fee")
 def waive_fee(loan_id: int, body: WaiveIn,
-              authorization: Optional[str] = Header(None)):
-    # ANY authenticated user can waive a fee. No maker-checker.
+              x_user_role: Optional[str] = Header(None)):
+    # ANY authenticated user can waive a fee. No maker-checker. (debt D8)
     return {"loan_id": loan_id, "past_due": balance.waive_fee(loan_id, body.amount)}
 
 
@@ -71,7 +91,7 @@ def late_fee(loan_id: int):
 
 @app.get("/reconciliation/peek")
 def reconciliation_peek():
-    # Not a real control — just exposes the two totals. They don't tie out.
+    # Not a real control — just exposes the two totals. They don't tie out. (debt D7)
     return {
         "ledger_total": reconciliation.ledger_total(),
         "settlement_total": reconciliation.settlement_total(),
