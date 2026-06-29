@@ -1,5 +1,8 @@
 """Credit decisioning.
 
+This logic was lifted verbatim out of the origination service into its own
+decision-service — the behaviour (and the debt) is unchanged by the split.
+
 The credit pull, the bureau call, and the model run are a SYNCHRONOUS chain executed
 inline on the request thread (load note: timeouts past ~20 concurrent apps).
 

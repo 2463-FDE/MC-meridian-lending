@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import db, decision, intake, kyc, models
+from .. import clients, db, intake, models
 from ..database import get_session
 from ..logging_config import get_logger
 from ..schemas import (
@@ -25,22 +25,44 @@ router = APIRouter(prefix="/applications", tags=["applications"])
 @router.post("", response_model=ApplicationCreated)
 def submit_application(body: ApplicationIn):
     payload = body.model_dump()
-    app_id = intake.create_application(payload)
-    cip = kyc.run_cip(payload)  # CIP only — no sanctions / UBO / monitoring (debt)
-    # persist the CIP result (still no sanctions/ubo columns to persist — debt preserved)
+    app_id = intake.create_application(payload)  # creates applicant+application rows, logs full PII (D5 — KEEP)
+    # Resolve applicant_id the same way the old in-process path did.
+    applicant_id = None
     try:
         applicant_rows = db.query(
             "SELECT applicant_id FROM applications WHERE id = %s", (app_id,)
         )
         applicant_id = applicant_rows[0]["applicant_id"] if applicant_rows else None
-        db.query(
-            "INSERT INTO kyc_checks (applicant_id, name_verified, dob_verified, "
-            "address_verified, ssn_verified) VALUES (%s, %s, %s, %s, %s)",
-            (applicant_id, cip["name_verified"], cip["dob_verified"],
-             cip["address_verified"], cip["ssn_verified"]),
-        )
     except Exception as e:  # noqa
-        log.warning("could not persist kyc: %s", e)
+        log.warning("could not resolve applicant_id: %s", e)
+
+    # CIP/KYC moved to kyc-service. It persists its own kyc_checks row (so no INSERT here).
+    # Default to all-false; a kyc-service hiccup must not 500 the intake (resilience kept).
+    cip = {"name_verified": False, "dob_verified": False,
+           "address_verified": False, "ssn_verified": False}
+    is_entity = bool(payload.get("is_entity"))
+    try:
+        resp = clients.post(clients.KYC_URL, "/kyc/check", {
+            "application_id": app_id,
+            "applicant_id": applicant_id,
+            "name": payload.get("name"),
+            "dob": payload.get("dob"),
+            "ssn": payload.get("ssn"),
+            "address": payload.get("address"),
+            "entity_type": "llc" if is_entity else None,
+        })
+        passed = bool(resp.get("cip_passed"))
+        # Map kyc-service cip_passed -> the four KycOut booleans the frontend expects.
+        # CIP verifies name/dob/address/ssn that were provided; entity applicants have no
+        # dob/ssn so those stay false even on a pass (mirrors the old in-process stub).
+        cip = {
+            "name_verified": passed,
+            "dob_verified": passed and not is_entity,
+            "address_verified": passed,
+            "ssn_verified": passed and not is_entity,
+        }
+    except Exception as e:  # noqa
+        log.warning("kyc-service call failed: %s", e)
     return {"app_id": app_id, "status": "submitted", "kyc": KycOut(**cip)}
 
 
@@ -109,17 +131,30 @@ def get_application(app_id: int, session: Session = Depends(get_session)):
 @router.post("/{app_id}/decision", response_model=DecisionOut)
 def run_decision(app_id: int):
     rows = db.query(
-        "SELECT a.id, a.income, ap.ssn FROM applications a "
-        "LEFT JOIN applicants ap ON ap.id = a.applicant_id WHERE a.id = %s",
+        "SELECT a.id, a.applicant_id, a.amount, a.term_months, a.income, ap.name, ap.ssn "
+        "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id WHERE a.id = %s",
         (app_id,),
     )
     if not rows:
         raise HTTPException(status_code=404, detail="application not found")
-    application = {"app_id": app_id, "ssn": rows[0].get("ssn") or "", "income": rows[0].get("income") or 0}
-    result = decision.decide(application)  # synchronous chain; persists outcome only (debt)
+    r = rows[0]
+    # Decisioning moved to decision-service; it persists the (outcome-only) decisions row.
+    resp = clients.post(clients.DECISION_URL, "/decisions", {
+        "application_id": app_id,
+        "applicant_id": r.get("applicant_id"),
+        "name": r.get("name"),
+        "ssn": r.get("ssn") or "",
+        "requested_amount": r.get("amount"),
+        "term_months": r.get("term_months"),
+        "annual_income": r.get("income") or 0,
+        "monthly_debt": 0,            # not captured in the LOS today
+        "credit_score": None,         # pulled downstream by decision-service
+    })
     return DecisionOut(
-        app_id=app_id, decision=result["decision"], score=result["score"],
-        adverse_action_reason=result.get("adverse_action_reason"),
+        app_id=app_id,
+        decision=resp["outcome"],
+        score=int(round(resp.get("score") or 0)),  # DecisionOut.score is int
+        adverse_action_reason=resp.get("reason"),
     )
 
 

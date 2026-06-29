@@ -5,7 +5,7 @@ A funded loan is boarded to servicing by a DIRECT INSERT into the servicing tabl
 no contract. (brownfield seam #1 — see docs/architecture.md, ADR 0002)
 """
 from .logging_config import get_logger
-from . import db, offer
+from . import db
 
 log = get_logger("intake")
 
@@ -52,13 +52,5 @@ def board_to_servicing(app_id: int, applicant_name: str, principal: float,
     return loan_id
 
 
-def build_disclosure(app_id: int, principal: float, annual_rate_pct: float,
-                     term_months: int) -> dict:
-    o = offer.build_offer(principal, annual_rate_pct, term_months)
-    db.query(
-        "INSERT INTO offers (app_id, apr, finance_charge, monthly_payment, "
-        "amount_financed, total_of_payments) VALUES (%s, %s, %s, %s, %s, %s)",
-        (app_id, o["apr"], o["finance_charge"], o["monthly_payment"],
-         o["amount_financed"], o["total_of_payments"]),
-    )
-    return o
+# build_disclosure was removed: offer/disclosure build moved to disclosure-service, which
+# now persists the offers row itself. The offers router calls it over HTTP (see clients.py).

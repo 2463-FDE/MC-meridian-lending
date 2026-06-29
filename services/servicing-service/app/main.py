@@ -53,6 +53,20 @@ def post_payment(body: PaymentIn):
     )
 
 
+class ApplyPaymentIn(BaseModel):
+    amount: float
+    payment_id: int
+
+
+@app.post("/accounts/{loan_id}/apply-payment")
+def apply_payment(loan_id: int, body: ApplyPaymentIn):
+    # This is the apply path called by payment-service AFTER it captures the charge (the
+    # LSS half of the split payment flow). It still does the unlocked read-modify-write
+    # (D3) straight off principal with no waterfall (D14) — preserved exactly as-is.
+    new_balance = balance.apply_payment(loan_id, body.amount)
+    return {"loan_id": loan_id, "applied_amount": body.amount, "new_balance": new_balance}
+
+
 @app.get("/accounts/{loan_id}/balance")
 def get_account_balance(loan_id: int):
     return {

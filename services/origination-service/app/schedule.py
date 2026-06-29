@@ -5,13 +5,22 @@ platform); fine for a display schedule, but the same float drift that affects ap
 applies here too.
 """
 import datetime
-from . import apr
+
+
+def _monthly_payment(principal: float, annual_rate_pct: float, term_months: int) -> float:
+    # Inlined from the (now-removed) apr.py — APR/finance-charge moved to disclosure-service,
+    # but the display schedule generator stays in the LOS. Float math (D1) preserved.
+    r = (annual_rate_pct / 100.0) / 12.0
+    if r == 0:
+        return principal / term_months
+    factor = (1 + r) ** term_months
+    return principal * r * factor / (factor - 1)
 
 
 def amortization(principal: float, annual_rate_pct: float, term_months: int,
                  start: datetime.date | None = None) -> list[dict]:
     start = start or datetime.date.today()
-    pmt = apr.monthly_payment(principal, annual_rate_pct, term_months)
+    pmt = _monthly_payment(principal, annual_rate_pct, term_months)
     monthly_rate = (annual_rate_pct / 100.0) / 12.0
     balance = principal
     rows: list[dict] = []

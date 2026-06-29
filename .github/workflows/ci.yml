@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [gateway, origination-service, servicing-service]
+        service: [gateway, origination-service, servicing-service, kyc-service, decision-service, disclosure-service, payment-service]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

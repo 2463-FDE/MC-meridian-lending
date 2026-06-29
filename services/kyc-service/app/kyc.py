@@ -8,6 +8,10 @@ MISSING (deliberately, for now):
   - ongoing monitoring
   - SAR path
 An LLC can clear this with no real person verified.
+
+This logic used to live inside origination-service (app/kyc.py); it is now its own
+kyc-service. Splitting it into a standalone service did NOT close the gap — the CIP-only
+story (no sanctions/OFAC, no UBO, no ongoing monitoring, no SAR) is carried forward intact.
 """
 from .logging_config import get_logger
 

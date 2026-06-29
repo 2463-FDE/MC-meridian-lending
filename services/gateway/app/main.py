@@ -19,7 +19,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from . import auth
-from .config import ORIGINATION_URL, SERVICING_URL
+from .config import (
+    DECISION_URL,
+    DISCLOSURE_URL,
+    KYC_URL,
+    ORIGINATION_URL,
+    PAYMENT_URL,
+    SERVICING_URL,
+)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("gateway")
@@ -116,3 +123,35 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
     # Servicing requires authentication (but not a specific role — see module docstring).
     user = _require_user(authorization)
     return await _proxy(SERVICING_URL, f"/{path}", request, user)
+
+
+# --- LOS sub-services (the decomposed origination estate). -------------------
+# Origination calls these server-to-server during the application flow; they are
+# also exposed here so the portal / ops tooling can reach each service directly.
+# Like /los/*, the underwriting-flow services forward a session if one is present
+# but do not require it (an applicant can apply without an account).
+
+@app.api_route("/kyc/{path:path}", methods=["GET", "POST"])
+async def kyc(path: str, request: Request, authorization: str | None = Header(None)):
+    user = auth.get_session(auth.bearer_token(authorization))
+    return await _proxy(KYC_URL, f"/{path}", request, user)
+
+
+@app.api_route("/decision/{path:path}", methods=["GET", "POST"])
+async def decision(path: str, request: Request, authorization: str | None = Header(None)):
+    user = auth.get_session(auth.bearer_token(authorization))
+    return await _proxy(DECISION_URL, f"/{path}", request, user)
+
+
+@app.api_route("/disclosure/{path:path}", methods=["GET", "POST"])
+async def disclosure(path: str, request: Request, authorization: str | None = Header(None)):
+    user = auth.get_session(auth.bearer_token(authorization))
+    return await _proxy(DISCLOSURE_URL, f"/{path}", request, user)
+
+
+@app.api_route("/payments/{path:path}", methods=["GET", "POST"])
+async def payments(path: str, request: Request, authorization: str | None = Header(None)):
+    # Taking a payment is a money-moving action: authenticated, but (brownfield)
+    # the gateway still does NOT enforce a specific role — same gap as /lss.
+    user = _require_user(authorization)
+    return await _proxy(PAYMENT_URL, f"/{path}", request, user)

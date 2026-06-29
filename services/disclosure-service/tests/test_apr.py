@@ -2,6 +2,9 @@
 
 These currently FAIL because apr.py uses float and a crude annualization. CI runs them
 with continue-on-error so the build stays green. (This is the W4 discovery material.)
+
+DELIBERATELY-FAILING by design — documents debt D1 (float money math breaching the Reg Z
+APR tolerance) and D6 (the three drifted ORIGINATION_FEE_PCT copies). Do not "fix".
 """
 from decimal import Decimal, getcontext
 from app import apr

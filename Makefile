@@ -22,6 +22,10 @@ seed:
 test:
 	cd services/origination-service && python -m pytest -q || true
 	cd services/servicing-service && python -m pytest -q || true
+	cd services/kyc-service && python -m pytest -q || true
+	cd services/decision-service && python -m pytest -q || true
+	cd services/disclosure-service && python -m pytest -q || true
+	cd services/payment-service && python -m pytest -q || true
 
 config:
 	docker compose config -q && echo "compose config OK"

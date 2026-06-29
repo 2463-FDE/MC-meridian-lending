@@ -123,7 +123,7 @@ export default function LoanDetailPage() {
     setActionMsg(null);
     try {
       // NOTE: no idempotency key — a retry double-charges.
-      await apiPost("/lss/payments", {
+      await apiPost("/payments", {
         loan_id: loanId,
         pan: "4111111111111111", // hardcoded test card PAN (texture)
         cvv: "123", // hardcoded test CVV (texture)
