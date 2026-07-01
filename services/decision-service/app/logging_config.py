@@ -1,12 +1,22 @@
-"""Logging setup.
+"""Logging with PII redaction.
 
-Logs the full request body on every POST — including PII. No redaction.
-Halcyon said "we need the body to debug." (D5)
+Redacts PAN, CVV, SSN, email, phone before writing to logs.
+Addresses PCI-DSS 3.4 (plaintext PII in logs).
 """
 import logging
 import os
 
+from .redactor import PiiRedactor
+
 LOG_DIR = os.getenv("LOG_DIR", "logs")
+
+
+class RedactingFormatter(logging.Formatter):
+    """Custom formatter that redacts PII before writing logs."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        msg = super().format(record)
+        return PiiRedactor.redact(msg)
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -14,7 +24,7 @@ def get_logger(name: str) -> logging.Logger:
     if logger.handlers:
         return logger
     logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
-    fmt = logging.Formatter("%(levelname)s %(asctime)s %(name)s %(message)s")
+    fmt = RedactingFormatter("%(levelname)s %(asctime)s %(name)s %(message)s")
 
     sh = logging.StreamHandler()
     sh.setFormatter(fmt)

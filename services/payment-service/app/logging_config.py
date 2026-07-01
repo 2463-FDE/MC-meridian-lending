@@ -1,11 +1,22 @@
-"""Logging — writes the full charge request body (PAN, CVV, SSN) at INFO. No redaction.
+"""Logging with PII redaction.
 
-Output goes to logs/payment-service.log, the same file handed over in the repo. (D5, #7)
+Previously logged full charge request body (PAN, CVV, SSN) without redaction.
+Now redacts PII before writing to logs/payment-service.log. Addresses PCI-DSS 3.4.
 """
 import logging
 import os
 
+from .redactor import PiiRedactor
+
 LOG_DIR = os.getenv("LOG_DIR", "logs")
+
+
+class RedactingFormatter(logging.Formatter):
+    """Custom formatter that redacts PII before writing logs."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        msg = super().format(record)
+        return PiiRedactor.redact(msg)
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -13,7 +24,7 @@ def get_logger(name: str) -> logging.Logger:
     if logger.handlers:
         return logger
     logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
-    fmt = logging.Formatter("%(levelname)s %(asctime)s %(message)s")
+    fmt = RedactingFormatter("%(levelname)s %(asctime)s %(message)s")
 
     sh = logging.StreamHandler()
     sh.setFormatter(fmt)
