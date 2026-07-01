@@ -67,11 +67,11 @@ class PiiRedactor:
             text
         )
 
-        # 5. Redact phone numbers (requires full format: area code + 7 digits)
-        # Patterns: XXX-XXX-XXXX or (XXX) XXX-XXXX or (XXX)XXX-XXXX
-        # Preserve last 4 digits. Require area code to avoid false positives.
+        # 5. Redact phone numbers (requires area code + separators to avoid false positives)
+        # Patterns: XXX-XXX-XXXX or (XXX) XXX-XXXX or (XXX)XXX-XXXX (but not bare 10-digit)
+        # Require at least one separator to avoid matching product codes like 5551234567
         text = re.sub(
-            r'(?:\+\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})\b',
+            r'(?:\+\d{1,3}[\s.-])?(?:\(?\d{3}[\s.-]|\(?\d{3}\)[\s.-]?)\d{3}[\s.-]?(\d{4})\b',
             lambda m: '•••-•••-' + m.group(1),
             text
         )
