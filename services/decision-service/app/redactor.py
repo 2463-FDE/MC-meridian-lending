@@ -32,7 +32,7 @@ class PiiRedactor:
         - Phone: 555-123-4567 → •••-•••-4567
         """
         if not text:
-            return text
+            return text or ""
 
         # 1. Redact PAN (Visa/Mastercard/Amex format: XXXX-XXXX-XXXX-XXXX or variations)
         # Pattern: 4+ digits, separated by - or space, repeated 4 times
@@ -67,10 +67,11 @@ class PiiRedactor:
             text
         )
 
-        # 5. Redact phone numbers (XXX-XXX-XXXX or (XXX) XXX-XXXX or XXXXXXXXXX)
-        # Preserve last 4 digits
+        # 5. Redact phone numbers (requires full format: area code + 7 digits)
+        # Patterns: XXX-XXX-XXXX or (XXX) XXX-XXXX or (XXX)XXX-XXXX
+        # Preserve last 4 digits. Require area code to avoid false positives.
         text = re.sub(
-            r'\b(?:\(?\d{3}\)?[\s.-]?)?\d{3}[\s.-]?(\d{4})\b',
+            r'(?:\+\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})\b',
             lambda m: '•••-•••-' + m.group(1),
             text
         )

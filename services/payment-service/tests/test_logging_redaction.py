@@ -16,10 +16,13 @@ from app.redactor import PiiRedactor
 
 @pytest.fixture
 def temp_log_dir():
-    """Create a temporary directory for log files."""
+    """Create a temporary directory for log files. Clears logger cache to avoid cross-test pollution."""
     with tempfile.TemporaryDirectory() as tmpdir:
         original_log_dir = os.getenv("LOG_DIR")
         os.environ["LOG_DIR"] = tmpdir
+        # Clear cached loggers to prevent handlers from previous tests
+        logging.getLogger("payment_test").handlers.clear()
+        logging.getLogger("formatter_test").handlers.clear()
         yield tmpdir
         if original_log_dir:
             os.environ["LOG_DIR"] = original_log_dir
