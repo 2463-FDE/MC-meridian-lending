@@ -14,7 +14,6 @@ from fastapi.responses import JSONResponse
 from .logging_config import get_logger
 from .routers import kyc
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = get_logger("kyc")
 
 app = FastAPI(title="Meridian KYC Service", version="2.0.0")
