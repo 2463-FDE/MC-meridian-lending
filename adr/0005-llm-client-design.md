@@ -61,7 +61,7 @@ def call(
 2. **Request:**
    - POST to Claude API via `anthropic` SDK.
    - Redact PII from `messages` before sending (use `PiiRedactor` from logging redaction module).
-   - Include `response_schema` as JSON schema constraint if provided (native Claude structured output).
+   - Include `response_schema` as a JSON schema constraint if provided. **Planned approach:** use native Claude structured output *if the `anthropic` SDK version we pin supports it* — to be verified at implementation time. If it does not, fall back to a Pydantic model + manual validation (see Rationale).
 
 3. **Timeout:**
    - Enforce 30s timeout on the HTTP call.
@@ -109,9 +109,9 @@ def call(
 - **Why:** Principle of least privilege. PII should never leave the system unless necessary. Claude API is a third party (Anthropic-hosted, US data centers). Even redacted data is safer than unredacted.
 - **Alternative:** Send unredacted, redact only in logs (less secure; rejected).
 
-### Native Claude Structured Output
-- **Why:** Claude API (Anthropic SDK) has built-in constraints for structured output. Using native support is safest and avoids reimplementing validation.
-- **Fallback:** If SDK doesn't support it, use Pydantic model + manual validation (origination-service already uses Pydantic 2.10.4).
+### Native Claude Structured Output (planned, pending SDK verification)
+- **Why:** If the pinned `anthropic` SDK exposes built-in structured-output constraints, using native support is safest and avoids reimplementing validation. **This has not yet been verified against a specific SDK version** — confirm at implementation time before relying on it.
+- **Fallback:** If the SDK doesn't support it (or we can't confirm in time), use a Pydantic model + manual validation (origination-service already uses Pydantic 2.10.4).
 
 ### Single Dedicated Instance Per Service
 - **Why:** Keep scope focused. origination-service is the primary consumer (week 1 loan-summary feature). If payment-service or others need LLM later, refactor to shared module then (YAGNI).

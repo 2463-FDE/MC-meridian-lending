@@ -43,7 +43,7 @@ A reusable, hardened HTTP client for Claude API calls that:
 7. No unit test logs contain PAN/CVV/SSN/email/phone
 
 ### D2. PCI/PII-Safe Logging
-Configure logging across the Meridian services (origination-service, payment-service, servicing-service, decision-service, disclosure-service, kyc-service) so that:
+Configure logging across all 7 Meridian services (origination-service, payment-service, servicing-service, decision-service, disclosure-service, kyc-service, gateway) so that:
 - No PAN, CVV, full SSN, or email is ever written to `logs/`
 - Partial SSN (last 4 digits only) is allowed in logs for audit trails
 - PII in request/response bodies is redacted before logging
@@ -51,7 +51,7 @@ Configure logging across the Meridian services (origination-service, payment-ser
 
 **Acceptance:**
 1. A `PiiRedactor` class (or similar) exists in a shared module with a `redact(text: str) -> str` method
-2. Logging is configured with this redactor in all services
+2. Logging is configured with this redactor in all 7 services
 3. Existing log files are reviewed; any containing PAN/CVV/full SSN are flagged in the debt-log
 4. Unit tests verify PAN ("4111…"), CVV ("123"), full SSN ("412-55-9981"), email, and phone are redacted
 5. Partial SSN (last 4) is preserved: "SSN: •••-••-1234" or similar
@@ -100,7 +100,7 @@ A new entry in `docs/debt-log.md` (create if missing) documenting the security/c
 
 ### Functional
 1. LLM client wrapper exists, is tested, and can make a real Claude API call with timeout/retry/validation
-2. Logging across all services is configured to redact PAN/CVV/full SSN
+2. Logging across all 7 services is configured to redact PAN/CVV/full SSN
 3. LOS↔LSS seam map is documented
 4. Debt-log entry is committed with all four findings (D1, D5, D13, D2)
 

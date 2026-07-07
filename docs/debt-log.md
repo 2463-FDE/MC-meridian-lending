@@ -52,8 +52,8 @@ This document tracks known issues, their business/compliance impact, and mitigat
 |---|---|
 | **ID** | D5 |
 | **Finding** | Payment and origination services log full request/response bodies, including plaintext PAN, CVV, and SSN. |
-| **Location** | `services/payment-service/app/logging_config.py` (line 1–4): "writes the full charge request body (PAN, CVV, SSN) at INFO." |
-| | `services/payment-service/app/main.py` (assumed): Logs full request body on POST `/charge`. |
+| **Location** | `services/payment-service/app/logging_config.py` (lines 1–4): docstring — "writes the full charge request body (PAN, CVV, SSN) at INFO. No redaction." |
+| | `services/payment-service/app/payments.py` (lines 23–27): `charge()` logs the full request body `{"pan","cvv","ssn","amount","loan_id","name"}` at INFO on `POST /payments`. |
 | | `services/origination-service/app/logging_config.py` (line 3–4): "Logs the full request body on every POST — including PII. No redaction." |
 | | `services/origination-service/app/intake.py` (line 15): `log.info("POST /applications intake req=%s", payload)` — payload includes SSN, email, phone. |
 | | **Log files:** `logs/payment-service.log`, `logs/origination-service.log` contain unredacted cardholder data. |
@@ -70,7 +70,7 @@ This document tracks known issues, their business/compliance impact, and mitigat
 | | **Week 2:** Implement log rotation + deletion (30-day retention). |
 | | **Week 2:** Implement centralized logging (Loki/ELK) with redaction at ingest. |
 | | **Week 3:** Audit all existing backups; re-encrypt or delete any containing plaintext PII. |
-| **Status** | Open; **being addressed in Week 1 via ADR 0006 (logging redaction).** |
+| **Status** | Open. **Planned:** redaction strategy is designed in ADR 0006; the `PiiRedactor` code + tests land in a separate PR (`feature/pii-redaction`) and are not part of this docs branch. Not marked fixed until that code + tests are merged. |
 
 ---
 
@@ -113,7 +113,7 @@ This document tracks known issues, their business/compliance impact, and mitigat
 | Severity | Finding | Status | Week 1 Action |
 |---|---|---|---|
 | **Critical** | D1: Hardcoded credentials | Open | Document, flag, schedule rotation (Week 2+). |
-| **Critical** | D5: Plaintext PII in logs | Open | **ADDRESSED: ADR 0006 (logging redaction).** |
+| **Critical** | D5: Plaintext PII in logs | Open | **Planned: ADR 0006 designs redaction; code + tests in `feature/pii-redaction` PR (not yet merged).** |
 | **Critical** | D13: PAN/CVV in DB | Open | Document, flag, schedule tokenization (Week 2–3). |
 | **High** | D2: Float money math | Open | Document, flag, schedule migration to Decimal (Week 2+). |
 
@@ -123,7 +123,7 @@ This document tracks known issues, their business/compliance impact, and mitigat
 
 ✓ **D1:** Documented; flagged for rotation (Week 2).  
 ✓ **D2:** Documented; flagged for Decimal migration (Week 2+).  
-✓ **D5:** **FIXED (ADR 0006).** PiiRedactor applied to all 7 services; new logs are redacted. Existing logs flagged (not deleted, out of scope).  
+◻ **D5:** **Planned (ADR 0006).** Redaction strategy designed; `PiiRedactor` code + tests are in a separate PR (`feature/pii-redaction`) and not yet merged. Existing logs flagged (not deleted, out of scope). Not fixed until that code + tests land.  
 ✓ **D13:** Documented; flagged for tokenization (Week 2–3).  
 
 ---
