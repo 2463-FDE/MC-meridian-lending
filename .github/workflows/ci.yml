@@ -32,6 +32,27 @@ jobs:
           cd services/${{ matrix.service }}
           python -m pytest -q || true
 
+  redactor-drift:
+    # The PII redactor is duplicated per service (no shared package across containers).
+    # Fail if the copies diverge — a fix applied to one but not the rest silently
+    # reopens a PII log leak. Regenerate with scripts/sync_redactor.sh.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify redactor.py copies are identical
+        run: |
+          set -euo pipefail
+          canonical=$(md5sum services/gateway/app/redactor.py | awk '{print $1}')
+          fail=0
+          for f in services/*/app/redactor.py; do
+            h=$(md5sum "$f" | awk '{print $1}')
+            if [ "$h" != "$canonical" ]; then
+              echo "DRIFT: $f differs from canonical gateway redactor.py"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || { echo "Run scripts/sync_redactor.sh to resync."; exit 1; }
+
   frontend:
     runs-on: ubuntu-latest
     steps:

@@ -6,7 +6,7 @@ Now redacts PII before writing to logs/payment-service.log. Addresses PCI-DSS 3.
 import logging
 import os
 
-from .redactor import PiiRedactor
+from .redactor import PiiRedactor, configure_uvicorn
 
 
 
@@ -40,4 +40,6 @@ def get_logger(name: str) -> logging.Logger:
         logger.addHandler(fh)
     except OSError:
         pass
+    # Also redact uvicorn's own access/error loggers (URLs, tracebacks).
+    configure_uvicorn(fmt)
     return logger

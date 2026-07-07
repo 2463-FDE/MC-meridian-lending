@@ -1,13 +1,13 @@
 """Logging setup with PII redaction.
 
-Logs requests and responses, but redacts PAN, CVV, SSN, email, phone
-before writing to disk. Addresses PCI-DSS 3.4 (plaintext PII in logs).
+The gateway proxies every request/response between the portal and the LOS/LSS
+services, so anything it logs can contain PII. Redacts PAN, CVV, SSN, email,
+phone before writing. Addresses PCI-DSS 3.4 (plaintext PII in logs).
 """
 import logging
 import os
 
 from .redactor import PiiRedactor, configure_uvicorn
-
 
 
 class RedactingFormatter(logging.Formatter):
@@ -35,7 +35,7 @@ def get_logger(name: str) -> logging.Logger:
     try:
         log_dir = os.getenv("LOG_DIR", "logs")
         os.makedirs(log_dir, exist_ok=True)
-        fh = logging.FileHandler(os.path.join(log_dir, "origination-service.log"))
+        fh = logging.FileHandler(os.path.join(log_dir, "gateway.log"))
         fh.setFormatter(fmt)
         logger.addHandler(fh)
     except OSError:

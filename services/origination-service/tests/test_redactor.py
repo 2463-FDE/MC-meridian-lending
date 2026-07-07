@@ -184,3 +184,47 @@ class TestPiiRedactorIntegration:
         # Current implementation checks `if not text`, so it returns None as-is
         result = PiiRedactor.redact(None)
         assert result is None
+
+
+class TestPiiRedactorAdversarialFixes:
+    """Regression tests for closed bypasses / false positives (adversarial review)."""
+
+    def test_bare_9_digit_id_not_masked_as_ssn(self):
+        # SSN masking of bare 9-digit runs used to clobber loan IDs / amounts.
+        # Only DASHED or LABELED nine-digit values may be treated as SSN.
+        assert PiiRedactor.redact("loan_id=402551998 approved") == "loan_id=402551998 approved"
+        assert PiiRedactor.redact("principal 100000000 cents") == "principal 100000000 cents"
+
+    def test_labeled_bare_ssn_still_masked(self):
+        result = PiiRedactor.redact('{"ssn":"412559981"}')
+        assert "412559981" not in result
+        assert "9981" in result
+
+    def test_cvv2_variant_masked(self):
+        result = PiiRedactor.redact('{"cvv2": "123"}')
+        assert "123" not in result and "••••" in result
+
+    def test_security_code_variant_masked(self):
+        result = PiiRedactor.redact('{"security_code": "456"}')
+        assert "456" not in result and "••••" in result
+
+    def test_card_security_code_variant_masked(self):
+        result = PiiRedactor.redact('"card_security_code":"7890"')
+        assert "7890" not in result and "••••" in result
+
+    def test_bare_phone_in_labeled_field_masked(self):
+        # JSON-serialized bodies are the common log shape; a bare 10-digit value
+        # in a labeled phone field must be redacted even without separators.
+        result = PiiRedactor.redact('{"phone":"5551234567"}')
+        assert "5551234567" not in result
+        assert "4567" in result
+
+    def test_dotted_pan_masked(self):
+        result = PiiRedactor.redact("card 4111.1111.1111.1111")
+        assert "4111.1111.1111.1111" not in result
+        assert "(PAN)" in result and "1111" in result
+
+    def test_decimal_amount_not_masked_as_pan(self):
+        # Dot-grouped PAN support must not swallow ordinary decimals.
+        text = "amount 1234567.89 usd"
+        assert PiiRedactor.redact(text) == text

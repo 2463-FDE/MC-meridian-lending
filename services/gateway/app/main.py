@@ -9,9 +9,6 @@ authorization on money-moving servicing actions — that is left to the downstre
 servicing-service, which also doesn't check. Any authenticated user can adjust balances
 or waive fees. (weak authz — kept on purpose)
 """
-import logging
-import os
-
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,9 +24,9 @@ from .config import (
     PAYMENT_URL,
     SERVICING_URL,
 )
+from .logging_config import get_logger
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
-log = logging.getLogger("gateway")
+log = get_logger("gateway")
 
 app = FastAPI(title="Meridian Gateway (BFF)", version="2.0.0")
 

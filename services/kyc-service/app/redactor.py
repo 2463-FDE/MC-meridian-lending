@@ -5,7 +5,12 @@ before logging. This prevents PCI-DSS violations (plaintext PII in logs).
 
 Redaction patterns are regex-based for performance; they handle common
 formats but may not catch all variations (e.g., international phone numbers).
+
+This file is duplicated byte-for-byte across every service (each runs in its
+own container and cannot import a shared package). CI enforces that the copies
+stay identical — edit here, then sync to all services (see scripts/sync_redactor).
 """
+import logging
 import re
 
 
@@ -39,7 +44,7 @@ class PiiRedactor:
         Luhn gate avoids redacting unrelated long digit runs (order IDs, timestamps).
         """
         raw = match.group(0)
-        digits = re.sub(r'[ \-]', '', raw)
+        digits = re.sub(r'[ \-.]', '', raw)
         if 13 <= len(digits) <= 19 and PiiRedactor._luhn_valid(digits):
             return PiiRedactor._mask_with_last_4(digits) + ' (PAN)'
         return raw
@@ -51,10 +56,10 @@ class PiiRedactor:
 
         Patterns redacted:
         - PAN (13-19 digits, Luhn-checked): Visa/MC 16, Amex 15 (378282246310005)
-        - CVV: "cvv": "123" → "cvv": "••••"
-        - Full SSN: 412-55-9981 → •••-••-9981
-        - Email: user@example.com → ••••@•••••••.com
-        - Phone: 555-123-4567 → •••-•••-4567
+        - CVV: "cvv"/"cvv2"/"security_code": "123" → "cvv": "••••"
+        - Full SSN: 412-55-9981 → •••-••-9981 (dashed always; bare only in a labeled field)
+        - Email: user@example.com → ••••@example.com
+        - Phone: 555-123-4567 → •••-•••-4567 (separated always; bare only in a labeled field)
         """
         if text is None:
             return None
@@ -62,42 +67,62 @@ class PiiRedactor:
             return text
 
         # 1. Redact PAN. Cards are 13-19 digits (Amex 15, Visa/MC 16, Diners 14)
-        # with optional single space/hyphen separators. Old 4x4 regex missed
-        # 15-digit Amex (e.g. 378282246310005). Candidates Luhn-checked below.
+        # with optional single space/hyphen separators. Candidates Luhn-checked below.
         text = re.sub(
             r'\b\d(?:[ \-]?\d){12,18}\b',
             PiiRedactor._redact_if_pan,
             text
         )
-
-        # 2. Redact CVV (3-4 digits in context of "cvv" or "cvc" field)
-        # Match JSON patterns like "cvv": "123" or "cvv":"123" or cvv: 123
+        # 1b. Dot-grouped PANs (e.g. 4111.1111.1111.1111). Kept as a separate,
+        # tightly-grouped pattern so we don't mask ordinary decimals like 1234567.89.
         text = re.sub(
-            r'(["\']?(?:cvv|cvc|card_security_code)["\']?\s*[:=]\s*["\']?)(\d{3,4})(["\']?)',
+            r'\b\d{4}(?:\.\d{4}){2}\.\d{1,7}\b',
+            PiiRedactor._redact_if_pan,
+            text
+        )
+
+        # 2. Redact CVV (3-4 digits in the context of a card-security-code field).
+        # Match JSON/kv patterns like "cvv": "123", cvv2=123, "security_code":"4567".
+        text = re.sub(
+            r'(["\']?(?:cvv2|cvv|cvc|cid|card[_ ]?security[_ ]?code|security[_ ]?code)["\']?\s*[:=]\s*["\']?)(\d{3,4})(["\']?)',
             lambda m: m.group(1) + "••••" + m.group(3),
             text,
             flags=re.IGNORECASE
         )
 
-        # 3. Redact full SSN (XXX-XX-XXXX or XXXXXXXXX format)
-        # Preserve last 4 digits for audit trail
+        # 3a. Redact dashed SSN (XXX-XX-XXXX) — unambiguous, always redact.
+        # Preserve last 4 digits for audit trail.
         text = re.sub(
-            r'\b\d{3}[-]?\d{2}[-]?(\d{4})\b',
+            r'\b\d{3}-\d{2}-(\d{4})\b',
             lambda m: '•••-••-' + m.group(1),
             text
         )
+        # 3b. Redact bare/loosely-formatted SSN ONLY inside a labeled field, so we
+        # don't mask unrelated 9-digit numbers (loan IDs, amounts, timestamps).
+        text = re.sub(
+            r'(["\']?(?:ssn|social[_ ]?security(?:[_ ]?(?:no|num|number))?|tax[_ ]?id|tin)["\']?\s*[:=]\s*["\']?)\d{3}[-\s]?\d{2}[-\s]?(\d{4})\b',
+            lambda m: m.group(1) + '•••-••-' + m.group(2),
+            text,
+            flags=re.IGNORECASE
+        )
 
-        # 4. Redact email addresses
-        # Match common email pattern; redact local part, preserve domain
+        # 4. Redact email addresses. Redact local part, preserve domain.
         text = re.sub(
             r'\b[a-zA-Z0-9._%+\-]+@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b',
             lambda m: '••••@' + m.group(1),
             text
         )
 
-        # 5. Redact phone numbers (requires area code + separators to avoid false positives)
-        # Patterns: XXX-XXX-XXXX or (XXX) XXX-XXXX or (XXX)XXX-XXXX (but not bare 10-digit)
-        # Require at least one separator to avoid matching product codes like 5551234567
+        # 5a. Redact phone in a labeled field (catches bare 10-digit like
+        # "phone":"5551234567" that 5b intentionally skips to avoid false positives).
+        text = re.sub(
+            r'(["\']?(?:phone|telephone|tel|mobile|cell|fax)["\']?\s*[:=]\s*["\']?)\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})\b',
+            lambda m: m.group(1) + '•••-•••-' + m.group(2),
+            text,
+            flags=re.IGNORECASE
+        )
+        # 5b. Redact free-text phone numbers (requires area code + separators to
+        # avoid false positives on bare 10-digit product/order codes).
         text = re.sub(
             r'(?:\+\d{1,3}[\s.-])?(?:\(?\d{3}[\s.-]|\(?\d{3}\)[\s.-]?)\d{3}[\s.-]?(\d{4})\b',
             lambda m: '•••-•••-' + m.group(1),
@@ -105,3 +130,29 @@ class PiiRedactor:
         )
 
         return text
+
+
+class _RedactWrapper(logging.Formatter):
+    """Wraps another formatter, redacting its output. Preserves the inner layout."""
+
+    def __init__(self, inner: logging.Formatter):
+        super().__init__()
+        self._inner = inner
+
+    def format(self, record: logging.LogRecord) -> str:
+        return PiiRedactor.redact(self._inner.format(record))
+
+
+def configure_uvicorn(fallback_fmt: logging.Formatter) -> None:
+    """Route uvicorn's own loggers through redaction.
+
+    uvicorn.access / uvicorn.error own their handlers and do NOT propagate to the
+    app logger, so access lines (URL + query string) and startup tracebacks would
+    otherwise be written unredacted. Wrap each existing formatter in place.
+    """
+    for name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+        lg = logging.getLogger(name)
+        for h in lg.handlers:
+            if isinstance(h.formatter, _RedactWrapper):
+                continue
+            h.setFormatter(_RedactWrapper(h.formatter or fallback_fmt))
