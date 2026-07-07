@@ -3,6 +3,7 @@
 This test simulates a payment request with full PAN/CVV/SSN,
 verifies the log file does NOT contain these fields unredacted.
 """
+import io
 import logging
 import os
 import tempfile
@@ -134,6 +135,30 @@ def test_logging_does_not_redact_non_pii(temp_log_dir):
     assert "12345" in content
     assert "250.00" in content
     assert "9876" in content
+
+
+def test_no_leak_via_root_handler(temp_log_dir):
+    """propagate=False must stop unredacted duplication via a root handler.
+
+    Plain (non-redacting) root handler stands in for uvicorn / basicConfig.
+    If the service logger propagated, raw PAN/CVV would be formatted here from
+    record.msg/args -- the leak path RedactingFormatter alone cannot close.
+    """
+    buffer = io.StringIO()
+    root_handler = logging.StreamHandler(buffer)
+    root_handler.setFormatter(logging.Formatter("%(message)s"))
+    root_logger = logging.getLogger()
+    root_logger.addHandler(root_handler)
+    try:
+        logger = get_logger("payment_test")
+        logger.info("charge: %s", {"pan": "4111111111111111", "cvv": "123"})
+    finally:
+        root_logger.removeHandler(root_handler)
+
+    out = buffer.getvalue()
+    assert "4111111111111111" not in out, "Raw PAN leaked to root handler"
+    assert '"123"' not in out, "Raw CVV leaked to root handler"
+    assert logger.propagate is False, "service logger must not propagate to root"
 
 
 def test_redacting_formatter_integration(temp_log_dir):

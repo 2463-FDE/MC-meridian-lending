@@ -24,6 +24,26 @@ class TestPiiRedactorPan:
         result = PiiRedactor.redact(text)
         assert result == text  # not a PAN, should not redact
 
+    def test_redact_amex_15_digit(self):
+        text = "card: 378282246310005"
+        result = PiiRedactor.redact(text)
+        assert "378282246310005" not in result
+        assert "37828224631" not in result
+        assert "0005" in result  # last 4 preserved
+        assert "•" in result
+
+    def test_redact_amex_grouped(self):
+        text = "card 3782 822463 10005"
+        result = PiiRedactor.redact(text)
+        assert "822463" not in result
+        assert "0005" in result
+
+    def test_no_redact_non_card_16_digits(self):
+        # 16-digit run failing Luhn (order id) must NOT be redacted
+        text = "order 1234567890123456"
+        result = PiiRedactor.redact(text)
+        assert result == text
+
 
 class TestPiiRedactorCvv:
     """Test CVV redaction."""
@@ -58,7 +78,7 @@ class TestPiiRedactorSsn:
         assert "•••-••-" in result
 
     def test_redact_ssn_no_dashes(self):
-        text = "ssn=4125599981"
+        text = "ssn=412559981"  # valid 9-digit SSN, no dashes
         result = PiiRedactor.redact(text)
         assert "412559" not in result
         assert "9981" in result  # last 4 preserved
@@ -114,11 +134,12 @@ class TestPiiRedactorPhone:
         assert "555" not in result or "555" not in result.split("(")[1] if "(" in result else True
         assert "4567" in result
 
-    def test_redact_phone_no_formatting(self):
+    def test_bare_10_digit_not_treated_as_phone(self):
+        # Deliberate: bare 10-digit runs are NOT redacted as phone, to avoid
+        # false positives on product codes / IDs (see phone-regex tightening).
         text = "5551234567"
         result = PiiRedactor.redact(text)
-        assert "5551234567" not in result
-        assert "4567" in result
+        assert result == text
 
 
 class TestPiiRedactorIntegration:

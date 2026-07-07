@@ -8,7 +8,6 @@ import os
 
 from .redactor import PiiRedactor
 
-LOG_DIR = os.getenv("LOG_DIR", "logs")
 
 
 class RedactingFormatter(logging.Formatter):
@@ -24,6 +23,9 @@ def get_logger(name: str) -> logging.Logger:
     if logger.handlers:
         return logger
     logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
+    # Own our handlers. Otherwise records propagate to root (uvicorn/basicConfig),
+    # formatted from raw msg/args — unredacted duplicate on stdout/central collector.
+    logger.propagate = False
     fmt = RedactingFormatter("%(levelname)s %(asctime)s %(name)s %(message)s")
 
     sh = logging.StreamHandler()
@@ -31,8 +33,9 @@ def get_logger(name: str) -> logging.Logger:
     logger.addHandler(sh)
 
     try:
-        os.makedirs(LOG_DIR, exist_ok=True)
-        fh = logging.FileHandler(os.path.join(LOG_DIR, "kyc-service.log"))
+        log_dir = os.getenv("LOG_DIR", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        fh = logging.FileHandler(os.path.join(log_dir, "kyc-service.log"))
         fh.setFormatter(fmt)
         logger.addHandler(fh)
     except OSError:

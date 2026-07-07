@@ -20,25 +20,53 @@ class PiiRedactor:
         return "•" * (len(text) - 4) + text[-4:]
 
     @staticmethod
+    def _luhn_valid(digits: str) -> bool:
+        """Return True if digits pass the Luhn checksum (look like a real card)."""
+        total = 0
+        for i, ch in enumerate(reversed(digits)):
+            d = int(ch)
+            if i % 2 == 1:
+                d *= 2
+                if d > 9:
+                    d -= 9
+            total += d
+        return total % 10 == 0
+
+    @staticmethod
+    def _redact_if_pan(match: re.Match) -> str:
+        """Mask a candidate digit run only if it is a valid 13-19 digit card (Luhn).
+
+        Luhn gate avoids redacting unrelated long digit runs (order IDs, timestamps).
+        """
+        raw = match.group(0)
+        digits = re.sub(r'[ \-]', '', raw)
+        if 13 <= len(digits) <= 19 and PiiRedactor._luhn_valid(digits):
+            return PiiRedactor._mask_with_last_4(digits) + ' (PAN)'
+        return raw
+
+    @staticmethod
     def redact(text: str) -> str:
         """
         Redact PII from text. Return redacted copy.
 
         Patterns redacted:
-        - PAN (Visa/MC/Amex): 4111-1111-1111-1111 → ••••-••••-••••-1111
+        - PAN (13-19 digits, Luhn-checked): Visa/MC 16, Amex 15 (378282246310005)
         - CVV: "cvv": "123" → "cvv": "••••"
         - Full SSN: 412-55-9981 → •••-••-9981
         - Email: user@example.com → ••••@•••••••.com
         - Phone: 555-123-4567 → •••-•••-4567
         """
+        if text is None:
+            return None
         if not text:
-            return text or ""
+            return text
 
-        # 1. Redact PAN (Visa/Mastercard/Amex format: XXXX-XXXX-XXXX-XXXX or variations)
-        # Pattern: 4+ digits, separated by - or space, repeated 4 times
+        # 1. Redact PAN. Cards are 13-19 digits (Amex 15, Visa/MC 16, Diners 14)
+        # with optional single space/hyphen separators. Old 4x4 regex missed
+        # 15-digit Amex (e.g. 378282246310005). Candidates Luhn-checked below.
         text = re.sub(
-            r'\b\d{4}[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4}\b',
-            lambda m: PiiRedactor._mask_with_last_4(m.group(0).replace('-', '').replace(' ', '')) + ' (PAN)',
+            r'\b\d(?:[ \-]?\d){12,18}\b',
+            PiiRedactor._redact_if_pan,
             text
         )
 
