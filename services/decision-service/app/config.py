@@ -1,21 +1,23 @@
 """Decision service configuration.
 
 Carried over from origination when decisioning was split into its own service.
-Halcyon left the bureau credentials inline so the demo "just works" without setup.
-TODO(rotate): move these to a secret manager before go-live. (never done)
+Bureau/DB credentials are now read from the environment only — no secret defaults
+in source (was: inline "so the demo just works"). Inject via the host env /
+secret manager; see docs/security-remediation-2026-07.md.
 """
 import os
 
-# --- Credit bureau (Experian) — HARDCODED. Also duplicated in the committed .env. ---
-EXPERIAN_KEY = "EXAMPLE-LEAKED-KEY-rotate-me"
+# --- Credit bureau (Experian) — env only; no committed default. Rotate the key
+# that was previously hardcoded/committed. ---
+EXPERIAN_KEY = os.getenv("EXPERIAN_KEY", "")
 EXPERIAN_BASE_URL = os.getenv("EXPERIAN_BASE_URL", "https://api.experian.example.com/v2")
 
-# Core banking key, also hardcoded as a fallback "so on-call doesn't get stuck".
-CORE_BANKING_API_KEY = os.getenv("CORE_BANKING_API_KEY", "cb_live_4f9a2e7c1b8d6053a1f4e9c2")
+# Core banking key — env only; no committed default.
+CORE_BANKING_API_KEY = os.getenv("CORE_BANKING_API_KEY", "")
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://meridian:meridian_dev_pw_2024@postgres:5432/meridian",
+    "postgresql://meridian:@postgres:5432/meridian",
 )
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
