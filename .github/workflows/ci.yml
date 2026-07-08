@@ -67,12 +67,12 @@ jobs:
       - name: origination-service redactor unit tests
         run: |
           cd services/origination-service
-          pip install -r requirements.txt
+          pip install -r requirements.txt pytest
           python -m pytest tests/test_redactor.py -q
       - name: payment-service logging-redaction integration tests
         run: |
           cd services/payment-service
-          pip install -r requirements.txt
+          pip install -r requirements.txt pytest
           python -m pytest tests/test_logging_redaction.py -q
 
   frontend:
