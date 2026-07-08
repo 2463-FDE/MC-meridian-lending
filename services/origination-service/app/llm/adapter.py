@@ -149,13 +149,13 @@ class ClaudeAdapter(_AnthropicSDKAdapter):
         if self._client is None:
             try:
                 import anthropic
+                self._client = anthropic.Anthropic(api_key=self._api_key)
             except ImportError as exc:  # pragma: no cover - env-dependent
                 raise LLMHTTPError(
                     "anthropic SDK is not installed; cannot reach Claude.",
                     status_code=0,
                     retryable=False,
                 ) from exc
-            self._client = anthropic.Anthropic(api_key=self._api_key)
         return self._client
 
 
@@ -180,17 +180,23 @@ class BedrockAdapter(_AnthropicSDKAdapter):
 
     def _sdk_client(self):
         if self._client is None:
+            # Construction is inside the try because the `anthropic[bedrock]`
+            # extra (boto3) is imported when AnthropicBedrock() is built, not on
+            # `import anthropic`. A shipped image with plain `anthropic` but no
+            # boto3 would otherwise raise a RAW ImportError here instead of our
+            # typed error — the exact "missing extra" gap the review flagged.
             try:
                 import anthropic
-            except ImportError as exc:  # pragma: no cover - env-dependent
+                kwargs = {"aws_region": self._region} if self._region else {}
+                self._client = anthropic.AnthropicBedrock(**kwargs)
+            except ImportError as exc:
                 raise LLMHTTPError(
                     "anthropic[bedrock] is not installed (needs boto3); "
-                    "cannot reach Claude on Bedrock.",
+                    "cannot reach Claude on Bedrock. Install the "
+                    "'anthropic[bedrock]' extra.",
                     status_code=0,
                     retryable=False,
                 ) from exc
-            kwargs = {"aws_region": self._region} if self._region else {}
-            self._client = anthropic.AnthropicBedrock(**kwargs)
         return self._client
 
 

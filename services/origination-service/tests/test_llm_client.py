@@ -155,6 +155,27 @@ def test_bedrock_adapter_without_sdk_raises_llm_error(monkeypatch):
         adapter.complete(_req())
 
 
+def test_bedrock_missing_boto3_extra_raises_typed_error(monkeypatch):
+    """Realistic 'shipped set missing the bedrock extra' (PR review F3): the base
+    `anthropic` package imports fine, but `AnthropicBedrock()` construction fails
+    because the `[bedrock]` extra (boto3) is absent. Must surface as a typed
+    LLMHTTPError, not a raw ImportError leaking from _sdk_client()."""
+    import sys
+    import types
+
+    fake = types.ModuleType("anthropic")
+
+    def _needs_boto3(*args, **kwargs):
+        raise ImportError("No module named 'boto3'")
+
+    fake.AnthropicBedrock = _needs_boto3
+    monkeypatch.setitem(sys.modules, "anthropic", fake)
+
+    adapter = BedrockAdapter()
+    with pytest.raises(LLMHTTPError):
+        adapter.complete(_req())
+
+
 # --- Concern 4: transport (timeout / retry) -------------------------------
 
 def test_retries_5xx_then_succeeds():
