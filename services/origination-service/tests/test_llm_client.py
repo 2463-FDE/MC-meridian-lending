@@ -22,10 +22,12 @@ from app.llm import (
     load_llm_config,
 )
 from app.llm.adapter import Completion, CompletionRequest
-from app.llm.errors import LLMHTTPError, LLMTimeoutError
+from app.llm.errors import LLMError, LLMHTTPError, LLMTimeoutError
 from app.llm.request_builder import build_request, estimate_tokens
 from app.llm.transport import call_with_retry
+from app.llm.validator import parse_json
 from app.prompts import get_prompt
+from app.redactor import PiiRedactor
 
 # A valid loan-summary JSON the fake model can "return".
 GOOD_SUMMARY = (
@@ -331,3 +333,64 @@ def test_no_pii_in_logs():
     assert "maria@example.com" not in logs
     assert "4111111111111111" not in logs
     assert "555-123-4567" not in logs
+
+
+# --- Adversarial fixes (A / C / D / E / B) --------------------------------
+
+def test_pii_redacted_before_sent_to_provider():
+    """Fix A: customer PII must be redacted before the request leaves to the
+    third-party model (ADR 0005 decision #2), not just in output/logs."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).summarize_application(
+        '{"name": "Maria", "ssn": "412-55-9981", "email": "maria@example.com", '
+        '"pan": "4111111111111111", "phone": "555-123-4567"}'
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    assert "412-55-9981" not in sent
+    assert "4111111111111111" not in sent
+    assert "maria@example.com" not in sent
+    assert "555-123-4567" not in sent
+
+
+def test_history_pii_redacted_before_send():
+    """Fix A: PII in prior-turn history is also redacted before send."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).complete(
+        "loan_application_summary",
+        application_json="{}",
+        history=[{"role": "user", "content": "earlier: SSN 412-55-9981"}],
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    assert "412-55-9981" not in sent
+
+
+def test_stream_is_gated_not_leaking():
+    """Fix C: stream() bypasses output guards, so it raises rather than
+    shipping raw, unvalidated model text until buffer-then-validate lands."""
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response=GOOD_SUMMARY))
+    with pytest.raises(NotImplementedError):
+        list(client.stream("loan_application_summary", application_json="{}"))
+
+
+def test_parse_json_single_line_fence():
+    """Fix D: a single-line ```json {...}``` fence parses, not rejected."""
+    assert parse_json('```json {"a": 1} ```') == {"a": 1}
+    assert parse_json('```\n{"b": 2}\n```') == {"b": 2}
+
+
+def test_malformed_history_raises_typed_error():
+    """Fix E: a history turn without 'content' raises LLMError, not KeyError."""
+    tmpl = get_prompt("loan_application_summary")
+    with pytest.raises(LLMError):
+        build_request(
+            tmpl, model="m", max_tokens=10, temperature=0.0, timeout=1.0,
+            token_budget=20_000, history=[{"role": "user"}], application_json="{}",
+        )
+
+
+def test_redactor_catches_spaced_ssn():
+    """Fix B: space-separated SSN (XXX XX XXXX) is redacted, closing the leak
+    guard hole found in the adversarial round."""
+    out = PiiRedactor.redact("applicant SSN 412 55 9981 on file")
+    assert "412 55 9981" not in out
+    assert "9981" in out  # last-4 preserved for audit

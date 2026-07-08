@@ -7,9 +7,25 @@
 **Checklist:** "Reviewing LLM-integration code — what to look for" (7 items)
 
 Verdict: **Ship for Week 1.** Seven build concerns are implemented and tested
-against a fake model (56 tests pass, no tokens spent). Findings below are ranked;
+against a fake model (70 tests pass, no tokens spent). Findings below are ranked;
 none block the Week-1 turn-in. Items marked *Deferred* are explicitly scoped to
 Week 2 in ADR 0005.
+
+> **Adversarial round (2026-07-07, "teeth check") — 5 findings, all resolved:**
+>
+> | # | Sev | Finding | Fix |
+> |---|-----|---------|-----|
+> | **A** | High | Customer PII (SSN **and** PAN) was sent to the model **unredacted** — violated ADR 0005 decision #2; only output was guarded, not input. | `request_builder` now redacts the current message + all history content via `PiiRedactor` before the request is built/sent. Tests: `test_pii_redacted_before_sent_to_provider`, `test_history_pii_redacted_before_send`. |
+> | **C** | High | `client.stream()` was public and yielded raw model text — no schema/length/leak guard. | `stream()` now raises `NotImplementedError` (gated) until buffer-then-validate lands in Week 2. Test: `test_stream_is_gated_not_leaking`. |
+> | **B** | Medium | Leak guard inherited redactor blind spots — space-separated SSN (`412 55 9981`) slipped through (was disclosed as F5). | Added a `XXX XX XXXX` pattern to the shared redactor (3-2-4 grouping is SSN-specific); synced to all 7 services. Test: `test_redactor_catches_spaced_ssn`. Bare 10-digit / DOB still out of scope — see F5. |
+> | **D** | Low | `parse_json` rejected a single-line ` ```json {…} ``` ` fence. | Regex-based fence stripping handles inline + multiline fences. Test: `test_parse_json_single_line_fence`. |
+> | **E** | Low | Malformed history turn (no `content`) raised bare `KeyError`. | `request_builder` validates each turn, raises typed `LLMError`. Test: `test_malformed_history_raises_typed_error`. |
+>
+> Also fixed during this round (found while wiring provider support): a latent
+> `UnboundLocalError` in `transport.call_with_retry` — the except-clause `exc`
+> was referenced after Python unbinds it, so a real 429/5xx would have crashed
+> instead of retrying. Now held in a stable name; covered by
+> `test_client_recovers_from_retryable_failure`.
 
 ---
 
