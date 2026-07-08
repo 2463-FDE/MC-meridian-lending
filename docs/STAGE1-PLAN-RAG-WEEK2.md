@@ -62,7 +62,7 @@ content policy or decision-record content. Guidelines already flag the reason ga
 
 **Chosen:** **pure-Python TF-IDF + cosine similarity behind a small `Embedder` interface**,
 with the interface designed so a dense backend can be dropped in later.
-**Why:** the corpus is 2 documents / ~15 chunks; at this scale lexical retrieval is
+**Why:** the corpus is 2 documents / ~9 section chunks; at this scale lexical retrieval is
 competitive and the eval harness's job is to measure retrieval and surface data gaps — not
 to ship the production retriever. Pure Python honors the quota constraint absolutely (zero
 API, zero downloads), is deterministic (stable eval numbers), runs anywhere (the dev
@@ -110,6 +110,32 @@ routes it to the "Data gaps" section with a stated root cause.
 **Why:** the #6012 case is the week's headline finding. Scoring it as a plain retrieval
 miss would mislabel a data-capture failure as a search failure — the exact confusion Dana
 already has ("which was weird").
+**Calibration note:** the confidence threshold is *not* pre-committed. TF-IDF cosine scores
+over a ~9-chunk corpus are lumpy; the threshold must be calibrated empirically against the
+gold set at implementation time, and the chosen value + method recorded in the eval report.
+
+### DL-7: Vector store / retrieval index
+
+| Option | Tradeoffs |
+|--------|-----------|
+| Hosted vector DB (Pinecone et al.) | Managed ANN at scale; recurring cost, data leaves the estate — violates cost + hygiene constraints |
+| Local vector DB (Chroma/FAISS) | No API cost; heavy deps, a persistent chunk store to secure, ANN approximates what exact search gives free at this size |
+| pgvector on estate Postgres | No new infra (ADR 0002 shared DB); still a persistent chunk store + runtime dependency an offline harness shouldn't have |
+| In-memory exact cosine index | Zero infra/deps/cost; exact (not approximate) retrieval; rebuilt per run — nothing persistent to audit |
+
+**Chosen:** **in-memory exact cosine index**, rebuilt each run from the on-disk embedding
+cache. No vector database.
+**Why:** (1) *Scale* — ~9 chunks; brute-force exact cosine is microseconds, and ANN
+machinery would approximate a result exact search gives for free. (2) *Role* — this is an
+offline eval harness, not the production retriever; it must run anywhere (laptop, CI) on
+stdlib alone, with no running service dependency. (3) *Cost* — the "Pro plan" constraint
+rules out hosted stores; local stores drag in deps the machine doesn't have. (4) *Hygiene
+surface* — every persistent store holding corpus text is another PCI/backup audit target
+(ADR 0007); the harness persists only term-weight vectors (embedding cache), never a chunk
+store. **Week 3+ upgrade path (not locked):** when the production helper ships, pgvector on
+the existing shared Postgres is the natural candidate — no new infra, ADR 0007's ingest
+gate applies at write time — but that choice requires its own ADR when the helper feature
+starts.
 
 ---
 

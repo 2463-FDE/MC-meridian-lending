@@ -57,6 +57,12 @@ not via LLM calls.
    on disk; unchanged content is never re-embedded. Hygiene checks are pure regex/validator
    logic — zero LLM calls.
 
+6. **The eval harness keeps no persistent chunk store.** Retrieval runs on an in-memory
+   exact index rebuilt each run; the only artifact on disk is the embedding cache
+   (term-weight vectors, no document text). A production vector store (e.g. pgvector on the
+   estate Postgres) is a Week 3+ decision requiring its own ADR, with this gate applied at
+   ingest regardless of store choice. (Stage 1 plan, DL-7.)
+
 ## Consequences
 
 ### Positive
