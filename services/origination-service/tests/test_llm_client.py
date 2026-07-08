@@ -11,6 +11,8 @@ import logging
 import pytest
 
 from app.llm import (
+    BedrockAdapter,
+    ClaudeAdapter,
     ClaudeClient,
     FakeAdapter,
     LLMConfig,
@@ -98,6 +100,59 @@ def test_key_not_logged_on_call_or_error(caplog):
     assert secret not in buf.getvalue()
 
 
+# --- Provider selection (anthropic vs. bedrock) ---------------------------
+
+def test_default_provider_is_anthropic(monkeypatch):
+    monkeypatch.setenv("CLAUDE_API_KEY", "k")
+    monkeypatch.delenv("CLAUDE_PROVIDER", raising=False)
+    cfg = load_llm_config()
+    assert cfg.provider == "anthropic"
+    client = ClaudeClient(cfg)
+    assert isinstance(client.adapter, ClaudeAdapter)
+
+
+def test_bedrock_provider_does_not_require_api_key(monkeypatch):
+    monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_PROVIDER", "bedrock")
+    cfg = load_llm_config()  # must not raise LLMConfigError without CLAUDE_API_KEY
+    assert cfg.api_key == ""
+    assert cfg.model.startswith("us.anthropic.")
+    client = ClaudeClient(cfg)
+    assert isinstance(client.adapter, BedrockAdapter)
+
+
+def test_unknown_provider_rejected(monkeypatch):
+    monkeypatch.setenv("CLAUDE_API_KEY", "k")
+    monkeypatch.setenv("CLAUDE_PROVIDER", "openai")
+    with pytest.raises(LLMConfigError):
+        load_llm_config()
+
+
+def test_injected_adapter_overrides_provider():
+    """An explicitly injected adapter always wins, regardless of provider."""
+    cfg = _config(provider="bedrock")
+    client = ClaudeClient(cfg, adapter=FakeAdapter(response=GOOD_SUMMARY))
+    assert isinstance(client.adapter, FakeAdapter)
+
+
+def test_bedrock_adapter_without_sdk_raises_llm_error(monkeypatch):
+    """Same lazy-import contract as ClaudeAdapter: no `anthropic[bedrock]`
+    installed (no `boto3`) surfaces as a typed LLMHTTPError, not ImportError."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _blocked(name, *args, **kwargs):
+        if name == "anthropic":
+            raise ImportError("simulated: anthropic[bedrock] not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _blocked)
+    adapter = BedrockAdapter()
+    with pytest.raises(LLMHTTPError):
+        adapter.complete(_req())
+
+
 # --- Concern 4: transport (timeout / retry) -------------------------------
 
 def test_retries_5xx_then_succeeds():
@@ -157,6 +212,26 @@ def test_backoff_grows_with_jitter():
                     sleep=lambda d: delays.append(d), rng=lambda: 1.0)
     # rng=1.0 => equal-jitter max: 2**attempt (1, 2)
     assert delays == [1.0, 2.0]
+
+
+def test_client_recovers_from_retryable_failure():
+    """Regression: ClaudeClient.complete() always passes `on_retry` to
+    call_with_retry (unlike the tests above, which call it directly and never
+    exercise that argument). A prior bug referenced the except-clause `exc`
+    binding after Python had already unbound it, so any real 429/5xx crashed
+    with UnboundLocalError instead of retrying — this drives the retry through
+    the actual client call site to catch that class of regression.
+
+    No `sleep`/`rng` injection available at this call site (the client doesn't
+    expose one), so this incurs one real backoff sleep (<1s, attempt 0)."""
+    adapter = FakeAdapter(
+        response=GOOD_SUMMARY,
+        raises=[LLMHTTPError("boom", 503, retryable=True)],
+    )
+    client = ClaudeClient(_config(), adapter=adapter)
+    out = client.summarize_application('{"amount": 10000}')
+    assert out["recommended_next_step"] == "request_docs"
+    assert len(adapter.calls) == 2  # one failure + one success
 
 
 # --- Concern 3: request builder / cost guard ------------------------------

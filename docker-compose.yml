@@ -38,6 +38,13 @@ services:
       # feature is enabled. Never add CLAUDE_API_KEY (or AWS Bedrock creds) to
       # the committed .env — put them in your shell or an untracked .env.local.
       CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
+      # provider=bedrock routes through Amazon Bedrock instead; AWS creds only
+      # (same host-env-only rule — never write these into the committed .env).
+      CLAUDE_PROVIDER: ${CLAUDE_PROVIDER:-anthropic}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-}
     ports:
       - "8001:8001"
     depends_on:

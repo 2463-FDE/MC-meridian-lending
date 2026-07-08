@@ -9,7 +9,7 @@ concern): config, adapter, request builder, transport, streaming, validator,
 logger. `ClaudeClient` wires them together; the adapter is injected so tests run
 against `FakeAdapter` and spend no tokens.
 """
-from .adapter import ClaudeAdapter, Completion, FakeAdapter, ModelAdapter
+from .adapter import BedrockAdapter, ClaudeAdapter, Completion, FakeAdapter, ModelAdapter
 from .client import ClaudeClient
 from .config import LLMConfig, load_llm_config
 from .errors import (
@@ -27,6 +27,7 @@ __all__ = [
     "load_llm_config",
     "ModelAdapter",
     "ClaudeAdapter",
+    "BedrockAdapter",
     "FakeAdapter",
     "Completion",
     "LLMError",

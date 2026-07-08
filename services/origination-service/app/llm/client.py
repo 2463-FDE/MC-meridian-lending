@@ -20,9 +20,9 @@ from time import perf_counter
 from typing import Any, Iterator
 
 from ..prompts import get_prompt
-from .adapter import ClaudeAdapter, ModelAdapter
+from .adapter import BedrockAdapter, ClaudeAdapter, ModelAdapter
 from .config import LLMConfig
-from .errors import LLMError, ValidationFailed
+from .errors import LLMConfigError, LLMError, ValidationFailed
 from .logging_setup import get_llm_logger
 from .request_builder import build_request
 from .transport import call_with_retry
@@ -31,12 +31,21 @@ from .validator import guard_output, validate_structured
 _UNSET = object()
 
 
+def _default_adapter(config: LLMConfig) -> ModelAdapter:
+    """Pick the adapter for `config.provider`. No adapter was injected."""
+    if config.provider == "bedrock":
+        return BedrockAdapter(region=config.aws_region)
+    if config.provider == "anthropic":
+        return ClaudeAdapter(config.api_key)
+    raise LLMConfigError(f"unknown provider {config.provider!r}")
+
+
 class ClaudeClient:
     """Hardened Claude client. Build with `ClaudeClient(load_llm_config())`."""
 
     def __init__(self, config: LLMConfig, adapter: ModelAdapter | None = None):
         self.config = config
-        self.adapter = adapter if adapter is not None else ClaudeAdapter(config.api_key)
+        self.adapter = adapter if adapter is not None else _default_adapter(config)
         self.log = get_llm_logger()
 
     def complete(
@@ -135,23 +144,18 @@ class ClaudeClient:
 
     def stream(self, prompt_name: str, *, idempotency_key: str | None = None,
                **variables) -> Iterator[str]:
-        """Stream text chunks (concern 5). Deferred from the Week-1 product path.
+        """Stream text chunks (concern 5). DEFERRED to Week 2 — intentionally gated.
 
-        No retry/validation wrapping yet — buffer the chunks and validate before
-        use when this is wired into a UI (see ADR 0005 revision).
+        The adapter interface implements streaming, but the client does not yet
+        wrap it with the output guards the non-streaming path enforces (schema
+        validation, length, and PII-leak checks). Exposing it now would let raw,
+        unvalidated model output — including any PII the model echoes — reach the
+        caller, bypassing `guard_output`. Until this is implemented as
+        buffer-then-validate (ADR 0005), calling it raises rather than leaking.
         """
-        template = get_prompt(prompt_name)
-        request_id = idempotency_key or uuid.uuid4().hex
-        built = build_request(
-            template,
-            model=self.config.model,
-            max_tokens=self.config.max_tokens,
-            temperature=self.config.temperature,
-            timeout=self.config.timeout,
-            token_budget=self.config.token_budget,
-            idempotency_key=request_id,
-            **variables,
+        raise NotImplementedError(
+            "streaming is deferred to Week 2 (ADR 0005): not yet buffer-then-"
+            "validated, so it would bypass the output leak/schema guards. Use "
+            "complete()/summarize_application() for now."
         )
-        self.log.info("llm stream start request_id=%s prompt=%s",
-                      request_id, template.name)
-        yield from self.adapter.stream(built.request)
+        yield  # pragma: no cover - keeps this a generator for the interface

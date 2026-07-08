@@ -5,8 +5,10 @@ One interface (`ModelAdapter`) hides the provider behind `complete()` and
 shapes to and from the provider SDK and nothing else — no retry, no validation,
 no budgeting, no business logic (those live in the client's collaborators).
 
-`ClaudeAdapter` talks to the Anthropic SDK (imported lazily so the rest of the
-package — and the whole test suite — works without the SDK installed).
+`ClaudeAdapter` talks to the Anthropic SDK directly; `BedrockAdapter` talks to
+the same models via Amazon Bedrock. Both are imported lazily (the SDK, and
+`boto3` for Bedrock, are only touched inside methods) so the rest of the
+package — and the whole test suite — works without either installed.
 `FakeAdapter` is the in-memory double used by tests so they spend no tokens and
 never flake on the network.
 """
@@ -60,44 +62,35 @@ class ModelAdapter(ABC):
         """
 
 
-class ClaudeAdapter(ModelAdapter):
-    """Anthropic Claude adapter. Translation only.
+def _translate_anthropic_error(exc: Exception) -> LLMHTTPError | LLMTimeoutError:
+    """Map an `anthropic` SDK exception to our neutral error (transient vs terminal).
 
-    The `anthropic` SDK is imported lazily inside methods so importing this module
-    (and running unit tests against `FakeAdapter`) needs no SDK and no API key.
+    Shared by `ClaudeAdapter` and `BedrockAdapter` — both go through the same
+    `anthropic` SDK exception types (`AnthropicBedrock` raises the same
+    `anthropic.*Error` hierarchy as `Anthropic`), just over a different transport.
+    """
+    import anthropic
+
+    if isinstance(exc, anthropic.APITimeoutError):
+        return LLMTimeoutError("Claude API did not respond within the timeout.")
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        # Connection error, etc. — treat as transient.
+        return LLMHTTPError(f"Claude API connection error: {type(exc).__name__}",
+                            status_code=0, retryable=True)
+    retryable = status == 429 or 500 <= status < 600
+    return LLMHTTPError(f"Claude API returned HTTP {status}.",
+                        status_code=status, retryable=retryable)
+
+
+class _AnthropicSDKAdapter(ModelAdapter):
+    """Shared `complete`/`stream` for any adapter backed by the `anthropic` SDK's
+    `messages.create`/`messages.stream` (same shape for `Anthropic` and
+    `AnthropicBedrock`). Subclasses provide only `_sdk_client()`.
     """
 
-    def __init__(self, api_key: str):
-        self._api_key = api_key
-        self._client = None  # built lazily on first call
-
-    def _sdk_client(self):
-        if self._client is None:
-            try:
-                import anthropic
-            except ImportError as exc:  # pragma: no cover - env-dependent
-                raise LLMHTTPError(
-                    "anthropic SDK is not installed; cannot reach Claude.",
-                    status_code=0,
-                    retryable=False,
-                ) from exc
-            self._client = anthropic.Anthropic(api_key=self._api_key)
-        return self._client
-
-    def _translate_error(self, exc: Exception) -> LLMHTTPError | LLMTimeoutError:
-        """Map SDK exceptions to our neutral errors (transient vs terminal)."""
-        import anthropic
-
-        if isinstance(exc, anthropic.APITimeoutError):
-            return LLMTimeoutError("Claude API did not respond within the timeout.")
-        status = getattr(exc, "status_code", None)
-        if status is None:
-            # Connection error, etc. — treat as transient.
-            return LLMHTTPError(f"Claude API connection error: {type(exc).__name__}",
-                                status_code=0, retryable=True)
-        retryable = status == 429 or 500 <= status < 600
-        return LLMHTTPError(f"Claude API returned HTTP {status}.",
-                            status_code=status, retryable=retryable)
+    def _sdk_client(self):  # pragma: no cover - overridden by subclasses
+        raise NotImplementedError
 
     def complete(self, req: CompletionRequest) -> Completion:
         client = self._sdk_client()
@@ -111,7 +104,7 @@ class ClaudeAdapter(ModelAdapter):
                 timeout=req.timeout,
             )
         except Exception as exc:
-            raise self._translate_error(exc) from exc
+            raise _translate_anthropic_error(exc) from exc
 
         text = "".join(
             block.text for block in resp.content if getattr(block, "type", "") == "text"
@@ -138,7 +131,67 @@ class ClaudeAdapter(ModelAdapter):
                 for chunk in stream.text_stream:
                     yield chunk
         except Exception as exc:
-            raise self._translate_error(exc) from exc
+            raise _translate_anthropic_error(exc) from exc
+
+
+class ClaudeAdapter(_AnthropicSDKAdapter):
+    """Anthropic Claude adapter (direct API). Translation only.
+
+    The `anthropic` SDK is imported lazily inside methods so importing this module
+    (and running unit tests against `FakeAdapter`) needs no SDK and no API key.
+    """
+
+    def __init__(self, api_key: str):
+        self._api_key = api_key
+        self._client = None  # built lazily on first call
+
+    def _sdk_client(self):
+        if self._client is None:
+            try:
+                import anthropic
+            except ImportError as exc:  # pragma: no cover - env-dependent
+                raise LLMHTTPError(
+                    "anthropic SDK is not installed; cannot reach Claude.",
+                    status_code=0,
+                    retryable=False,
+                ) from exc
+            self._client = anthropic.Anthropic(api_key=self._api_key)
+        return self._client
+
+
+class BedrockAdapter(_AnthropicSDKAdapter):
+    """Claude-on-Amazon-Bedrock adapter. Translation only — same contract as
+    `ClaudeAdapter`, different transport.
+
+    Auth is never passed explicitly here: `anthropic.AnthropicBedrock()` picks up
+    AWS credentials the standard way (`AWS_BEARER_TOKEN_BEDROCK`, the
+    `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_REGION` triple, an SSO
+    profile, or an IAM role) exactly like any other `boto3`-backed client — no
+    credential ever lives on this object, so there is nothing here that needs
+    `repr=False` treatment (unlike `LLMConfig.api_key`).
+
+    Requires the `anthropic[bedrock]` extra (pulls in `boto3`); imported lazily
+    so the rest of the package works without it installed.
+    """
+
+    def __init__(self, region: str | None = None):
+        self._region = region
+        self._client = None  # built lazily on first call
+
+    def _sdk_client(self):
+        if self._client is None:
+            try:
+                import anthropic
+            except ImportError as exc:  # pragma: no cover - env-dependent
+                raise LLMHTTPError(
+                    "anthropic[bedrock] is not installed (needs boto3); "
+                    "cannot reach Claude on Bedrock.",
+                    status_code=0,
+                    retryable=False,
+                ) from exc
+            kwargs = {"aws_region": self._region} if self._region else {}
+            self._client = anthropic.AnthropicBedrock(**kwargs)
+        return self._client
 
 
 class FakeAdapter(ModelAdapter):
