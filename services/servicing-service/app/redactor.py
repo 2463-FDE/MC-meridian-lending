@@ -97,6 +97,14 @@ class PiiRedactor:
             lambda m: '•••-••-' + m.group(1),
             text
         )
+        # 3a-bis. Space-separated SSN (XXX XX XXXX). The 3-2-4 grouping is
+        # SSN-specific (phones are 3-3-4), so the false-positive risk is low
+        # enough to redact even unlabeled, unlike the bare-digit case in 3b.
+        text = re.sub(
+            r'\b\d{3} \d{2} (\d{4})\b',
+            lambda m: '•••-••-' + m.group(1),
+            text
+        )
         # 3b. Redact bare/loosely-formatted SSN ONLY inside a labeled field, so we
         # don't mask unrelated 9-digit numbers (loan IDs, amounts, timestamps).
         text = re.sub(
