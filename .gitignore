@@ -24,4 +24,14 @@ coverage/
 .idea/
 .vscode/
 
-# NOTE: keep logs/ checked in for now — finance asked us to retain sample logs.
+# secrets — never commit real credentials. Ship .env.example only.
+.env
+.env.local
+.env.*.local
+!.env.example
+*.pem
+*.key
+
+# logs may contain PII / cardholder data — do not track (was: kept checked in,
+# which shipped raw PAN/CVV/SSN; see docs/security-remediation-2026-07.md).
+*.log
