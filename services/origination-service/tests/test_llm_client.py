@@ -64,6 +64,40 @@ def test_config_loads_defaults(monkeypatch):
     assert "api_key" not in cfg.redacted()  # never expose the key
 
 
+def test_key_never_in_repr_or_str():
+    """The credential must not leak via repr/str (log.info(cfg), tracebacks)."""
+    secret = "sk-super-secret-value-123"
+    cfg = LLMConfig(api_key=secret)
+    assert secret not in repr(cfg)
+    assert secret not in str(cfg)
+    assert secret not in str(cfg.redacted())
+    assert secret not in "%s" % cfg  # format path used by loggers
+
+
+def test_key_not_logged_on_call_or_error(caplog):
+    """No code path logs the credential — success or failure."""
+    secret = "sk-leak-canary-9999"
+    cfg = _config(api_key=secret)
+    buf = io.StringIO()
+    from app.logging_config import RedactingFormatter
+    handler = logging.StreamHandler(buf)
+    handler.setFormatter(RedactingFormatter("%(message)s"))
+    llm_log = logging.getLogger("llm")
+    llm_log.addHandler(handler)
+    try:
+        # success path
+        ClaudeClient(cfg, adapter=FakeAdapter(response=GOOD_SUMMARY)) \
+            .summarize_application('{"amount": 1}')
+        # error path (transport failure gets logged)
+        with pytest.raises(LLMHTTPError):
+            ClaudeClient(cfg, adapter=FakeAdapter(
+                raises=[LLMHTTPError("bad", 400, retryable=False)])) \
+                .summarize_application('{"amount": 1}')
+    finally:
+        llm_log.removeHandler(handler)
+    assert secret not in buf.getvalue()
+
+
 # --- Concern 4: transport (timeout / retry) -------------------------------
 
 def test_retries_5xx_then_succeeds():

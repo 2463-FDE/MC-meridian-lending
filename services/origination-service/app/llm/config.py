@@ -6,7 +6,7 @@ loaded from the environment only (never hardcoded, unlike the bureau keys in
 so a misconfigured deploy dies at startup instead of on the first customer call.
 """
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .errors import LLMConfigError
 
@@ -16,9 +16,16 @@ _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
 @dataclass(frozen=True)
 class LLMConfig:
-    """Immutable client configuration. Build via `load_llm_config()`."""
+    """Immutable client configuration. Build via `load_llm_config()`.
 
-    api_key: str
+    The credential (`api_key`) is kept out of the default repr/str
+    (`repr=False`) so it cannot leak via `log.info(config)`, an exception that
+    dumps locals, or a traceback. The redactor does NOT catch API keys (it
+    targets PII patterns), so keeping the secret out of every string
+    representation is the guardrail. Log via `redacted()` only.
+    """
+
+    api_key: str = field(repr=False)
     model: str = _DEFAULT_MODEL
     timeout: float = 30.0            # seconds, enforced on every call
     max_retries: int = 3            # attempts for transient (429/5xx) failures
@@ -27,7 +34,7 @@ class LLMConfig:
     token_budget: int = 20_000      # per-request ceiling; refuse if exceeded
 
     def redacted(self) -> dict:
-        """Config safe to log — never includes the API key."""
+        """Config safe to log — never includes the credential."""
         return {
             "model": self.model,
             "timeout": self.timeout,
@@ -36,6 +43,9 @@ class LLMConfig:
             "temperature": self.temperature,
             "token_budget": self.token_budget,
         }
+
+    def __str__(self) -> str:  # never render the secret, even via str()
+        return f"LLMConfig({self.redacted()})"
 
 
 def load_llm_config() -> LLMConfig:

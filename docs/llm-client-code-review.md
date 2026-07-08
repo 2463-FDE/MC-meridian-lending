@@ -20,8 +20,21 @@ Week 2 in ADR 0005.
   raises `LLMConfigError` at boot (`load_llm_config`), not on first call.
 - `LLMConfig.redacted()` is the only config-to-log path and omits `api_key`;
   test `test_config_loads_defaults` asserts the key is absent.
+- **`api_key` is `field(repr=False)` with a custom `__str__`** so it never
+  renders via `repr(cfg)`, `str(cfg)`, `"%s" % cfg`, a traceback that dumps
+  locals, or an accidental `log.info(cfg)`. This matters because the
+  `RedactingFormatter` targets PII patterns, **not** API keys — keeping the
+  secret out of every string form is the actual control
+  (`test_key_never_in_repr_or_str`).
 - No key in error messages (`errors.py` messages describe modes, never content).
-- Adapter holds the key in memory only; never logged.
+  Client logs `type(exc).__name__` only, never `str(exc)` or the config
+  (`test_key_not_logged_on_call_or_error`, success + failure paths).
+- Adapter holds the key in memory only; default object repr shows no fields.
+
+**Bedrock note:** when a `BedrockAdapter` is added, apply the same rules to AWS
+creds — put `aws_secret_access_key` / `aws_session_token` / bearer token behind
+`field(repr=False)`, load from env (`AWS_*` / `AWS_BEARER_TOKEN_BEDROCK`), never
+into `redacted()`, and prefer an IAM role over static keys where possible.
 
 **Note (existing debt, out of scope):** other secrets in this repo *are*
 hardcoded (`app/config.py` EXPERIAN_KEY, CORE_BANKING_API_KEY) — tracked as D1 in
