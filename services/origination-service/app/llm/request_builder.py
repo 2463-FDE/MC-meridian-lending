@@ -1,0 +1,117 @@
+"""Concern 3 — Request builder.
+
+Assembles the full prompt from parts — system + few-shot examples + prior
+conversation history + the current user message — pulling the template from the
+prompt library rather than inlining strings. Enforces a token budget: it counts
+tokens, reserves room for the answer, and trims the *oldest* history turns first
+to make the request fit. If even the irreducible parts (system + examples +
+current message + reserved answer) exceed the budget, it refuses up front so an
+oversized request never reaches the network.
+
+Token counting is a heuristic (~4 characters per token, per ADR 0005). It is an
+estimate used for budgeting only — deliberately conservative so we refuse early
+rather than overshoot. Swap in a real tokenizer later without changing callers.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ..prompts import PromptTemplate
+from .adapter import CompletionRequest
+from .errors import TokenBudgetExceeded
+
+_CHARS_PER_TOKEN = 4
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate for budgeting. Conservative (rounds up)."""
+    if not text:
+        return 0
+    return -(-len(text) // _CHARS_PER_TOKEN)  # ceil division
+
+
+@dataclass
+class BuiltRequest:
+    """A CompletionRequest plus the estimate used to admit it (for logging)."""
+
+    request: CompletionRequest
+    estimated_input_tokens: int
+    trimmed_history_turns: int
+
+
+def _expand_examples(examples: list) -> list[dict]:
+    """Turn few-shot pairs into alternating user/assistant messages."""
+    out: list[dict] = []
+    for ex in examples:
+        out.append({"role": "user", "content": ex["user"]})
+        out.append({"role": "assistant", "content": ex["assistant"]})
+    return out
+
+
+def build_request(
+    template: PromptTemplate,
+    *,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    timeout: float,
+    token_budget: int,
+    history: list[dict] | None = None,
+    idempotency_key: str = "",
+    **variables,
+) -> BuiltRequest:
+    """Assemble a `CompletionRequest` within the token budget.
+
+    Order of assembly: system (from template) + few-shot examples + trimmed
+    history + current user message (rendered from template).
+
+    Raises `TokenBudgetExceeded` if the non-trimmable parts plus the reserved
+    answer room do not fit in `token_budget`.
+    """
+    history = list(history or [])
+    system = template.system
+    user_msg = {"role": "user", "content": template.render_user(**variables)}
+    example_msgs = _expand_examples(template.examples)
+
+    # Reserve room for the answer so prompt + response stays under budget.
+    reserved = max_tokens
+    fixed_tokens = (
+        estimate_tokens(system)
+        + sum(estimate_tokens(m["content"]) for m in example_msgs)
+        + estimate_tokens(user_msg["content"])
+    )
+
+    if fixed_tokens + reserved > token_budget:
+        raise TokenBudgetExceeded(
+            f"Request needs ~{fixed_tokens} input + {reserved} reserved answer "
+            f"tokens, over the {token_budget} budget, before adding history. "
+            f"Shorten the input or raise CLAUDE_TOKEN_BUDGET."
+        )
+
+    # Trim oldest history turns until everything fits.
+    trimmed = 0
+    while history:
+        hist_tokens = sum(estimate_tokens(m["content"]) for m in history)
+        if fixed_tokens + hist_tokens + reserved <= token_budget:
+            break
+        history.pop(0)  # drop oldest
+        trimmed += 1
+
+    messages = example_msgs + history + [user_msg]
+    input_tokens = fixed_tokens + sum(estimate_tokens(m["content"]) for m in history)
+
+    req = CompletionRequest(
+        system=system,
+        messages=messages,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        timeout=timeout,
+        idempotency_key=idempotency_key,
+        metadata={"prompt": template.name, "prompt_version": template.version},
+    )
+    return BuiltRequest(
+        request=req,
+        estimated_input_tokens=input_tokens,
+        trimmed_history_turns=trimmed,
+    )

@@ -1,0 +1,224 @@
+"""Unit tests for the LLM client (ADR 0005).
+
+Everything runs against `FakeAdapter` — no network, no tokens, no `anthropic`
+SDK required. Covers the unhappy paths the review checklist calls out: config
+failure, timeout, 429/5xx retry, 4xx no-retry, token budget, malformed output,
+leak guard — plus a check that no PII reaches the logs.
+"""
+import io
+import logging
+
+import pytest
+
+from app.llm import (
+    ClaudeClient,
+    FakeAdapter,
+    LLMConfig,
+    LLMConfigError,
+    TokenBudgetExceeded,
+    ValidationFailed,
+    load_llm_config,
+)
+from app.llm.adapter import Completion, CompletionRequest
+from app.llm.errors import LLMHTTPError, LLMTimeoutError
+from app.llm.request_builder import build_request, estimate_tokens
+from app.llm.transport import call_with_retry
+from app.prompts import get_prompt
+
+# A valid loan-summary JSON the fake model can "return".
+GOOD_SUMMARY = (
+    '{"summary": "Applicant requests $10,000 over 36 months.", '
+    '"risk_flags": ["verify income"], '
+    '"recommended_next_step": "request_docs"}'
+)
+
+
+def _config(**over):
+    base = dict(api_key="test-key", max_retries=2, token_budget=20_000, max_tokens=256)
+    base.update(over)
+    return LLMConfig(**base)
+
+
+def _req(**over):
+    base = dict(
+        system="s", messages=[{"role": "user", "content": "hi"}],
+        model="m", max_tokens=10, temperature=0.0, timeout=1.0,
+    )
+    base.update(over)
+    return CompletionRequest(**base)
+
+
+# --- Concern 1: config, fail loud at boot ---------------------------------
+
+def test_config_missing_key_raises(monkeypatch):
+    monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+    with pytest.raises(LLMConfigError):
+        load_llm_config()
+
+
+def test_config_loads_defaults(monkeypatch):
+    monkeypatch.setenv("CLAUDE_API_KEY", "k")
+    cfg = load_llm_config()
+    assert cfg.api_key == "k"
+    assert cfg.model.startswith("claude-")
+    assert "api_key" not in cfg.redacted()  # never expose the key
+
+
+# --- Concern 4: transport (timeout / retry) -------------------------------
+
+def test_retries_5xx_then_succeeds():
+    adapter = FakeAdapter(
+        response=GOOD_SUMMARY,
+        raises=[LLMHTTPError("boom", 503, retryable=True)],
+    )
+    out = call_with_retry(adapter, _req(), max_retries=2,
+                          sleep=lambda _: None, rng=lambda: 0.0)
+    assert out.text == GOOD_SUMMARY
+    assert len(adapter.calls) == 2  # one failure + one success
+
+
+def test_429_is_retried():
+    adapter = FakeAdapter(response="ok",
+                          raises=[LLMHTTPError("rate", 429, retryable=True)])
+    call_with_retry(adapter, _req(), max_retries=1, sleep=lambda _: None,
+                    rng=lambda: 0.0)
+    assert len(adapter.calls) == 2
+
+
+def test_4xx_not_retried():
+    adapter = FakeAdapter(raises=[LLMHTTPError("bad", 400, retryable=False)])
+    with pytest.raises(LLMHTTPError):
+        call_with_retry(adapter, _req(), max_retries=3, sleep=lambda _: None,
+                        rng=lambda: 0.0)
+    assert len(adapter.calls) == 1  # no retry
+
+
+def test_retries_exhausted_raises():
+    adapter = FakeAdapter(raises=[
+        LLMHTTPError("x", 500, retryable=True),
+        LLMHTTPError("x", 500, retryable=True),
+        LLMHTTPError("x", 500, retryable=True),
+    ])
+    with pytest.raises(LLMHTTPError):
+        call_with_retry(adapter, _req(), max_retries=2, sleep=lambda _: None,
+                        rng=lambda: 0.0)
+    assert len(adapter.calls) == 3  # 1 + 2 retries
+
+
+def test_timeout_not_retried():
+    adapter = FakeAdapter(raises=[LLMTimeoutError("slow")])
+    with pytest.raises(LLMTimeoutError):
+        call_with_retry(adapter, _req(), max_retries=3, sleep=lambda _: None,
+                        rng=lambda: 0.0)
+    assert len(adapter.calls) == 1
+
+
+def test_backoff_grows_with_jitter():
+    delays = []
+    adapter = FakeAdapter(response="ok", raises=[
+        LLMHTTPError("x", 500, retryable=True),
+        LLMHTTPError("x", 500, retryable=True),
+    ])
+    call_with_retry(adapter, _req(), max_retries=3,
+                    sleep=lambda d: delays.append(d), rng=lambda: 1.0)
+    # rng=1.0 => equal-jitter max: 2**attempt (1, 2)
+    assert delays == [1.0, 2.0]
+
+
+# --- Concern 3: request builder / cost guard ------------------------------
+
+def test_token_budget_refused_preflight():
+    cfg = _config(token_budget=5)  # absurdly small
+    client = ClaudeClient(cfg, adapter=FakeAdapter(response=GOOD_SUMMARY))
+    with pytest.raises(TokenBudgetExceeded):
+        client.summarize_application('{"amount": 10000}')
+
+
+def test_history_trimmed_to_fit():
+    tmpl = get_prompt("loan_application_summary")
+    long_turn = {"role": "user", "content": "x" * 4000}  # ~1000 tokens each
+    built = build_request(
+        tmpl, model="m", max_tokens=256, temperature=0.0, timeout=1.0,
+        token_budget=1200, history=[long_turn, long_turn, long_turn],
+        application_json="{}",
+    )
+    assert built.trimmed_history_turns >= 1  # oldest dropped to fit
+
+
+def test_estimate_tokens_ceil():
+    assert estimate_tokens("") == 0
+    assert estimate_tokens("abcd") == 1
+    assert estimate_tokens("abcde") == 2
+
+
+# --- Concern 6: validation / guardrails -----------------------------------
+
+def test_summarize_returns_validated_dict():
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response=GOOD_SUMMARY))
+    out = client.summarize_application('{"amount": 10000, "term_months": 36}')
+    assert out["recommended_next_step"] == "request_docs"
+    assert isinstance(out["risk_flags"], list)
+
+
+def test_malformed_output_raises():
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response="not json"))
+    with pytest.raises(ValidationFailed):
+        client.summarize_application("{}")
+
+
+def test_bad_enum_rejected():
+    bad = ('{"summary": "s", "risk_flags": [], '
+           '"recommended_next_step": "fund_immediately"}')
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response=bad))
+    with pytest.raises(ValidationFailed):
+        client.summarize_application("{}")
+
+
+def test_fallback_on_bad_output():
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response="garbage"))
+    out = client.summarize_application("{}", fallback={"summary": "unavailable"})
+    assert out == {"summary": "unavailable"}
+
+
+def test_leak_guard_blocks_pii_in_output():
+    leaky = ('{"summary": "SSN 412-55-9981 on file", "risk_flags": [], '
+             '"recommended_next_step": "request_docs"}')
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response=leaky))
+    with pytest.raises(ValidationFailed):
+        client.summarize_application("{}")
+
+
+# --- Concern 2: adapter is thin / injectable ------------------------------
+
+def test_adapter_receives_built_request():
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    client = ClaudeClient(_config(), adapter=adapter)
+    client.summarize_application('{"amount": 1}', idempotency_key="req-123")
+    sent = adapter.calls[0]
+    assert sent.idempotency_key == "req-123"
+    assert sent.metadata["prompt"] == "loan_application_summary"
+
+
+# --- Acceptance: no PII in logs -------------------------------------------
+
+def test_no_pii_in_logs():
+    """Feed PII in the input; assert none reaches the (redacted) log stream."""
+    buf = io.StringIO()
+    from app.logging_config import RedactingFormatter
+    handler = logging.StreamHandler(buf)
+    handler.setFormatter(RedactingFormatter("%(message)s"))
+    llm_log = logging.getLogger("llm")
+    llm_log.addHandler(handler)
+    try:
+        client = ClaudeClient(_config(), adapter=FakeAdapter(response=GOOD_SUMMARY))
+        client.summarize_application(
+            '{"name": "Maria", "ssn": "412-55-9981", "email": "maria@example.com", '
+            '"pan": "4111111111111111", "phone": "555-123-4567"}'
+        )
+    finally:
+        llm_log.removeHandler(handler)
+    logs = buf.getvalue()
+    assert "412-55-9981" not in logs
+    assert "maria@example.com" not in logs
+    assert "4111111111111111" not in logs
+    assert "555-123-4567" not in logs
