@@ -23,7 +23,7 @@ from app.llm import (
 )
 from app.llm.adapter import Completion, CompletionRequest
 from app.llm.errors import LLMError, LLMHTTPError, LLMTimeoutError
-from app.llm.request_builder import build_request, estimate_tokens
+from app.llm.request_builder import build_request, estimate_tokens, redact_json
 from app.llm.transport import call_with_retry
 from app.llm.validator import parse_json
 from app.prompts import get_prompt
@@ -407,6 +407,44 @@ def test_malformed_history_raises_typed_error():
             tmpl, model="m", max_tokens=10, temperature=0.0, timeout=1.0,
             token_budget=20_000, history=[{"role": "user"}], application_json="{}",
         )
+
+
+def test_numeric_pii_json_stays_valid_and_redacted():
+    """Fix F2: PII encoded as JSON *numbers* must be redacted without corrupting
+    the JSON the prompt hands the model. Whole-string redaction would replace the
+    bare numeric literals with unquoted mask text; the JSON-aware path keeps the
+    document parseable while still masking the PII."""
+    import json as _json
+
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).summarize_application(
+        '{"name": "the applicant", "ssn": 412559981, "card": 4111111111111111, '
+        '"phone": 5551234567, "amount": 18000}'
+    )
+    messages = adapter.calls[0].messages
+    sent = "".join(m["content"] for m in messages)
+    # The user message carries our payload (few-shot examples come first).
+    user_msg = messages[-1]["content"]
+    block = user_msg.split("Application (JSON):\n", 1)[1].split("\n\n", 1)[0]
+    parsed = _json.loads(block)  # raises if redaction broke the JSON
+    # Non-PII numbers keep their type/value.
+    assert parsed["amount"] == 18000
+    # Raw PII must not survive anywhere in the sent request.
+    assert "412559981" not in sent
+    assert "4111111111111111" not in sent
+    assert "5551234567" not in sent
+
+
+def test_redact_json_preserves_last4_and_falls_back_on_bad_json():
+    out = redact_json('{"ssn": 412559981}')
+    assert out == '{"ssn": "•••-••-9981"}'
+    # Non-JSON input degrades to whole-string redaction, never raises.
+    assert redact_json("SSN 412-55-9981") == PiiRedactor.redact("SSN 412-55-9981")
+    # A PII-shaped KEY must not corrupt the JSON or leak the value.
+    import json as _json
+    out = redact_json('{"contact@ex.com": "4111111111111111"}')
+    parsed = _json.loads(out)  # still valid JSON
+    assert "4111111111111111" not in out  # value redacted
 
 
 def test_redactor_catches_spaced_ssn():

@@ -24,7 +24,7 @@ from .adapter import BedrockAdapter, ClaudeAdapter, ModelAdapter
 from .config import LLMConfig
 from .errors import LLMConfigError, LLMError, ValidationFailed
 from .logging_setup import get_llm_logger
-from .request_builder import build_request
+from .request_builder import build_request, redact_json
 from .transport import call_with_retry
 from .validator import guard_output, validate_structured
 
@@ -135,10 +135,19 @@ class ClaudeClient:
         return result
 
     def summarize_application(self, application_json: str, **kwargs) -> dict:
-        """Convenience wrapper for the loan-summary prompt."""
+        """Convenience wrapper for the loan-summary prompt.
+
+        The application is a JSON document, so it is redacted JSON-aware
+        (`redact_json`) rather than by the whole-string redactor: masking a
+        numeric PII literal (an SSN/PAN encoded as a JSON number) with the
+        whole-string pass would emit unquoted mask text and break the JSON the
+        prompt hands the model. The generic whole-string redact in
+        `build_request` still runs afterwards (idempotent on the masked values)
+        as defense in depth for the surrounding prompt text.
+        """
         return self.complete(
             "loan_application_summary",
-            application_json=application_json,
+            application_json=redact_json(application_json),
             **kwargs,
         )
 

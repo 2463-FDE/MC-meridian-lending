@@ -14,6 +14,7 @@ rather than overshoot. Swap in a real tokenizer later without changing callers.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from ..prompts import PromptTemplate
@@ -22,6 +23,62 @@ from .adapter import CompletionRequest
 from .errors import LLMError, TokenBudgetExceeded
 
 _CHARS_PER_TOKEN = 4
+
+
+def _redact_scalar(key: str, value):
+    """Redact one JSON scalar while keeping the result JSON-valid.
+
+    The scalar is redacted *with its field label* (`"key": value`) so the
+    label-gated patterns (bare SSN/phone, CVV) still fire, then the possibly
+    masked value is returned as a plain string — so a masked number becomes the
+    JSON string "…1111 (PAN)" rather than a bare, unparseable token.
+    """
+    if isinstance(value, bool) or value is None:
+        return value
+    prefix = f'"{key}": '
+    probe = prefix + json.dumps(value)
+    redacted = PiiRedactor.redact(probe)
+    if redacted == probe:
+        return value  # nothing sensitive — keep original type (numbers stay numbers)
+    if not redacted.startswith(prefix):
+        # Redaction altered the key/prefix (a PII-shaped field name); the
+        # value slice would be misaligned. Fall back to redacting the value
+        # alone — loses the label hint but stays correct and JSON-valid.
+        return PiiRedactor.redact(json.dumps(value))
+    masked = redacted[len(prefix):]
+    if len(masked) >= 2 and masked[0] == '"' and masked[-1] == '"':
+        masked = masked[1:-1]  # drop the quotes json.dumps added; re-quoted on output
+    return masked
+
+
+def _redact_node(node, key: str = ""):
+    if isinstance(node, dict):
+        return {k: _redact_node(v, k) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_redact_node(v, key) for v in node]
+    return _redact_scalar(key, node)
+
+
+def redact_json(json_str: str) -> str:
+    """Redact PII from a JSON document without breaking its syntax.
+
+    Whole-string redaction (used for logs and free text) can turn a bare numeric
+    PII literal — an SSN or PAN encoded as a JSON *number* — into unquoted mask
+    text (`"ssn": •••-••-9981`), producing invalid JSON inside a prompt that asks
+    the model to read Application (JSON). This parses the document, redacts each
+    scalar in the context of its field label, and re-serializes, so masked values
+    stay valid JSON strings.
+
+    Falls back to whole-string `PiiRedactor.redact` when the input is not valid
+    JSON — never weaker than the prior behavior.
+    """
+    try:
+        data = json.loads(json_str)
+    except (ValueError, TypeError):
+        return PiiRedactor.redact(json_str)
+    # ensure_ascii=False keeps mask glyphs (•) literal, matching the whole-string
+    # redactor's output rather than emitting • escapes.
+    return json.dumps(_redact_node(data), ensure_ascii=False)
 
 
 def _redacted_turn(turn: dict) -> dict:
