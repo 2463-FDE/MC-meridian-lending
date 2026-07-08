@@ -56,12 +56,15 @@ def call_with_retry(
         except LLMHTTPError as exc:
             if not exc.retryable or attempt >= max_retries:
                 raise
+            # Python unbinds `exc` when the except block exits, so it can't be
+            # referenced below. Keep it under a plain name across the block.
+            last_exc = exc
         except LLMTimeoutError:
             # Not retried by policy (see module docstring).
             raise
 
         delay = _backoff_delay(attempt, rng)
         if on_retry is not None:
-            on_retry(attempt + 1, delay, exc)
+            on_retry(attempt + 1, delay, last_exc)
         sleep(delay)
         attempt += 1

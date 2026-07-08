@@ -17,10 +17,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..prompts import PromptTemplate
+from ..redactor import PiiRedactor
 from .adapter import CompletionRequest
-from .errors import TokenBudgetExceeded
+from .errors import LLMError, TokenBudgetExceeded
 
 _CHARS_PER_TOKEN = 4
+
+
+def _redacted_turn(turn: dict) -> dict:
+    """Validate a caller-supplied message and redact PII from its content.
+
+    Raises `LLMError` on a malformed turn (missing/ non-string content) instead
+    of a bare KeyError, so callers get a typed failure.
+    """
+    if not isinstance(turn, dict) or "content" not in turn:
+        raise LLMError("history turn must be a dict with a 'content' key")
+    content = turn["content"]
+    if not isinstance(content, str):
+        raise LLMError("history turn 'content' must be a string")
+    return {"role": turn.get("role", "user"), "content": PiiRedactor.redact(content)}
 
 
 def estimate_tokens(text: str) -> int:
@@ -65,12 +80,20 @@ def build_request(
     Order of assembly: system (from template) + few-shot examples + trimmed
     history + current user message (rendered from template).
 
+    Customer PII in the current message and in history is redacted BEFORE the
+    request is built (ADR 0005 decision #2 — least privilege: raw PAN/CVV/SSN/
+    email/phone must not leave the system to a third-party provider). System and
+    few-shot examples are authored by us and carry no customer PII.
+
     Raises `TokenBudgetExceeded` if the non-trimmable parts plus the reserved
-    answer room do not fit in `token_budget`.
+    answer room do not fit in `token_budget`. Raises `LLMError` on a malformed
+    history turn.
     """
-    history = list(history or [])
+    # Redact caller-supplied content before it is measured or sent.
+    history = [_redacted_turn(t) for t in (history or [])]
     system = template.system
-    user_msg = {"role": "user", "content": template.render_user(**variables)}
+    user_msg = {"role": "user",
+                "content": PiiRedactor.redact(template.render_user(**variables))}
     example_msgs = _expand_examples(template.examples)
 
     # Reserve room for the answer so prompt + response stays under budget.

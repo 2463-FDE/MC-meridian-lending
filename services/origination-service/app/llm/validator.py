@@ -13,6 +13,7 @@ if prompts start needing more.
 from __future__ import annotations
 
 import json
+import re
 
 from ..redactor import PiiRedactor
 from .errors import ValidationFailed
@@ -21,19 +22,21 @@ from .errors import ValidationFailed
 # stuff the log). Generous — real summaries are a few hundred chars.
 _MAX_OUTPUT_CHARS = 20_000
 
+# Strip a leading ``` fence (optionally with a language tag, on its own line or
+# inline) and a trailing ``` fence. Handles ```json\n{...}\n```, ```{...}```,
+# and single-line ```json {...} ```.
+_FENCE_OPEN = re.compile(r"^```[a-zA-Z0-9_-]*[ \t]*\n?")
+_FENCE_CLOSE = re.compile(r"\n?```$")
+
 
 def parse_json(text: str) -> dict:
-    """Parse model text as a JSON object, tolerating ```json fences.
+    """Parse model text as a JSON object, tolerating ``` code fences.
 
     Raises `ValidationFailed` if it is not valid JSON or not an object.
     """
     cleaned = text.strip()
     if cleaned.startswith("```"):
-        # Strip a leading ```json / ``` fence and trailing ```.
-        cleaned = cleaned.split("\n", 1)[-1] if "\n" in cleaned else cleaned
-        if cleaned.endswith("```"):
-            cleaned = cleaned[: -3]
-        cleaned = cleaned.strip()
+        cleaned = _FENCE_CLOSE.sub("", _FENCE_OPEN.sub("", cleaned)).strip()
     try:
         obj = json.loads(cleaned)
     except json.JSONDecodeError as exc:
