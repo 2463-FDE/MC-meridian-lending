@@ -99,8 +99,8 @@ zero retrieval value. ADR 0007 locks this.
 check, plus JSONL field-name detection (`ssn`/`pan`/`dob`/`ein` keys).
 **Why:** `feature/pii-redaction` is unmerged — cannot import from main. Field-name checks
 catch structured PII even where value regexes miss (e.g. `"dob": "1992-04-21"` is just a
-date by value). Duplication is noted in the module docstring with a pointer to consolidate
-after the pii-redaction PR merges.
+date by value). Duplication will be noted in the module docstring with a pointer to
+consolidate after the pii-redaction PR merges.
 
 ### DL-6: Unanswerable-query semantics in eval
 
@@ -195,7 +195,9 @@ are explicitly out of scope.
 
 1. **Gold-set answer keys:** I will author the ≥10 queries + expected chunks from the
    policy docs. Sign-off happens at the Stage 2 verification gate.
-2. **Left over from Week 1 (not this feature):** uncommitted Luhn redactor work is stashed
-   on `feature/pii-redaction` (`git stash list` → "wip: luhn PAN redaction"); payment-service
-   integration tests fail locally on that branch even without the stash (5 failures,
-   pre-existing) despite the tracker's "Integration ✓". Needs a revisit before that PR merges.
+2. **Left over from Week 1 (not this feature):** the Luhn redactor work has since landed as
+   commits on `feature/pii-redaction` (`864a2c6`, `e5f01d2`), superseding the earlier stash
+   (retained as `stash@{0}`, safe to drop once verified). Payment-service integration tests
+   showed 5 pre-existing local failures at commit `7a8bd3c` despite the tracker's
+   "Integration ✓"; whether the newer commits repaired them is unverified — re-check before
+   that PR merges.
