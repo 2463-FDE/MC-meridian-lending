@@ -62,6 +62,37 @@ def test_payment_request_logging_redacts_pan(temp_log_dir):
     assert "••••" in content, "Redaction marker should be present"
 
 
+@pytest.mark.parametrize("pan", [
+    "4111/1111/1111/1111",   # slash-separated — previously leaked
+    "4111_1111_1111_1111",   # underscore-separated — previously leaked
+    "4111  1111  1111  1111",  # repeated whitespace — previously leaked
+    "4111-1111-1111-1111",   # hyphen
+    "4111 1111 1111 1111",   # single space
+    "4111.1111.1111.1111",   # dotted
+    "4111*1111*1111*1111",   # star — separator the field-context rule catches
+    "4111|1111|1111|1111",   # pipe
+    "4111111111111111",      # contiguous
+])
+def test_payment_request_logging_redacts_pan_separator_variants(temp_log_dir, pan):
+    """Regression: PAN must be redacted on the charge log path for every separator
+    a client can put in the unconstrained PaymentIn.pan string. Mirrors the real
+    log line emitted by payments.charge (req={"pan":"...","cvv":"..."})."""
+    logger = get_logger("payment_test")
+
+    logger.info(
+        'POST /payments charge req={"pan":"%s","cvv":"%s","amount":%s}',
+        pan, "123", 250.00,
+    )
+
+    content = (Path(temp_log_dir) / "payment-service.log").read_text()
+
+    # The 12-digit prefix must never appear (with or without separators).
+    assert "411111111111" not in content, f"raw PAN leaked for {pan!r}"
+    assert pan[:14] not in content, f"formatted PAN prefix leaked for {pan!r}"
+    assert "1111" in content, "last 4 of PAN should be preserved"
+    assert '"123"' not in content, "CVV should be redacted"
+
+
 def test_payment_request_logging_redacts_ssn(temp_log_dir):
     """Test: Full SSN in payment request is redacted; last 4 preserved."""
     logger = get_logger("payment_test")

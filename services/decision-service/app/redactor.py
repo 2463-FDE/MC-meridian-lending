@@ -17,6 +17,29 @@ import re
 class PiiRedactor:
     """Redacts PII patterns from text. Used by logging formatters."""
 
+    # Card-number field names. Value in such a field is masked separator-agnostically
+    # (see _mask_pan_value) — the field name asserts it is a PAN, so we do NOT rely on
+    # digit grouping or a Luhn gate, only on the digit count. This closes the family of
+    # separator bypasses (4111/1111..., 4111_1111..., 4111*1111..., etc.) on the
+    # primary charge-log path where the client controls the raw pan string.
+    _PAN_KEY = (
+        r'(?:pan|card[_ ]?(?:number|no|num)|account[_ ]?(?:number|no|num)'
+        r'|acct[_ ]?(?:number|no|num)|primary[_ ]?account[_ ]?number)'
+    )
+
+    @staticmethod
+    def _mask_pan_value(value: str) -> str:
+        """Mask a labeled card-field value of ANY internal format, keeping last 4 digits.
+
+        Masks only when the value carries a card-length digit count (>=13), so a
+        non-card value in a field named 'pan' (e.g. "n/a", a short token) is left
+        untouched. Separators are irrelevant — only the digits are counted.
+        """
+        digits = re.sub(r'\D', '', value)
+        if len(digits) < 13:
+            return value
+        return PiiRedactor._mask_with_last_4(digits) + ' (PAN)'
+
     @staticmethod
     def _mask_with_last_4(text: str) -> str:
         """Mask text, preserving last 4 characters."""
@@ -44,7 +67,7 @@ class PiiRedactor:
         Luhn gate avoids redacting unrelated long digit runs (order IDs, timestamps).
         """
         raw = match.group(0)
-        digits = re.sub(r'[ \-.]', '', raw)
+        digits = re.sub(r'\D', '', raw)
         if 13 <= len(digits) <= 19 and PiiRedactor._luhn_valid(digits):
             return PiiRedactor._mask_with_last_4(digits) + ' (PAN)'
         return raw
@@ -66,14 +89,36 @@ class PiiRedactor:
         if not text:
             return text
 
-        # 1. Redact PAN. Cards are 13-19 digits (Amex 15, Visa/MC 16, Diners 14)
-        # with optional single space/hyphen separators. Candidates Luhn-checked below.
+        # 1a. PAN in a labeled card field — mask the WHOLE value, separator-agnostic.
+        # PaymentIn.pan is an unconstrained string logged verbatim on the charge path,
+        # so the client controls the delimiters (/, _, *, |, mixed whitespace, ...).
+        # We do not enumerate separators (a losing game); we mask everything inside the
+        # field value and keep only the last 4 digits. _mask_pan_value applies a digit
+        # count gate so a non-card value in a 'pan' field is left alone.
+        #   Quoted value: "pan":"4111*1111*1111*1111"  -> mask up to the closing quote.
         text = re.sub(
-            r'\b\d(?:[ \-]?\d){12,18}\b',
+            r'(["\']?\b' + PiiRedactor._PAN_KEY + r'["\']?\s*[:=]\s*)(["\'])([^"\']*)\2',
+            lambda m: m.group(1) + m.group(2) + PiiRedactor._mask_pan_value(m.group(3)) + m.group(2),
+            text,
+            flags=re.IGNORECASE
+        )
+        #   Unquoted value: pan=4111*1111*1111*1111  -> mask up to the next delimiter.
+        text = re.sub(
+            r'(["\']?\b' + PiiRedactor._PAN_KEY + r'["\']?\s*[:=]\s*)([^\s"\',;}\])&]+)',
+            lambda m: m.group(1) + PiiRedactor._mask_pan_value(m.group(2)),
+            text,
+            flags=re.IGNORECASE
+        )
+        # 1b. Free-text PAN. Cards are 13-19 digits (Amex 15, Visa/MC 16, Diners 14)
+        # with optional space/hyphen/slash/underscore separators (incl. repeated
+        # whitespace). Candidates Luhn-checked below so unrelated long digit runs
+        # (order IDs, timestamps) are left alone.
+        text = re.sub(
+            r'\b\d(?:[ \-/_]{0,3}\d){12,18}\b',
             PiiRedactor._redact_if_pan,
             text
         )
-        # 1b. Dot-grouped PANs (e.g. 4111.1111.1111.1111). Kept as a separate,
+        # 1c. Dot-grouped PANs (e.g. 4111.1111.1111.1111). Kept as a separate,
         # tightly-grouped pattern so we don't mask ordinary decimals like 1234567.89.
         text = re.sub(
             r'\b\d{4}(?:\.\d{4}){2}\.\d{1,7}\b',

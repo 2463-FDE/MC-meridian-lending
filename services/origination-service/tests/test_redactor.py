@@ -44,6 +44,52 @@ class TestPiiRedactorPan:
         result = PiiRedactor.redact(text)
         assert result == text
 
+    # Regression: separator variants the client can put in the unconstrained
+    # PaymentIn.pan field. Slash/underscore/repeated-whitespace previously slipped
+    # past the redactor and leaked the raw PAN to the charge log (PCI-DSS 3.4).
+    def test_redact_pan_with_slashes(self):
+        result = PiiRedactor.redact("card: 4111/1111/1111/1111")
+        assert "4111/1111" not in result
+        assert "411111111111" not in result
+        assert "1111" in result  # last 4 preserved
+
+    def test_redact_pan_with_underscores(self):
+        result = PiiRedactor.redact("card: 4111_1111_1111_1111")
+        assert "4111_1111" not in result
+        assert "411111111111" not in result
+        assert "1111" in result
+
+    def test_redact_pan_with_repeated_whitespace(self):
+        result = PiiRedactor.redact("card 4111  1111  1111  1111")
+        assert "411111111111" not in result
+        assert "1111" in result
+
+    def test_redact_pan_labeled_field_any_separator(self):
+        # A labeled card field is masked separator-agnostically — including exotic
+        # separators (* | +) that a numeric-run pattern could never enumerate.
+        for sep in ("/", "_", "-", " ", ".", "*", "|", "+"):
+            pan = sep.join(["4111", "1111", "1111", "1111"])
+            result = PiiRedactor.redact('{"pan":"%s","cvv":"123"}' % pan)
+            assert "411111111111" not in result, f"PAN leaked for separator {sep!r}: {result}"
+            assert "4111" not in result, f"PAN prefix leaked for separator {sep!r}: {result}"
+            assert "1111" in result
+
+    def test_redact_pan_unquoted_kv(self):
+        # Unquoted key=value form, exotic separator, masked up to next delimiter.
+        result = PiiRedactor.redact("pan=4111*1111*1111*1111 amount=5")
+        assert "411111111111" not in result
+        assert "4111*1111" not in result
+        assert "amount=5" in result  # trailing field untouched
+
+    def test_labeled_pan_non_card_value_untouched(self):
+        # A non-card value in a field named 'pan' must not be mangled.
+        assert PiiRedactor.redact('{"pan":"n/a"}') == '{"pan":"n/a"}'
+
+    def test_span_field_not_treated_as_pan(self):
+        # Word boundary: 'span' must not match the 'pan' key.
+        text = '{"span":"1234567890123"}'
+        assert PiiRedactor.redact(text) == text
+
 
 class TestPiiRedactorCvv:
     """Test CVV redaction."""
