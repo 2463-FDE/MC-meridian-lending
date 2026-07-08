@@ -53,6 +53,28 @@ jobs:
           done
           [ "$fail" -eq 0 ] || { echo "Run scripts/sync_redactor.sh to resync."; exit 1; }
 
+  redaction-tests:
+    # PII redaction is a security control, so its regression tests MUST block the
+    # build. Unlike the `backend` job (which tolerates known-flaky money-math tests
+    # via continue-on-error), a failure here means a PII log-leak path reopened.
+    # No continue-on-error, no `|| true` — a red suite fails CI.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: origination-service redactor unit tests
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt
+          python -m pytest tests/test_redactor.py -q
+      - name: payment-service logging-redaction integration tests
+        run: |
+          cd services/payment-service
+          pip install -r requirements.txt
+          python -m pytest tests/test_logging_redaction.py -q
+
   frontend:
     runs-on: ubuntu-latest
     steps:
