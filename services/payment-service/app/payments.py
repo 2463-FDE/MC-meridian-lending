@@ -8,22 +8,63 @@ The amount is applied to the balance by calling servicing-service over HTTP (the
 servicing /accounts/{loan_id}/apply-payment endpoint). If servicing is unreachable the
 charge is still reported captured so this service stands alone.
 """
+import json
+import re
+
 import httpx
 
 from .logging_config import get_logger
 from . import db
 from .config import SERVICING_URL
+from .redactor import PiiRedactor
 
 log = get_logger("payment")   # writes to logs/payment-service.log
 
 
+def _mask_ssn(ssn):
+    """Mask an SSN value to •••-••-LAST4 (digit-count based, separator-agnostic)."""
+    if not ssn:
+        return ssn
+    digits = re.sub(r"\D", "", str(ssn))
+    if len(digits) >= 4:
+        return "•••-••-" + digits[-4:]
+    return "•" * len(str(ssn))
+
+
+def _redacted_charge_req(pan, cvv, ssn, amount, loan_id, name) -> dict:
+    """Charge-request fields with card/SSN values masked at the VALUE level,
+    BEFORE anything is interpolated into the log string.
+
+    This is the fix for the charge-log PAN bypass. The prior code built a
+    hand-formatted pseudo-JSON string from the raw, client-controlled `pan` and
+    relied on the log formatter's regex to redact it. That is defeatable by
+    delimiter injection: a pan like `4111","x":"111111111111` splits the number
+    across fake JSON fields, so the delimiter-sensitive formatter masks only a
+    <13-digit fragment and the rest leaks in the clear. Masking each value here
+    (PAN by digit count, so separators/injected quotes are stripped and cannot
+    un-mask it) and serializing with `json.dumps` (which escapes embedded
+    quotes) removes the pseudo-JSON parsing surface entirely. The formatter
+    redaction stays on as a backstop.
+    """
+    return {
+        "pan": PiiRedactor._mask_pan_value(pan) if pan else pan,
+        "cvv": "••••" if cvv else cvv,
+        "ssn": _mask_ssn(ssn),
+        "amount": amount,
+        "loan_id": loan_id,
+        "name": name,
+    }
+
+
 def charge(loan_id: int, pan: str, cvv: str, amount: float, ssn: str = None,
            name: str = None, method: str = "card") -> dict:
-    # Full request body — including PAN, CVV, SSN — at INFO. No redaction.
+    # PII (PAN/CVV/SSN) is masked at the value level before it reaches the log
+    # string; see _redacted_charge_req for why the old formatter-only approach
+    # was bypassable. json.dumps escapes any quotes in free-text fields (name).
     log.info(
-        'POST /payments charge req={"pan":"%s","cvv":"%s","ssn":"%s","amount":%s,'
-        '"loan_id":%s,"name":"%s"} -> ok',
-        pan, cvv, ssn, amount, loan_id, name,
+        "POST /payments charge req=%s -> ok",
+        json.dumps(_redacted_charge_req(pan, cvv, ssn, amount, loan_id, name),
+                   ensure_ascii=False),
     )
     # No idempotency check. No unique charge reference. Every POST inserts a row.
     rows = db.query(

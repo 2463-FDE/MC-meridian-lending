@@ -4,6 +4,7 @@ This test simulates a payment request with full PAN/CVV/SSN,
 verifies the log file does NOT contain these fields unredacted.
 """
 import io
+import json
 import logging
 import os
 import tempfile
@@ -94,6 +95,47 @@ def test_payment_request_logging_redacts_pan_separator_variants(temp_log_dir, pa
     assert pan[:14] not in content, f"formatted PAN prefix leaked for {pan!r}"
     assert "1111" in content, "last 4 of PAN should be preserved"
     assert '"123"' not in content, "CVV should be redacted"
+
+
+def test_charge_log_defeats_quote_delimiter_injection():
+    """Regression (charge-log construction boundary): a client-controlled pan
+    that injects a quote followed by a field delimiter — `4111","x":"111111111111`
+    — previously split the card number across fake pseudo-JSON fields, so the
+    delimiter-sensitive formatter masked only a <13-digit fragment and the rest
+    leaked. The fix masks values BEFORE interpolation, so no PAN digits survive.
+    Exercises the real construction path (app.payments), not just the formatter."""
+    from app import payments
+
+    evil = '4111","x":"111111111111'  # quote + delimiter injection
+    line = "POST /payments charge req=%s -> ok" % json.dumps(
+        payments._redacted_charge_req(evil, "123", "412-55-9981", 250.0, 7, "Bob"),
+        ensure_ascii=False,
+    )
+    # No reconstructable PAN chunk survives.
+    assert "411111111111" not in line, f"12-digit PAN chunk leaked: {line}"
+    assert "4111" not in line, f"PAN prefix leaked: {line}"
+    assert "111111111111" not in line, f"injected PAN tail leaked: {line}"
+    assert "1111" in line, "last 4 of PAN should be preserved"
+    # CVV and SSN masked too.
+    assert '"123"' not in line and "412-55" not in line
+    assert "9981" in line  # SSN last 4 preserved
+
+
+def test_name_field_exotic_separator_pan_redacted(temp_log_dir):
+    """Regression: a PAN smuggled into the free-text `name` field with an exotic
+    separator (*) is caught by the formatter backstop on the real charge-log
+    path. `name` is not value-masked (it is a name), so the free-text redactor
+    must cover it."""
+    logger = get_logger("payment_test")
+    logger.info(
+        "POST /payments charge req=%s -> ok",
+        json.dumps({"pan": "••••••••••••1111 (PAN)", "cvv": "••••",
+                    "name": "4111*1111*1111*1111"}, ensure_ascii=False),
+    )
+    content = (Path(temp_log_dir) / "payment-service.log").read_text()
+    assert "411111111111" not in content, "star-separated PAN leaked via name"
+    assert "4111" not in content
+    assert "1111" in content
 
 
 def test_payment_request_logging_redacts_ssn(temp_log_dir):

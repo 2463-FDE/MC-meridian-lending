@@ -102,6 +102,26 @@ class TestPiiRedactorPan:
         text = '{"span":"1234567890123"}'
         assert PiiRedactor.redact(text) == text
 
+    def test_free_text_pan_exotic_separators_masked(self):
+        # Regression: a Luhn-valid PAN with */|/+ separators in a NON-card
+        # (free-text) field — e.g. smuggled into `name` — must be caught by the
+        # free-text pass, not only the labeled card-field rule. These separators
+        # previously slipped, leaking the PAN into the log.
+        for sep in ("*", "|", "+"):
+            pan = sep.join(["4111", "1111", "1111", "1111"])
+            result = PiiRedactor.redact('{"name":"%s"}' % pan)
+            assert "411111111111" not in result, f"PAN leaked for sep {sep!r}: {result}"
+            assert "4111" not in result, f"PAN prefix leaked for sep {sep!r}: {result}"
+            assert "1111" in result  # last 4 preserved
+
+    def test_free_text_exotic_separator_non_luhn_not_masked(self):
+        # The broadened separator class must stay Luhn-gated: a pipe-separated
+        # short/again non-card run is left alone (no false positive).
+        assert PiiRedactor.redact("cols 12|34|56|78") == "cols 12|34|56|78"
+        # 16-digit run failing Luhn, star-separated, must NOT be masked.
+        text = "ref 1234*5678*9012*3456"
+        assert PiiRedactor.redact(text) == text
+
 
 class TestPiiRedactorCvv:
     """Test CVV redaction."""
