@@ -31,6 +31,13 @@ services:
   origination-service:
     build: ./services/origination-service
     env_file: .env
+    environment:
+      # LLM credential is injected from the HOST shell at `compose up` time and
+      # is NOT written into the committed .env. If unset it stays empty here; the
+      # app fails loud (load_llm_config raises LLMConfigError) when the LLM
+      # feature is enabled. Never add CLAUDE_API_KEY (or AWS Bedrock creds) to
+      # the committed .env — put them in your shell or an untracked .env.local.
+      CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
     ports:
       - "8001:8001"
     depends_on:
