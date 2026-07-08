@@ -435,6 +435,31 @@ def test_numeric_pii_json_stays_valid_and_redacted():
     assert "5551234567" not in sent
 
 
+def test_pii_in_json_key_not_sent_to_provider():
+    """F3-key: customer PII carried in an object KEY (not a value) must not reach
+    the model. redact_json rebuilt objects with the original key untouched."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).summarize_application(
+        '{"contact@ex.com": "note", "ssn": 412559981}'
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    assert "contact@ex.com" not in sent
+    assert "412559981" not in sent
+
+
+def test_labeled_number_variants_redacted_before_send():
+    """F3-labels: `ssn_number` / `phone_number` (and variants) are common
+    structured keys; bare numeric values under them must be masked pre-send."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).summarize_application(
+        '{"ssn_number": 412559981, "phone_number": 5551234567, "loan_number": 87654321}'
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    assert "412559981" not in sent   # ssn_number masked
+    assert "5551234567" not in sent  # phone_number masked
+    assert "87654321" in sent        # unrelated labeled number left intact
+
+
 def test_redact_json_preserves_last4_and_falls_back_on_bad_json():
     out = redact_json('{"ssn": 412559981}')
     assert out == '{"ssn": "•••-••-9981"}'

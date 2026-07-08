@@ -44,16 +44,27 @@ def _redact_scalar(key: str, value):
         # Redaction altered the key/prefix (a PII-shaped field name); the
         # value slice would be misaligned. Fall back to redacting the value
         # alone — loses the label hint but stays correct and JSON-valid.
-        return PiiRedactor.redact(json.dumps(value))
+        return PiiRedactor.redact(value if isinstance(value, str) else json.dumps(value))
     masked = redacted[len(prefix):]
     if len(masked) >= 2 and masked[0] == '"' and masked[-1] == '"':
         masked = masked[1:-1]  # drop the quotes json.dumps added; re-quoted on output
     return masked
 
 
+def _redact_key(key) -> str:
+    """Redact PII out of an object key. Keys are normally field names, but a
+    caller-supplied document could carry customer data in a key
+    (`{"contact@ex.com": ...}`); that key would otherwise reach the model raw.
+    """
+    return PiiRedactor.redact(str(key))
+
+
 def _redact_node(node, key: str = ""):
     if isinstance(node, dict):
-        return {k: _redact_node(v, k) for k, v in node.items()}
+        # Redact both the key (PII-in-key leak) and the value; the value is
+        # redacted with the ORIGINAL key as its label so label-gated patterns
+        # still fire before the key itself is masked.
+        return {_redact_key(k): _redact_node(v, k) for k, v in node.items()}
     if isinstance(node, list):
         return [_redact_node(v, key) for v in node]
     return _redact_scalar(key, node)

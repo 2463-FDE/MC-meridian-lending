@@ -228,3 +228,22 @@ class TestPiiRedactorAdversarialFixes:
         # Dot-grouped PAN support must not swallow ordinary decimals.
         text = "amount 1234567.89 usd"
         assert PiiRedactor.redact(text) == text
+
+    def test_ssn_number_label_variant_masked(self):
+        # Common structured key `ssn_number` (and plural/no/num variants) must
+        # match the SSN label gate — the narrow `ssn`-only set let these bypass.
+        for label in ("ssn_number", "ssn_no", "ssns", "tax_id_number"):
+            result = PiiRedactor.redact('{"%s": 412559981}' % label)
+            assert "412559981" not in result, label
+            assert "9981" in result, label
+
+    def test_phone_number_label_variant_masked(self):
+        for label in ("phone_number", "phone_no", "phones", "mobile_number"):
+            result = PiiRedactor.redact('{"%s": 5551234567}' % label)
+            assert "5551234567" not in result, label
+            assert "4567" in result, label
+
+    def test_number_suffix_not_overmasking_non_pii_labels(self):
+        # The `_number` broadening must not mask unrelated labeled numbers.
+        text = '{"loan_number": 412559981, "account_number": 5551234567}'
+        assert PiiRedactor.redact(text) == text

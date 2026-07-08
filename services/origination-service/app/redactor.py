@@ -108,7 +108,7 @@ class PiiRedactor:
         # 3b. Redact bare/loosely-formatted SSN ONLY inside a labeled field, so we
         # don't mask unrelated 9-digit numbers (loan IDs, amounts, timestamps).
         text = re.sub(
-            r'(["\']?(?:ssn|social[_ ]?security(?:[_ ]?(?:no|num|number))?|tax[_ ]?id|tin)["\']?\s*[:=]\s*["\']?)\d{3}[-\s]?\d{2}[-\s]?(\d{4})\b',
+            r'(["\']?(?:ssn|social[_ ]?security|tax[_ ]?id|tin)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?)\d{3}[-\s]?\d{2}[-\s]?(\d{4})\b',
             lambda m: m.group(1) + '•••-••-' + m.group(2),
             text,
             flags=re.IGNORECASE
@@ -124,7 +124,7 @@ class PiiRedactor:
         # 5a. Redact phone in a labeled field (catches bare 10-digit like
         # "phone":"5551234567" that 5b intentionally skips to avoid false positives).
         text = re.sub(
-            r'(["\']?(?:phone|telephone|tel|mobile|cell|fax)["\']?\s*[:=]\s*["\']?)\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})\b',
+            r'(["\']?(?:phone|telephone|tel|mobile|cell|fax)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?)\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})\b',
             lambda m: m.group(1) + '•••-•••-' + m.group(2),
             text,
             flags=re.IGNORECASE
