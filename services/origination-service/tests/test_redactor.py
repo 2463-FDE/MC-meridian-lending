@@ -74,6 +74,18 @@ class TestPiiRedactorPan:
             assert "4111" not in result, f"PAN prefix leaked for separator {sep!r}: {result}"
             assert "1111" in result
 
+    def test_redact_pan_quote_separators_in_quoted_field(self):
+        # Regression: the log field is quote-delimited ({"pan":"%s"}), so a client
+        # pan containing quote chars would close the field early. The labeled matcher
+        # must consume past inner quotes to the field-terminating delimiter, else it
+        # captures only the first segment (<13 digits) and leaks the raw PAN.
+        for pan in ('4111"1111"1111"1111', "4111'1111'1111'1111", "4111\"1111'1111\"1111"):
+            result = PiiRedactor.redact('{"pan":"%s","cvv":"123"}' % pan)
+            assert "411111111111" not in result, f"PAN leaked for {pan!r}: {result}"
+            assert result.count("4111") == 0, f"PAN prefix leaked for {pan!r}: {result}"
+            assert "1111" in result
+            assert '"cvv":"••••"' in result, f"trailing field mangled for {pan!r}: {result}"
+
     def test_redact_pan_unquoted_kv(self):
         # Unquoted key=value form, exotic separator, masked up to next delimiter.
         result = PiiRedactor.redact("pan=4111*1111*1111*1111 amount=5")

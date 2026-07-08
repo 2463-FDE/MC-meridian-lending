@@ -71,6 +71,9 @@ def test_payment_request_logging_redacts_pan(temp_log_dir):
     "4111.1111.1111.1111",   # dotted
     "4111*1111*1111*1111",   # star — separator the field-context rule catches
     "4111|1111|1111|1111",   # pipe
+    '4111"1111"1111"1111',   # double-quote — closes the quoted log field early
+    "4111'1111'1111'1111",   # single-quote — same bypass, other quote char
+    "4111\"1111'1111\"1111",  # mixed quotes
     "4111111111111111",      # contiguous
 ])
 def test_payment_request_logging_redacts_pan_separator_variants(temp_log_dir, pan):

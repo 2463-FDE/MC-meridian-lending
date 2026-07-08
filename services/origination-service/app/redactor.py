@@ -95,9 +95,15 @@ class PiiRedactor:
         # We do not enumerate separators (a losing game); we mask everything inside the
         # field value and keep only the last 4 digits. _mask_pan_value applies a digit
         # count gate so a non-card value in a 'pan' field is left alone.
-        #   Quoted value: "pan":"4111*1111*1111*1111"  -> mask up to the closing quote.
+        #   Quoted value: "pan":"4111*1111*1111*1111"  -> mask the whole value.
+        # The value is consumed up to the closing quote that TERMINATES the field
+        # (a quote followed by a field delimiter or end-of-string), NOT the first
+        # quote inside the value. This closes the quote-as-separator bypass: a client
+        # pan of 4111"1111"1111"1111 is logged as {"pan":"4111"1111"1111"1111",...},
+        # and stopping at the first inner quote would capture only "4111" (<13 digits,
+        # left unmasked). Single quotes work the same way.
         text = re.sub(
-            r'(["\']?\b' + PiiRedactor._PAN_KEY + r'["\']?\s*[:=]\s*)(["\'])([^"\']*)\2',
+            r'(["\']?\b' + PiiRedactor._PAN_KEY + r'["\']?\s*[:=]\s*)(["\'])(.*?)\2(?=[\s,;}\])]|$)',
             lambda m: m.group(1) + m.group(2) + PiiRedactor._mask_pan_value(m.group(3)) + m.group(2),
             text,
             flags=re.IGNORECASE
