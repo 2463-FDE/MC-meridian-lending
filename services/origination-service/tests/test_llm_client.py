@@ -461,6 +461,36 @@ def test_structured_purpose_code_survives():
     assert "5000" in sent
 
 
+def test_no_whitespace_free_text_still_masked():
+    """Regression (review): a no-whitespace string under a non-identity key used
+    to fall straight through to the pattern pass, which has no name/plain-date
+    shape — so a hyphenated/concatenated name or an ISO date leaked raw. The
+    free-text guard is now FAIL-CLOSED on shape (only lowercase code tokens pass),
+    so these are masked despite carrying no whitespace."""
+    for leaked in ("Jane-Smith", "JaneSmith", "1970-01-01"):
+        adapter = FakeAdapter(response=GOOD_SUMMARY)
+        ClaudeClient(_config(), adapter=adapter).summarize_application(
+            '{"purpose": "%s", "amount": 1000}' % leaked
+        )
+        sent = "".join(m["content"] for m in adapter.calls[0].messages)
+        assert leaked not in sent, f"identity leaked via no-whitespace purpose: {leaked!r}"
+        assert "1000" in sent  # numeric triage field still survives
+
+
+def test_free_text_with_embedded_shaped_pii_masked_wholesale():
+    """Free text is masked WHOLESALE, not just its shaped PII: a purpose that
+    embeds an SSN also carries a label-less name around it. Pattern-masking only
+    the SSN would leak the name, so the whole value is dropped."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).summarize_application(
+        '{"purpose": "call Jane Smith 412-55-9981", "amount": 1000}'
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    for leaked in ("Jane Smith", "9981", "412-55-9981"):
+        assert leaked not in sent, f"free text leaked: {leaked!r}"
+    assert "1000" in sent
+
+
 def test_history_free_text_field_value_redacted():
     """A free-text (whitespace-bearing) value under a non-identity history field
     is masked wholesale — it can hide label-less identity the pattern pass can't
