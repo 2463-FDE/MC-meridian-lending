@@ -145,6 +145,8 @@ def test_name_field_exotic_separator_pan_redacted(temp_log_dir):
     "4111=1111=1111=1111",       # equals — reviewer example
     "4111====1111====1111====1111",  # 4-char run — defeats any fixed length bound
     "4111 - / _ 1111 . 1111 ~ 1111",  # mixed multi-char separators
+    "4111x1111x1111x1111",           # letter separators — digit-extraction still catches
+    "card4111a1111b1111c1111end",    # alnum-embedded card in free text
 ])
 def test_name_field_any_separator_pan_redacted(temp_log_dir, pan):
     """Regression (Codex): a Luhn-valid PAN smuggled into the free-text `name`

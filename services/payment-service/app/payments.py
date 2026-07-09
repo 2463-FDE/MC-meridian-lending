@@ -28,11 +28,17 @@ def _scrub_free_text_pan(text: str) -> str:
     The shared PiiRedactor free-text pass bounds the separator run (<=3 chars
     between digits) so it stays safe when applied to a whole log line. But a
     client can defeat any fixed bound (4111====1111====...), so for the isolated,
-    short name value we detect digit runs separated by ANY number of non-
-    alphanumeric chars and Luhn-check the extracted digits — exactly the
-    digit-extraction + Luhn approach, with no separator or length enumeration.
-    The Luhn gate keeps ordinary numeric text (IDs, amounts) untouched. Guarded
-    on a >=13 digit count so normal names skip the scan entirely.
+    short name value we detect digit runs separated by ANY number of NON-DIGIT
+    chars (letters included — 4111x1111x... strips to a real card) and Luhn-check
+    the extracted digits — true digit-extraction + Luhn, with no separator,
+    charset, or length enumeration. The Luhn gate keeps ordinary numeric text
+    (IDs, amounts) untouched. Guarded on a >=13 digit count so normal names skip
+    the scan entirely.
+
+    Non-digit (not non-alphanumeric) as the separator is safe HERE because this
+    runs on the isolated, short name value; the shared PiiRedactor free-text pass
+    keeps a bounded non-alphanumeric class so it does not glom digits across a
+    whole log line.
     """
     if not text or sum(c.isdigit() for c in text) < 13:
         return text
@@ -43,7 +49,7 @@ def _scrub_free_text_pan(text: str) -> str:
             return PiiRedactor._mask_with_last_4(digits) + " (PAN)"
         return m.group(0)
 
-    return re.sub(r"\d(?:[^0-9A-Za-z]*\d){12,18}", _mask, str(text))
+    return re.sub(r"\d(?:[^0-9]*\d){12,18}", _mask, str(text))
 
 
 def _mask_ssn(ssn):
