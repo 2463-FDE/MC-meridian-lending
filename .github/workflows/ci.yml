@@ -74,6 +74,16 @@ jobs:
           cd services/payment-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_logging_redaction.py -q
+      - name: servicing-service logging-redaction integration tests
+        run: |
+          cd services/servicing-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_logging_redaction.py -q
+      - name: kyc-service logging-redaction integration tests
+        run: |
+          cd services/kyc-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_logging_redaction.py -q
 
   frontend:
     runs-on: ubuntu-latest
