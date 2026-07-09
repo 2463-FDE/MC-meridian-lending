@@ -165,87 +165,59 @@ class TestPiiRedactorPan:
         doc2 = str({"ref": "1234567890123456"})
         assert PiiRedactor.redact(doc2) == doc2
 
-    def test_access_log_url_letter_separated_pan_masked(self):
-        # Regression (Codex): configure_uvicorn routes access logs through redact,
-        # but request lines are UNQUOTED, so the quote-scoped per-value scan (1d)
-        # never fires. A letter-split card in a query param slipped the free-text
-        # pass (1b), which excluded letters as separators, and reached the log.
-        # Any client can trigger this via the URL.
-        line = "GET /payments?name=4111x1111x1111x1111 HTTP/1.1"
+    # Access-log request-target query values are masked WHOLESALE (rule 0), keys
+    # and path kept. A client controls the request target, so any query value —
+    # PAN split across params, padded with stray digits, letter- or percent-
+    # separated — is dropped to ••• before it can reach the log. The per-field PAN
+    # passes (1b/1d/1e) still cover PANs OUTSIDE a request-line query (payload
+    # dicts, path segments, free text); those are exercised elsewhere.
+
+    def test_access_log_split_pan_across_query_params_masked(self):
+        # Regression (Codex round 4): a Luhn-valid PAN split across adjacent query
+        # params (?pan=4111&x=111111111111 -> 4111111111111111) was left intact
+        # because the per-field passes refuse to glob across &/=. Rule 0 masks
+        # every query value, so no reconstructable PAN survives.
+        line = "INFO GET /payments?pan=4111&x=111111111111 HTTP/1.1"
         result = PiiRedactor.redact(line)
-        assert "4111x1111" not in result, f"raw PAN leaked in access log: {result}"
-        assert "411111111111" not in result
-        assert "1111" in result  # last 4 preserved
-        assert "(PAN)" in result
+        assert "4111111111111111" not in result
+        assert "111111111111" not in result, f"split PAN leaked: {result}"
+        assert "pan=•••" in result and "x=•••" in result  # values masked, keys kept
+        assert "/payments" in result  # path kept
 
-    def test_access_log_pan_does_not_glob_across_query_params(self):
-        # The single-letter separator allowance must stay bleed-safe: digits in
-        # SEPARATE query params (split by &/=) must not be globbed into a false
-        # PAN. Neither of these is a real card, so nothing is masked.
-        line = "GET /pay?a=4111&b=1111111111111 HTTP/1.1"
-        assert PiiRedactor.redact(line) == line
-        line2 = "GET /o?id=41&x=1234567890123456 HTTP/1.1"  # 16-digit, Luhn-fail
-        assert PiiRedactor.redact(line2) == line2
+    def test_access_log_split_pan_with_intervening_and_path_digits_masked(self):
+        # Stray digits between params (y=9) or in the path (/v1/) previously
+        # defeated Luhn-based detection; wholesale value masking is immune.
+        for line in (
+            "INFO GET /p?pan=4111&y=9&x=111111111111 HTTP/1.1",
+            "INFO GET /v1/p?pan=4111&x=111111111111 HTTP/1.1",
+        ):
+            result = PiiRedactor.redact(line)
+            assert "4111111111111111" not in result, f"leaked: {result}"
+            assert "111111111111" not in result, f"leaked: {result}"
 
-    def test_access_log_url_multi_letter_separated_pan_masked(self):
-        # Regression (Codex round 2): rule 1b only tolerates a SINGLE letter
-        # between digits, so a MULTI-letter obfuscation (4111xx1111...) in an
-        # unquoted access-log query param bypassed 1b, and the bound-free scan
-        # (1d) only runs inside quotes. Rule 1e now scans each structural token
-        # (bounded by URL/log field delimiters) bound-free, closing this.
-        line = "GET /payments?name=4111xx1111xx1111xx1111 HTTP/1.1"
-        result = PiiRedactor.redact(line)
-        assert "4111xx1111" not in result, f"multi-letter PAN leaked: {result}"
-        assert "411111111111" not in result
-        assert "1111" in result  # last 4 preserved
-        assert "(PAN)" in result
-
-    def test_access_log_path_digits_do_not_shield_pan(self):
-        # A digit in an EARLIER path segment (/v1/) must not merge with the PAN
-        # token and defeat the Luhn check — the token scan splits on '/', so the
-        # PAN query value is isolated and still masked.
-        line = "GET /v1/payments?x=4111zz1111zz1111zz1111 HTTP/1.1"
-        result = PiiRedactor.redact(line)
-        assert "411111111111" not in result
-        assert "(PAN)" in result
-
-    def test_access_log_multi_letter_no_glob_across_params(self):
-        # Bound-free token scan must still not glob across &/= boundaries:
-        # short non-card digit groups in separate params stay intact.
-        line = "GET /pay?a=4111xx1111&b=2222xx3333 HTTP/1.1"
-        assert PiiRedactor.redact(line) == line
-
-    @pytest.mark.parametrize("enc_sep", ["%2D", "%2F", "%20", "%78"])
-    def test_access_log_percent_encoded_separator_pan_masked(self, enc_sep):
-        # Regression (Codex round 3): rule 1e passed raw URL tokens to the Luhn
-        # scan, but percent escapes (%2D='-', %2F='/', %20=' ', %78='x') inject
-        # stray hex digits that break the run — so an encoded-separator PAN in a
-        # query string leaked into the access log. 1e now percent-decodes each
-        # token for detection. Assert no reconstructable PAN survives (raw digits
-        # and the unmasked 12-digit prefix both absent).
-        pan_enc = enc_sep.join(["4111", "1111", "1111", "1111"])
-        line = f"GET /payments?name={pan_enc} HTTP/1.1"
+    @pytest.mark.parametrize("value", [
+        "4111x1111x1111x1111",              # single-letter separators
+        "4111xx1111xx1111xx1111",           # multi-letter separators
+        "4111%2D1111%2D1111%2D1111",        # percent-encoded '-'
+        "%34%31%31%31%31%31%31%31%31%31%31%31%31%31%31%31",  # fully percent-encoded
+    ])
+    def test_access_log_query_pan_value_masked(self, value):
+        # Any obfuscated PAN carried in ONE query value is masked wholesale.
+        line = f"GET /payments?name={value} HTTP/1.1"
         result = PiiRedactor.redact(line)
         assert "4111111111111111" not in result
         assert "411111111111" not in result, f"PAN prefix leaked: {result}"
-        assert pan_enc not in result, f"encoded PAN survived: {result}"
-        assert "(PAN)" in result
+        assert value not in result, f"raw value survived: {result}"
+        assert "name=•••" in result
 
-    def test_access_log_fully_percent_encoded_pan_masked(self):
-        # A PAN whose every digit is percent-encoded (%34%31...) must be caught
-        # once the token is decoded for detection.
-        pan_enc = "".join("%%%02X" % ord(c) for c in "4111111111111111")
-        line = f"GET /p?x={pan_enc} HTTP/1.1"
-        result = PiiRedactor.redact(line)
-        assert "4111111111111111" not in result
-        assert pan_enc not in result
-        assert "(PAN)" in result
-
-    def test_percent_decode_does_not_over_mask_short_values(self):
-        # Decoding must not turn a short non-card value into a false PAN, nor glob
-        # across query boundaries after decoding (4111-1111 is only 8 digits).
-        line = "GET /pay?a=4111%2D1111&b=2222 HTTP/1.1"
-        assert PiiRedactor.redact(line) == line
+    def test_access_log_masks_all_query_values_keeps_keys_and_path(self):
+        # Non-PII query values are masked too (attacker-controlled surface), but
+        # keys and path are preserved for debugging, and a query-less request line
+        # is untouched.
+        assert PiiRedactor.redact("GET /applications?status=funded&limit=25 HTTP/1.1") == \
+            "GET /applications?status=•••&limit=••• HTTP/1.1"
+        assert PiiRedactor.redact("GET /applications HTTP/1.1") == \
+            "GET /applications HTTP/1.1"
 
 
 class TestPiiRedactorCvv:

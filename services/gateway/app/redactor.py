@@ -135,6 +135,37 @@ class PiiRedactor:
                 return decoded_masked
         return PiiRedactor._mask_pan_in_value(token)
 
+    # HTTP request line in an access log: METHOD <target> HTTP/x.y (target is the
+    # only \S+ between the method and the protocol). Case-insensitive; works quoted
+    # or unquoted. Group 3 is the request target whose query values we mask.
+    _REQUEST_LINE = re.compile(
+        r'(?i)\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)(\s+)(\S+)(\s+HTTP/\d)'
+    )
+
+    @staticmethod
+    def _mask_request_target_query(m: 're.Match') -> str:
+        """Mask every query-string VALUE in an access-log request target, keeping
+        the keys and the path.
+
+        configure_uvicorn routes uvicorn access logs — attacker-controlled request
+        targets — through redact(). A client can put cardholder data in query
+        params and split it across params (?pan=4111&x=111111111111), pad it with
+        stray digits, or percent-encode it; those forms defeat the Luhn/token PAN
+        passes by design (they refuse cross-field globbing to avoid false positives
+        on unrelated numeric fields). Query values carry no operational signal worth
+        the PCI risk here — sensitive routes take PII in the POST body or integer
+        path params, never the query — so mask every value wholesale. Keys and the
+        path stay for debugging. This closes the whole URL-query PAN class at the
+        source instead of chasing separator tricks.
+        """
+        method, sp, target, tail = m.group(1), m.group(2), m.group(3), m.group(4)
+        if '?' not in target:
+            return m.group(0)
+        path, query = target.split('?', 1)
+        # Mask each non-empty value (key=value), bounded by & or the # fragment.
+        query = re.sub(r'=[^&#]+', '=•••', query)
+        return f"{method}{sp}{path}?{query}{tail}"
+
     @staticmethod
     def redact(text: str) -> str:
         """
@@ -151,6 +182,17 @@ class PiiRedactor:
             return None
         if not text:
             return text
+
+        # 0. Access-log request-target query string: mask every query VALUE (keep
+        # keys + path) BEFORE the PAN passes run. An access-log request line is
+        # attacker-controlled; a client can split/pad/encode a PAN across query
+        # params in ways the per-field Luhn passes below cannot catch without
+        # cross-field globbing (which would false-mask unrelated numeric fields).
+        # Masking query values at the source closes that class outright. Only the
+        # HTTP request target is touched — other log fields keep their boundaries.
+        text = PiiRedactor._REQUEST_LINE.sub(
+            PiiRedactor._mask_request_target_query, text
+        )
 
         # 1a. PAN in a labeled card field — mask the WHOLE value, separator-agnostic.
         # PaymentIn.pan is an unconstrained string logged verbatim on the charge path,
