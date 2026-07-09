@@ -15,7 +15,6 @@ rather than overshoot. Swap in a real tokenizer later without changing callers.
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 
 from ..prompts import PromptTemplate
@@ -30,25 +29,14 @@ _CHARS_PER_TOKEN = 4
 _IDENTITY_MASK = "•••• (redacted)"
 
 # Value substituted for an applicant-controlled FREE-TEXT field (e.g. `purpose`).
-# A string under a non-identity key is unstructured applicant text if it holds
-# whitespace OR is not a strict operational-code token (see _SAFE_TOKEN): it can
-# embed a name/DOB/address the pattern redactor cannot detect (no label, no shape),
-# so it must not reach the provider raw. FAIL-CLOSED — a string is sent raw only
-# when it is a single safe-token; everything else is masked (see _redact_scalar).
+# A string value under a non-identity key can embed a name/DOB/address the pattern
+# redactor cannot detect (no label, no shape), so — unless it is itself a genuine
+# shaped token whose audit last-4 we keep — it must not reach the provider raw.
+# FAIL-CLOSED: after the label-gated pattern pass, any leftover non-empty string
+# under a non-identity key is masked. No shape rule can tell an operational code
+# (auto, debt_consolidation) from a lowercased bare name (jane, jane_smith) — they
+# are byte-identical — so we do not try; strings are masked, numbers survive.
 _FREETEXT_MASK = "•••• (free text redacted)"
-
-# The ONLY string shape allowed to reach the provider raw under a non-identity key.
-# A lowercase snake/alnum token (auto, debt_consolidation, term36) is an operational
-# enum/code that carries no identity. Whitespace alone is NOT a sufficient boundary
-# between safe codes and unsafe free text — a hyphenated/concatenated name
-# (Jane-Smith, JaneSmith) and an ISO date (1970-01-01) have no whitespace yet are
-# identity, and the pattern redactor (name/date have no shape) would let them
-# through. Requiring all-lowercase, no separators but underscore, rejects those:
-# caps (names), hyphens/colons (dates), and dots/at-signs (emails) all fail the
-# match. Residual (inherent to any shape rule, documented): a deliberately
-# lowercased bare name like "jane" is indistinguishable from a code and still
-# passes — closing that needs the field-level allowlist noted in _require_json_object.
-_SAFE_TOKEN = re.compile(r'[a-z0-9][a-z0-9_]*')
 
 
 def _is_identity_key(key) -> bool:
@@ -99,17 +87,13 @@ def _redact_scalar(key: str, value):
     2. NO WHITESPACE ⇒ a single token. It is redacted *with its field label*
        (`"key": value`) so the label-gated / shape patterns fire, keeping the
        audit last-4 of a genuine single shaped token (an SSN/PAN/email is a token,
-       not free text). If nothing shaped matched, the token is passed raw ONLY
-       when it is a strict operational-code token (`_SAFE_TOKEN`); a name
-       (Jane-Smith, JaneSmith) or a date (1970-01-01) has no whitespace and no
-       shape, so it FAILS the token test and is masked. Numbers and other
-       non-string scalars skip step 1 and go straight to the pattern pass so a
-       bare SSN/PAN literal is still caught. Empty string carries nothing, kept.
-
-    Residual (documented, closed only by the field allowlist in
-    `_require_json_object`): a no-whitespace value that dash/underscore-joins a
-    name to shaped PII (`"Jane-Smith-412-55-9981"`) keeps the name after the SSN
-    is masked. Real free text has whitespace and is caught by step 1.
+       not free text). If nothing shaped matched, the string is masked outright:
+       no shape rule can distinguish an operational code (auto) from a lowercased
+       bare name (jane, jane_smith) — they are byte-identical — so a string under
+       a non-identity key is never passed raw on shape alone. Numbers and other
+       non-string scalars skip both steps and go through the pattern pass so a
+       bare SSN/PAN literal is still caught, then survive (a number cannot hide a
+       label-less name). Empty string carries nothing, kept.
     """
     if isinstance(value, bool) or value is None:
         return value
@@ -131,11 +115,12 @@ def _redact_scalar(key: str, value):
         if len(masked) >= 2 and masked[0] == '"' and masked[-1] == '"':
             masked = masked[1:-1]  # drop the quotes json.dumps added; re-quoted on output
         return masked
-    # Nothing shaped. Fail closed: a non-empty string that is not a strict
-    # operational-code token can hide label-less identity, so mask it.
-    if isinstance(value, str) and value and not _SAFE_TOKEN.fullmatch(value):
+    # Nothing shaped. Fail closed: any non-empty string under a non-identity key
+    # can hide label-less identity (a lowercased bare name is indistinguishable
+    # from a code), so mask it outright.
+    if isinstance(value, str) and value:
         return _FREETEXT_MASK
-    return value  # numbers stay numbers; recognized code tokens (and "") pass raw
+    return value  # numbers stay numbers; empty string carries nothing
 
 
 def _redact_key(key) -> str:
@@ -201,11 +186,13 @@ def _require_json_object(value: str):
     is the same leak as malformed input, just wrapped in quotes/brackets. So both
     non-JSON and non-object JSON fail closed.
 
-    Known residual (inherent, documented): an object still masks only VALUES
-    under recognized identity KEYS. A name a caller stuffs into a free-text value
-    under a non-identity key (e.g. {"notes": "Applicant Jane Smith"}) has no label
-    and no shape, so — like the redactor's free-text limitation — it is not
-    masked. Callers must not place raw applicant identity in free-text fields.
+    Identity stuffed into a free-text value under a NON-identity key (e.g.
+    {"notes": "Applicant Jane Smith"} or {"purpose": "jane_smith"}) is handled by
+    `_redact_scalar`, which fails closed: every non-empty string scalar under a
+    non-identity key is masked (whitespace-bearing free text wholesale, single
+    tokens after a label-gated shaped-PII pass). Only numbers and shaped tokens
+    (with their audit last-4) survive, so a label-less name cannot ride out in a
+    string value.
     """
     try:
         parsed = json.loads(value)

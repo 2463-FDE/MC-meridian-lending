@@ -269,8 +269,10 @@ def test_token_budget_refused_preflight():
 
 def test_history_trimmed_to_fit():
     tmpl = get_prompt("loan_application_summary")
-    # History must be valid JSON (fail-closed); pad a JSON string to ~1000 tokens.
-    long_turn = {"role": "user", "content": '{"note": "' + "x" * 3980 + '"}'}
+    # History must be valid JSON (fail-closed). Bulk it out with NUMBERS: string
+    # scalars under a non-identity key are now masked to a short glyph (fail-closed),
+    # so only surviving content (numbers) can make a turn large enough to trim.
+    long_turn = {"role": "user", "content": '{"n": [' + "1," * 1999 + "1]}"}
     built = build_request(
         tmpl, model="m", max_tokens=256, temperature=0.0, timeout=1.0,
         token_budget=1200, history=[long_turn, long_turn, long_turn],
@@ -449,24 +451,48 @@ def test_free_text_purpose_field_does_not_leak_identity():
     assert "24" in sent
 
 
-def test_structured_purpose_code_survives():
-    """A structured purpose code (no whitespace) is operational data and is kept
-    — only unstructured free text is masked."""
-    adapter = FakeAdapter(response=GOOD_SUMMARY)
-    ClaudeClient(_config(), adapter=adapter).summarize_application(
-        '{"purpose": "debt_consolidation", "amount": 5000}'
-    )
-    sent = "".join(m["content"] for m in adapter.calls[0].messages)
-    assert "debt_consolidation" in sent
-    assert "5000" in sent
+def test_lowercase_token_under_non_identity_key_masked():
+    """Regression (review): the fail-closed guard used to pass any lowercase
+    snake/alnum token raw under a non-identity key, so a lowercased bare name
+    (jane, jane_smith) — byte-identical to an operational code (debt_consolidation)
+    — leaked. No shape rule can tell them apart, so ALL non-empty string scalars
+    are now masked; numbers survive as triage data."""
+    # Values chosen absent from the few-shot example (which contains "auto").
+    for value in ("jane", "jane_smith", "debt_consolidation"):
+        adapter = FakeAdapter(response=GOOD_SUMMARY)
+        ClaudeClient(_config(), adapter=adapter).summarize_application(
+            '{"purpose": "%s", "amount": 5000}' % value
+        )
+        sent = "".join(m["content"] for m in adapter.calls[0].messages)
+        assert value not in sent, f"string value leaked under non-identity key: {value!r}"
+        assert "5000" in sent  # numeric triage field survives
+
+
+def test_history_lowercase_token_under_non_identity_key_masked():
+    """History path: same fail-closed masking — a lowercased bare name replayed as
+    a no-whitespace value under a non-identity history key does not reach the
+    provider."""
+    for value in ("jane", "jane_smith"):
+        adapter = FakeAdapter(response=GOOD_SUMMARY)
+        ClaudeClient(_config(), adapter=adapter).complete(
+            "loan_application_summary",
+            application_json="{}",
+            history=[{"role": "user", "content":
+                      '{"note": "%s", "amount": 5000}' % value}],
+        )
+        sent = "".join(m["content"] for m in adapter.calls[0].messages)
+        assert value not in sent, f"string value leaked via history: {value!r}"
+        assert "5000" in sent
 
 
 def test_no_whitespace_free_text_still_masked():
     """Regression (review): a no-whitespace string under a non-identity key used
     to fall straight through to the pattern pass, which has no name/plain-date
     shape — so a hyphenated/concatenated name or an ISO date leaked raw. The
-    free-text guard is now FAIL-CLOSED on shape (only lowercase code tokens pass),
-    so these are masked despite carrying no whitespace."""
+    free-text guard is now FAIL-CLOSED: every non-empty string scalar under a
+    non-identity key is masked, so these are dropped despite carrying no
+    whitespace (see test_lowercase_token_under_non_identity_key_masked for the
+    lowercased-name case)."""
     for leaked in ("Jane-Smith", "JaneSmith", "1970-01-01"):
         adapter = FakeAdapter(response=GOOD_SUMMARY)
         ClaudeClient(_config(), adapter=adapter).summarize_application(
@@ -706,7 +732,7 @@ def test_identity_fields_not_sent_to_provider():
     assert "Acme Corp" not in sent         # employer dropped
     assert "42000" in sent                 # income kept (triage-relevant)
     assert "18000" in sent                 # amount kept
-    assert "auto" in sent                  # purpose kept
+    # (purpose-string masking is covered by test_lowercase_token_under_non_identity_key_masked)
 
 
 def test_identity_masking_enforced_in_public_complete_path():
