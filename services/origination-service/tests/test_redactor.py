@@ -165,28 +165,38 @@ class TestPiiRedactorPan:
         doc2 = str({"ref": "1234567890123456"})
         assert PiiRedactor.redact(doc2) == doc2
 
-    # Access-log request-target query values are masked WHOLESALE (rule 0), keys
-    # and path kept. A client controls the request target, so any query value —
-    # PAN split across params, padded with stray digits, letter- or percent-
-    # separated — is dropped to ••• before it can reach the log. The per-field PAN
-    # passes (1b/1d/1e) still cover PANs OUTSIDE a request-line query (payload
-    # dicts, path segments, free text); those are exercised elsewhere.
+    # Access-log request-target query strings are dropped WHOLESALE (rule 0) — both
+    # param names AND values — keeping only the path. A client controls the whole
+    # request target, so a PAN split across values, across param NAMES, padded with
+    # stray digits, letter- or percent-separated is gone before it can reach the
+    # log. The per-field PAN passes (1b/1d/1e) still cover PANs OUTSIDE a request-
+    # line query (payload dicts, path segments, free text); exercised elsewhere.
 
-    def test_access_log_split_pan_across_query_params_masked(self):
-        # Regression (Codex round 4): a Luhn-valid PAN split across adjacent query
-        # params (?pan=4111&x=111111111111 -> 4111111111111111) was left intact
-        # because the per-field passes refuse to glob across &/=. Rule 0 masks
-        # every query value, so no reconstructable PAN survives.
+    def test_access_log_split_pan_across_query_values_masked(self):
+        # A Luhn-valid PAN split across adjacent query VALUES
+        # (?pan=4111&x=111111111111 -> 4111111111111111) is dropped with the query.
         line = "INFO GET /payments?pan=4111&x=111111111111 HTTP/1.1"
         result = PiiRedactor.redact(line)
         assert "4111111111111111" not in result
         assert "111111111111" not in result, f"split PAN leaked: {result}"
-        assert "pan=•••" in result and "x=•••" in result  # values masked, keys kept
-        assert "/payments" in result  # path kept
+        assert result == "INFO GET /payments?••• HTTP/1.1"  # whole query gone, path kept
+
+    def test_access_log_split_pan_across_query_keys_masked(self):
+        # Regression (Codex round 5): param NAMES are attacker-controlled too, so a
+        # PAN split across keys (?4111=x&111111111111=y) reconstructs from the keys
+        # if only values are masked. The whole query is now dropped.
+        line = "GET /payments?4111=x&111111111111=y HTTP/1.1"
+        result = PiiRedactor.redact(line)
+        assert "4111111111111111" not in result
+        assert "111111111111" not in result, f"key-split PAN leaked: {result}"
+        assert result == "GET /payments?••• HTTP/1.1"
+        # Bare keys with no '=' (another key-only split form) are dropped as well.
+        line2 = "GET /p?4111&111111111111 HTTP/1.1"
+        assert PiiRedactor.redact(line2) == "GET /p?••• HTTP/1.1"
 
     def test_access_log_split_pan_with_intervening_and_path_digits_masked(self):
         # Stray digits between params (y=9) or in the path (/v1/) previously
-        # defeated Luhn-based detection; wholesale value masking is immune.
+        # defeated Luhn-based detection; dropping the whole query is immune.
         for line in (
             "INFO GET /p?pan=4111&y=9&x=111111111111 HTTP/1.1",
             "INFO GET /v1/p?pan=4111&x=111111111111 HTTP/1.1",
@@ -202,20 +212,19 @@ class TestPiiRedactorPan:
         "%34%31%31%31%31%31%31%31%31%31%31%31%31%31%31%31",  # fully percent-encoded
     ])
     def test_access_log_query_pan_value_masked(self, value):
-        # Any obfuscated PAN carried in ONE query value is masked wholesale.
+        # Any obfuscated PAN carried in a query value is dropped with the query.
         line = f"GET /payments?name={value} HTTP/1.1"
         result = PiiRedactor.redact(line)
         assert "4111111111111111" not in result
         assert "411111111111" not in result, f"PAN prefix leaked: {result}"
         assert value not in result, f"raw value survived: {result}"
-        assert "name=•••" in result
+        assert result == "GET /payments?••• HTTP/1.1"
 
-    def test_access_log_masks_all_query_values_keeps_keys_and_path(self):
-        # Non-PII query values are masked too (attacker-controlled surface), but
-        # keys and path are preserved for debugging, and a query-less request line
-        # is untouched.
+    def test_access_log_drops_whole_query_keeps_path(self):
+        # The entire query (keys + values) is replaced by a single marker; the path
+        # is kept, and a query-less request line is untouched.
         assert PiiRedactor.redact("GET /applications?status=funded&limit=25 HTTP/1.1") == \
-            "GET /applications?status=•••&limit=••• HTTP/1.1"
+            "GET /applications?••• HTTP/1.1"
         assert PiiRedactor.redact("GET /applications HTTP/1.1") == \
             "GET /applications HTTP/1.1"
 
