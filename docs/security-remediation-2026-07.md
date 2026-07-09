@@ -15,12 +15,14 @@ The repository tracked live-looking secrets and raw cardholder/PII data:
   `logs/payment-service.log`, `services/servicing-service/logs/payment-service.log`,
   `services/origination-service/logs/origination-service.log`.
 - **Hardcoded secrets in source** (the same credentials, duplicated inline so the
-  demo "just works"): `EXPERIAN_KEY = "EXAMPLE-LEAKED-KEY-rotate-me"` and
-  `CORE_BANKING_API_KEY`/`PROCESSOR_API_KEY` `os.getenv` fallbacks (`cb_live_…`,
-  `proc_live_…`) across the service `config.py` files, plus the Postgres password
-  `meridian_dev_pw_2024` in all seven `config.py` `DATABASE_URL` defaults and in
-  `docker-compose.yml`. Untracking `.env` alone would NOT have removed these — they
-  ship in every image and stay in history.
+  demo "just works"): the `EXPERIAN_KEY`, and the `CORE_BANKING_API_KEY` /
+  `PROCESSOR_API_KEY` `os.getenv` fallbacks, were inlined across the service
+  `config.py` files, plus the Postgres password inlined in all seven `config.py`
+  `DATABASE_URL` defaults and in `docker-compose.yml`. (The literal values are
+  intentionally NOT reproduced in this doc — a remediation that re-prints the
+  secret it is purging still ships it to every clone. Treat all of them as
+  compromised; see the rotation checklist below.) Untracking `.env` alone would
+  NOT have removed these — they ship in every image and stay in history.
 
 These predate the LLM-client feature (committed in `a726640`) and exist on `main`.
 
@@ -82,11 +84,17 @@ untracking part of this remediation is considered done:
   git ls-files | grep -E '(^|/)\.env\.example$'
   ```
   Expected: `.env.example`.
-- No hardcoded secret literals remain in source/compose:
+- No hardcoded secret literals remain anywhere in the tracked tree. Scan the FULL
+  tree (not just `services/`), excluding this remediation doc — which necessarily
+  quotes the pattern in this very command — and intentional test fixtures under
+  `*/tests/`:
   ```
-  git grep -nIE 'cb_live_|proc_live_|EXAMPLE-LEAKED-KEY|meridian_dev_pw_2024' -- 'services/*' docker-compose.yml
+  git grep -nIE 'cb_live_|proc_live_|EXAMPLE-LEAKED-KEY|meridian_dev_pw_2024' \
+    -- ':!docs/security-remediation-2026-07.md' ':!*/tests/*'
   ```
-  Expected: **no output**.
+  Expected: **no output**. (Earlier this scan was scoped to `services/*` +
+  `docker-compose.yml`, so the same literals echoed in `docs/` — e.g. this file
+  and `docs/debt-log.md` — slipped through the check.)
 - No secrets remain in the working tree (adjust tool to your scanner):
   ```
   gitleaks detect --no-banner --redact
