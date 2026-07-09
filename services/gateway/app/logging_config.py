@@ -1,13 +1,13 @@
-"""Logging with PII redaction.
+"""Logging setup with PII redaction.
 
-Previously logged full charge request body (PAN, CVV, SSN) without redaction.
-Now redacts PII before writing to logs/payment-service.log. Addresses PCI-DSS 3.4.
+The gateway proxies every request/response between the portal and the LOS/LSS
+services, so anything it logs can contain PII. Redacts PAN, CVV, SSN, email,
+phone before writing. Addresses PCI-DSS 3.4 (plaintext PII in logs).
 """
 import logging
 import os
 
 from .redactor import PiiRedactor, _RedactWrapper, configure_uvicorn
-
 
 
 class RedactingFormatter(logging.Formatter):
@@ -27,7 +27,7 @@ def get_logger(name: str) -> logging.Logger:
     # uvicorn, or a pre-existing config) must still be forced non-propagating and
     # have those handlers redacted below — the old early-return trusted them raw.
     logger.propagate = False
-    fmt = RedactingFormatter("%(levelname)s %(asctime)s %(message)s")
+    fmt = RedactingFormatter("%(levelname)s %(asctime)s %(name)s %(message)s")
 
     # Force redaction onto any handler already attached to this logger (by a test,
     # by uvicorn, or by a pre-existing logging config). Never trust an inherited
@@ -46,7 +46,7 @@ def get_logger(name: str) -> logging.Logger:
         try:
             log_dir = os.getenv("LOG_DIR", "logs")
             os.makedirs(log_dir, exist_ok=True)
-            fh = logging.FileHandler(os.path.join(log_dir, "payment-service.log"))
+            fh = logging.FileHandler(os.path.join(log_dir, "gateway.log"))
             fh.setFormatter(fmt)
             logger.addHandler(fh)
         except OSError:

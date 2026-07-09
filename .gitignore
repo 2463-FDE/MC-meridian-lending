@@ -32,6 +32,11 @@ coverage/
 *.pem
 *.key
 
-# logs may contain PII / cardholder data — do not track (was: kept checked in,
-# which shipped raw PAN/CVV/SSN; see docs/security-remediation-2026-07.md).
+# logs — never commit runtime logs; they can carry unredacted PII (raw PANs/SSNs
+# were found in a checked-in log; see docs/security-remediation-2026-07.md). If
+# finance needs a sample, commit ONE redacted example explicitly. NOTE:
+# untracking does not purge PII already in git history — a history rewrite
+# (git filter-repo / BFG) is still required separately.
+logs/
+**/logs/
 *.log

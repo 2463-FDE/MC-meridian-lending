@@ -15,7 +15,6 @@ from . import intake
 from .logging_config import get_logger
 from .routers import applications, offers
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = get_logger("origination")
 
 app = FastAPI(title="Meridian Origination Service (LOS)", version="2.0.0")

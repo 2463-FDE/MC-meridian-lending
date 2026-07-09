@@ -21,14 +21,25 @@ from app.decision import decide, CreditPullError
 
 @pytest.fixture
 def synthetic_mode(monkeypatch):
-    """Explicit local/demo mode: no key, stub allowed."""
+    """Explicit local/demo mode: dev environment + opt-in flag + no key."""
+    monkeypatch.setattr(config, "ENVIRONMENT", "development")
     monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", True)
     monkeypatch.setattr(config, "EXPERIAN_KEY", "")
 
 
 @pytest.fixture
 def prod_like(monkeypatch):
-    """Production-like: no key, stub NOT allowed."""
+    """Production-like: no key, synthetic NOT allowed."""
+    monkeypatch.setattr(config, "ENVIRONMENT", "production")
+    monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", False)
+    monkeypatch.setattr(config, "EXPERIAN_KEY", "")
+
+
+@pytest.fixture
+def env_example_semantics(monkeypatch):
+    """Mirror a fresh copy of .env.example: ENVIRONMENT=production, the synthetic
+    flag UNSET, and no EXPERIAN_KEY — the default a deploy inherits."""
+    monkeypatch.setattr(config, "ENVIRONMENT", "production")
     monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", False)
     monkeypatch.setattr(config, "EXPERIAN_KEY", "")
 
@@ -86,3 +97,26 @@ def test_decision_endpoint_returns_503_when_key_missing(prod_like):
         },
     )
     assert resp.status_code == 503  # fail closed — no decision issued
+
+
+def test_synthetic_flag_ignored_outside_development(monkeypatch):
+    # Two-gate guard: the opt-in flag alone must NOT enable synthetic scoring in a
+    # production environment — no config can approve loans on fake data by accident.
+    monkeypatch.setattr(config, "ENVIRONMENT", "production")
+    monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", True)  # set, but env is prod
+    monkeypatch.setattr(config, "EXPERIAN_KEY", "")
+    assert config.synthetic_credit_enabled() is False
+    assert "EXPERIAN_KEY" in config.missing_required_secrets()
+    with pytest.raises(CreditPullError):
+        decide({"app_id": 4, "ssn": "123456782", "income": 100000})
+
+
+def test_env_example_semantics_report_unhealthy(env_example_semantics):
+    # A fresh copy of .env.example (no key, synthetic off, production) must leave
+    # decision-service unhealthy — a copied config cannot silently issue decisions.
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    resp = TestClient(app).get("/health")
+    assert resp.status_code == 503
+    assert "EXPERIAN_KEY" in resp.json()["missing_secrets"]

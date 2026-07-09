@@ -46,8 +46,13 @@ These predate the LLM-client feature (committed in `a726640`) and exist on `main
   approvals/denials off a synthetic number while `/health` reported OK. Now a
   missing `EXPERIAN_KEY` (or any bureau failure) raises and the decision endpoint
   returns 503 — no decision is issued — and `/health` reports `unhealthy` with the
-  missing secret. The stub is gated behind an explicit `ALLOW_SYNTHETIC_CREDIT`
-  flag for local/demo only (set in `.env.example`, never in a real environment).
+  missing secret. Synthetic scoring is gated behind **two** independent conditions
+  — `ENVIRONMENT=development` AND `ALLOW_SYNTHETIC_CREDIT` — so a production config
+  can never enable it, even if the flag is set by mistake. `.env.example` ships
+  secure by default (`ENVIRONMENT=production`, flag unset), so a copied config
+  fails closed; the local demo opts in explicitly via `docker-compose.demo.yml`
+  (`docker compose -f docker-compose.yml -f docker-compose.demo.yml up`), which is
+  not auto-loaded.
   NOTE: the payment-service processor path has not been audited for the same
   stub-on-missing-key behaviour — tracked as follow-up.
 
