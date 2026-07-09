@@ -51,6 +51,15 @@ content policy or decision-record content. Guidelines already flag the reason ga
 
 ## Decision Ledger
 
+> **Status of these decisions (planning PR).** The *problem framing*, *hygiene
+> posture*, and *scope boundaries* below are settled. The *implementation
+> choices* — DL-1 (TF-IDF backend), DL-2 (`##`-section chunking), DL-7 (in-memory
+> index) and the embedding-cache shape — are **proposed**: they honor the stated
+> constraints on paper but are **not yet validated** against installed
+> dependencies, repo packaging conventions, or a calibrated gold set. They are
+> confirmed or revised at implementation time; see *Assumptions to verify during
+> implementation* below.
+
 ### DL-1: Embedding backend
 
 | Option | Tradeoffs |
@@ -131,8 +140,9 @@ offline eval harness, not the production retriever; it must run anywhere (laptop
 stdlib alone, with no running service dependency. (3) *Cost* — the "Pro plan" constraint
 rules out hosted stores; local stores drag in deps the machine doesn't have. (4) *Hygiene
 surface* — every persistent store holding corpus text is another PCI/backup audit target
-(ADR 0007); the harness persists only term-weight vectors (embedding cache), never a chunk
-store. **Week 3+ upgrade path (not locked):** when the production helper ships, pgvector on
+(ADR 0007); the harness's on-disk cache persists term-weight vectors + non-sensitive
+structural metadata only (filename, section heading, chunk id, content hash) — never raw
+chunk bodies or a chunk store (ADR 0007 rule 6). **Week 3+ upgrade path (not locked):** when the production helper ships, pgvector on
 the existing shared Postgres is the natural candidate — no new infra, ADR 0007's ingest
 gate applies at write time — but that choice requires its own ADR when the helper feature
 starts.
@@ -188,6 +198,36 @@ findings and for absence of any raw SSN/PAN value.
 
 No plan item lacks a spec anchor — no scope creep detected. Form polish and the chat helper
 are explicitly out of scope.
+
+---
+
+## Assumptions to verify during implementation
+
+These carry the plan's direction but are **not yet proven**. Each is confirmed or
+revised as the harness is built, and the outcome recorded in the eval report or a
+follow-up ADR update:
+
+1. **Cache contents / source-text persistence.** The embedding cache is intended to
+   hold term-weight vectors + non-sensitive structural metadata only (source
+   filename, section heading, chunk id, content hash) — never raw chunk bodies, the
+   `kb_dump` records, or any PII sample (ADR 0007 rule 6). Verify against a real
+   `.cache/` artifact: assert no corpus body text and no PII string is present.
+2. **Pure-Python TF-IDF sufficiency (DL-1).** Adequate on paper at ~9 chunks, but
+   unproven until the gold set is calibrated. If hit@k / MRR are poor after first
+   calibration, revisit (sklearn TF-IDF, or a local dense backend behind the same
+   `Embedder` interface) — the interface exists precisely to keep this swap cheap.
+3. **Compliance / legal wording.** The Reg B adverse-action and 25-month retention
+   language (ADR 0008) and the "recoverable from most stores" risk claim (ADR 0007)
+   are directional; confirm the statutory citations and wording with a compliance
+   reviewer before Week 3 implementation.
+4. **ADR 0008 — contractual now vs implementation later.** Locked now: the field
+   contract and the identifier-free projection (ADR 0007 depends on both). Week 3+
+   implementation: the additive schema migration, decision-service write-path
+   validation, override rules, and cross-service ownership — not commitments of this
+   planning PR.
+5. **Repo conventions (DL-3).** Top-level `rag_eval/` with its own `requirements.txt`
+   follows the offline-tool intent; confirm it matches the repo's packaging/CI
+   conventions when the harness lands.
 
 ---
 

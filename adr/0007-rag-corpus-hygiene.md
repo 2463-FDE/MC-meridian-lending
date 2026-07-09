@@ -21,8 +21,11 @@ corpus is:
 Embedding this dump would copy full SSNs and card numbers into a vector store and its
 on-disk caches — a *new* PCI/PII surface on top of existing debt (D5: plaintext PII in
 logs; D13: PAN/CVV columns in the payments table). Vector stores and embedding caches are
-backup targets exactly like log files, and embedded text is recoverable from most stores
-(they persist the source chunk alongside the vector).
+backup targets exactly like log files. We treat embedded text as **recoverable by default**:
+many vector stores — and any cache that keeps the source chunk beside its vector — allow the
+original text to be read back or reconstructed. This is a stated risk assumption, not a
+measured property of one specific store; the hygiene posture below is chosen to hold
+regardless of which store is later selected.
 
 Cost constraint from the client: "basically a Pro plan" — embed a sampled policy subset,
 cache embeddings, never re-embed per run, and run hygiene checks offline (regex/validator),
@@ -58,10 +61,18 @@ not via LLM calls.
    logic — zero LLM calls.
 
 6. **The eval harness keeps no persistent chunk store.** Retrieval runs on an in-memory
-   exact index rebuilt each run; the only artifact on disk is the embedding cache
-   (term-weight vectors, no document text). A production vector store (e.g. pgvector on the
-   estate Postgres) is a Week 3+ decision requiring its own ADR, with this gate applied at
-   ingest regardless of store choice. (Stage 1 plan, DL-7.)
+   exact index rebuilt each run. The only on-disk artifact is the embedding cache, and it
+   persists **term-weight vectors keyed by content hash, plus non-sensitive structural
+   metadata only** — source filename, section heading, and chunk id. It MUST NOT persist raw
+   chunk bodies, the refused `kb_dump` records, or any PII sample. Reporting maps a matched
+   vector back to its source section through this structural metadata; section headings come
+   from the gate-passed `policies/` docs, which carry no PII. Any full chunk text needed to
+   render a snippet in a report is re-read at report time from the live, gate-passed source
+   files — not stored in the cache. (This is why the earlier "no document text" shorthand is
+   made precise here: structural headings persist; corpus *bodies* and PII do not.) A
+   production vector store (e.g. pgvector on the estate Postgres) is a Week 3+ decision
+   requiring its own ADR, with this gate applied at ingest regardless of store choice.
+   (Stage 1 plan, DL-7.)
 
 ## Consequences
 

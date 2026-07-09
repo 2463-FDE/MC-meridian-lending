@@ -30,9 +30,11 @@ never recorded**:
 - An officer's note confirms the operational pain: *"We approve/deny in the tool, but I can
   never find why later."*
 
-**Regulatory stake:** Reg B requires an adverse-action notice stating the specific
-principal reason(s) for denial, and records retention (~25 months). If a regulator asked
-today for the reason behind denial #6012, Meridian could not produce it from stored data.
+**Regulatory stake:** Reg B (ECOA, 12 CFR Part 1002) requires an adverse-action notice
+stating the specific principal reason(s) for denial (§1002.9) and retention of the related
+records for 25 months for consumer credit (§1002.12(b)). If a regulator asked today for the
+reason behind denial #6012, Meridian could not produce it from stored data. (Statutory
+wording and citations to be confirmed with compliance before Week 3 implementation.)
 
 ## Decision
 
@@ -55,16 +57,30 @@ Requirements:
    Implementation is scheduled Week 3+; this ADR locks the contract now so the Week 2 eval
    harness can state the gap precisely and the RAG corpus design (ADR 0007) can plan for an
    identifier-free projection of these records.
-2. **Write-path rule:** decision-service must not persist an outcome without
-   `principal_reasons` and `drivers`. An outcome that contradicts `policy_band` (e.g. deny
-   in the refer band) requires `decided_by` to be a user — silent system overrides are
-   forbidden.
+2. **Write-path rule (Week 3+ implementation requirement):** decision-service must not
+   persist an outcome without `principal_reasons` and `drivers`. An outcome that contradicts
+   `policy_band` (e.g. deny in the refer band) requires `decided_by` to be a user — silent
+   system overrides are forbidden. This is the target write-path contract for the decision-
+   record feature; it is not enforced by this planning PR.
 3. **Retrievability:** the identifier-free projection (no name/SSN/PAN/DOB/address —
    ADR 0007 rule 1) is what may be indexed for the officer helper, making "why was #X
    denied?" answerable from stored data.
 4. **Backfill is impossible and must be said plainly:** reasons for past denials (6012,
    6013) were never captured; no migration can recover them. Historical rows remain
    reason-less and the eval report must not pretend otherwise.
+
+**Scope of this ADR — locked now vs Week 3+.** This is a planning-stage decision record;
+it fixes a *contract*, not a delivered implementation:
+
+- **Locked now (Week 2):** the field contract (the table above) and the identifier-free
+  projection (requirement 3). ADR 0007's corpus design and this week's eval "data gap"
+  statement both depend on these, so they are settled now.
+- **Week 3+ implementation requirements (not delivered by this PR):** the additive schema
+  migration (requirement 1), the decision-service write-path validation and override
+  enforcement (requirement 2), and the cross-service ownership/coordination
+  (Consequences below). These are scheduled when the decision-record feature is picked up
+  and each needs its own implementation review; service-validation and migration details
+  are explicitly deferred, not committed here.
 
 ## Consequences
 
