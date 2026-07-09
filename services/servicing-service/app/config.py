@@ -38,10 +38,12 @@ def database_url_configured() -> bool:
     # password (p@ss -> p%40ss in the DSN) is not falsely flagged as a placeholder
     # or as drifted from raw POSTGRES_PASSWORD.
     password = unquote(password)
-    # Known placeholder / previously-committed stub passwords are never valid.
+    # Known placeholder passwords are never valid. The previously-committed
+    # credential is intentionally NOT listed here — embedding that literal would
+    # re-commit the leaked secret in every clone/image and defeat the purge. A
+    # stale/rotated DSN is caught by the POSTGRES_PASSWORD consistency check below.
     if password.lower() in {
         "replace_with_postgres_password",
-        "meridian_dev_pw_2024",
         "changeme", "change_me", "password", "postgres",
     }:
         return False
