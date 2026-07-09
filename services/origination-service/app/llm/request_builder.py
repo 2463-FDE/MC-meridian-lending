@@ -24,6 +24,37 @@ from .errors import LLMError, TokenBudgetExceeded
 
 _CHARS_PER_TOKEN = 4
 
+# Value substituted for a direct-identity field before the application reaches
+# the provider. Uses the redactor's • glyph so it reads as a redaction, not data.
+_IDENTITY_MASK = "•••• (redacted)"
+
+
+def _is_identity_key(key) -> bool:
+    """True if a field NAME denotes a direct applicant identifier.
+
+    The pattern redactor (PiiRedactor) masks values with a self-identifying shape
+    — PAN (Luhn), SSN (3-2-4), email, phone, bank/IBAN. Name, date of birth,
+    address, EIN and employer have NO such shape: only the field label identifies
+    them, so they slip through the pattern pass and would reach the third-party
+    model raw. ADR 0005 least-privilege: these nonessential identifiers must not
+    leave the trust boundary. This is label-gated (like bare SSN / bank in the
+    redactor) — the label is the only available signal.
+    """
+    k = str(key).strip().lower()
+    # name family: name, first/last/middle/full/maiden_name, employer_name, etc.
+    if k == "name" or k.endswith("_name") or k.endswith(" name"):
+        return True
+    # date of birth: dob, date_of_birth, birth_date, birthdate
+    if k == "dob" or "birth" in k:
+        return True
+    # postal address family (city/zip alone are quasi-identifiers; mask them too)
+    if "address" in k or k in {"street", "city"} or k.startswith(("zip", "postal", "postcode")):
+        return True
+    # employer identification: ein, employer, employer_id, employer_name(above)
+    if k == "ein" or k.startswith("employer") or k == "company":
+        return True
+    return False
+
 
 def _redact_scalar(key: str, value):
     """Redact one JSON scalar while keeping the result JSON-valid.
@@ -63,8 +94,14 @@ def _redact_node(node, key: str = ""):
     if isinstance(node, dict):
         # Redact both the key (PII-in-key leak) and the value; the value is
         # redacted with the ORIGINAL key as its label so label-gated patterns
-        # still fire before the key itself is masked.
-        return {_redact_key(k): _redact_node(v, k) for k, v in node.items()}
+        # still fire before the key itself is masked. A direct-identity field
+        # (name/DOB/address/EIN/employer) is generalized to a mask wholesale —
+        # the pattern redactor cannot catch these (no self-identifying shape),
+        # so the label is the gate and the entire subtree is dropped.
+        return {
+            _redact_key(k): (_IDENTITY_MASK if _is_identity_key(k) else _redact_node(v, k))
+            for k, v in node.items()
+        }
     if isinstance(node, list):
         return [_redact_node(v, key) for v in node]
     return _redact_scalar(key, node)
@@ -79,6 +116,12 @@ def redact_json(json_str: str) -> str:
     the model to read Application (JSON). This parses the document, redacts each
     scalar in the context of its field label, and re-serializes, so masked values
     stay valid JSON strings.
+
+    Direct-identity fields (name, DOB, address, EIN, employer) carry no
+    self-identifying shape for the pattern redactor to key on, so they are
+    generalized to a mask by field label (see `_is_identity_key`) — least
+    privilege: they are nonessential to a triage summary and must not leave the
+    trust boundary.
 
     Falls back to whole-string `PiiRedactor.redact` when the input is not valid
     JSON — never weaker than the prior behavior.

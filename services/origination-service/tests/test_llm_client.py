@@ -495,6 +495,47 @@ def test_account_and_routing_numbers_not_sent_to_provider():
     assert "18000" in sent                    # non-PII amount preserved
 
 
+def test_identity_fields_not_sent_to_provider():
+    """No-ship fix: direct applicant identifiers (name, DOB, address, EIN,
+    employer) have no self-identifying shape for the pattern redactor, so they
+    would reach the third-party model raw. ADR 0005 least-privilege: they must be
+    generalized before the prompt is built. Asserts the raw values are absent
+    from every message actually handed to the adapter, while triage-relevant
+    non-identity fields survive."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).summarize_application(
+        '{"name": "Jane Doe", "dob": "1970-01-01", "address": "10 Main St", '
+        '"ein": "12-3456789", "employer": "Acme Corp", '
+        '"annual_income": 42000, "amount": 18000, "purpose": "auto"}'
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    assert "Jane Doe" not in sent          # name generalized
+    assert "1970-01-01" not in sent        # DOB dropped
+    assert "10 Main St" not in sent        # address dropped
+    assert "12-3456789" not in sent        # EIN dropped
+    assert "Acme Corp" not in sent         # employer dropped
+    assert "42000" in sent                 # income kept (triage-relevant)
+    assert "18000" in sent                 # amount kept
+    assert "auto" in sent                  # purpose kept
+
+
+def test_nested_identity_fields_not_sent_to_provider():
+    """Identity fields nested under a non-identity parent are still gated by the
+    per-key walk — a structured address object is dropped wholesale."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).summarize_application(
+        '{"applicant": {"full_name": "John Roe", "date_of_birth": "1985-02-03"}, '
+        '"home_address": {"street": "42 Elm Ave", "city": "Springfield"}, '
+        '"amount": 9000}'
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    assert "John Roe" not in sent
+    assert "1985-02-03" not in sent
+    assert "42 Elm Ave" not in sent
+    assert "Springfield" not in sent
+    assert "9000" in sent
+
+
 def test_pii_in_json_key_not_sent_to_provider():
     """F3-key: customer PII carried in an object KEY (not a value) must not reach
     the model. redact_json rebuilt objects with the original key untouched."""
