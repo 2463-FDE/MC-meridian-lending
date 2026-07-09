@@ -427,6 +427,39 @@ def test_history_pii_redacted_before_send():
     assert "412-55-9981" not in sent
 
 
+def test_history_identity_fields_not_sent_to_provider():
+    """Regression (review): history is caller-supplied and can replay raw
+    application JSON. Label-only identifiers (name/DOB/address/employer) have no
+    shape for the pattern redactor, so a history turn must get the same
+    JSON-aware masking as the current message. Covers a whole-JSON turn and a
+    turn that embeds JSON in prose; asserts none of the identity values reach
+    the adapter while shaped PII keeps its audit last-4 and prose survives."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).complete(
+        "loan_application_summary",
+        application_json="{}",
+        history=[
+            {"role": "user", "content": (
+                '{"name": "Jane Smith", "dob": "1980-01-02", '
+                '"address": "1 Main St", "employer": "Acme Corp", '
+                '"ssn": "412-55-9981", "amount": 18000}'
+            )},
+            {"role": "user", "content": (
+                'Prior application: {"full_name": "Bob Roe", '
+                '"date_of_birth": "1975-05-05"} — please compare'
+            )},
+        ],
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    for leaked in ("Jane Smith", "1980-01-02", "1 Main St", "Acme Corp",
+                   "Bob Roe", "1975-05-05"):
+        assert leaked not in sent, f"identity value leaked via history: {leaked!r}"
+    assert "412-55-9981" not in sent      # shaped SSN masked...
+    assert "9981" in sent                 # ...last 4 kept for audit
+    assert "18000" in sent                # triage-relevant field survives
+    assert "Prior application" in sent    # surrounding prose preserved
+
+
 def test_stream_is_gated_not_leaking():
     """Fix C: stream() bypasses output guards, so it raises rather than
     shipping raw, unvalidated model text until buffer-then-validate lands."""

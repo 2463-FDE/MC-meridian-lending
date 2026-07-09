@@ -144,6 +144,94 @@ def redact_json(json_str: str) -> str:
     return json.dumps(_redact_node(data), ensure_ascii=False)
 
 
+def _json_span_end(text: str, start: int) -> int | None:
+    """Index just past the JSON object/array that starts at `text[start]`.
+
+    Quote- and escape-aware brace/bracket matching so a `{` or `]` inside a JSON
+    string value does not throw off the depth count. Returns None if the span
+    never closes (unbalanced) — the caller then leaves the text untouched.
+    """
+    openers = {"{": "}", "[": "]"}
+    stack = [openers[text[start]]]
+    in_str = False
+    esc = False
+    i = start + 1
+    while i < len(text):
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c in openers:
+            stack.append(openers[c])
+        elif c in "}]":
+            if c != stack[-1]:
+                return None
+            stack.pop()
+            if not stack:
+                return i + 1
+        i += 1
+    return None
+
+
+def _mask_embedded_json(text: str) -> str:
+    """Redact JSON payloads embedded in free text JSON-aware (`redact_json`).
+
+    A history turn is arbitrary caller text that may wrap an application JSON
+    payload in prose ("Prior application: {...} thanks"). The whole string is not
+    valid JSON, so `redact_json`'s document path would not fire and label-only
+    identifiers (name/DOB/address/employer) inside the payload would survive the
+    pattern pass. Find each balanced JSON object/array span, and if it parses,
+    replace it with its JSON-aware-redacted form.
+    """
+    out = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c in "{[":
+            end = _json_span_end(text, i)
+            if end is not None:
+                candidate = text[i:end]
+                try:
+                    json.loads(candidate)
+                except (ValueError, TypeError):
+                    out.append(c)
+                    i += 1
+                    continue
+                out.append(redact_json(candidate))
+                i = end
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _redact_turn_content(content: str) -> str:
+    """Redact a history turn JSON-aware, then by pattern.
+
+    History is caller-supplied and may replay raw application JSON, so it needs
+    the SAME identity masking as the current message — the pattern redactor
+    alone leaves name/DOB/address/employer intact (no self-identifying shape).
+    A whole-JSON turn is redacted as a document; a turn that embeds JSON in prose
+    has its payload(s) masked; the whole-string pattern pass then runs for shaped
+    PII (SSN/PAN/email/phone) in the surrounding prose.
+    """
+    stripped = content.strip()
+    if stripped:
+        try:
+            json.loads(stripped)
+        except (ValueError, TypeError):
+            pass
+        else:
+            return redact_json(stripped)
+    return PiiRedactor.redact(_mask_embedded_json(content))
+
+
 def _redacted_turn(turn: dict) -> dict:
     """Validate a caller-supplied message and redact PII from its content.
 
@@ -155,7 +243,7 @@ def _redacted_turn(turn: dict) -> dict:
     content = turn["content"]
     if not isinstance(content, str):
         raise LLMError("history turn 'content' must be a string")
-    return {"role": turn.get("role", "user"), "content": PiiRedactor.redact(content)}
+    return {"role": turn.get("role", "user"), "content": _redact_turn_content(content)}
 
 
 def estimate_tokens(text: str) -> int:
