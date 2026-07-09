@@ -187,6 +187,34 @@ class TestPiiRedactorPan:
         line2 = "GET /o?id=41&x=1234567890123456 HTTP/1.1"  # 16-digit, Luhn-fail
         assert PiiRedactor.redact(line2) == line2
 
+    def test_access_log_url_multi_letter_separated_pan_masked(self):
+        # Regression (Codex round 2): rule 1b only tolerates a SINGLE letter
+        # between digits, so a MULTI-letter obfuscation (4111xx1111...) in an
+        # unquoted access-log query param bypassed 1b, and the bound-free scan
+        # (1d) only runs inside quotes. Rule 1e now scans each structural token
+        # (bounded by URL/log field delimiters) bound-free, closing this.
+        line = "GET /payments?name=4111xx1111xx1111xx1111 HTTP/1.1"
+        result = PiiRedactor.redact(line)
+        assert "4111xx1111" not in result, f"multi-letter PAN leaked: {result}"
+        assert "411111111111" not in result
+        assert "1111" in result  # last 4 preserved
+        assert "(PAN)" in result
+
+    def test_access_log_path_digits_do_not_shield_pan(self):
+        # A digit in an EARLIER path segment (/v1/) must not merge with the PAN
+        # token and defeat the Luhn check — the token scan splits on '/', so the
+        # PAN query value is isolated and still masked.
+        line = "GET /v1/payments?x=4111zz1111zz1111zz1111 HTTP/1.1"
+        result = PiiRedactor.redact(line)
+        assert "411111111111" not in result
+        assert "(PAN)" in result
+
+    def test_access_log_multi_letter_no_glob_across_params(self):
+        # Bound-free token scan must still not glob across &/= boundaries:
+        # short non-card digit groups in separate params stay intact.
+        line = "GET /pay?a=4111xx1111&b=2222xx3333 HTTP/1.1"
+        assert PiiRedactor.redact(line) == line
+
 
 class TestPiiRedactorCvv:
     """Test CVV redaction."""

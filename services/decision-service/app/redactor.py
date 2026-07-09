@@ -154,10 +154,9 @@ class PiiRedactor:
         # `[^0-9A-Za-z]` class would let the letter-split card through. It is
         # deliberately bounded to ONE letter (not a run): multi-letter gaps are
         # words, and allowing them would glob digits across unrelated fields
-        # (`4111 and card 1111...`) or across `&`/`=` query boundaries. A
-        # two-letter obfuscation therefore still escapes here — an accepted limit
-        # of bleed-safe free-text matching (rule 1d covers any separator, but only
-        # inside a quoted value where the closing quote bounds the field).
+        # (`4111 and card 1111...`) or across `&`/`=` query boundaries. Multi-letter
+        # separators in an UNQUOTED value are handled by rule 1e below (token-bounded
+        # bound-free scan); a quoted value is covered by rule 1d.
         text = re.sub(
             r'\b\d(?:(?:[^0-9A-Za-z]{0,3}|[A-Za-z])\d){12,18}\b',
             PiiRedactor._redact_if_pan,
@@ -183,6 +182,23 @@ class PiiRedactor:
         text = re.sub(
             r'(["\'])((?:(?!\1)[^\\]|\\.)*)\1',
             lambda m: m.group(1) + PiiRedactor._mask_pan_in_value(m.group(2)) + m.group(1),
+            text
+        )
+        # 1e. PAN in UNQUOTED structured text (access-log request lines / URL query
+        # strings). Rule 1b bounds a free-text separator to a single letter, and the
+        # bound-free scan (1d) runs only inside quotes — so a card split by MULTI-
+        # letter separators in an unquoted value (?name=4111xx1111xx1111xx1111, which
+        # configure_uvicorn writes to the uvicorn access log) escaped both. Scan each
+        # STRUCTURAL TOKEN — a maximal run holding no URL/log field delimiter
+        # ([whitespace " ' ? & = / # ; , :]) — bound-free via _mask_pan_in_value.
+        # Those delimiters bound each query value, path segment, and log field, so a
+        # match cannot glob digits across fields (the reason 1b had to stay single-
+        # letter); WITHIN a token any separator is allowed, closing the multi-letter
+        # bypass. Luhn-gated, so unrelated long digit runs are left alone; a token
+        # with <13 digits is a no-op.
+        text = re.sub(
+            r"""[^\s"'?&=/#;,:]+""",
+            lambda m: PiiRedactor._mask_pan_in_value(m.group(0)),
             text
         )
 
