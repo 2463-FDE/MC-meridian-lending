@@ -103,6 +103,44 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_decision.py::test_env_example_gate_stays_closed_by_parsing_the_template -q
 
+  db-readiness-gate:
+    # DB readiness is a security control: a passwordless / placeholder / stale
+    # DATABASE_URL must report unhealthy, not connect unauthenticated or fail
+    # auth at first query. The per-service test_db_readiness.py tests run in the
+    # `backend` job too, but that is continue-on-error/|| true, so a reopened
+    # gate would stay green. This job MUST block — no continue-on-error, no
+    # `|| true`. Covers every service that implements the gate.
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, origination-service, servicing-service, kyc-service, disclosure-service, payment-service]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ${{ matrix.service }} DB readiness regression tests
+        run: |
+          cd services/${{ matrix.service }}
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_db_readiness.py -q
+
+  decision-db-readiness-gate:
+    # decision-service implements the same DB readiness gate; its tests live in
+    # test_decision.py (alongside the bureau-key/synthetic gates). Blocking, like
+    # db-readiness-gate above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: decision-service DB readiness regression tests
+        run: |
+          cd services/decision-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_decision.py -k database_url -q
+
   frontend:
     runs-on: ubuntu-latest
     steps:

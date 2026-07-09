@@ -38,26 +38,46 @@ def synthetic_credit_enabled() -> bool:
 
 
 def database_url_configured() -> bool:
-    """True only when DATABASE_URL is set with a non-empty password.
+    """True only when DATABASE_URL is set with a real, consistent password.
 
     This stack authenticates to Postgres with a password: docker-compose sets
-    POSTGRES_PASSWORD via ${VAR:?} and .env.example embeds it in the DSN. So an
-    unset DATABASE_URL — or a present-but-passwordless one (meridian:@postgres,
-    the shape the secret purge left behind) — is a misconfiguration, not a valid
-    setup. Left unflagged it connects with no password (or fails opaquely at
-    query time, swallowed by decide()), so the service looks OK while issuing
-    decisions it cannot persist.
+    POSTGRES_PASSWORD via ${VAR:?} and .env.example embeds it in the DSN. A
+    non-empty password is necessary but NOT sufficient: the template ships a
+    REPLACE_WITH_POSTGRES_PASSWORD placeholder, and an operator can set
+    POSTGRES_PASSWORD but leave the DSN on that placeholder or a stale value —
+    /health would read healthy while the first real query fails auth (and
+    decide() would swallow the persistence failure). So this also rejects known
+    placeholder/stub tokens and, when POSTGRES_PASSWORD is present as the source
+    of truth, requires the DSN password to match it, catching placeholder/stale
+    drift without a DB round trip.
 
-    NOTE: a deployment that intentionally uses passwordless auth (an IAM token,
-    peer/trust, or the password supplied out-of-band via PGPASSWORD/.pgpass)
+    Residual (documented): this proves the password is real and consistent, not
+    that it authenticates. A wrong password with no POSTGRES_PASSWORD to compare
+    (e.g. an external managed DB whose secret lives only in the DSN) needs a live
+    connectivity probe — a follow-up. Passwordless auth (IAM/peer/PGPASSWORD)
     must revisit this gate — here, passwordless means misconfigured.
     """
     if not DATABASE_URL:
         return False
     try:
-        return bool(urlparse(DATABASE_URL).password)
+        password = urlparse(DATABASE_URL).password
     except ValueError:
         return False
+    if not password:
+        return False
+    # Known placeholder / previously-committed stub passwords are never valid.
+    if password.lower() in {
+        "replace_with_postgres_password",
+        "meridian_dev_pw_2024",
+        "changeme", "change_me", "password", "postgres",
+    }:
+        return False
+    # When POSTGRES_PASSWORD is the source of truth (compose ${VAR:?}), the DSN
+    # password must match it — catches a stale/placeholder DSN without a DB call.
+    expected = os.getenv("POSTGRES_PASSWORD")
+    if expected and password != expected:
+        return False
+    return True
 
 
 def missing_required_secrets() -> list:

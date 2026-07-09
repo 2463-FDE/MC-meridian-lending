@@ -25,7 +25,9 @@ def synthetic_mode(monkeypatch):
 
     Sets a password-bearing DATABASE_URL — the demo always runs against the
     compose Postgres, which requires a password — so readiness reflects a valid
-    DB config, not the passwordless footgun."""
+    DB config, not the passwordless footgun. POSTGRES_PASSWORD is cleared so the
+    DSN-consistency check is skipped (the DSN password alone is validated)."""
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
     monkeypatch.setattr(config, "ENVIRONMENT", "development")
     monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", True)
     monkeypatch.setattr(config, "EXPERIAN_KEY", "")
@@ -126,6 +128,7 @@ def test_health_flags_unset_database_url(monkeypatch):
 
 def test_health_ok_with_password_bearing_database_url(monkeypatch):
     # A DSN with a real password clears the DB readiness check.
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
     monkeypatch.setattr(config, "ENVIRONMENT", "development")
     monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", True)
     monkeypatch.setattr(config, "EXPERIAN_KEY", "")
@@ -134,6 +137,37 @@ def test_health_ok_with_password_bearing_database_url(monkeypatch):
     )
     assert config.database_url_configured() is True
     assert "DATABASE_URL" not in config.missing_required_secrets()
+
+
+def test_health_flags_placeholder_database_url(monkeypatch):
+    # The .env.example placeholder has a non-empty password string but is not a
+    # real credential; readiness must flag it rather than report OK (else
+    # docker-compose health passes and the first real query fails auth).
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+    monkeypatch.setattr(config, "ENVIRONMENT", "development")
+    monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", True)
+    monkeypatch.setattr(config, "EXPERIAN_KEY", "")
+    monkeypatch.setattr(
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:REPLACE_WITH_POSTGRES_PASSWORD@postgres:5432/meridian",
+    )
+    assert config.database_url_configured() is False
+    assert "DATABASE_URL" in config.missing_required_secrets()
+
+
+def test_health_flags_database_url_password_drift(monkeypatch):
+    # DSN password inconsistent with POSTGRES_PASSWORD (rotated/stale) is caught
+    # without a DB round trip — this is the placeholder/stale case generalized.
+    monkeypatch.setenv("POSTGRES_PASSWORD", "the_real_pw")
+    monkeypatch.setattr(config, "ENVIRONMENT", "development")
+    monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", True)
+    monkeypatch.setattr(config, "EXPERIAN_KEY", "")
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:stale_old_pw@postgres:5432/meridian"
+    )
+    assert config.database_url_configured() is False
+    assert "DATABASE_URL" in config.missing_required_secrets()
 
 
 def test_decision_endpoint_returns_503_when_key_missing(prod_like):
