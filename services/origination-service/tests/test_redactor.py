@@ -412,3 +412,27 @@ class TestPiiRedactorAdversarialFixes:
         # Dot-grouped PAN support must not swallow ordinary decimals.
         text = "amount 1234567.89 usd"
         assert PiiRedactor.redact(text) == text
+
+    def test_pii_embedded_in_free_text_note_masked(self):
+        # Review ask: free-text is where redaction most often slips. PII buried in
+        # a prose note (not a labeled field) must still be masked by shape.
+        # Dashed SSN — always redacted regardless of surrounding text.
+        out = PiiRedactor.redact("notes: please call the borrower re SSN 412-55-9981 before noon")
+        assert "412-55-9981" not in out
+        assert "•••-••-9981" in out  # last-4 preserved for audit
+        # PAN in a prose note.
+        out = PiiRedactor.redact("notes: card on file 4111 1111 1111 1111 per client request")
+        assert "4111 1111 1111 1111" not in out and "411111111111" not in out
+        assert "(PAN)" in out
+        # Email in a prose note — local part masked, domain kept.
+        out = PiiRedactor.redact("notes: reach them at jane.doe@example.com anytime")
+        assert "jane.doe@example.com" not in out
+        assert "••••@example.com" in out
+
+    def test_pii_in_free_text_json_value_masked(self):
+        # Same, as a JSON free-text value (how a notes field reaches a log dump).
+        import json as _json
+        out = PiiRedactor.redact('{"notes": "borrower ssn 412-55-9981, ok to proceed"}')
+        assert "412-55-9981" not in out
+        assert _json.loads(out)  # still valid JSON
+        assert "9981" in out  # last-4 preserved
