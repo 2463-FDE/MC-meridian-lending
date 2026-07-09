@@ -170,6 +170,23 @@ def test_health_flags_database_url_password_drift(monkeypatch):
     assert "DATABASE_URL" in config.missing_required_secrets()
 
 
+def test_database_url_encoded_reserved_char_password_is_ok(monkeypatch):
+    # A reserved-char password must be percent-encoded in the DSN
+    # (p@ss/word:1 -> p%40ss%2Fword%3A1); the gate decodes before comparing to
+    # POSTGRES_PASSWORD, so a valid encoded password is not falsely flagged stale.
+    monkeypatch.setenv("POSTGRES_PASSWORD", "p@ss/word:1")
+    monkeypatch.setattr(config, "ENVIRONMENT", "development")
+    monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", True)
+    monkeypatch.setattr(config, "EXPERIAN_KEY", "")
+    monkeypatch.setattr(
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:p%40ss%2Fword%3A1@postgres:5432/meridian",
+    )
+    assert config.database_url_configured() is True
+    assert "DATABASE_URL" not in config.missing_required_secrets()
+
+
 def test_decision_endpoint_returns_503_when_key_missing(prod_like):
     from fastapi.testclient import TestClient
     from app.main import app

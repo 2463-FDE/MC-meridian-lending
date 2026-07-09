@@ -6,7 +6,7 @@ in source (was: inline "so the demo just works"). Inject via the host env /
 secret manager; see docs/security-remediation-2026-07.md.
 """
 import os
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 # --- Credit bureau (Experian) — env only; no committed default. Rotate the key
 # that was previously hardcoded/committed. ---
@@ -65,6 +65,10 @@ def database_url_configured() -> bool:
         return False
     if not password:
         return False
+    # urlparse returns the percent-ENCODED password; decode it so a reserved-char
+    # password (p@ss -> p%40ss in the DSN) is not falsely flagged as a placeholder
+    # or as drifted from raw POSTGRES_PASSWORD.
+    password = unquote(password)
     # Known placeholder / previously-committed stub passwords are never valid.
     if password.lower() in {
         "replace_with_postgres_password",

@@ -1,6 +1,6 @@
 """Disclosure service configuration."""
 import os
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 # No committed default: a passwordless fallback DSN (meridian:@postgres) would
 # let a deploy that omits DATABASE_URL connect unauthenticated and look healthy.
@@ -35,6 +35,10 @@ def database_url_configured() -> bool:
         return False
     if not password:
         return False
+    # urlparse returns the percent-ENCODED password; decode it so a reserved-char
+    # password (p@ss -> p%40ss in the DSN) is not falsely flagged as a placeholder
+    # or as drifted from raw POSTGRES_PASSWORD.
+    password = unquote(password)
     # Known placeholder / previously-committed stub passwords are never valid.
     if password.lower() in {
         "replace_with_postgres_password",
