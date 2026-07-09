@@ -17,7 +17,6 @@ from . import balance, delinquency, payments, reconciliation
 from .logging_config import get_logger
 from .routers import loans
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = get_logger("servicing")
 
 app = FastAPI(title="Meridian Servicing Service (LSS)", version="2.0.0")

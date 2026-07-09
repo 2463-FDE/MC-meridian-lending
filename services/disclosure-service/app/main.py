@@ -13,7 +13,6 @@ from fastapi.responses import JSONResponse
 from .logging_config import get_logger
 from .routers import offers
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = get_logger("disclosure")
 
 app = FastAPI(title="Meridian Disclosure Service", version="2.0.0")

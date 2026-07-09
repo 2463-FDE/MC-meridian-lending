@@ -11,8 +11,20 @@ log = get_logger("intake")
 
 
 def create_application(payload: dict) -> int:
-    """Insert applicant + application. Logs the full body including PII (D5)."""
-    log.info("POST /applications intake req=%s", payload)  # full PII in the log
+    """Insert applicant + application.
+
+    Logs an ALLOWLIST of non-PII, non-free-text fields only (amount / term /
+    entity flag) — never the raw payload. Dumping the whole request dict put
+    client-controlled free text (name, address, ssn, ...) into the log, where a
+    PAN could hide behind separators the whole-line redactor can't fully catch.
+    Not logging free text at all removes that entire class (closes D5 on this
+    path); the redactor stays a backstop for anything that still reaches a log.
+    """
+    log.info(
+        "POST /applications intake amount=%s term_months=%s is_entity=%s",
+        payload.get("amount"), payload.get("term_months", 36),
+        payload.get("is_entity", False),
+    )
     applicant = db.query(
         "INSERT INTO applicants (name, dob, ssn, ein, is_entity, address) "
         "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",

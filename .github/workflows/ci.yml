@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   backend:
@@ -30,6 +31,59 @@ jobs:
         run: |
           cd services/${{ matrix.service }}
           python -m pytest -q || true
+
+  redactor-drift:
+    # The PII redactor is duplicated per service (no shared package across containers).
+    # Fail if the copies diverge — a fix applied to one but not the rest silently
+    # reopens a PII log leak. Regenerate with scripts/sync_redactor.sh.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify redactor.py copies are identical
+        run: |
+          set -euo pipefail
+          canonical=$(md5sum services/gateway/app/redactor.py | awk '{print $1}')
+          fail=0
+          for f in services/*/app/redactor.py; do
+            h=$(md5sum "$f" | awk '{print $1}')
+            if [ "$h" != "$canonical" ]; then
+              echo "DRIFT: $f differs from canonical gateway redactor.py"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || { echo "Run scripts/sync_redactor.sh to resync."; exit 1; }
+
+  redaction-tests:
+    # PII redaction is a security control, so its regression tests MUST block the
+    # build. Unlike the `backend` job (which tolerates known-flaky money-math tests
+    # via continue-on-error), a failure here means a PII log-leak path reopened.
+    # No continue-on-error, no `|| true` — a red suite fails CI.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: origination-service redactor unit tests
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_redactor.py -q
+      - name: payment-service logging-redaction integration tests
+        run: |
+          cd services/payment-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_logging_redaction.py -q
+      - name: servicing-service logging-redaction integration tests
+        run: |
+          cd services/servicing-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_logging_redaction.py -q
+      - name: kyc-service logging-redaction integration tests
+        run: |
+          cd services/kyc-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_logging_redaction.py -q
 
   frontend:
     runs-on: ubuntu-latest

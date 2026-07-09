@@ -14,7 +14,6 @@ from fastapi.responses import JSONResponse
 from .logging_config import get_logger
 from .routers import decisions
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = get_logger("decision-service")
 
 app = FastAPI(title="Meridian Decision Service", version="2.0.0")
