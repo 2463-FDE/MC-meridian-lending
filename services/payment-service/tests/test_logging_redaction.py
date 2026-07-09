@@ -4,6 +4,7 @@ This test simulates a payment request with full PAN/CVV/SSN,
 verifies the log file does NOT contain these fields unredacted.
 """
 import io
+import json
 import logging
 import os
 import tempfile
@@ -60,6 +61,113 @@ def test_payment_request_logging_redacts_pan(temp_log_dir):
     # Verify CVV is redacted
     assert '"123"' not in content, "CVV should be redacted"
     assert "••••" in content, "Redaction marker should be present"
+
+
+@pytest.mark.parametrize("pan", [
+    "4111/1111/1111/1111",   # slash-separated — previously leaked
+    "4111_1111_1111_1111",   # underscore-separated — previously leaked
+    "4111  1111  1111  1111",  # repeated whitespace — previously leaked
+    "4111-1111-1111-1111",   # hyphen
+    "4111 1111 1111 1111",   # single space
+    "4111.1111.1111.1111",   # dotted
+    "4111*1111*1111*1111",   # star — separator the field-context rule catches
+    "4111|1111|1111|1111",   # pipe
+    '4111"1111"1111"1111',   # double-quote — closes the quoted log field early
+    "4111'1111'1111'1111",   # single-quote — same bypass, other quote char
+    "4111\"1111'1111\"1111",  # mixed quotes
+    "4111111111111111",      # contiguous
+])
+def test_payment_request_logging_redacts_pan_separator_variants(temp_log_dir, pan):
+    """Regression: PAN must be redacted on the charge log path for every separator
+    a client can put in the unconstrained PaymentIn.pan string. Mirrors the real
+    log line emitted by payments.charge (req={"pan":"...","cvv":"..."})."""
+    logger = get_logger("payment_test")
+
+    logger.info(
+        'POST /payments charge req={"pan":"%s","cvv":"%s","amount":%s}',
+        pan, "123", 250.00,
+    )
+
+    content = (Path(temp_log_dir) / "payment-service.log").read_text()
+
+    # The 12-digit prefix must never appear (with or without separators).
+    assert "411111111111" not in content, f"raw PAN leaked for {pan!r}"
+    assert pan[:14] not in content, f"formatted PAN prefix leaked for {pan!r}"
+    assert "1111" in content, "last 4 of PAN should be preserved"
+    assert '"123"' not in content, "CVV should be redacted"
+
+
+def test_charge_log_defeats_quote_delimiter_injection():
+    """Regression (charge-log construction boundary): a client-controlled pan
+    that injects a quote followed by a field delimiter — `4111","x":"111111111111`
+    — previously split the card number across fake pseudo-JSON fields, so the
+    delimiter-sensitive formatter masked only a <13-digit fragment and the rest
+    leaked. The fix masks values BEFORE interpolation, so no PAN digits survive.
+    Exercises the real construction path (app.payments), not just the formatter."""
+    from app import payments
+
+    evil = '4111","x":"111111111111'  # quote + delimiter injection
+    line = "POST /payments charge req=%s -> ok" % json.dumps(
+        payments._redacted_charge_req(evil, "123", "412-55-9981", 250.0, 7),
+        ensure_ascii=False,
+    )
+    # No reconstructable PAN chunk survives.
+    assert "411111111111" not in line, f"12-digit PAN chunk leaked: {line}"
+    assert "4111" not in line, f"PAN prefix leaked: {line}"
+    assert "111111111111" not in line, f"injected PAN tail leaked: {line}"
+    assert "1111" in line, "last 4 of PAN should be preserved"
+    # CVV and SSN masked too.
+    assert '"123"' not in line and "412-55" not in line
+    assert "9981" in line  # SSN last 4 preserved
+
+
+def test_name_field_exotic_separator_pan_redacted(temp_log_dir):
+    """Backstop: if any OTHER path ever logs a free-text value carrying a
+    separator-obfuscated PAN, the formatter still masks it. The charge path no
+    longer logs `name` at all (see test_charge_log_never_contains_name), but the
+    formatter defense-in-depth must remain effective."""
+    logger = get_logger("payment_test")
+    logger.info(
+        "customer note: %s",
+        json.dumps({"note": "4111*1111*1111*1111"}, ensure_ascii=False),
+    )
+    content = (Path(temp_log_dir) / "payment-service.log").read_text()
+    assert "411111111111" not in content, "star-separated PAN leaked via free text"
+    assert "4111" not in content
+    assert "1111" in content
+
+
+@pytest.mark.parametrize("name", [
+    "Apt 12 4111x1111x1111x1111",     # reviewer repro: leading digits defeat whole-value Luhn
+    "4111x1111x1111x1111",            # bare smuggled card, letter separators
+    "Unit 5 4111,1111,1111,1111",     # apartment digits + comma-separated card
+    "order 99 4111 1111 1111 1111",   # order digits + spaced card
+    "4111====1111====1111====1111",   # long separator runs
+    "Jane Doe",                       # ordinary name — nothing to leak
+])
+def test_charge_log_never_contains_name(temp_log_dir, monkeypatch, name):
+    """Regression (Codex): a PAN smuggled into the free-text `name` — including
+    with LEADING ordinary digits (`Apt 12 ...`) that break a whole-value Luhn
+    scrub — must not reach the charge log. The fix does not chase separators
+    (a sliding window would false-mask ordinary IDs); `name` is simply not
+    logged. Exercises the real charge() path with the DB + servicing mocked."""
+    from app import payments
+
+    logging.getLogger("payment").handlers.clear()
+    monkeypatch.setattr(payments, "log", get_logger("payment"))
+    monkeypatch.setattr(payments.db, "query", lambda *a, **k: [{"id": 1}])
+    monkeypatch.setattr(payments, "_apply_via_servicing", lambda *a, **k: None)
+
+    payments.charge(loan_id=7, pan="4111111111111111", cvv="123",
+                    amount=250.0, ssn="412-55-9981", name=name)
+
+    content = (Path(temp_log_dir) / "payment-service.log").read_text()
+    # The card the client submitted (pan field) is masked to its last 4.
+    assert "411111111111" not in content, f"12-digit PAN leaked for name={name!r}"
+    # name is not logged at all, so nothing smuggled into it can appear.
+    assert '"name"' not in content, "name field should not be logged"
+    assert "Apt" not in content and "Unit" not in content and "Jane" not in content, \
+        f"raw name reached the log for {name!r}"
 
 
 def test_payment_request_logging_redacts_ssn(temp_log_dir):

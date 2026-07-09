@@ -28,8 +28,9 @@ def run_cip(applicant: dict) -> dict:
         "ssn_verified": bool(applicant.get("ssn")),
     }
     # NOTE: entity applicants (LLC) have no dob/ssn — they still "pass" CIP here.
-    # Log the operational id + boolean result only — never the raw name (a direct
-    # identifier the redactor cannot mask, and PII in its own right). Overrides D5.
+    # Allowlist log: applicant_id + the boolean CIP result only. The raw name is
+    # client-controlled free text (could hide a PAN) and is PII in its own right,
+    # so it is never logged. redactor stays a backstop for the id/result string.
     log.info("CIP check applicant_id=%s result=%s",
              applicant.get("applicant_id"), result)
     return result
