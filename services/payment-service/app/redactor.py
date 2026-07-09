@@ -97,6 +97,45 @@ class PiiRedactor:
         return re.sub(r'\d(?:\D*\d){12,18}', PiiRedactor._redact_if_pan, value)
 
     @staticmethod
+    def _percent_decode(s: str) -> str:
+        """Single-pass percent-decode (%XX -> char) for PAN DETECTION only.
+
+        Deliberately ONE level (no recursive re-decode): it closes the common
+        encoded-separator bypass without unbounded work. Double-encoded input
+        (%252D) is a documented residual. Only well-formed %XX (two hex digits)
+        is decoded; a bare % or %<non-hex> is left as-is.
+        """
+        return re.sub(r'%([0-9A-Fa-f]{2})',
+                      lambda m: chr(int(m.group(1), 16)), s)
+
+    @staticmethod
+    def _mask_pan_token(token: str) -> str:
+        """Mask a PAN in one unquoted structural token (rule 1e), including a PAN
+        that hides its separators — or itself — in percent-encoding.
+
+        A URL like ?name=4111%2D1111%2D1111%2D1111 carries a PAN only once the
+        %2D escapes resolve to '-'; left raw, the stray hex digits ('2') break the
+        Luhn run (and a partial raw match would mangle the token). So: if a
+        percent-decoded copy reveals a PAN, return the decoded+masked form — the
+        token is a single field value, so replacing the encoded original wholesale
+        keeps no reconstructable PAN. Otherwise fall back to the raw-token scan.
+
+        Residuals (shared with the whole-run Luhn design, which refuses sub-window
+        sliding to avoid false-masking 13-19 digit order IDs): a stray digit placed
+        adjacent to the PAN in one field — a trailing partial escape ("…1111%2"), a
+        PAN split across two &-separated params, or double-encoding ("%252D") —
+        shifts or breaks the Luhn run and can escape. Closing these needs bounded
+        sub-run Luhn with false-positive analysis, a design-level change beyond this
+        pass.
+        """
+        decoded = PiiRedactor._percent_decode(token)
+        if decoded != token:
+            decoded_masked = PiiRedactor._mask_pan_in_value(decoded)
+            if decoded_masked != decoded:
+                return decoded_masked
+        return PiiRedactor._mask_pan_in_value(token)
+
+    @staticmethod
     def redact(text: str) -> str:
         """
         Redact PII from text. Return redacted copy.
@@ -195,10 +234,13 @@ class PiiRedactor:
         # match cannot glob digits across fields (the reason 1b had to stay single-
         # letter); WITHIN a token any separator is allowed, closing the multi-letter
         # bypass. Luhn-gated, so unrelated long digit runs are left alone; a token
-        # with <13 digits is a no-op.
+        # with <13 digits is a no-op. Each token is also percent-decoded for
+        # detection (_mask_pan_token), so a PAN whose separators — or whole value —
+        # are URL-encoded (?name=4111%2D1111%2D1111%2D1111) is caught too; the
+        # stray hex digits in %XX would otherwise break the Luhn run.
         text = re.sub(
             r"""[^\s"'?&=/#;,:]+""",
-            lambda m: PiiRedactor._mask_pan_in_value(m.group(0)),
+            lambda m: PiiRedactor._mask_pan_token(m.group(0)),
             text
         )
 

@@ -215,6 +215,38 @@ class TestPiiRedactorPan:
         line = "GET /pay?a=4111xx1111&b=2222xx3333 HTTP/1.1"
         assert PiiRedactor.redact(line) == line
 
+    @pytest.mark.parametrize("enc_sep", ["%2D", "%2F", "%20", "%78"])
+    def test_access_log_percent_encoded_separator_pan_masked(self, enc_sep):
+        # Regression (Codex round 3): rule 1e passed raw URL tokens to the Luhn
+        # scan, but percent escapes (%2D='-', %2F='/', %20=' ', %78='x') inject
+        # stray hex digits that break the run — so an encoded-separator PAN in a
+        # query string leaked into the access log. 1e now percent-decodes each
+        # token for detection. Assert no reconstructable PAN survives (raw digits
+        # and the unmasked 12-digit prefix both absent).
+        pan_enc = enc_sep.join(["4111", "1111", "1111", "1111"])
+        line = f"GET /payments?name={pan_enc} HTTP/1.1"
+        result = PiiRedactor.redact(line)
+        assert "4111111111111111" not in result
+        assert "411111111111" not in result, f"PAN prefix leaked: {result}"
+        assert pan_enc not in result, f"encoded PAN survived: {result}"
+        assert "(PAN)" in result
+
+    def test_access_log_fully_percent_encoded_pan_masked(self):
+        # A PAN whose every digit is percent-encoded (%34%31...) must be caught
+        # once the token is decoded for detection.
+        pan_enc = "".join("%%%02X" % ord(c) for c in "4111111111111111")
+        line = f"GET /p?x={pan_enc} HTTP/1.1"
+        result = PiiRedactor.redact(line)
+        assert "4111111111111111" not in result
+        assert pan_enc not in result
+        assert "(PAN)" in result
+
+    def test_percent_decode_does_not_over_mask_short_values(self):
+        # Decoding must not turn a short non-card value into a false PAN, nor glob
+        # across query boundaries after decoding (4111-1111 is only 8 digits).
+        line = "GET /pay?a=4111%2D1111&b=2222 HTTP/1.1"
+        assert PiiRedactor.redact(line) == line
+
 
 class TestPiiRedactorCvv:
     """Test CVV redaction."""
