@@ -120,3 +120,36 @@ def test_env_example_semantics_report_unhealthy(env_example_semantics):
     resp = TestClient(app).get("/health")
     assert resp.status_code == 503
     assert "EXPERIAN_KEY" in resp.json()["missing_secrets"]
+
+
+def _parse_env_example() -> list:
+    """Parse the repo .env.example into (key, value) pairs, mirroring dotenv:
+    uncommented KEY=VALUE lines only, in file order (so a later duplicate wins,
+    which is exactly the last-assignment-wins semantics a deploy inherits)."""
+    from pathlib import Path
+
+    # tests/ -> decision-service/ -> services/ -> repo root
+    env_path = Path(__file__).resolve().parents[3] / ".env.example"
+    pairs = []
+    for line in env_path.read_text().splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        key, _, value = s.partition("=")
+        pairs.append((key.strip(), value.strip()))
+    return pairs
+
+
+def test_env_example_gate_stays_closed_by_parsing_the_template():
+    """Regression: parse the REAL .env.example instead of monkeypatching its
+    assumed semantics. A duplicate ENVIRONMENT=development (later line wins in
+    dotenv/compose) silently reopened the synthetic-credit gate a copied deploy
+    inherits. Assert the template defines ENVIRONMENT exactly once, its value is
+    not "development", and it ships no ALLOW_SYNTHETIC_CREDIT default."""
+    pairs = _parse_env_example()
+    env_values = [v for k, v in pairs if k == "ENVIRONMENT"]
+    assert len(env_values) == 1, f"expected one ENVIRONMENT, got {env_values}"
+    # Effective (last-wins) value must not open the dev gate.
+    assert env_values[-1].strip().lower() != "development"
+    # The synthetic escape hatch must not be defaulted on in the template.
+    assert not any(k == "ALLOW_SYNTHETIC_CREDIT" for k, _ in pairs)
