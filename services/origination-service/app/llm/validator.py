@@ -109,8 +109,22 @@ def guard_output(text: str, *, max_chars: int = _MAX_OUTPUT_CHARS) -> None:
 
 
 def validate_structured(text: str, schema: dict) -> dict:
-    """Full structured path: guards, then parse, then schema-check. Returns the object."""
+    """Full structured path: guards, then parse, then schema-check. Returns the object.
+
+    The leak guard runs TWICE: once on the raw text, then again on the DECODED
+    object (re-serialized with ensure_ascii=False). The raw pass alone is
+    bypassable — a model can escape PII so it is invisible until json.loads
+    unescapes it. e.g. `maria\\u0040example.com` has no literal '@', so the email
+    regex never fires on the raw string, but the decoded value is
+    `maria@example.com`. Re-serializing the parsed object materializes every
+    unescaped value (in a form whose quoting/`@`/`-` the redactor recognizes)
+    and re-running the guard closes that bypass for email/SSN/PAN alike.
+    """
     guard_output(text)
     obj = parse_json(text)
     validate_schema(obj, schema)
+    # Re-guard the decoded values: escapes that hid PII from the raw guard are
+    # now unescaped. ensure_ascii=False keeps decoded chars (@, non-ASCII) intact
+    # so the redactor can see them; a re-escaped dump would reintroduce the hole.
+    guard_output(json.dumps(obj, ensure_ascii=False))
     return obj

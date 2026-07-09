@@ -6,6 +6,7 @@ failure, timeout, 429/5xx retry, 4xx no-retry, token budget, malformed output,
 leak guard — plus a check that no PII reaches the logs.
 """
 import io
+import json
 import logging
 
 import pytest
@@ -315,6 +316,47 @@ def test_fallback_on_bad_output():
 def test_leak_guard_blocks_pii_in_output():
     leaky = ('{"summary": "SSN 412-55-9981 on file", "risk_flags": [], '
              '"recommended_next_step": "request_docs"}')
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response=leaky))
+    with pytest.raises(ValidationFailed):
+        client.summarize_application("{}")
+
+
+def _json_uescape(text, chars):
+    r"""Rewrite each char in `chars` as a JSON \uXXXX escape (e.g. '@' -> @),
+    building the backslash with chr(92) so this source file carries no literal
+    escape sequence. Reproduces a model that JSON-escapes PII in its output: the
+    escaped form is invisible to the raw leak guard's regexes, but json.loads
+    decodes it straight back to real PII."""
+    backslash = chr(92)
+    return "".join(
+        (backslash + "u%04x" % ord(c)) if c in chars else c for c in text
+    )
+
+
+@pytest.mark.parametrize("plain, escape", [
+    ("contact maria@example.com", "@"),   # escaped '@' -> no email in raw text
+    ("SSN 412-55-9981 on file", "-"),     # escaped '-' -> no dashed SSN in raw text
+    ("card 4111-1111-1111-1111", "-"),    # escaped '-' -> no 13+ digit PAN run in raw
+])
+def test_leak_guard_blocks_escaped_pii_in_structured_output(plain, escape):
+    """Regression (Codex): a model can JSON-escape PII so the raw leak guard's
+    regexes never fire — an escaped '@' hides an email, an escaped '-' hides a
+    dashed SSN / hyphen-grouped PAN — yet json.loads decodes each back to real
+    PII. validate_structured re-guards the DECODED, re-serialized object, so the
+    escaped output is rejected instead of handed back to the caller."""
+    escaped = _json_uescape(plain, escape)
+    leaky = ('{"summary": "%s", "risk_flags": [], '
+             '"recommended_next_step": "request_docs"}') % escaped
+
+    # Sanity 1: the RAW guard does NOT catch it — the leak is real, not masked
+    # upstream. If this raised, the test would pass for the wrong reason.
+    from app.llm.validator import guard_output
+    guard_output(leaky)  # must not raise while the PII is still escaped
+    # Sanity 2: decoding really does reconstitute the PII (guards against a typo
+    # in the escape making the payload harmless).
+    assert plain in json.loads(leaky)["summary"]
+
+    # The full structured path must reject the decoded PII.
     client = ClaudeClient(_config(), adapter=FakeAdapter(response=leaky))
     with pytest.raises(ValidationFailed):
         client.summarize_application("{}")
