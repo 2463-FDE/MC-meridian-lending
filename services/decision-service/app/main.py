@@ -5,9 +5,6 @@ Exposes the synchronous decisioning chain (bureau pull + rules scorecard) and pe
 the bare outcome to the shared `decisions` table. The decisioning write path uses raw
 psycopg2 — the same partial, unfinished ORM migration seam as origination.
 """
-import logging
-import os
-
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
