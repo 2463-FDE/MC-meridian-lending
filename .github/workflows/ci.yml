@@ -154,6 +154,40 @@ jobs:
           npm ci || npm install
           npm run build
 
-  # GAP: no secret scanning (gitleaks/trufflehog), no dependency audit, no SAST,
-  # no check that .env is untracked. A live bureau key + AWS key sail through CI.
+  secret-scan:
+    # Secret literals must never re-enter the tracked tree. Runs the same scan
+    # documented in docs/security-remediation-2026-07.md and BLOCKS the build on
+    # any hit — previously this was docs-only, so a config denylist re-committed
+    # the leaked Postgres password literal across all seven services and nothing
+    # caught it. Blocking, like the other security-control gates: no
+    # continue-on-error, no `|| true`.
+    #
+    # The scanner definitions here and in the remediation doc necessarily quote
+    # the patterns, so both files are excluded from their own scan; every other
+    # tracked path (incl. docs/, services/) is scanned. Intentional test fixtures
+    # under */tests/ are excluded.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No leaked secret literals in tracked tree
+        run: |
+          set -euo pipefail
+          if git grep -nIE 'cb_live_|proc_live_|EXAMPLE-LEAKED-KEY|meridian_dev_pw_2024' \
+              -- ':!docs/security-remediation-2026-07.md' \
+                 ':!.github/workflows/ci.yml' \
+                 ':!*/tests/*'; then
+            echo "FAIL: leaked secret literal found in tracked tree (see matches above)."
+            exit 1
+          fi
+          echo "OK: no leaked secret literals."
+      - name: .env must not be tracked
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '(^|/)\.env$'; then
+            echo "FAIL: .env is tracked; it must be gitignored (.env.example is fine)."
+            exit 1
+          fi
+          echo "OK: no tracked .env."
+
+  # GAP: no dependency audit, no SAST, no container image scan.
   # GAP: backend tests are continue-on-error, so failing money-math tests are green.
