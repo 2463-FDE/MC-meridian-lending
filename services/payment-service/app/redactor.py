@@ -116,14 +116,17 @@ class PiiRedactor:
             flags=re.IGNORECASE
         )
         # 1b. Free-text PAN. Cards are 13-19 digits (Amex 15, Visa/MC 16, Diners 14)
-        # with optional separators (space/hyphen/slash/underscore and the exotic
-        # ones a client can inject: * | +), incl. repeated whitespace. Candidates
-        # are Luhn-checked below, so unrelated long digit runs (order IDs,
-        # timestamps) are left alone — that gate is what makes the broad separator
-        # class safe. Without */|/+ a star-separated PAN smuggled into a free-text
-        # field (e.g. a `name`) reached the log in the clear.
+        # with optional separators. The separator class is ANY non-alphanumeric
+        # char (bounded to <=3 between digits), NOT a fixed enumerated set:
+        # enumerating separators for client-controlled free text (e.g. a `name`
+        # field) is a losing game — comma, tilde, backslash, equals, etc. each
+        # reopened the leak. Candidates are Luhn-checked below, so unrelated long
+        # digit runs (order IDs, timestamps) are left alone — that gate, not the
+        # separator set, is what makes matching safe. Alphanumeric chars are NOT
+        # separators, so letters/other digits bound a candidate run (a real card
+        # can't hide behind letter separators without being unreadable anyway).
         text = re.sub(
-            r'\b\d(?:[ \-/_*|+]{0,3}\d){12,18}\b',
+            r'\b\d(?:[^0-9A-Za-z]{0,3}\d){12,18}\b',
             PiiRedactor._redact_if_pan,
             text
         )

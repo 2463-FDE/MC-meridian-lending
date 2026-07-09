@@ -138,6 +138,37 @@ def test_name_field_exotic_separator_pan_redacted(temp_log_dir):
     assert "1111" in content
 
 
+@pytest.mark.parametrize("pan", [
+    "4111,1111,1111,1111",       # comma — reviewer example
+    "4111~1111~1111~1111",       # tilde — reviewer example
+    "4111\\1111\\1111\\1111",    # backslash — reviewer example
+    "4111=1111=1111=1111",       # equals — reviewer example
+    "4111====1111====1111====1111",  # 4-char run — defeats any fixed length bound
+    "4111 - / _ 1111 . 1111 ~ 1111",  # mixed multi-char separators
+])
+def test_name_field_any_separator_pan_redacted(temp_log_dir, pan):
+    """Regression (Codex): a Luhn-valid PAN smuggled into the free-text `name`
+    field with an ARBITRARY separator must not reach the charge log. name is
+    value-scrubbed at the construction boundary (_redacted_charge_req runs it
+    through PiiRedactor.redact) — no separator enumeration. Exercises the real
+    charge-log construction path, not just the formatter."""
+    from app import payments
+
+    logger = get_logger("payment_test")
+    logger.info(
+        "POST /payments charge req=%s -> ok",
+        json.dumps(
+            payments._redacted_charge_req("4111111111111111", "123",
+                                          "412-55-9981", 250.0, 7, pan),
+            ensure_ascii=False,
+        ),
+    )
+    content = (Path(temp_log_dir) / "payment-service.log").read_text()
+    assert "411111111111" not in content, f"raw PAN leaked via name for {pan!r}"
+    assert "4111" not in content, f"PAN prefix leaked via name for {pan!r}"
+    assert "1111" in content, "last 4 of PAN should be preserved"
+
+
 def test_payment_request_logging_redacts_ssn(temp_log_dir):
     """Test: Full SSN in payment request is redacted; last 4 preserved."""
     logger = get_logger("payment_test")

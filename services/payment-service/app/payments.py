@@ -21,6 +21,31 @@ from .redactor import PiiRedactor
 log = get_logger("payment")   # writes to logs/payment-service.log
 
 
+def _scrub_free_text_pan(text: str) -> str:
+    """Mask a PAN hidden anywhere in a short free-text value (e.g. `name`),
+    separator-agnostic and BOUND-FREE.
+
+    The shared PiiRedactor free-text pass bounds the separator run (<=3 chars
+    between digits) so it stays safe when applied to a whole log line. But a
+    client can defeat any fixed bound (4111====1111====...), so for the isolated,
+    short name value we detect digit runs separated by ANY number of non-
+    alphanumeric chars and Luhn-check the extracted digits — exactly the
+    digit-extraction + Luhn approach, with no separator or length enumeration.
+    The Luhn gate keeps ordinary numeric text (IDs, amounts) untouched. Guarded
+    on a >=13 digit count so normal names skip the scan entirely.
+    """
+    if not text or sum(c.isdigit() for c in text) < 13:
+        return text
+
+    def _mask(m):
+        digits = re.sub(r"\D", "", m.group(0))
+        if 13 <= len(digits) <= 19 and PiiRedactor._luhn_valid(digits):
+            return PiiRedactor._mask_with_last_4(digits) + " (PAN)"
+        return m.group(0)
+
+    return re.sub(r"\d(?:[^0-9A-Za-z]*\d){12,18}", _mask, str(text))
+
+
 def _mask_ssn(ssn):
     """Mask an SSN value to •••-••-LAST4 (digit-count based, separator-agnostic)."""
     if not ssn:
@@ -45,6 +70,12 @@ def _redacted_charge_req(pan, cvv, ssn, amount, loan_id, name) -> dict:
     un-mask it) and serializing with `json.dumps` (which escapes embedded
     quotes) removes the pseudo-JSON parsing surface entirely. The formatter
     redaction stays on as a backstop.
+
+    `name` is client-controlled free text, so a PAN can be smuggled into it with
+    any separator (comma, tilde, backslash, ...) and any separator length. We do
+    NOT enumerate separators or a length bound: _scrub_free_text_pan does bound-
+    free digit-extraction + Luhn on the isolated value, then PiiRedactor.redact
+    masks any other PII (email/ssn/phone) in the name.
     """
     return {
         "pan": PiiRedactor._mask_pan_value(pan) if pan else pan,
@@ -52,7 +83,7 @@ def _redacted_charge_req(pan, cvv, ssn, amount, loan_id, name) -> dict:
         "ssn": _mask_ssn(ssn),
         "amount": amount,
         "loan_id": loan_id,
-        "name": name,
+        "name": PiiRedactor.redact(_scrub_free_text_pan(name)) if name else name,
     }
 
 

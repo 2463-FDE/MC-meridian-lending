@@ -114,6 +114,19 @@ class TestPiiRedactorPan:
             assert "4111" not in result, f"PAN prefix leaked for sep {sep!r}: {result}"
             assert "1111" in result  # last 4 preserved
 
+    def test_free_text_pan_any_separator_masked(self):
+        # Regression (Codex): a Luhn-valid PAN in a NON-card free-text field (e.g.
+        # `name`) must be masked regardless of separator. Enumerating a separator
+        # charset is a losing game — the free-text pass now allows ANY non-
+        # alphanumeric separator and relies on the Luhn gate for false-positive
+        # safety. comma/tilde/backslash/equals previously leaked.
+        for sep in (",", "~", "\\", "=", " ", "-", "/", "_", "*", "|", "+", "."):
+            pan = sep.join(["4111", "1111", "1111", "1111"])
+            result = PiiRedactor.redact('{"name":"%s"}' % pan)
+            assert "411111111111" not in result, f"raw PAN leaked for sep {sep!r}: {result}"
+            assert "4111" not in result, f"PAN prefix leaked for sep {sep!r}: {result}"
+            assert "1111" in result  # last 4 preserved
+
     def test_free_text_exotic_separator_non_luhn_not_masked(self):
         # The broadened separator class must stay Luhn-gated: a pipe-separated
         # short/again non-card run is left alone (no false positive).
