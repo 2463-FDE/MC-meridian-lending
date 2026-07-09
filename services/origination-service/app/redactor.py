@@ -50,6 +50,24 @@ class PiiRedactor:
         return raw
 
     @staticmethod
+    def _mask_pan_value(value: str) -> str:
+        """Mask a value in a field whose NAME asserts it is a card number.
+
+        Regardless of Luhn: a mistyped, test, or rejected card is still cardholder
+        data. The Luhn gate in _redact_if_pan exists only to keep UNLABELED
+        free-text digit runs (order IDs, timestamps) from false-positiving; once a
+        field is labeled `pan`/`card_number`/etc. the label is the signal. Mask
+        when the value carries a card-length digit run (13-19); leave shorter
+        values (a 4-digit last-4, a brand string, an already-masked value) as-is.
+        No upper digit bound: padding a labeled card past 19 digits must not
+        evade masking (the label, not the length, is the signal here).
+        """
+        digits = re.sub(r'\D', '', value)
+        if len(digits) >= 13:
+            return PiiRedactor._mask_with_last_4(digits) + ' (PAN)'
+        return value
+
+    @staticmethod
     def _mask_bank_value(value: str) -> str:
         """Mask a labeled bank account / routing value, keeping the last 4 digits.
 
@@ -94,6 +112,32 @@ class PiiRedactor:
             r'\b\d{4}(?:\.\d{4}){2}\.\d{1,7}\b',
             PiiRedactor._redact_if_pan,
             text
+        )
+
+        # 1c. Labeled PAN field. The field NAME asserts the value is a card
+        # number, so an invalid-Luhn value (mistyped / test / rejected card) is
+        # still cardholder data and MUST be masked. Rules 1/1b Luhn-gate to avoid
+        # false positives on UNLABELED free-text digit runs; a labeled field has
+        # no such ambiguity, so mask regardless of Luhn (mirrors the bank rule 6a).
+        # A valid card already masked by rule 1 has only its last 4 left, so
+        # _mask_pan_value (13-19 digit gate) is a no-op on it — no double-masking.
+        _PAN_KEY = (
+            r'\b(?:pan|card[_ ]?number|card[_ ]?no|cc[_ ]?number|cc[_ ]?num'
+            r'|credit[_ ]?card)'
+        )
+        #   Quoted value: consume to the quote that TERMINATES the field.
+        text = re.sub(
+            r'(["\']?' + _PAN_KEY + r'["\']?\s*[:=]\s*)(["\'])(.*?)\2(?=[\s,;}\])]|$)',
+            lambda m: m.group(1) + m.group(2) + PiiRedactor._mask_pan_value(m.group(3)) + m.group(2),
+            text,
+            flags=re.IGNORECASE
+        )
+        #   Unquoted value: mask up to the next delimiter.
+        text = re.sub(
+            r'(["\']?' + _PAN_KEY + r'["\']?\s*[:=]\s*)([^\s"\',;}\])&]+)',
+            lambda m: m.group(1) + PiiRedactor._mask_pan_value(m.group(2)),
+            text,
+            flags=re.IGNORECASE
         )
 
         # 2. Redact CVV (3-4 digits in the context of a card-security-code field).
