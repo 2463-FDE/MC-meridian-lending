@@ -536,6 +536,36 @@ def test_nested_identity_fields_not_sent_to_provider():
     assert "9000" in sent
 
 
+def test_identity_key_variant_spellings_not_sent_to_provider():
+    """Adversarial hardening: identity keys must be caught in concatenated and
+    prefixed spellings too (firstname, surname, fullname, federal_ein, street1),
+    and job_title (employment identity, like employer). Only underscore/exact
+    forms were covered before, so these variants reached the provider raw."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).summarize_application(
+        '{"firstname": "Jane", "lastname": "Roe", "fullname": "Jane Q Roe", '
+        '"surname": "Roe", "middlename": "Quinn", "dateofbirth": "1970-01-01", '
+        '"federal_ein": "98-7654321", "street1": "10 Main St", '
+        '"job_title": "Chief Widget Officer", "employer": "Acme", "amount": 18000}'
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    for leaked in ("Jane", "Roe", "Quinn", "1970-01-01", "98-7654321",
+                   "10 Main St", "Chief Widget Officer", "Acme"):
+        assert leaked not in sent, f"identity value leaked: {leaked!r}"
+    assert "18000" in sent  # operational field preserved
+
+
+def test_is_identity_key_does_not_over_match_operational_fields():
+    """The hardened matcher must not mask triage-relevant operational fields."""
+    from app.llm.request_builder import _is_identity_key
+    for k in ("amount", "income", "term_months", "purpose",
+              "employment_years", "is_entity", "loan_id", "apr", "status"):
+        assert not _is_identity_key(k), f"over-masked operational field {k!r}"
+    for k in ("firstname", "surname", "fullname", "federal_ein",
+              "street1", "job_title", "name", "dob", "ein", "address"):
+        assert _is_identity_key(k), f"missed identity field {k!r}"
+
+
 def test_pii_in_json_key_not_sent_to_provider():
     """F3-key: customer PII carried in an object KEY (not a value) must not reach
     the model. redact_json rebuilt objects with the original key untouched."""

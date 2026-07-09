@@ -41,17 +41,26 @@ def _is_identity_key(key) -> bool:
     redactor) — the label is the only available signal.
     """
     k = str(key).strip().lower()
-    # name family: name, first/last/middle/full/maiden_name, employer_name, etc.
-    if k == "name" or k.endswith("_name") or k.endswith(" name"):
+    # Normalize separators so concatenated and separated spellings match the same
+    # rules: firstname == first_name == first-name.
+    kn = k.replace("_", "").replace("-", "").replace(" ", "")
+    # name family: name, first/last/middle/full/maiden/sur-name — separated OR
+    # concatenated (firstname, surname, fullname), and employer_name/company_name.
+    if kn == "name" or kn.endswith("name") or kn == "surname":
         return True
-    # date of birth: dob, date_of_birth, birth_date, birthdate
-    if k == "dob" or "birth" in k:
+    if kn in {"firstname", "lastname", "middlename", "fullname", "maidenname"}:
+        return True
+    # date of birth: dob, date_of_birth, birthdate, dateofbirth
+    if kn == "dob" or "birth" in kn:
         return True
     # postal address family (city/zip alone are quasi-identifiers; mask them too)
-    if "address" in k or k in {"street", "city"} or k.startswith(("zip", "postal", "postcode")):
+    if "address" in kn or kn.startswith(("street", "zip", "postal", "postcode")) \
+            or kn == "city":
         return True
-    # employer identification: ein, employer, employer_id, employer_name(above)
-    if k == "ein" or k.startswith("employer") or k == "company":
+    # employer identification: ein (any prefix: federal_ein, employer_ein), employer*,
+    # company; and job title (employment identity, like employer).
+    if kn == "ein" or kn.endswith("ein") or kn.startswith("employer") \
+            or kn == "company" or "jobtitle" in kn or kn == "title":
         return True
     return False
 
