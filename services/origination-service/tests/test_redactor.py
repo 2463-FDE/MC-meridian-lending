@@ -165,6 +165,28 @@ class TestPiiRedactorPan:
         doc2 = str({"ref": "1234567890123456"})
         assert PiiRedactor.redact(doc2) == doc2
 
+    def test_access_log_url_letter_separated_pan_masked(self):
+        # Regression (Codex): configure_uvicorn routes access logs through redact,
+        # but request lines are UNQUOTED, so the quote-scoped per-value scan (1d)
+        # never fires. A letter-split card in a query param slipped the free-text
+        # pass (1b), which excluded letters as separators, and reached the log.
+        # Any client can trigger this via the URL.
+        line = "GET /payments?name=4111x1111x1111x1111 HTTP/1.1"
+        result = PiiRedactor.redact(line)
+        assert "4111x1111" not in result, f"raw PAN leaked in access log: {result}"
+        assert "411111111111" not in result
+        assert "1111" in result  # last 4 preserved
+        assert "(PAN)" in result
+
+    def test_access_log_pan_does_not_glob_across_query_params(self):
+        # The single-letter separator allowance must stay bleed-safe: digits in
+        # SEPARATE query params (split by &/=) must not be globbed into a false
+        # PAN. Neither of these is a real card, so nothing is masked.
+        line = "GET /pay?a=4111&b=1111111111111 HTTP/1.1"
+        assert PiiRedactor.redact(line) == line
+        line2 = "GET /o?id=41&x=1234567890123456 HTTP/1.1"  # 16-digit, Luhn-fail
+        assert PiiRedactor.redact(line2) == line2
+
 
 class TestPiiRedactorCvv:
     """Test CVV redaction."""

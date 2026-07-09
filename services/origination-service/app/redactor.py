@@ -140,17 +140,26 @@ class PiiRedactor:
             flags=re.IGNORECASE
         )
         # 1b. Free-text PAN. Cards are 13-19 digits (Amex 15, Visa/MC 16, Diners 14)
-        # with optional separators. The separator class is ANY non-alphanumeric
-        # char (bounded to <=3 between digits), NOT a fixed enumerated set:
-        # enumerating separators for client-controlled free text (e.g. a `name`
-        # field) is a losing game — comma, tilde, backslash, equals, etc. each
+        # with optional separators. Between digits we allow EITHER up to 3
+        # non-alphanumeric chars OR a SINGLE letter. Enumerating separators for
+        # client-controlled free text (e.g. a `name` field or an access-log URL)
+        # is a losing game — comma, tilde, backslash, equals, and letters each
         # reopened the leak. Candidates are Luhn-checked below, so unrelated long
         # digit runs (order IDs, timestamps) are left alone — that gate, not the
-        # separator set, is what makes matching safe. Alphanumeric chars are NOT
-        # separators, so letters/other digits bound a candidate run (a real card
-        # can't hide behind letter separators without being unreadable anyway).
+        # separator set, is what makes matching safe.
+        #
+        # The single-letter branch closes the unquoted access-log bypass:
+        # `GET /payments?name=4111x1111x1111x1111` reaches this pass with NO
+        # surrounding quotes (so quote-scoped rule 1d never fires), and a bare
+        # `[^0-9A-Za-z]` class would let the letter-split card through. It is
+        # deliberately bounded to ONE letter (not a run): multi-letter gaps are
+        # words, and allowing them would glob digits across unrelated fields
+        # (`4111 and card 1111...`) or across `&`/`=` query boundaries. A
+        # two-letter obfuscation therefore still escapes here — an accepted limit
+        # of bleed-safe free-text matching (rule 1d covers any separator, but only
+        # inside a quoted value where the closing quote bounds the field).
         text = re.sub(
-            r'\b\d(?:[^0-9A-Za-z]{0,3}\d){12,18}\b',
+            r'\b\d(?:(?:[^0-9A-Za-z]{0,3}|[A-Za-z])\d){12,18}\b',
             PiiRedactor._redact_if_pan,
             text
         )
