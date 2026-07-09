@@ -116,6 +116,7 @@ This document tracks known issues, their business/compliance impact, and mitigat
 | **Critical** | D5: Plaintext PII in logs | Open | **Planned: ADR 0006 designs redaction; code + tests in `feature/pii-redaction` PR (not yet merged).** |
 | **Critical** | D13: PAN/CVV in DB | Open | Document, flag, schedule tokenization (Week 2–3). |
 | **High** | D2: Float money math | Open | Document, flag, schedule migration to Decimal (Week 2+). |
+| **Medium** | D14: Encoded PII bypasses log redaction | Deferred | The log redactor matches literal shapes only, so percent-encoded (email=maria%40example.com, ssn=412%2D55%2D9981) and unicode-escaped (@) PII in uvicorn access-log query strings is not masked. Payload vector closed by allowlist logging; no sensitive route accepts PII via query/path today, so exposure is a client-crafted query param. Follow-up: bounded URL-decode + \uXXXX-unescape normalization pass in the (CI-synced) redactor, with regression tests for encoded email/SSN/phone. Not done now to avoid a byte-altering change to the shared redactor for a low-exposure case. |
 
 ---
 

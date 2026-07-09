@@ -11,8 +11,16 @@ log = get_logger("intake")
 
 
 def create_application(payload: dict) -> int:
-    """Insert applicant + application. Logs the full body including PII (D5)."""
-    log.info("POST /applications intake req=%s", payload)  # full PII in the log
+    """Insert applicant + application. Logs only non-identifying operational
+    fields — never the direct applicant identifiers (name/dob/ssn/ein/address),
+    which the log-redactor cannot mask for name/dob/ein/address (no self-
+    identifying shape). Overrides the prior D5 'log full PII' decision: cleartext
+    applicant identity in service logs is a PII-retention violation."""
+    log.info(
+        "POST /applications intake amount=%s term_months=%s purpose=%s is_entity=%s",
+        payload.get("amount"), payload.get("term_months", 36),
+        payload.get("purpose"), payload.get("is_entity", False),
+    )
     applicant = db.query(
         "INSERT INTO applicants (name, dob, ssn, ein, is_entity, address) "
         "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",

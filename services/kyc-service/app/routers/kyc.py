@@ -18,7 +18,12 @@ router = APIRouter(prefix="/kyc", tags=["kyc"])
 @router.post("/check", response_model=CipCheckOut)
 def kyc_check(body: CipCheckIn):
     payload = body.model_dump()
-    log.info("POST /kyc/check req=%s", payload)  # full PII in the log (D5)
+    # Log only operational ids — never the raw CIP payload (name/dob/ssn/address).
+    # The redactor masks ssn but not name/dob/address (no self-identifying shape),
+    # so the old req=%s dump leaked applicant identity. Overrides D5.
+    log.info("POST /kyc/check application_id=%s applicant_id=%s entity_type=%s",
+             payload.get("application_id"), payload.get("applicant_id"),
+             payload.get("entity_type"))
     cip = kyc.run_cip(payload)  # CIP only — no sanctions / UBO / monitoring (debt D11)
 
     # CIP "passes" if name + address verified. Entity applicants (no dob/ssn) still pass —

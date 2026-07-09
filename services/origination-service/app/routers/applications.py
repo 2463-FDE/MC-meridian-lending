@@ -25,7 +25,7 @@ router = APIRouter(prefix="/applications", tags=["applications"])
 @router.post("", response_model=ApplicationCreated)
 def submit_application(body: ApplicationIn):
     payload = body.model_dump()
-    app_id = intake.create_application(payload)  # creates applicant+application rows, logs full PII (D5 — KEEP)
+    app_id = intake.create_application(payload)  # creates applicant+application rows; logs operational fields only (no PII)
     # Resolve applicant_id the same way the old in-process path did.
     applicant_id = None
     try:
