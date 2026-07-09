@@ -269,7 +269,8 @@ def test_token_budget_refused_preflight():
 
 def test_history_trimmed_to_fit():
     tmpl = get_prompt("loan_application_summary")
-    long_turn = {"role": "user", "content": "x" * 4000}  # ~1000 tokens each
+    # History must be valid JSON (fail-closed); pad a JSON string to ~1000 tokens.
+    long_turn = {"role": "user", "content": '{"note": "' + "x" * 3980 + '"}'}
     built = build_request(
         tmpl, model="m", max_tokens=256, temperature=0.0, timeout=1.0,
         token_budget=1200, history=[long_turn, long_turn, long_turn],
@@ -416,24 +417,24 @@ def test_pii_redacted_before_sent_to_provider():
 
 
 def test_history_pii_redacted_before_send():
-    """Fix A: PII in prior-turn history is also redacted before send."""
+    """Fix A: PII in a (JSON) prior-turn history is redacted before send."""
     adapter = FakeAdapter(response=GOOD_SUMMARY)
     ClaudeClient(_config(), adapter=adapter).complete(
         "loan_application_summary",
         application_json="{}",
-        history=[{"role": "user", "content": "earlier: SSN 412-55-9981"}],
+        history=[{"role": "user", "content": '{"note": "earlier: SSN 412-55-9981"}'}],
     )
     sent = "".join(m["content"] for m in adapter.calls[0].messages)
     assert "412-55-9981" not in sent
+    assert "9981" in sent  # shaped SSN masked, audit last-4 kept
 
 
 def test_history_identity_fields_not_sent_to_provider():
     """Regression (review): history is caller-supplied and can replay raw
     application JSON. Label-only identifiers (name/DOB/address/employer) have no
-    shape for the pattern redactor, so a history turn must get the same
-    JSON-aware masking as the current message. Covers a whole-JSON turn and a
-    turn that embeds JSON in prose; asserts none of the identity values reach
-    the adapter while shaped PII keeps its audit last-4 and prose survives."""
+    shape for the pattern redactor, so a JSON history turn gets the same
+    JSON-aware masking as the current message — none of the values reach the
+    adapter, while shaped PII keeps its audit last-4 and triage fields survive."""
     adapter = FakeAdapter(response=GOOD_SUMMARY)
     ClaudeClient(_config(), adapter=adapter).complete(
         "loan_application_summary",
@@ -445,8 +446,7 @@ def test_history_identity_fields_not_sent_to_provider():
                 '"ssn": "412-55-9981", "amount": 18000}'
             )},
             {"role": "user", "content": (
-                'Prior application: {"full_name": "Bob Roe", '
-                '"date_of_birth": "1975-05-05"} — please compare'
+                '{"full_name": "Bob Roe", "date_of_birth": "1975-05-05"}'
             )},
         ],
     )
@@ -457,7 +457,86 @@ def test_history_identity_fields_not_sent_to_provider():
     assert "412-55-9981" not in sent      # shaped SSN masked...
     assert "9981" in sent                 # ...last 4 kept for audit
     assert "18000" in sent                # triage-relevant field survives
-    assert "Prior application" in sent    # surrounding prose preserved
+
+
+def test_free_prose_history_is_rejected(monkeypatch):
+    """Regression (review): free-form history prose cannot be identity-masked
+    (an unlabeled name is indistinguishable from ordinary text), so a non-JSON
+    history turn FAILS CLOSED — LLMError before any provider call — rather than
+    shipping name/DOB/address/employer raw."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    client = ClaudeClient(_config(), adapter=adapter)
+    with pytest.raises(LLMError):
+        client.complete(
+            "loan_application_summary",
+            application_json="{}",
+            history=[{"role": "user", "content": (
+                "Prior borrower Jane Smith, DOB 1970-01-01, address 10 Main St, "
+                "employer Acme Corp."
+            )}],
+        )
+    assert adapter.calls == []  # refused before the network
+
+
+def test_malformed_application_json_is_rejected(monkeypatch):
+    """Regression (review): a declared JSON var that is not valid JSON must fail
+    closed. redact_json's whole-string fallback would leave label-only
+    identifiers (name/DOB/address/employer) intact, so a malformed payload is
+    refused before send instead of being partially redacted."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    client = ClaudeClient(_config(), adapter=adapter)
+    with pytest.raises(LLMError):
+        client.summarize_application(
+            "{name: Jane Smith, dob: 1970-01-01, address: 10 Main St, amount: 10000}"
+        )
+    assert adapter.calls == []  # refused before the network
+
+
+@pytest.mark.parametrize("payload", [
+    '"Jane Smith DOB 1970-01-01 address 10 Main St"',  # bare JSON string
+    '["Jane Smith", "1970-01-01"]',                     # JSON array
+    '42',                                               # bare JSON number
+])
+def test_bare_json_scalar_or_array_application_json_rejected(payload):
+    """Adversarial: prose wrapped in quotes/brackets is valid JSON but has no
+    keys to mask, so it would ship identity raw. A declared JSON var must be an
+    OBJECT; a bare scalar or array fails closed like malformed input."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    with pytest.raises(LLMError):
+        ClaudeClient(_config(), adapter=adapter).summarize_application(payload)
+    assert adapter.calls == []
+
+
+def test_dict_application_json_is_masked_not_stringified(monkeypatch):
+    """Adversarial: a caller passing the application as a dict (not a JSON
+    string) must not skip masking. The value is serialized to JSON and redacted;
+    it must never render as str(dict) with identity intact."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).complete(
+        "loan_application_summary",
+        application_json={"name": "Jane Smith", "dob": "1970-01-01", "amount": 100},
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    assert "Jane Smith" not in sent
+    assert "1970-01-01" not in sent
+    assert "100" in sent  # triage field survives
+
+
+@pytest.mark.parametrize("content", [
+    '"Prior borrower Jane Smith, DOB 1970-01-01, 10 Main St"',  # bare JSON string
+    '["Jane Smith", "1970-01-01"]',                             # JSON array
+])
+def test_bare_json_scalar_or_array_history_rejected(content):
+    """Adversarial: the same quotes/brackets-as-prose bypass on history. A turn
+    must be a JSON object, not a bare scalar/array, or it fails closed."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    with pytest.raises(LLMError):
+        ClaudeClient(_config(), adapter=adapter).complete(
+            "loan_application_summary",
+            application_json="{}",
+            history=[{"role": "user", "content": content}],
+        )
+    assert adapter.calls == []
 
 
 def test_stream_is_gated_not_leaking():

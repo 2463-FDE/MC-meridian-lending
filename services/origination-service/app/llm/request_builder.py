@@ -144,106 +144,82 @@ def redact_json(json_str: str) -> str:
     return json.dumps(_redact_node(data), ensure_ascii=False)
 
 
-def _json_span_end(text: str, start: int) -> int | None:
-    """Index just past the JSON object/array that starts at `text[start]`.
+def _require_json_object(value: str):
+    """Parse `value` and require it to be a JSON OBJECT, else raise LLMError.
 
-    Quote- and escape-aware brace/bracket matching so a `{` or `]` inside a JSON
-    string value does not throw off the depth count. Returns None if the span
-    never closes (unbalanced) — the caller then leaves the text untouched.
+    A JSON *object* is the only shape in which label-only identifiers
+    (name/DOB/address/employer) can be masked — masking keys on the identity
+    label. A bare JSON scalar ("Jane Smith DOB 1970-01-01") or array parses fine
+    but has no keys, so it would be redacted as prose and ship identity raw; that
+    is the same leak as malformed input, just wrapped in quotes/brackets. So both
+    non-JSON and non-object JSON fail closed.
+
+    Known residual (inherent, documented): an object still masks only VALUES
+    under recognized identity KEYS. A name a caller stuffs into a free-text value
+    under a non-identity key (e.g. {"notes": "Applicant Jane Smith"}) has no label
+    and no shape, so — like the redactor's free-text limitation — it is not
+    masked. Callers must not place raw applicant identity in free-text fields.
     """
-    openers = {"{": "}", "[": "]"}
-    stack = [openers[text[start]]]
-    in_str = False
-    esc = False
-    i = start + 1
-    while i < len(text):
-        c = text[i]
-        if in_str:
-            if esc:
-                esc = False
-            elif c == "\\":
-                esc = True
-            elif c == '"':
-                in_str = False
-        elif c == '"':
-            in_str = True
-        elif c in openers:
-            stack.append(openers[c])
-        elif c in "}]":
-            if c != stack[-1]:
-                return None
-            stack.pop()
-            if not stack:
-                return i + 1
-        i += 1
-    return None
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else False
 
 
-def _mask_embedded_json(text: str) -> str:
-    """Redact JSON payloads embedded in free text JSON-aware (`redact_json`).
+def _redact_json_var(name: str, value: str) -> str:
+    """Redact a declared JSON variable, failing closed unless it is a JSON object.
 
-    A history turn is arbitrary caller text that may wrap an application JSON
-    payload in prose ("Prior application: {...} thanks"). The whole string is not
-    valid JSON, so `redact_json`'s document path would not fire and label-only
-    identifiers (name/DOB/address/employer) inside the payload would survive the
-    pattern pass. Find each balanced JSON object/array span, and if it parses,
-    replace it with its JSON-aware-redacted form.
+    A `json_vars` field (e.g. application_json) is contractually a JSON object,
+    the only shape in which label-only identifiers can be masked structurally. A
+    value that does not parse, or parses to a non-object, would fall through to
+    weaker redaction and ship identity raw, so we REFUSE before the network — a
+    caller bug, schema drift, or a half-serialized payload must never export
+    applicant identity to the third-party model (ADR 0005 least-privilege).
     """
-    out = []
-    i = 0
-    while i < len(text):
-        c = text[i]
-        if c in "{[":
-            end = _json_span_end(text, i)
-            if end is not None:
-                candidate = text[i:end]
-                try:
-                    json.loads(candidate)
-                except (ValueError, TypeError):
-                    out.append(c)
-                    i += 1
-                    continue
-                out.append(redact_json(candidate))
-                i = end
-                continue
-        out.append(c)
-        i += 1
-    return "".join(out)
-
-
-def _redact_turn_content(content: str) -> str:
-    """Redact a history turn JSON-aware, then by pattern.
-
-    History is caller-supplied and may replay raw application JSON, so it needs
-    the SAME identity masking as the current message — the pattern redactor
-    alone leaves name/DOB/address/employer intact (no self-identifying shape).
-    A whole-JSON turn is redacted as a document; a turn that embeds JSON in prose
-    has its payload(s) masked; the whole-string pattern pass then runs for shaped
-    PII (SSN/PAN/email/phone) in the surrounding prose.
-    """
-    stripped = content.strip()
-    if stripped:
-        try:
-            json.loads(stripped)
-        except (ValueError, TypeError):
-            pass
-        else:
-            return redact_json(stripped)
-    return PiiRedactor.redact(_mask_embedded_json(content))
+    if _require_json_object(value) in (None, False):
+        raise LLMError(
+            f"{name} must be a JSON object: it is a declared identity-bearing "
+            f"document and label-only identifiers (name/DOB/address/employer) "
+            f"can only be masked structurally. Refusing to send a "
+            f"partially-redacted payload (invalid JSON or a bare scalar/array is "
+            f"treated as prose) to the provider."
+        )
+    return redact_json(value)
 
 
 def _redacted_turn(turn: dict) -> dict:
-    """Validate a caller-supplied message and redact PII from its content.
+    """Validate a caller-supplied history turn and redact its content.
 
-    Raises `LLMError` on a malformed turn (missing/ non-string content) instead
-    of a bare KeyError, so callers get a typed failure.
+    History is arbitrary caller text and may replay raw application data, so it
+    needs the SAME structural identity masking as the current message. Label-only
+    identifiers (name/DOB/address/employer) have no shape the pattern redactor
+    can catch, and they cannot be reliably scrubbed from free prose (an unlabeled
+    name is indistinguishable from ordinary text). So history FAILS CLOSED: each
+    turn's content must be a JSON OBJECT, which `redact_json` then masks;
+    free-form prose — or a bare JSON scalar/array, which is just prose in
+    quotes/brackets — is refused rather than leaked (ADR 0005 least-privilege,
+    same stance as the gated stream() path). See `_require_json_object` for the
+    residual on identity placed in free-text object values.
+
+    Raises `LLMError` on a malformed turn (missing/non-string content, or content
+    that is not a JSON object) instead of a bare KeyError, so callers get a typed
+    failure.
     """
     if not isinstance(turn, dict) or "content" not in turn:
         raise LLMError("history turn must be a dict with a 'content' key")
     content = turn["content"]
     if not isinstance(content, str):
         raise LLMError("history turn 'content' must be a string")
-    return {"role": turn.get("role", "user"), "content": _redact_turn_content(content)}
+    if _require_json_object(content) in (None, False):
+        raise LLMError(
+            "history turn 'content' must be a JSON object so applicant identity "
+            "can be masked before it reaches the provider; free-form text (or a "
+            "bare JSON scalar/array, which is just prose in quotes) is refused "
+            "because label-only identifiers (name/DOB/address/employer) cannot "
+            "be reliably scrubbed from prose. Pass the prior turn as a JSON object."
+        )
+    return {"role": turn.get("role", "user"), "content": redact_json(content)}
 
 
 def estimate_tokens(text: str) -> int:
@@ -289,13 +265,17 @@ def build_request(
     history + current user message (rendered from template).
 
     Customer PII in the current message and in history is redacted BEFORE the
-    request is built (ADR 0005 decision #2 — least privilege: raw PAN/CVV/SSN/
-    email/phone must not leave the system to a third-party provider). System and
-    few-shot examples are authored by us and carry no customer PII.
+    request is built (ADR 0005 decision #2 — least privilege: raw PII must not
+    leave the system to a third-party provider). Declared `json_vars` and history
+    turns are masked JSON-aware and FAIL CLOSED on invalid JSON (see
+    _redact_json_var / _redacted_turn), so label-only identifiers cannot escape
+    via a malformed payload or free-form prose. System and few-shot examples are
+    authored by us and carry no customer PII.
 
     Raises `TokenBudgetExceeded` if the non-trimmable parts plus the reserved
     answer room do not fit in `token_budget`. Raises `LLMError` on a malformed
-    history turn.
+    history turn, a history turn that is not valid JSON, or a declared JSON
+    variable that is not valid JSON.
     """
     # Redact caller-supplied content before it is measured or sent.
     history = [_redacted_turn(t) for t in (history or [])]
@@ -305,10 +285,22 @@ def build_request(
     # gets it — not just the summarize_application() wrapper. Whole-string
     # PiiRedactor.redact (below) does not mask label-only identifiers
     # (name/DOB/address/EIN/employer); redact_json does, via _is_identity_key.
+    # Fails closed on invalid JSON (see _redact_json_var) so a malformed payload
+    # cannot fall back to weaker whole-string redaction and leak those fields. A
+    # non-string value (a caller passing the application as a dict) is serialized
+    # to JSON first — otherwise it would render as str(dict) and skip masking.
     for var in getattr(template, "json_vars", ()):
-        value = variables.get(var)
-        if isinstance(value, str):
-            variables[var] = redact_json(value)
+        if var in variables:
+            value = variables[var]
+            if not isinstance(value, str):
+                try:
+                    value = json.dumps(value)
+                except (TypeError, ValueError) as e:
+                    raise LLMError(
+                        f"{var} must be a JSON object or its JSON string; got a "
+                        f"non-JSON-serializable {type(value).__name__}."
+                    ) from e
+            variables[var] = _redact_json_var(var, value)
     user_msg = {"role": "user",
                 "content": PiiRedactor.redact(template.render_user(**variables))}
     example_msgs = _expand_examples(template.examples)
