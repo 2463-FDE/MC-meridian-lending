@@ -435,6 +435,24 @@ def test_numeric_pii_json_stays_valid_and_redacted():
     assert "5551234567" not in sent
 
 
+def test_account_and_routing_numbers_not_sent_to_provider():
+    """No-ship fix: bank account + routing numbers in a loan application must be
+    masked BEFORE the prompt reaches the third-party model (ADR 0005: account
+    identifiers must not leave the system). Asserts the raw values are absent from
+    every message actually handed to the adapter."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).summarize_application(
+        '{"name": "the applicant", "account_number": 5551234567, '
+        '"routing_number": 123456789, "iban": "GB82WEST12345698765432", '
+        '"amount": 18000}'
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    assert "5551234567" not in sent          # account number masked
+    assert "123456789" not in sent           # routing number masked
+    assert "GB82WEST12345698765432" not in sent  # IBAN masked
+    assert "18000" in sent                    # non-PII amount preserved
+
+
 def test_pii_in_json_key_not_sent_to_provider():
     """F3-key: customer PII carried in an object KEY (not a value) must not reach
     the model. redact_json rebuilt objects with the original key untouched."""
