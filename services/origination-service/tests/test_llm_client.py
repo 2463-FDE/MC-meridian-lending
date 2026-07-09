@@ -417,16 +417,64 @@ def test_pii_redacted_before_sent_to_provider():
 
 
 def test_history_pii_redacted_before_send():
-    """Fix A: PII in a (JSON) prior-turn history is redacted before send."""
+    """Fix A: shaped PII in a structured JSON history field is masked (audit
+    last-4 kept)."""
     adapter = FakeAdapter(response=GOOD_SUMMARY)
     ClaudeClient(_config(), adapter=adapter).complete(
         "loan_application_summary",
         application_json="{}",
-        history=[{"role": "user", "content": '{"note": "earlier: SSN 412-55-9981"}'}],
+        history=[{"role": "user", "content": '{"ssn": "412-55-9981"}'}],
     )
     sent = "".join(m["content"] for m in adapter.calls[0].messages)
     assert "412-55-9981" not in sent
     assert "9981" in sent  # shaped SSN masked, audit last-4 kept
+
+
+def test_free_text_purpose_field_does_not_leak_identity():
+    """Regression (review): a valid application object still leaked identity via
+    applicant-controlled free text — purpose is a non-identity key, so its value
+    went through the pattern pass only, which cannot detect a name/DOB/address.
+    A whitespace-bearing (unstructured) purpose is now masked wholesale; the
+    structured triage fields survive."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).summarize_application(
+        '{"name": "Jane Smith", '
+        '"purpose": "medical loan for Jane Smith DOB 1970-01-01 at 10 Main St", '
+        '"amount": 1000, "term_months": 24}'
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    for leaked in ("Jane Smith", "DOB 1970-01-01", "10 Main St"):
+        assert leaked not in sent, f"identity leaked via purpose: {leaked!r}"
+    assert "1000" in sent        # structured triage fields survive
+    assert "24" in sent
+
+
+def test_structured_purpose_code_survives():
+    """A structured purpose code (no whitespace) is operational data and is kept
+    — only unstructured free text is masked."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).summarize_application(
+        '{"purpose": "debt_consolidation", "amount": 5000}'
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    assert "debt_consolidation" in sent
+    assert "5000" in sent
+
+
+def test_history_free_text_field_value_redacted():
+    """A free-text (whitespace-bearing) value under a non-identity history field
+    is masked wholesale — it can hide label-less identity the pattern pass can't
+    catch, so it is not sent raw."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).complete(
+        "loan_application_summary",
+        application_json="{}",
+        history=[{"role": "user", "content":
+                  '{"note": "prior borrower Jane Smith DOB 1970-01-01 at 10 Main St"}'}],
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    for leaked in ("Jane Smith", "1970-01-01", "10 Main St"):
+        assert leaked not in sent
 
 
 def test_history_identity_fields_not_sent_to_provider():

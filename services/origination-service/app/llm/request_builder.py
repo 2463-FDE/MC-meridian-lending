@@ -28,6 +28,14 @@ _CHARS_PER_TOKEN = 4
 # the provider. Uses the redactor's • glyph so it reads as a redaction, not data.
 _IDENTITY_MASK = "•••• (redacted)"
 
+# Value substituted for an applicant-controlled FREE-TEXT field (e.g. `purpose`).
+# A string under a non-identity key that contains whitespace is unstructured
+# text: it can embed a name/DOB/address the pattern redactor cannot detect (no
+# label, no shape), so it must not reach the provider raw. Structured tokens
+# (codes, ids, single shaped values like an SSN/PAN/email) carry no whitespace
+# and still flow through the pattern masker below.
+_FREETEXT_MASK = "•••• (free text redacted)"
+
 
 def _is_identity_key(key) -> bool:
     """True if a field NAME denotes a direct applicant identifier.
@@ -75,6 +83,14 @@ def _redact_scalar(key: str, value):
     """
     if isinstance(value, bool) or value is None:
         return value
+    # Free-text guard: a string value (under a non-identity key — identity keys
+    # are masked wholesale before reaching here) that contains whitespace is
+    # unstructured applicant text and can hide label-less identity (name/DOB/
+    # address in a `purpose` sentence). The pattern redactor cannot catch that,
+    # so refuse to send it raw. Structured tokens (no whitespace: codes, ids, a
+    # lone SSN/PAN/email) fall through to the pattern masking below.
+    if isinstance(value, str) and any(ch.isspace() for ch in value):
+        return _FREETEXT_MASK
     prefix = f'"{key}": '
     probe = prefix + json.dumps(value)
     redacted = PiiRedactor.redact(probe)
