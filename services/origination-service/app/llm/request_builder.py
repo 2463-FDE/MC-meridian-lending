@@ -212,6 +212,15 @@ def build_request(
     # Redact caller-supplied content before it is measured or sent.
     history = [_redacted_turn(t) for t in (history or [])]
     system = template.system
+    # JSON-aware redaction for any variable the template declares as a JSON
+    # document. This runs in the GENERIC path so every caller of complete()
+    # gets it — not just the summarize_application() wrapper. Whole-string
+    # PiiRedactor.redact (below) does not mask label-only identifiers
+    # (name/DOB/address/EIN/employer); redact_json does, via _is_identity_key.
+    for var in getattr(template, "json_vars", ()):
+        value = variables.get(var)
+        if isinstance(value, str):
+            variables[var] = redact_json(value)
     user_msg = {"role": "user",
                 "content": PiiRedactor.redact(template.render_user(**variables))}
     example_msgs = _expand_examples(template.examples)

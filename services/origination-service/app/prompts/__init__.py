@@ -24,6 +24,11 @@ class PromptTemplate:
     - `system`: the system instruction (role, rules, guardrails).
     - `user_template`: a `str.format`-style template rendered per request.
     - `required_vars`: variable names that MUST be supplied to `render_user`.
+    - `json_vars`: variable names whose value is a JSON document that must be
+      redacted JSON-aware (`redact_json`) BEFORE it is rendered into the prompt.
+      The generic build path applies this to every caller of `complete()`, so
+      label-only identifiers (name/DOB/address/EIN/employer) cannot slip past
+      the pattern redactor regardless of how the client is called.
     - `examples`: optional few-shot pairs `[{"user": ..., "assistant": ...}]`.
     - `output_schema`: optional JSON schema the response must satisfy (drives the
       validator). None means free text.
@@ -34,6 +39,7 @@ class PromptTemplate:
     system: str
     user_template: str
     required_vars: tuple = ()
+    json_vars: tuple = ()
     examples: list = field(default_factory=list)
     output_schema: Optional[dict] = None
 

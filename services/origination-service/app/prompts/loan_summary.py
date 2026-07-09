@@ -72,6 +72,7 @@ register(
         system=SYSTEM,
         user_template=USER_TEMPLATE,
         required_vars=("application_json",),
+        json_vars=("application_json",),
         examples=EXAMPLES,
         output_schema=OUTPUT_SCHEMA,
     )

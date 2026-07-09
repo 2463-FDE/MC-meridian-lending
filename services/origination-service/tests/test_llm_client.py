@@ -519,6 +519,29 @@ def test_identity_fields_not_sent_to_provider():
     assert "auto" in sent                  # purpose kept
 
 
+def test_identity_masking_enforced_in_public_complete_path():
+    """Regression (review): JSON-aware identity masking must run in the generic
+    complete() path, not only in the summarize_application() wrapper. complete()
+    is public and takes application_json directly, so a caller that bypasses the
+    wrapper must NOT be able to ship raw name/DOB/EIN/employer to the provider.
+    Masking is driven by the prompt's declared json_vars in build_request."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).complete(
+        "loan_application_summary",
+        application_json=(
+            '{"name": "Jane Doe", "dob": "1970-01-01", "ein": "12-3456789", '
+            '"employer": "Acme Corp", "annual_income": 42000, "amount": 18000}'
+        ),
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    assert "Jane Doe" not in sent
+    assert "1970-01-01" not in sent
+    assert "12-3456789" not in sent
+    assert "Acme Corp" not in sent
+    assert "42000" in sent                 # triage-relevant fields survive
+    assert "18000" in sent
+
+
 def test_nested_identity_fields_not_sent_to_provider():
     """Identity fields nested under a non-identity parent are still gated by the
     per-key walk — a structured address object is dropped wholesale."""
