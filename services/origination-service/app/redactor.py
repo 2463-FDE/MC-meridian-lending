@@ -73,6 +73,30 @@ class PiiRedactor:
         return raw
 
     @staticmethod
+    def _mask_pan_in_value(value: str) -> str:
+        """Mask a Luhn-valid 13-19 digit PAN hidden in ONE free-text value, with
+        ANY separators between digits — letters (4111x1111...), punctuation, or
+        runs longer than 3 (4111====1111...).
+
+        Matches a maximal run of digits-plus-separators and Luhn-checks the run's
+        extracted digits (via _redact_if_pan). BOUND-FREE on separators, but safe
+        ONLY because redact() applies it per quoted value (step 1d), never across
+        a whole log line: the quote delimits a single field, so digits from
+        separate fields are never globbed into a false PAN. A <13-digit value
+        skips the scan.
+
+        Consistent with the redactor's whole-run Luhn design, this checks the
+        exact digit run — it does NOT slide sub-windows (which would false-mask
+        ordinary 13-19 digit numbers like order IDs). Consequence: a PAN sitting
+        immediately beside OTHER digits in the same field (e.g. a house number,
+        "12 <pan>") changes the run's digit count/Luhn and may escape — the known
+        limitation of Luhn-run detection, not a per-field-value regression.
+        """
+        if sum(c.isdigit() for c in value) < 13:
+            return value
+        return re.sub(r'\d(?:\D*\d){12,18}', PiiRedactor._redact_if_pan, value)
+
+    @staticmethod
     def redact(text: str) -> str:
         """
         Redact PII from text. Return redacted copy.
@@ -135,6 +159,21 @@ class PiiRedactor:
         text = re.sub(
             r'\b\d{4}(?:\.\d{4}){2}\.\d{1,7}\b',
             PiiRedactor._redact_if_pan,
+            text
+        )
+        # 1d. PAN hidden in a client-controlled free-text VALUE using separators
+        # the bounded pass (1b) can't cover: letters (4111x1111x1111x1111) or
+        # separator runs longer than 3 (4111====1111====...). Origination and
+        # KYC log whole request-payload dicts through this formatter (str(dict) →
+        # 'name': '<value>'), so a reconstructable card can hide in a name/address
+        # value and reach the log. We scan WITHIN each quoted value only: inside a
+        # quote every non-digit is a separator (bound-free), but the match cannot
+        # cross the closing quote, so PANs are caught regardless of separator while
+        # digits from other fields are never globbed together. Both ' and " (and
+        # escaped inner quotes) are handled — Python repr uses ', JSON uses ".
+        text = re.sub(
+            r'(["\'])((?:(?!\1)[^\\]|\\.)*)\1',
+            lambda m: m.group(1) + PiiRedactor._mask_pan_in_value(m.group(2)) + m.group(1),
             text
         )
 

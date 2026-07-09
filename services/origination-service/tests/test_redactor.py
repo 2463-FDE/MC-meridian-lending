@@ -135,6 +135,36 @@ class TestPiiRedactorPan:
         text = "ref 1234*5678*9012*3456"
         assert PiiRedactor.redact(text) == text
 
+    def test_payload_value_pan_letter_and_long_separators_masked(self):
+        # Regression (Codex): origination/KYC log whole request-payload dicts, so
+        # a PAN hidden in a client name/address VALUE with letter separators
+        # (4111x1111...) or separator runs longer than 3 (====) must be masked.
+        # The bounded free-text pass (1b) misses these; the per-quoted-value scan
+        # (1d) catches them regardless of separator.
+        variants = [
+            "4111x1111x1111x1111",              # letter separators
+            "4111====1111====1111====1111",     # >3-char runs
+            "card4111a1111b1111c1111end",       # embedded + alpha separators
+            "4111 - / _ 1111 . 1111 ~ 1111",    # mixed multi-char
+        ]
+        # Both JSON (") and Python-repr (') payload shapes.
+        for v in variants:
+            for doc in ('{"name":"%s"}' % v, "{'name': '%s'}" % v):
+                result = PiiRedactor.redact(doc)
+                assert "411111111111" not in result, f"raw PAN leaked: {doc!r} -> {result!r}"
+                assert "4111" not in result, f"PAN prefix leaked: {doc!r} -> {result!r}"
+                assert "1111" in result  # last 4 preserved
+
+    def test_payload_value_scan_does_not_glob_across_fields(self):
+        # The per-value scan must NOT concatenate digits from separate fields into
+        # a false PAN — each quoted value is scanned in isolation. Separate short
+        # numeric fields stay intact.
+        doc = str({"a": "12345", "b": "67890", "c": "1234", "d": "5678"})
+        assert PiiRedactor.redact(doc) == doc
+        # A non-Luhn 16-digit run inside one value is left alone.
+        doc2 = str({"ref": "1234567890123456"})
+        assert PiiRedactor.redact(doc2) == doc2
+
 
 class TestPiiRedactorCvv:
     """Test CVV redaction."""
