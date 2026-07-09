@@ -21,10 +21,17 @@ from app.decision import decide, CreditPullError
 
 @pytest.fixture
 def synthetic_mode(monkeypatch):
-    """Explicit local/demo mode: dev environment + opt-in flag + no key."""
+    """Explicit local/demo mode: dev environment + opt-in flag + no key.
+
+    Sets a password-bearing DATABASE_URL — the demo always runs against the
+    compose Postgres, which requires a password — so readiness reflects a valid
+    DB config, not the passwordless footgun."""
     monkeypatch.setattr(config, "ENVIRONMENT", "development")
     monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", True)
     monkeypatch.setattr(config, "EXPERIAN_KEY", "")
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:pw@postgres:5432/meridian"
+    )
 
 
 @pytest.fixture
@@ -82,6 +89,51 @@ def test_health_ok_in_synthetic_mode(synthetic_mode):
     resp = TestClient(app).get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+def test_health_flags_passwordless_database_url(monkeypatch):
+    # The secret purge replaced a committed DB password with a passwordless DSN
+    # (meridian:@postgres). It LOOKS configured but authenticates with no
+    # password, so readiness must flag it rather than report OK. Synthetic mode
+    # (bureau key not required) isolates the DATABASE_URL check.
+    monkeypatch.setattr(config, "ENVIRONMENT", "development")
+    monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", True)
+    monkeypatch.setattr(config, "EXPERIAN_KEY", "")
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:@postgres:5432/meridian"
+    )
+    assert config.database_url_configured() is False
+    assert "DATABASE_URL" in config.missing_required_secrets()
+
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    resp = TestClient(app).get("/health")
+    assert resp.status_code == 503
+    assert "DATABASE_URL" in resp.json()["missing_secrets"]
+
+
+def test_health_flags_unset_database_url(monkeypatch):
+    # An entirely unset DATABASE_URL (no committed default anymore) must also
+    # read as misconfigured, not silently fall back to a usable-looking DSN.
+    monkeypatch.setattr(config, "ENVIRONMENT", "development")
+    monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", True)
+    monkeypatch.setattr(config, "EXPERIAN_KEY", "")
+    monkeypatch.setattr(config, "DATABASE_URL", "")
+    assert config.database_url_configured() is False
+    assert "DATABASE_URL" in config.missing_required_secrets()
+
+
+def test_health_ok_with_password_bearing_database_url(monkeypatch):
+    # A DSN with a real password clears the DB readiness check.
+    monkeypatch.setattr(config, "ENVIRONMENT", "development")
+    monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", True)
+    monkeypatch.setattr(config, "EXPERIAN_KEY", "")
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:secret@postgres:5432/meridian"
+    )
+    assert config.database_url_configured() is True
+    assert "DATABASE_URL" not in config.missing_required_secrets()
 
 
 def test_decision_endpoint_returns_503_when_key_missing(prod_like):
