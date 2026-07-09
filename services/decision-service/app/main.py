@@ -11,6 +11,7 @@ import os
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from . import config
 from .logging_config import get_logger
 from .routers import decisions
 
@@ -29,4 +30,16 @@ async def unhandled(request: Request, exc: Exception):
 
 @app.get("/health")
 def health():
+    # Fail readiness when a required secret is missing, so a keyless deployment
+    # cannot look healthy while issuing decisions off a synthetic score.
+    missing = config.missing_required_secrets()
+    if missing:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "service": "decision-service",
+                "missing_secrets": missing,
+            },
+        )
     return {"status": "ok", "service": "decision-service"}

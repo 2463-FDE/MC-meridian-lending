@@ -39,8 +39,17 @@ These predate the LLM-client feature (committed in `a726640`) and exist on `main
   (env only, no secret default) across all service `config.py`; the
   `DATABASE_URL` fallbacks drop the inline password; `docker-compose.yml` now
   requires `POSTGRES_PASSWORD` (`:?` — fails fast with a message instead of
-  falling back to a committed default). Missing bureau/processor keys now fail
-  closed at call time rather than silently using a leaked key.
+  falling back to a committed default).
+- **decision-service fails closed without a bureau key.** Removing the committed
+  default alone was not enough: `_pull_credit` caught every bureau error and
+  returned a deterministic stub score, so a keyless deployment kept issuing
+  approvals/denials off a synthetic number while `/health` reported OK. Now a
+  missing `EXPERIAN_KEY` (or any bureau failure) raises and the decision endpoint
+  returns 503 — no decision is issued — and `/health` reports `unhealthy` with the
+  missing secret. The stub is gated behind an explicit `ALLOW_SYNTHETIC_CREDIT`
+  flag for local/demo only (set in `.env.example`, never in a real environment).
+  NOTE: the payment-service processor path has not been audited for the same
+  stub-on-missing-key behaviour — tracked as follow-up.
 
 ## What this branch does NOT do — MUST still happen
 

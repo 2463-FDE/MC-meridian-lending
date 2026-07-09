@@ -13,7 +13,7 @@ timestamp. There is no append-only audit trail. (D4, D9, D10)
 """
 import time
 import httpx
-from .config import EXPERIAN_KEY, EXPERIAN_BASE_URL
+from . import config
 from .logging_config import get_logger
 from . import db
 
@@ -24,20 +24,49 @@ log = get_logger("decision")
 GENERIC_REASONS = ["purchasing history", "insufficient credit profile"]
 
 
+class CreditPullError(RuntimeError):
+    """The bureau credit pull could not be completed. Raised so decisioning FAILS
+    CLOSED — no decision is issued off a synthetic score in a production-like
+    (non-synthetic) configuration."""
+
+
+def _synthetic_score(ssn: str) -> int:
+    """Deterministic demo score — ONLY used when ALLOW_SYNTHETIC_CREDIT is set."""
+    return 680 if ssn and ssn[-1] in "02468" else 612
+
+
 def _pull_credit(ssn: str) -> int:
-    """Synchronous bureau call. Blocks the request thread. No real timeout budget."""
+    """Synchronous bureau call. Blocks the request thread. No real timeout budget.
+
+    Fails CLOSED: with no EXPERIAN_KEY (or on any bureau failure) it raises
+    CreditPullError unless ALLOW_SYNTHETIC_CREDIT explicitly opts into the demo
+    stub. This prevents a keyless deployment from silently issuing decisions off a
+    synthetic score.
+    """
+    if not config.EXPERIAN_KEY:
+        if config.ALLOW_SYNTHETIC_CREDIT:
+            return _synthetic_score(ssn)
+        raise CreditPullError(
+            "EXPERIAN_KEY not configured — refusing to issue a decision without a "
+            "real credit pull. Set ALLOW_SYNTHETIC_CREDIT=1 for local/demo only."
+        )
     try:
-        # structured like a real call; in dev there's no live bureau so we fall back.
         resp = httpx.get(
-            f"{EXPERIAN_BASE_URL}/score",
+            f"{config.EXPERIAN_BASE_URL}/score",
             params={"ssn": ssn},
-            headers={"Authorization": f"Bearer {EXPERIAN_KEY}"},
+            headers={"Authorization": f"Bearer {config.EXPERIAN_KEY}"},
             timeout=30,
         )
-        return resp.json().get("score", 680)
-    except Exception:
-        # deterministic stub so the demo runs without a live bureau
-        return 680 if ssn and ssn[-1] in "02468" else 612
+        resp.raise_for_status()  # a bad/expired key returns 401/403 — treat as failure
+        score = resp.json().get("score")
+        if score is None:
+            raise ValueError("bureau response missing 'score'")
+        return score
+    except Exception as e:
+        if config.ALLOW_SYNTHETIC_CREDIT:
+            return _synthetic_score(ssn)
+        # Fail closed — do NOT fall back to a stub in a real environment.
+        raise CreditPullError(f"bureau credit pull failed: {type(e).__name__}") from e
 
 
 def _run_model(bureau_score: int, application: dict) -> dict:
