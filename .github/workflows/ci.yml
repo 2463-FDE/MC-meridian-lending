@@ -85,6 +85,24 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_logging_redaction.py -q
 
+  synthetic-credit-gate:
+    # Fail-closed synthetic credit is a security control (approving loans on fake
+    # scores). Like redaction-tests, this MUST block the build — the `backend` job
+    # is continue-on-error, so a reopened gate would otherwise stay green. Guards
+    # the template a deploy inherits: exactly one ENVIRONMENT, not development, and
+    # no ALLOW_SYNTHETIC_CREDIT default. No continue-on-error, no `|| true`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: decision-service .env.example gate regression test
+        run: |
+          cd services/decision-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_decision.py::test_env_example_gate_stays_closed_by_parsing_the_template -q
+
   frontend:
     runs-on: ubuntu-latest
     steps:
