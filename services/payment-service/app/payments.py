@@ -21,37 +21,6 @@ from .redactor import PiiRedactor
 log = get_logger("payment")   # writes to logs/payment-service.log
 
 
-def _scrub_free_text_pan(text: str) -> str:
-    """Mask a PAN hidden anywhere in a short free-text value (e.g. `name`),
-    separator-agnostic and BOUND-FREE.
-
-    The shared PiiRedactor free-text pass bounds the separator run (<=3 chars
-    between digits) so it stays safe when applied to a whole log line. But a
-    client can defeat any fixed bound (4111====1111====...), so for the isolated,
-    short name value we detect digit runs separated by ANY number of NON-DIGIT
-    chars (letters included — 4111x1111x... strips to a real card) and Luhn-check
-    the extracted digits — true digit-extraction + Luhn, with no separator,
-    charset, or length enumeration. The Luhn gate keeps ordinary numeric text
-    (IDs, amounts) untouched. Guarded on a >=13 digit count so normal names skip
-    the scan entirely.
-
-    Non-digit (not non-alphanumeric) as the separator is safe HERE because this
-    runs on the isolated, short name value; the shared PiiRedactor free-text pass
-    keeps a bounded non-alphanumeric class so it does not glom digits across a
-    whole log line.
-    """
-    if not text or sum(c.isdigit() for c in text) < 13:
-        return text
-
-    def _mask(m):
-        digits = re.sub(r"\D", "", m.group(0))
-        if 13 <= len(digits) <= 19 and PiiRedactor._luhn_valid(digits):
-            return PiiRedactor._mask_with_last_4(digits) + " (PAN)"
-        return m.group(0)
-
-    return re.sub(r"\d(?:[^0-9]*\d){12,18}", _mask, str(text))
-
-
 def _mask_ssn(ssn):
     """Mask an SSN value to •••-••-LAST4 (digit-count based, separator-agnostic)."""
     if not ssn:
@@ -62,26 +31,24 @@ def _mask_ssn(ssn):
     return "•" * len(str(ssn))
 
 
-def _redacted_charge_req(pan, cvv, ssn, amount, loan_id, name) -> dict:
-    """Charge-request fields with card/SSN values masked at the VALUE level,
-    BEFORE anything is interpolated into the log string.
+def _redacted_charge_req(pan, cvv, ssn, amount, loan_id) -> dict:
+    """Charge-request fields for the log — an ALLOWLIST of operational values,
+    with card/SSN masked at the VALUE level BEFORE anything is interpolated.
 
-    This is the fix for the charge-log PAN bypass. The prior code built a
-    hand-formatted pseudo-JSON string from the raw, client-controlled `pan` and
-    relied on the log formatter's regex to redact it. That is defeatable by
-    delimiter injection: a pan like `4111","x":"111111111111` splits the number
-    across fake JSON fields, so the delimiter-sensitive formatter masks only a
-    <13-digit fragment and the rest leaks in the clear. Masking each value here
-    (PAN by digit count, so separators/injected quotes are stripped and cannot
-    un-mask it) and serializing with `json.dumps` (which escapes embedded
-    quotes) removes the pseudo-JSON parsing surface entirely. The formatter
-    redaction stays on as a backstop.
-
-    `name` is client-controlled free text, so a PAN can be smuggled into it with
-    any separator (comma, tilde, backslash, ...) and any separator length. We do
-    NOT enumerate separators or a length bound: _scrub_free_text_pan does bound-
-    free digit-extraction + Luhn on the isolated value, then PiiRedactor.redact
-    masks any other PII (email/ssn/phone) in the name.
+    Two prior bypasses are closed here. (1) Delimiter injection: the old code
+    built a hand-formatted pseudo-JSON string from the raw, client-controlled
+    `pan` and relied on the log formatter's regex; a pan like
+    `4111","x":"111111111111` split the number across fake JSON fields so the
+    formatter masked only a <13-digit fragment. Masking each value here (PAN by
+    digit count, so injected separators/quotes are stripped) and serializing with
+    `json.dumps` (which escapes embedded quotes) removes that parsing surface.
+    (2) Free-text smuggling: `name` was logged after a Luhn-on-run scrub, but a
+    leading ordinary digit (`Apt 12 4111x1111x...`) corrupts the extracted run so
+    Luhn fails and the card passed through. Chasing that with a sliding window
+    false-masks ordinary 13-19 digit IDs, so instead `name` (client-controlled
+    free text, not needed operationally and not persisted) is simply NOT logged.
+    No free text in the charge log = no place left to smuggle a PAN. The
+    formatter redaction stays on as a backstop.
     """
     return {
         "pan": PiiRedactor._mask_pan_value(pan) if pan else pan,
@@ -89,7 +56,6 @@ def _redacted_charge_req(pan, cvv, ssn, amount, loan_id, name) -> dict:
         "ssn": _mask_ssn(ssn),
         "amount": amount,
         "loan_id": loan_id,
-        "name": PiiRedactor.redact(_scrub_free_text_pan(name)) if name else name,
     }
 
 
@@ -97,10 +63,12 @@ def charge(loan_id: int, pan: str, cvv: str, amount: float, ssn: str = None,
            name: str = None, method: str = "card") -> dict:
     # PII (PAN/CVV/SSN) is masked at the value level before it reaches the log
     # string; see _redacted_charge_req for why the old formatter-only approach
-    # was bypassable. json.dumps escapes any quotes in free-text fields (name).
+    # was bypassable. `name` is client-controlled free text (a PAN can be
+    # smuggled into it) and is deliberately not logged. json.dumps escapes any
+    # quotes in the remaining values.
     log.info(
         "POST /payments charge req=%s -> ok",
-        json.dumps(_redacted_charge_req(pan, cvv, ssn, amount, loan_id, name),
+        json.dumps(_redacted_charge_req(pan, cvv, ssn, amount, loan_id),
                    ensure_ascii=False),
     )
     # No idempotency check. No unique charge reference. Every POST inserts a row.

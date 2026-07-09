@@ -108,7 +108,7 @@ def test_charge_log_defeats_quote_delimiter_injection():
 
     evil = '4111","x":"111111111111'  # quote + delimiter injection
     line = "POST /payments charge req=%s -> ok" % json.dumps(
-        payments._redacted_charge_req(evil, "123", "412-55-9981", 250.0, 7, "Bob"),
+        payments._redacted_charge_req(evil, "123", "412-55-9981", 250.0, 7),
         ensure_ascii=False,
     )
     # No reconstructable PAN chunk survives.
@@ -122,53 +122,52 @@ def test_charge_log_defeats_quote_delimiter_injection():
 
 
 def test_name_field_exotic_separator_pan_redacted(temp_log_dir):
-    """Regression: a PAN smuggled into the free-text `name` field with an exotic
-    separator (*) is caught by the formatter backstop on the real charge-log
-    path. `name` is not value-masked (it is a name), so the free-text redactor
-    must cover it."""
+    """Backstop: if any OTHER path ever logs a free-text value carrying a
+    separator-obfuscated PAN, the formatter still masks it. The charge path no
+    longer logs `name` at all (see test_charge_log_never_contains_name), but the
+    formatter defense-in-depth must remain effective."""
     logger = get_logger("payment_test")
     logger.info(
-        "POST /payments charge req=%s -> ok",
-        json.dumps({"pan": "••••••••••••1111 (PAN)", "cvv": "••••",
-                    "name": "4111*1111*1111*1111"}, ensure_ascii=False),
+        "customer note: %s",
+        json.dumps({"note": "4111*1111*1111*1111"}, ensure_ascii=False),
     )
     content = (Path(temp_log_dir) / "payment-service.log").read_text()
-    assert "411111111111" not in content, "star-separated PAN leaked via name"
+    assert "411111111111" not in content, "star-separated PAN leaked via free text"
     assert "4111" not in content
     assert "1111" in content
 
 
-@pytest.mark.parametrize("pan", [
-    "4111,1111,1111,1111",       # comma — reviewer example
-    "4111~1111~1111~1111",       # tilde — reviewer example
-    "4111\\1111\\1111\\1111",    # backslash — reviewer example
-    "4111=1111=1111=1111",       # equals — reviewer example
-    "4111====1111====1111====1111",  # 4-char run — defeats any fixed length bound
-    "4111 - / _ 1111 . 1111 ~ 1111",  # mixed multi-char separators
-    "4111x1111x1111x1111",           # letter separators — digit-extraction still catches
-    "card4111a1111b1111c1111end",    # alnum-embedded card in free text
+@pytest.mark.parametrize("name", [
+    "Apt 12 4111x1111x1111x1111",     # reviewer repro: leading digits defeat whole-value Luhn
+    "4111x1111x1111x1111",            # bare smuggled card, letter separators
+    "Unit 5 4111,1111,1111,1111",     # apartment digits + comma-separated card
+    "order 99 4111 1111 1111 1111",   # order digits + spaced card
+    "4111====1111====1111====1111",   # long separator runs
+    "Jane Doe",                       # ordinary name — nothing to leak
 ])
-def test_name_field_any_separator_pan_redacted(temp_log_dir, pan):
-    """Regression (Codex): a Luhn-valid PAN smuggled into the free-text `name`
-    field with an ARBITRARY separator must not reach the charge log. name is
-    value-scrubbed at the construction boundary (_redacted_charge_req runs it
-    through PiiRedactor.redact) — no separator enumeration. Exercises the real
-    charge-log construction path, not just the formatter."""
+def test_charge_log_never_contains_name(temp_log_dir, monkeypatch, name):
+    """Regression (Codex): a PAN smuggled into the free-text `name` — including
+    with LEADING ordinary digits (`Apt 12 ...`) that break a whole-value Luhn
+    scrub — must not reach the charge log. The fix does not chase separators
+    (a sliding window would false-mask ordinary IDs); `name` is simply not
+    logged. Exercises the real charge() path with the DB + servicing mocked."""
     from app import payments
 
-    logger = get_logger("payment_test")
-    logger.info(
-        "POST /payments charge req=%s -> ok",
-        json.dumps(
-            payments._redacted_charge_req("4111111111111111", "123",
-                                          "412-55-9981", 250.0, 7, pan),
-            ensure_ascii=False,
-        ),
-    )
+    logging.getLogger("payment").handlers.clear()
+    monkeypatch.setattr(payments, "log", get_logger("payment"))
+    monkeypatch.setattr(payments.db, "query", lambda *a, **k: [{"id": 1}])
+    monkeypatch.setattr(payments, "_apply_via_servicing", lambda *a, **k: None)
+
+    payments.charge(loan_id=7, pan="4111111111111111", cvv="123",
+                    amount=250.0, ssn="412-55-9981", name=name)
+
     content = (Path(temp_log_dir) / "payment-service.log").read_text()
-    assert "411111111111" not in content, f"raw PAN leaked via name for {pan!r}"
-    assert "4111" not in content, f"PAN prefix leaked via name for {pan!r}"
-    assert "1111" in content, "last 4 of PAN should be preserved"
+    # The card the client submitted (pan field) is masked to its last 4.
+    assert "411111111111" not in content, f"12-digit PAN leaked for name={name!r}"
+    # name is not logged at all, so nothing smuggled into it can appear.
+    assert '"name"' not in content, "name field should not be logged"
+    assert "Apt" not in content and "Unit" not in content and "Jane" not in content, \
+        f"raw name reached the log for {name!r}"
 
 
 def test_payment_request_logging_redacts_ssn(temp_log_dir):
