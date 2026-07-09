@@ -11,6 +11,7 @@ import os
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from . import config
 from .logging_config import get_logger
 from .routers import payments
 
@@ -28,4 +29,10 @@ async def unhandled(request: Request, exc: Exception):
 
 @app.get("/health")
 def health():
+    missing = config.missing_required_secrets()
+    if missing:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "service": "payment-service", "missing_secrets": missing},
+        )
     return {"status": "ok", "service": "payment-service"}

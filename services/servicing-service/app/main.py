@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 
-from . import balance, delinquency, payments, reconciliation
+from . import balance, config, delinquency, payments, reconciliation
 from .logging_config import get_logger
 from .routers import loans
 
@@ -31,6 +31,12 @@ async def unhandled(request: Request, exc: Exception):
 
 @app.get("/health")
 def health():
+    missing = config.missing_required_secrets()
+    if missing:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "service": "servicing", "missing_secrets": missing},
+        )
     return {"status": "ok", "service": "servicing"}
 
 

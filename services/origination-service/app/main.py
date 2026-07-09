@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import intake
+from . import config, intake
 from .logging_config import get_logger
 from .routers import applications, offers
 
@@ -30,6 +30,12 @@ async def unhandled(request: Request, exc: Exception):
 
 @app.get("/health")
 def health():
+    missing = config.missing_required_secrets()
+    if missing:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "service": "origination", "missing_secrets": missing},
+        )
     return {"status": "ok", "service": "origination"}
 
 

@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import auth
+from . import auth, config
 from .config import (
     DECISION_URL,
     DISCLOSURE_URL,
@@ -40,6 +40,12 @@ app.add_middleware(
 
 @app.get("/health")
 def health():
+    missing = config.missing_required_secrets()
+    if missing:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "service": "gateway", "missing_secrets": missing},
+        )
     return {"status": "ok", "service": "gateway"}
 
 
