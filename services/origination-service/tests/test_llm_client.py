@@ -506,6 +506,40 @@ def test_history_pii_redacted_before_send():
     assert "9981" not in sent  # provider export strips the last-4 fragment
 
 
+@pytest.mark.parametrize("role", [
+    "Jane Smith",   # PII smuggled as a role
+    "system",       # privilege escalation attempt
+    "",             # empty
+    "User",         # wrong case — chat API expects lowercase
+    None,           # non-string
+])
+def test_history_invalid_role_rejected_before_provider(role):
+    """Regression: the role on a history turn is copied straight onto the provider
+    message and is NOT redacted. An unrecognized/PII role must fail closed during
+    request build so nothing crosses the trust boundary — the adapter is never
+    called."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    with pytest.raises(LLMError):
+        ClaudeClient(_config(), adapter=adapter).complete(
+            "loan_application_summary",
+            application_json="{}",
+            history=[{"role": role, "content": "{}"}],
+        )
+    assert adapter.calls == []  # nothing sent to the provider
+
+
+def test_history_missing_role_defaults_to_user():
+    """A turn with no role is normalized to 'user' (not rejected) and sent."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).complete(
+        "loan_application_summary",
+        application_json="{}",
+        history=[{"content": '{"note": "prior"}'}],
+    )
+    roles = [m["role"] for m in adapter.calls[0].messages]
+    assert "user" in roles and "system" not in roles
+
+
 def test_free_text_purpose_field_does_not_leak_identity():
     """Regression (review): a valid application object still leaked identity via
     applicant-controlled free text — purpose is a non-identity key, so its value

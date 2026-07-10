@@ -394,9 +394,9 @@ def _redacted_turn(turn: dict) -> dict:
     same stance as the gated stream() path). See `_require_json_object` for the
     residual on identity placed in free-text object values.
 
-    Raises `LLMError` on a malformed turn (missing/non-string content, or content
-    that is not a JSON object) instead of a bare KeyError, so callers get a typed
-    failure.
+    Raises `LLMError` on a malformed turn (missing/non-string content, content
+    that is not a JSON object, or an unrecognized role) instead of a bare KeyError,
+    so callers get a typed failure.
     """
     if not isinstance(turn, dict) or "content" not in turn:
         raise LLMError("history turn must be a dict with a 'content' key")
@@ -411,7 +411,19 @@ def _redacted_turn(turn: dict) -> dict:
             "because label-only identifiers (name/DOB/address/employer) cannot "
             "be reliably scrubbed from prose. Pass the prior turn as a JSON object."
         )
-    return {"role": turn.get("role", "user"), "content": redact_json(content)}
+    # Validate the role too: it is copied straight onto the provider message and
+    # is NOT redacted, so an unrecognized role (e.g. {"role": "Jane Smith"}) would
+    # ship a raw, identity-bearing string across the trust boundary before the
+    # provider rejects it. Normalize a missing role to "user"; fail closed on any
+    # value other than the two roles the chat API accepts.
+    role = turn.get("role", "user")
+    if role not in ("user", "assistant"):
+        raise LLMError(
+            "history turn 'role' must be 'user' or 'assistant'; refusing to send "
+            "an unrecognized role to the provider (it is not redacted and may "
+            "carry identity)"
+        )
+    return {"role": role, "content": redact_json(content)}
 
 
 def estimate_tokens(text: str) -> int:
