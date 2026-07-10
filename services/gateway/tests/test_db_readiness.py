@@ -15,11 +15,13 @@ from app import config
 
 @pytest.fixture(autouse=True)
 def _reset_probe_cache():
-    # database_reachable caches its result; reset around every test so the probe
-    # stubs below are observed fresh and cases don't leak into each other.
+    # database_reachable / redis_reachable cache their results; reset around every
+    # test so the probe stubs are observed fresh and cases don't leak into each other.
     config.reset_database_probe_cache()
+    config.reset_redis_probe_cache()
     yield
     config.reset_database_probe_cache()
+    config.reset_redis_probe_cache()
 
 
 def test_unset_database_url_is_misconfigured(monkeypatch):
@@ -230,3 +232,92 @@ def test_probe_single_flight_under_concurrent_misses(monkeypatch):
 
     assert calls["n"] == 1  # exactly one probe despite 8 concurrent misses
     assert results == [(True, None)] * 8
+
+
+# --- Redis readiness probe -------------------------------------------------
+# Gateway auth/session lives in Redis, so /health must fail when Redis is down
+# even if Postgres is fine. redis.Redis.from_url is stubbed so no real Redis runs.
+
+
+class _FakeRedis:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.closed = False
+
+    def ping(self):
+        if self.fail:
+            raise ConnectionError("redis down")
+        return True
+
+    def close(self):
+        self.closed = True
+
+
+def test_redis_probe_ok(monkeypatch):
+    conn = _FakeRedis()
+    monkeypatch.setattr(config.redis.Redis, "from_url", lambda *a, **k: conn)
+    ok, err = config.redis_reachable()
+    assert ok is True
+    assert err is None
+    assert conn.closed is True  # probe always closes its client
+
+
+def test_redis_probe_fails_when_unreachable(monkeypatch):
+    def _boom(*a, **k):
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(config.redis.Redis, "from_url", _boom)
+    ok, err = config.redis_reachable()
+    assert ok is False
+    assert err == "ConnectionError"  # class name only — no URL leak
+
+
+def test_redis_probe_cached_within_ttl(monkeypatch):
+    calls = {"n": 0}
+
+    def _count(*a, **k):
+        calls["n"] += 1
+        return _FakeRedis()
+
+    monkeypatch.setattr(config.redis.Redis, "from_url", _count)
+    config.redis_reachable()
+    config.redis_reachable()
+    assert calls["n"] == 1  # second call served from cache, no new connection
+
+
+def test_health_503_when_db_ok_but_redis_unavailable(monkeypatch):
+    # The regression the review calls out: Postgres reachable, Redis down -> /health
+    # must return 503, not keep the instance in rotation while auth is broken.
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: _FakeConn())
+
+    def _redis_boom(*a, **k):
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(config.redis.Redis, "from_url", _redis_boom)
+
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    resp = TestClient(app).get("/health")
+    assert resp.status_code == 503
+    assert resp.json()["redis_error"] == "ConnectionError"
+
+
+def test_health_ok_when_db_and_redis_reachable(monkeypatch):
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: _FakeConn())
+    monkeypatch.setattr(config.redis.Redis, "from_url", lambda *a, **k: _FakeRedis())
+
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    resp = TestClient(app).get("/health")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"

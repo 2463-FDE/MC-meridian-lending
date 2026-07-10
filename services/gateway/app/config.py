@@ -5,6 +5,7 @@ import time
 from urllib.parse import unquote, urlparse
 
 import psycopg2
+import redis
 
 # No committed default: a passwordless fallback DSN (meridian:@postgres) would
 # let a deploy that omits DATABASE_URL connect unauthenticated and look healthy.
@@ -147,6 +148,62 @@ def missing_required_secrets() -> list:
         missing.append("DATABASE_URL")
     return missing
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+
+
+# Gateway auth stores and reads sessions in Redis (see auth._client), so a Redis
+# outage breaks login, /auth/me, /lss, and /payments even while Postgres is fine.
+# /health probes Redis too, with the same bounded, TTL-cached, single-flight shape
+# as the DB probe, so a Redis outage flips readiness to unhealthy instead of
+# leaving the load balancer routing auth traffic to an instance that can't serve it.
+_REDIS_PROBE_TTL_SECONDS = 5.0
+_redis_probe_state = (None, 0.0, (False, None))  # (url, monotonic_at, result)
+_redis_probe_lock = threading.Lock()
+
+
+def reset_redis_probe_cache() -> None:
+    """Drop the cached Redis probe result (forces the next call to reconnect)."""
+    global _redis_probe_state
+    _redis_probe_state = (None, 0.0, (False, None))
+
+
+def redis_reachable(timeout: float = 2.0) -> tuple[bool, str | None]:
+    """Bounded live Redis PING, TTL-cached and single-flight — same shape as
+    database_reachable, so a /health flood cannot open a Redis connection per
+    request. Returns (ok, error); error is the exception class name only, never
+    the URL, so /health cannot leak connection details.
+    """
+    global _redis_probe_state
+    url, at, result = _redis_probe_state
+    if url == REDIS_URL and (time.monotonic() - at) < _REDIS_PROBE_TTL_SECONDS:
+        return result
+    with _redis_probe_lock:
+        url, at, result = _redis_probe_state
+        if url == REDIS_URL and (time.monotonic() - at) < _REDIS_PROBE_TTL_SECONDS:
+            return result
+        result = _run_redis_probe(timeout)
+        _redis_probe_state = (REDIS_URL, time.monotonic(), result)
+        return result
+
+
+def _run_redis_probe(timeout: float) -> tuple[bool, str | None]:
+    client = None
+    try:
+        client = redis.Redis.from_url(
+            REDIS_URL,
+            socket_connect_timeout=max(1, int(timeout)),
+            socket_timeout=max(1, int(timeout)),
+        )
+        client.ping()
+        return True, None
+    except Exception as exc:
+        return False, exc.__class__.__name__
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
 
 ORIGINATION_URL = os.getenv("ORIGINATION_URL", "http://origination-service:8001")
 SERVICING_URL = os.getenv("SERVICING_URL", "http://servicing-service:8002")

@@ -52,6 +52,15 @@ def health():
             status_code=503,
             content={"status": "unhealthy", "service": "gateway", "database_error": db_error},
         )
+    # Auth/session flows live in Redis, so a Redis outage must fail readiness too —
+    # otherwise the load balancer keeps sending login/session traffic to an instance
+    # that cannot authenticate.
+    redis_ok, redis_error = config.redis_reachable()
+    if not redis_ok:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "service": "gateway", "redis_error": redis_error},
+        )
     return {"status": "ok", "service": "gateway"}
 
 
