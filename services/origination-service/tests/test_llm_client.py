@@ -465,8 +465,8 @@ def test_pii_redacted_before_sent_to_provider():
 
 
 def test_history_pii_redacted_before_send():
-    """Fix A: shaped PII in a structured JSON history field is masked (audit
-    last-4 kept)."""
+    """Fix A: shaped PII in a structured JSON history field is masked. The
+    provider export drops the audit last-4 (least privilege) — no fragment."""
     adapter = FakeAdapter(response=GOOD_SUMMARY)
     ClaudeClient(_config(), adapter=adapter).complete(
         "loan_application_summary",
@@ -475,7 +475,7 @@ def test_history_pii_redacted_before_send():
     )
     sent = "".join(m["content"] for m in adapter.calls[0].messages)
     assert "412-55-9981" not in sent
-    assert "9981" in sent  # shaped SSN masked, audit last-4 kept
+    assert "9981" not in sent  # provider export strips the last-4 fragment
 
 
 def test_free_text_purpose_field_does_not_leak_identity():
@@ -584,7 +584,8 @@ def test_history_identity_fields_not_sent_to_provider():
     application JSON. Label-only identifiers (name/DOB/address/employer) have no
     shape for the pattern redactor, so a JSON history turn gets the same
     JSON-aware masking as the current message — none of the values reach the
-    adapter, while shaped PII keeps its audit last-4 and triage fields survive."""
+    adapter; shaped PII is masked with no last-4 fragment and triage fields
+    survive."""
     adapter = FakeAdapter(response=GOOD_SUMMARY)
     ClaudeClient(_config(), adapter=adapter).complete(
         "loan_application_summary",
@@ -605,7 +606,7 @@ def test_history_identity_fields_not_sent_to_provider():
                    "Bob Roe", "1975-05-05"):
         assert leaked not in sent, f"identity value leaked via history: {leaked!r}"
     assert "412-55-9981" not in sent      # shaped SSN masked...
-    assert "9981" in sent                 # ...last 4 kept for audit
+    assert "9981" not in sent             # ...and last-4 stripped for provider
     assert "18000" in sent                # triage-relevant field survives
 
 
@@ -876,6 +877,36 @@ def test_labeled_number_variants_redacted_before_send():
     assert "87654321" in sent        # unrelated labeled number left intact
 
 
+def test_leading_zero_ssn_coerced_to_int_masked():
+    """Regression (teeth): an SSN/TIN whose leading zero was dropped by int
+    coercion (012-34-5678 -> 12345678) is 8 digits and not a valid date, so the
+    structural heuristic and the label-gated pattern pass both miss it. Key-aware
+    masking under an SSN/TIN label catches it before it reaches the provider."""
+    for key in ("ssn", "tin", "social_security_number", "applicant_ssn"):
+        adapter = FakeAdapter(response=GOOD_SUMMARY)
+        ClaudeClient(_config(), adapter=adapter).summarize_application(
+            '{"%s": 12345678, "amount": 1000}' % key
+        )
+        sent = "".join(m["content"] for m in adapter.calls[0].messages)
+        assert "12345678" not in sent, f"leading-zero SSN leaked under key {key!r}"
+        assert "1000" in sent  # triage figure survives
+
+
+def test_no_last_four_identifier_fragment_reaches_provider():
+    """Regression (teeth): the log redactor preserves last-4 for SSN/phone/PAN/
+    bank ids; the provider export must NOT ship those stable fragments. Inspect
+    the exact messages handed to the adapter for any surviving last-4."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).summarize_application(
+        '{"ref": "412-55-6789", "acct": "4111111111111111", '
+        '"contact": "412-555-6789", "amount": 1000}'
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    for fragment in ("6789", "1111", "412-55-6789", "4111111111111111"):
+        assert fragment not in sent, f"identifier fragment leaked: {fragment!r}"
+    assert "1000" in sent  # triage figure survives
+
+
 def test_numeric_identity_under_non_identity_key_masked():
     """Regression (teeth): a bare SSN/DOB/phone packed as a JSON NUMBER under a
     non-identity key (no separators, no label) slipped past the pattern pass and
@@ -912,9 +943,11 @@ def test_looks_like_numeric_identity_boundaries():
     assert not f(1970.0101)  # float (money-shaped), never an ID
 
 
-def test_redact_json_preserves_last4_and_falls_back_on_bad_json():
+def test_redact_json_strips_last4_for_provider_and_falls_back_on_bad_json():
+    # Provider export drops the audit last-4 the log redactor keeps (least
+    # privilege): the category shape survives, the digits do not.
     out = redact_json('{"ssn": 412559981}')
-    assert out == '{"ssn": "•••-••-9981"}'
+    assert out == '{"ssn": "•••-••-••••"}'
     # Non-JSON input degrades to whole-string redaction, never raises.
     assert redact_json("SSN 412-55-9981") == PiiRedactor.redact("SSN 412-55-9981")
     # A PII-shaped KEY must not corrupt the JSON or leak the value.

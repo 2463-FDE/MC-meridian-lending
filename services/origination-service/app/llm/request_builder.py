@@ -105,6 +105,37 @@ def _looks_like_numeric_identity(value) -> bool:
     return False
 
 
+def _is_numeric_identity_key(key) -> bool:
+    """True if a field NAME denotes an SSN/TIN — an identifier of up to 9 digits
+    that may arrive as a JSON *number* which lost its leading zero (012-34-5678
+    coerced to the int 12345678). Such a value is neither 9 digits nor a valid
+    date, so `_looks_like_numeric_identity` misses it and the label-gated pattern
+    pass (which wants a 9-digit / 3-2-4 shape) misses it too. Under one of these
+    labels any number is masked outright. Matched on whole normalized tokens so a
+    substring like the "tin" inside "routing_number" does not false-positive.
+    """
+    kn = str(key).strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+    if kn in {"ssn", "ssnnumber", "socialsecurity", "socialsecuritynumber",
+              "tin", "tinnumber", "itin", "taxid", "taxidnumber",
+              "taxidentificationnumber"}:
+        return True
+    return kn.startswith("ssn") or kn.endswith("ssn")
+
+
+def _strip_fragment_digits(masked: str) -> str:
+    """Drop residual identifier digits (the audit last-4 the PiiRedactor keeps)
+    from a masked value before it is exported to the third-party model.
+
+    PiiRedactor is a log/audit redactor: it preserves the last four digits of
+    SSNs, phones, PANs and bank ids (•••-••-6789, ••••••••••••1111 (PAN)) so an
+    operator can reconcile a record. Those fragments are stable partial
+    identifiers and are nonessential to a triage summary, so least-privilege
+    (ADR 0005) removes them for provider export while keeping the category shape
+    (the dash layout, the "(PAN)" tag) as a harmless hint to the model.
+    """
+    return "".join("•" if ch.isdigit() else ch for ch in masked)
+
+
 def _redact_scalar(key: str, value):
     """Redact one JSON scalar while keeping the result JSON-valid.
 
@@ -115,9 +146,12 @@ def _redact_scalar(key: str, value):
        412-55-9981"`); pattern-masking only the SSN would leak "Jane Smith", so
        the whole value is dropped.
     2. NO WHITESPACE ⇒ a single token. It is redacted *with its field label*
-       (`"key": value`) so the label-gated / shape patterns fire, keeping the
-       audit last-4 of a genuine single shaped token (an SSN/PAN/email is a token,
-       not free text). If nothing shaped matched, the string is masked outright:
+       (`"key": value`) so the label-gated / shape patterns fire on a genuine
+       single shaped token (an SSN/PAN/email is a token, not free text). Unlike
+       the log redactor, the provider export drops the audit last-4 as well
+       (`_strip_fragment_digits`) — a partial identifier is nonessential to a
+       triage summary and must not cross the trust boundary. If nothing shaped
+       matched, the string is masked outright:
        no shape rule can distinguish an operational code (auto) from a lowercased
        bare name (jane, jane_smith) — they are byte-identical — so a string under
        a non-identity key is never passed raw on shape alone. Numbers skip step 1
@@ -143,16 +177,23 @@ def _redact_scalar(key: str, value):
             # Redaction altered the key/prefix (a PII-shaped field name); the
             # value slice would be misaligned. Fall back to redacting the value
             # alone — loses the label hint but stays correct and JSON-valid.
-            return PiiRedactor.redact(value if isinstance(value, str) else json.dumps(value))
+            return _strip_fragment_digits(
+                PiiRedactor.redact(value if isinstance(value, str) else json.dumps(value)))
         masked = redacted[len(prefix):]
         if len(masked) >= 2 and masked[0] == '"' and masked[-1] == '"':
             masked = masked[1:-1]  # drop the quotes json.dumps added; re-quoted on output
-        return masked
+        return _strip_fragment_digits(masked)
     # Nothing shaped. Fail closed: any non-empty string under a non-identity key
     # can hide label-less identity (a lowercased bare name is indistinguishable
     # from a code), so mask it outright.
     if isinstance(value, str) and value:
         return _FREETEXT_MASK
+    # An SSN/TIN under its own label may arrive as a number that lost its leading
+    # zero (012-34-5678 coerced to int 12345678) — neither 9 digits nor a valid
+    # date, so the checks below miss it. Mask any number under an SSN/TIN label.
+    if _is_numeric_identity_key(key) and isinstance(value, (int, float)) \
+            and not isinstance(value, bool):
+        return _IDENTITY_MASK
     # A bare SSN/DOB/phone packed as a JSON number has no separators/label for the
     # pattern pass to key on, so match it structurally and mask it. (A card PAN as
     # a number is already caught above.)
