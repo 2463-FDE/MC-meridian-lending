@@ -75,6 +75,36 @@ def _is_identity_key(key) -> bool:
     return False
 
 
+def _looks_like_numeric_identity(value) -> bool:
+    """True if an integer has the digit-shape of a label-less identifier that the
+    pattern pass cannot catch when it is packed as a JSON *number*.
+
+    A bare SSN/DOB/phone written as a number carries no separators and no label,
+    so the shaped-PII pass (which keys on separators, e.g. 3-2-4 for SSN, or on a
+    field label) misses it and it would reach the provider raw. The pattern pass
+    DOES still catch a card PAN as a number (Luhn/13-19-digit shape), so this only
+    needs to cover the three shapes it cannot: a 9-digit SSN, an 8-digit YYYYMMDD
+    date of birth, and a 10-digit NANP phone. Booleans are excluded (bool is an
+    int subclass); floats are money-shaped (apr, rate) and never these IDs.
+
+    Kept structural to avoid over-masking triage figures: amount/income/term are
+    far shorter than 8 digits, and the 8-digit branch additionally requires a
+    valid calendar date so a large loan number like 87654321 (year 8765) survives.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    digits = str(abs(value))
+    n = len(digits)
+    if n == 9:  # SSN — 9 digits, no separators
+        return True
+    if n == 8:  # possible YYYYMMDD date of birth
+        year, month, day = int(digits[:4]), int(digits[4:6]), int(digits[6:8])
+        return 1900 <= year <= 2099 and 1 <= month <= 12 and 1 <= day <= 31
+    if n == 10:  # NANP phone: area-code and exchange lead digits are 2-9
+        return digits[0] in "23456789" and digits[3] in "23456789"
+    return False
+
+
 def _redact_scalar(key: str, value):
     """Redact one JSON scalar while keeping the result JSON-valid.
 
@@ -90,10 +120,13 @@ def _redact_scalar(key: str, value):
        not free text). If nothing shaped matched, the string is masked outright:
        no shape rule can distinguish an operational code (auto) from a lowercased
        bare name (jane, jane_smith) — they are byte-identical — so a string under
-       a non-identity key is never passed raw on shape alone. Numbers and other
-       non-string scalars skip both steps and go through the pattern pass so a
-       bare SSN/PAN literal is still caught, then survive (a number cannot hide a
-       label-less name). Empty string carries nothing, kept.
+       a non-identity key is never passed raw on shape alone. Numbers skip step 1
+       and go through the pattern pass, which catches a card PAN literal (Luhn) —
+       but NOT a bare 9-digit SSN, an 8-digit YYYYMMDD date of birth, or a 10-digit
+       phone, which carry no separators/label as numbers. Those are matched
+       structurally by `_looks_like_numeric_identity` and masked; every other
+       number (triage figures: amount, income, term) survives. Empty string
+       carries nothing, kept.
     """
     if isinstance(value, bool) or value is None:
         return value
@@ -120,7 +153,12 @@ def _redact_scalar(key: str, value):
     # from a code), so mask it outright.
     if isinstance(value, str) and value:
         return _FREETEXT_MASK
-    return value  # numbers stay numbers; empty string carries nothing
+    # A bare SSN/DOB/phone packed as a JSON number has no separators/label for the
+    # pattern pass to key on, so match it structurally and mask it. (A card PAN as
+    # a number is already caught above.)
+    if _looks_like_numeric_identity(value):
+        return _IDENTITY_MASK
+    return value  # triage numbers stay numbers; empty string carries nothing
 
 
 def _redact_key(key) -> str:

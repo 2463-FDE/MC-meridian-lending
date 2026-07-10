@@ -876,6 +876,42 @@ def test_labeled_number_variants_redacted_before_send():
     assert "87654321" in sent        # unrelated labeled number left intact
 
 
+def test_numeric_identity_under_non_identity_key_masked():
+    """Regression (teeth): a bare SSN/DOB/phone packed as a JSON NUMBER under a
+    non-identity key (no separators, no label) slipped past the pattern pass and
+    reached the provider raw. It is now matched structurally and masked, while
+    triage numbers survive."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).summarize_application(
+        '{"ref": 19700101, "x": 412559981, "p": 4125559981, "amount": 18000, '
+        '"annual_income": 42000, "term_months": 48, "loan_number": 87654321}'
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    assert "19700101" not in sent    # DOB (YYYYMMDD) masked
+    assert "412559981" not in sent   # 9-digit SSN masked
+    assert "4125559981" not in sent  # 10-digit NANP phone masked
+    assert "18000" in sent           # triage figures survive
+    assert "42000" in sent
+    assert "48" in sent
+    assert "87654321" in sent        # 8-digit non-date (year 8765) not over-masked
+
+
+def test_looks_like_numeric_identity_boundaries():
+    """Unit: the structural matcher masks SSN/DOB/phone shapes without eating
+    triage figures or booleans."""
+    from app.llm.request_builder import _looks_like_numeric_identity as f
+    assert f(412559981)     # 9-digit SSN
+    assert f(19700101)      # valid YYYYMMDD DOB
+    assert f(4125559981)    # 10-digit NANP phone (area 412, exchange 555)
+    assert not f(87654321)  # 8 digits but year 8765 -> not a date
+    assert not f(1000000000)  # 10 digits but leads with 1 -> not NANP
+    assert not f(18000)     # amount
+    assert not f(42000)     # income
+    assert not f(48)        # term
+    assert not f(True)      # bool is not identity
+    assert not f(1970.0101)  # float (money-shaped), never an ID
+
+
 def test_redact_json_preserves_last4_and_falls_back_on_bad_json():
     out = redact_json('{"ssn": 412559981}')
     assert out == '{"ssn": "•••-••-9981"}'
