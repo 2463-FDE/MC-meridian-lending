@@ -1001,6 +1001,24 @@ def test_redact_json_strips_last4_for_provider_and_falls_back_on_bad_json():
     assert "4111111111111111" not in out  # value redacted
 
 
+def test_redact_json_preserves_all_values_when_keys_collapse():
+    """Regression: distinct PII-bearing keys must not overwrite each other.
+
+    Two name-like keys both redact to the same key mask; a dict comprehension
+    kept only the last, silently dropping applicant facts before summarization.
+    The fix disambiguates collided keys so every value survives.
+    """
+    import json as _json
+
+    out = redact_json('{"Jane Smith": 1, "John Smith": 2, "amount": 10000}')
+    parsed = _json.loads(out)
+    # Field-name key untouched; three input keys -> three output keys.
+    assert parsed["amount"] == 10000
+    assert len(parsed) == 3, parsed
+    # Both name-keyed values survive despite both keys masking to the same text.
+    assert sorted(v for k, v in parsed.items() if k != "amount") == [1, 2], parsed
+
+
 def test_redactor_catches_spaced_ssn():
     """Fix B: space-separated SSN (XXX XX XXXX) is redacted, closing the leak
     guard hole found in the adversarial round."""

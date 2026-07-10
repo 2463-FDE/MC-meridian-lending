@@ -258,10 +258,24 @@ def _redact_node(node, key: str = ""):
         # (name/DOB/address/EIN/employer) is generalized to a mask wholesale —
         # the pattern redactor cannot catch these (no self-identifying shape),
         # so the label is the gate and the entire subtree is dropped.
-        return {
-            _redact_key(k): (_IDENTITY_MASK if _is_identity_key(k) else _redact_node(v, k))
-            for k, v in node.items()
-        }
+        #
+        # Build explicitly (not a dict comprehension): distinct source keys can
+        # redact to the SAME text — most often the _KEY_MASK constant when two
+        # keys carry PII labels ({"Jane Smith": 1, "John Smith": 2}) — and a
+        # comprehension would let the later key silently overwrite the earlier
+        # value, dropping applicant facts before the model ever sees them. Keep
+        # every value by disambiguating a collided key with a numeric suffix.
+        out = {}
+        for k, v in node.items():
+            redacted_key = _redact_key(k)
+            value = _IDENTITY_MASK if _is_identity_key(k) else _redact_node(v, k)
+            if redacted_key in out:
+                n = 2
+                while f"{redacted_key} ({n})" in out:
+                    n += 1
+                redacted_key = f"{redacted_key} ({n})"
+            out[redacted_key] = value
+        return out
     if isinstance(node, list):
         return [_redact_node(v, key) for v in node]
     return _redact_scalar(key, node)
