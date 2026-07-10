@@ -22,6 +22,31 @@ from .errors import ValidationFailed
 # stuff the log). Generous — real summaries are a few hundred chars.
 _MAX_OUTPUT_CHARS = 20_000
 
+# Label-only identity the shape/financial-label-based PiiRedactor cannot see: a
+# person's name and a street address carry no PAN/SSN/email/phone signature, so
+# "Applicant Jane Smith lives at 123 Main Street" passes the redactor untouched.
+# The loan prompts forbid identity in the output; these are a fail-closed second
+# gate against an upstream redaction miss, prompt injection, or provider echo.
+#
+# Both anchor on Title Case (real names/addresses are capitalized) so legitimate
+# lowercase prose ("applicant requests $10,000 over 36 months") does not trip.
+#
+# A street address: a number, one-to-four Title-Case street-name words, then a
+# capitalized street-type suffix.
+_STREET_ADDRESS = re.compile(
+    r"\b\d{1,6}\s+(?:[A-Z][A-Za-z.'-]*\s+){1,4}"
+    r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|"
+    r"Court|Ct|Way|Place|Pl|Terrace|Ter|Circle|Cir|Highway|Hwy|Parkway|Pkwy|"
+    r"Trail|Trl|Square|Sq|Loop|Alley|Aly)\b\.?"
+)
+# An identity label (case-insensitive) followed by a Title-Case full name
+# (>= two capitalized words), e.g. "Applicant: Jane Smith", "Borrower Jane Q Public".
+_LABELED_NAME = re.compile(
+    r"(?i:\b(?:applicant|borrower|co-?borrower|co-?applicant|customer|guarantor|"
+    r"co-?signer|cosigner|full[ _-]?name|name)\b)[:\s]+"
+    r"(?-i:[A-Z][a-z]+(?:\s+[A-Z]\.?){0,2}(?:\s+[A-Z][a-z]+)+)"
+)
+
 # Strip a leading ``` fence (optionally with a language tag, on its own line or
 # inline) and a trailing ``` fence. Handles ```json\n{...}\n```, ```{...}```,
 # and single-line ```json {...} ```.
@@ -99,6 +124,8 @@ def guard_output(text: str, *, max_chars: int = _MAX_OUTPUT_CHARS) -> None:
     - leak: refuse output that still contains detectable PII (PAN/CVV/SSN/email/
       phone). The model is instructed not to emit PII; this catches regressions
       before the output is returned or logged.
+    - identity: refuse label-only identity (a person name or street address) the
+      shape-based redactor cannot detect. See _STREET_ADDRESS / _LABELED_NAME.
     """
     if not text or not text.strip():
         raise ValidationFailed("model output is empty")
@@ -106,6 +133,10 @@ def guard_output(text: str, *, max_chars: int = _MAX_OUTPUT_CHARS) -> None:
         raise ValidationFailed(f"model output too long ({len(text)} > {max_chars} chars)")
     if PiiRedactor.redact(text) != text:
         raise ValidationFailed("model output contains PII (leak guard tripped)")
+    if _STREET_ADDRESS.search(text):
+        raise ValidationFailed("model output contains a street address (identity guard)")
+    if _LABELED_NAME.search(text):
+        raise ValidationFailed("model output contains a labeled personal name (identity guard)")
 
 
 def validate_structured(text: str, schema: dict) -> dict:

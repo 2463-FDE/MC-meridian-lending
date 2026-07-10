@@ -411,6 +411,34 @@ def test_leak_guard_blocks_escaped_pii_in_structured_output(plain, escape):
         client.summarize_application("{}")
 
 
+@pytest.mark.parametrize("summary", [
+    "Applicant Jane Smith lives at 123 Main Street",  # name + address
+    "Borrower: Jane Smith requested funds",            # labeled name only
+    "Borrower Jane Q Public verified",                 # name w/ middle initial
+    "applicant John Smith has good credit",            # lowercase label, Title-Case name
+    "Property at 456 Oak Avenue on file",              # street address only
+])
+def test_identity_guard_blocks_label_only_identity_in_structured_output(summary):
+    """Regression: the leak guard delegates to PiiRedactor, which is shape/
+    financial-label based (PAN/SSN/email/phone) and cannot see a person name or a
+    street address. The prompt forbids identity; validate_structured must fail
+    closed on label-only identity so it never reaches the UI or a log."""
+    leaky = json.dumps(
+        {"summary": summary, "risk_flags": [], "recommended_next_step": "request_docs"}
+    )
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response=leaky))
+    with pytest.raises(ValidationFailed):
+        client.summarize_application("{}")
+
+
+def test_identity_guard_allows_legitimate_non_identity_summary():
+    """The identity guard anchors on Title Case, so ordinary lowercase loan prose
+    ("applicant requests ...", "36 months") is not falsely rejected."""
+    out = ClaudeClient(_config(), adapter=FakeAdapter(response=GOOD_SUMMARY)) \
+        .summarize_application("{}")
+    assert out["summary"] == "Applicant requests $10,000 over 36 months."
+
+
 # --- Concern 2: adapter is thin / injectable ------------------------------
 
 def test_adapter_receives_built_request():
