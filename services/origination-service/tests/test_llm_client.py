@@ -882,7 +882,9 @@ def test_leading_zero_ssn_coerced_to_int_masked():
     coercion (012-34-5678 -> 12345678) is 8 digits and not a valid date, so the
     structural heuristic and the label-gated pattern pass both miss it. Key-aware
     masking under an SSN/TIN label catches it before it reaches the provider."""
-    for key in ("ssn", "tin", "social_security_number", "applicant_ssn"):
+    for key in ("ssn", "tin", "social_security_number", "social_security_no",
+                "applicant_ssn", "taxpayer_id", "tax_id_number", "national_id",
+                "itin", "sin"):
         adapter = FakeAdapter(response=GOOD_SUMMARY)
         ClaudeClient(_config(), adapter=adapter).summarize_application(
             '{"%s": 12345678, "amount": 1000}' % key
@@ -890,6 +892,20 @@ def test_leading_zero_ssn_coerced_to_int_masked():
         sent = "".join(m["content"] for m in adapter.calls[0].messages)
         assert "12345678" not in sent, f"leading-zero SSN leaked under key {key!r}"
         assert "1000" in sent  # triage figure survives
+
+
+def test_is_numeric_identity_key_variants_and_false_positives():
+    """Regression (teeth): the SSN/TIN label matcher must catch common spelling
+    variants without over-matching operational numeric fields whose normalized
+    form embeds a short token (routing_number contains 'tin')."""
+    from app.llm.request_builder import _is_numeric_identity_key as f
+    for k in ("ssn", "ssn_number", "applicant_ssn", "tin", "tin_number", "itin",
+              "social_security", "social_security_no", "social_security_number",
+              "taxpayer_id", "tax_id", "tax_id_number", "national_id", "sin"):
+        assert f(k), f"missed SSN/TIN label {k!r}"
+    for k in ("routing_number", "loan_number", "loan_id", "amount",
+              "account_number", "term_months", "cross_number", "is_entity"):
+        assert not f(k), f"over-matched operational field {k!r}"
 
 
 def test_no_last_four_identifier_fragment_reaches_provider():

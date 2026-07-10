@@ -111,15 +111,26 @@ def _is_numeric_identity_key(key) -> bool:
     coerced to the int 12345678). Such a value is neither 9 digits nor a valid
     date, so `_looks_like_numeric_identity` misses it and the label-gated pattern
     pass (which wants a 9-digit / 3-2-4 shape) misses it too. Under one of these
-    labels any number is masked outright. Matched on whole normalized tokens so a
-    substring like the "tin" inside "routing_number" does not false-positive.
+    labels any number is masked outright. Distinctive tokens (socialsecurity,
+    taxpayer, taxid, itin, nationalid) match as substrings so spelling variants
+    (social_security_no, tax_id_number) are caught; short/ambiguous tokens
+    (ssn/tin/sin) are anchored so the "tin" inside "routing_number" or the "ssn"
+    inside "cross_number" does not false-positive.
     """
     kn = str(key).strip().lower().replace("_", "").replace("-", "").replace(" ", "")
-    if kn in {"ssn", "ssnnumber", "socialsecurity", "socialsecuritynumber",
-              "tin", "tinnumber", "itin", "taxid", "taxidnumber",
-              "taxidentificationnumber"}:
+    # Distinctive identity tokens — safe as substrings (catches social_security_no,
+    # taxpayer_id, tax_id_number, national_id, itin without an ordinary field name
+    # embedding them by accident).
+    if any(tok in kn for tok in ("socialsecurity", "taxpayer", "taxid",
+                                 "itin", "nationalid")):
         return True
-    return kn.startswith("ssn") or kn.endswith("ssn")
+    # Short/ambiguous tokens — anchored so a substring like the "tin" inside
+    # "routing_number" or the "ssn" inside "cross_number" cannot false-positive.
+    if kn == "ssn" or kn.startswith("ssn") or kn.endswith("ssn"):
+        return True
+    if kn == "tin" or kn.startswith("tin"):
+        return True
+    return kn in {"sin", "sinnumber"}
 
 
 def _strip_fragment_digits(masked: str) -> str:
