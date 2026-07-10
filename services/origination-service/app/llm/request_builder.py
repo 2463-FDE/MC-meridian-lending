@@ -38,6 +38,13 @@ _IDENTITY_MASK = "•••• (redacted)"
 # are byte-identical — so we do not try; strings are masked, numbers survive.
 _FREETEXT_MASK = "•••• (free text redacted)"
 
+# Value substituted for an object KEY that is not a field name. A legitimate key is
+# a schema label (a bare identifier token); a key carrying data (`{"Jane Smith": 1}`,
+# `{"dob 1970-01-01": 2}`) is caller-supplied identity the pattern redactor cannot
+# detect, and it would reach the provider raw. FAIL-CLOSED: non-field-name keys are
+# masked wholesale (see _is_field_name / _redact_key).
+_KEY_MASK = "•••• (key redacted)"
+
 
 def _is_identity_key(key) -> bool:
     """True if a field NAME denotes a direct applicant identifier.
@@ -213,12 +220,34 @@ def _redact_scalar(key: str, value):
     return value  # triage numbers stay numbers; empty string carries nothing
 
 
+def _is_field_name(s: str) -> bool:
+    """True if a string is a plausible schema field NAME — a bare identifier
+    token (`name`, `first_name`, `annualIncome`, `term-months`). A key that is not
+    (contains whitespace, opens with a digit or symbol, or holds `.`/`@`/`:`) is
+    caller data, not a label. Application/history keys in this system are all such
+    tokens; names/DOB-text/addresses carry spaces or lead with a digit/symbol and
+    fail this test. Residual (inherent, documented): a no-separator bare name used
+    as a key (`{"JaneSmith": 1}`) is indistinguishable from a field name and still
+    passes — the same limit as a lowercased bare name in a value (_redact_scalar).
+    """
+    if not s or not (s[0].isalpha() or s[0] == "_"):
+        return False
+    return all(ch.isalnum() or ch in "_-" for ch in s)
+
+
 def _redact_key(key) -> str:
     """Redact PII out of an object key. Keys are normally field names, but a
     caller-supplied document could carry customer data in a key
-    (`{"contact@ex.com": ...}`); that key would otherwise reach the model raw.
+    (`{"contact@ex.com": ...}`, `{"Jane Smith": 1}`); that key would otherwise
+    reach the model raw. Shaped PII (email/SSN/PAN) is masked by the pattern
+    redactor; anything that survives but is not a field-name token is masked
+    wholesale, because a label-only identifier (name/DOB/address) in a key has no
+    shape the redactor can catch — same fail-closed stance as string values.
     """
-    return PiiRedactor.redact(str(key))
+    redacted = PiiRedactor.redact(str(key))
+    if not _is_field_name(redacted):
+        return _KEY_MASK
+    return redacted
 
 
 def _redact_node(node, key: str = ""):

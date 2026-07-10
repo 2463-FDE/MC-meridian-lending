@@ -864,6 +864,34 @@ def test_pii_in_json_key_not_sent_to_provider():
     assert "412559981" not in sent
 
 
+def test_label_only_identity_in_json_key_not_sent_to_provider():
+    """Regression (teeth): a label-only identifier (name, DOB text, address) used
+    as an object KEY has no shape for the pattern redactor, so it slipped past the
+    key pass and reached the provider. Non-field-name keys are now masked
+    wholesale; legitimate field-name keys survive."""
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).summarize_application(
+        '{"Jane Smith": 1, "dob 1970-01-01": 2, "10 Main St": 3, '
+        '"annual_income": 42000}'
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    for leaked in ("Jane Smith", "dob 1970-01-01", "10 Main St", "1970-01-01"):
+        assert leaked not in sent, f"identity leaked via JSON key: {leaked!r}"
+    assert "annual_income" in sent  # legitimate field-name key survives
+    assert "42000" in sent
+
+
+def test_is_field_name_accepts_labels_rejects_data():
+    """Unit: the key gate accepts schema field names and rejects keys that carry
+    data (whitespace / leading digit / symbol)."""
+    from app.llm.request_builder import _is_field_name as f
+    for k in ("name", "first_name", "annualIncome", "term-months", "_private", "dob"):
+        assert f(k), f"rejected valid field name {k!r}"
+    for k in ("Jane Smith", "dob 1970-01-01", "10 Main St", "1970-01-01",
+              "contact@ex.com", "", "  ", "a.b"):
+        assert not f(k), f"accepted data-bearing key {k!r}"
+
+
 def test_labeled_number_variants_redacted_before_send():
     """F3-labels: `ssn_number` / `phone_number` (and variants) are common
     structured keys; bare numeric values under them must be masked pre-send."""
