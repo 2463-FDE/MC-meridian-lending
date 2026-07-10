@@ -169,6 +169,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history for all branches/tags so the HISTORY scan below can see
+          # every commit; the default shallow checkout would hide older blobs.
+          fetch-depth: 0
       - name: No leaked secret literals in tracked tree
         run: |
           set -euo pipefail
@@ -180,6 +184,32 @@ jobs:
             exit 1
           fi
           echo "OK: no leaked secret literals."
+      - name: No leaked secret literals in git HISTORY
+        # git grep only inspects the current tree. A literal purged from the tree
+        # but still reachable in history is recoverable by anyone with the repo,
+        # so the tree scan alone can go green while the exposure persists. This
+        # scans every commit's diffs across all refs and BLOCKS until the blobs
+        # are gone. Clearing it requires rotating the exposed credentials AND
+        # rewriting history to purge the blobs (see
+        # docs/security-remediation-2026-07.md); it will stay red until then.
+        # Same pattern set and the same self-referential exclusions as the tree
+        # scan (the scanner/doc that must quote the patterns are excluded; test
+        # fixtures under */tests/ are excluded).
+        run: |
+          set -euo pipefail
+          hits=$(git log --all --oneline \
+              -G 'cb_live_|proc_live_|EXAMPLE-LEAKED-KEY|meridian_dev_pw_2024' \
+              -- ':!docs/security-remediation-2026-07.md' \
+                 ':!.github/workflows/ci.yml' \
+                 ':!*/tests/*')
+          if [ -n "$hits" ]; then
+            echo "FAIL: leaked secret literal present in git history (commits below)."
+            echo "$hits"
+            echo "Remediate: rotate the exposed credentials, then rewrite history"
+            echo "to purge the blobs (see docs/security-remediation-2026-07.md)."
+            exit 1
+          fi
+          echo "OK: no leaked secret literals in history."
       - name: .env must not be tracked
         run: |
           set -euo pipefail
