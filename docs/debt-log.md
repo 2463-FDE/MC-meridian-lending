@@ -15,9 +15,10 @@ This document tracks known issues, their business/compliance impact, and mitigat
 |---|---|
 | **ID** | D1 |
 | **Finding** | Bureau and payment-processor API keys are hardcoded in source code and `.env`. |
-| **Location** | `services/decision-service/app/config.py`: `EXPERIAN_KEY = "EXAMPLE-LEAKED-KEY-rotate-me"` (lines ~15–20) |
+| **Location** | `services/decision-service/app/config.py`: hardcoded `EXPERIAN_KEY` inline default (value redacted; lines ~15–20) |
 | | `services/origination-service/app/config.py`: Stale duplicate (lines ~18–22) |
-| | Root `.env` (committed): `CORE_BANKING_API_KEY = "cb_live_..."`, card processor key (line ~12–14) |
+| | Root `.env` (committed): hardcoded `CORE_BANKING_API_KEY` and card-processor key (values redacted; line ~12–14) |
+| | *(Literal values intentionally not reproduced here — see `docs/security-remediation-2026-07.md`. They are purged from source on `security/purge-committed-secrets` and must be rotated.)* |
 | **Risk** | **Critical.** If repo is leaked (GitHub public, compromised dev machine, etc.), all live credentials are exposed. Attacker can: make credit pulls against Experian, charge cards, access banking APIs. PCI-DSS violation (3.5.1: no hardcoded secrets). |
 | **Current Impact** | Keys are in source control history (git log). Even if deleted now, they remain in old commits. |
 | **Mitigation Path** | **Week 2+:** Rotate all compromised keys immediately. Move credentials to sealed env vars or secret manager (e.g., AWS Secrets Manager, HashiCorp Vault). Use CI/CD to inject secrets at deploy time. Remove all old commits containing keys (force-push after rotation, or rewrite history). |

@@ -5,12 +5,10 @@ Exposes the synchronous decisioning chain (bureau pull + rules scorecard) and pe
 the bare outcome to the shared `decisions` table. The decisioning write path uses raw
 psycopg2 — the same partial, unfinished ORM migration seam as origination.
 """
-import logging
-import os
-
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from . import config
 from .logging_config import get_logger
 from .routers import decisions
 
@@ -28,4 +26,26 @@ async def unhandled(request: Request, exc: Exception):
 
 @app.get("/health")
 def health():
+    # Fail readiness when a required secret is missing, so a keyless deployment
+    # cannot look healthy while issuing decisions off a synthetic score.
+    missing = config.missing_required_secrets()
+    if missing:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "service": "decision-service",
+                "missing_secrets": missing,
+            },
+        )
+    ok, db_error = config.database_reachable()
+    if not ok:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "service": "decision-service",
+                "database_error": db_error,
+            },
+        )
     return {"status": "ok", "service": "decision-service"}

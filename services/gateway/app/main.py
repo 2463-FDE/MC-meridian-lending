@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import auth
+from . import auth, config
 from .config import (
     DECISION_URL,
     DISCLOSURE_URL,
@@ -40,6 +40,27 @@ app.add_middleware(
 
 @app.get("/health")
 def health():
+    missing = config.missing_required_secrets()
+    if missing:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "service": "gateway", "missing_secrets": missing},
+        )
+    ok, db_error = config.database_reachable()
+    if not ok:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "service": "gateway", "database_error": db_error},
+        )
+    # Auth/session flows live in Redis, so a Redis outage must fail readiness too —
+    # otherwise the load balancer keeps sending login/session traffic to an instance
+    # that cannot authenticate.
+    redis_ok, redis_error = config.redis_reachable()
+    if not redis_ok:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "service": "gateway", "redis_error": redis_error},
+        )
     return {"status": "ok", "service": "gateway"}
 
 

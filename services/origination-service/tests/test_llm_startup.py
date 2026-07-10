@@ -12,6 +12,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from app import config
 from app.llm import ClaudeClient, LLMConfigError
 from app.main import app, get_llm_client
 
@@ -23,13 +24,46 @@ class _Req:
         self.app = app
 
 
+class _FakeCursor:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, *a, **k):
+        pass
+
+    def fetchone(self):
+        return (1,)
+
+
+class _FakeConn:
+    """Stubs the DB-readiness probe so /health passes without a real Postgres."""
+
+    def cursor(self):
+        return _FakeCursor()
+
+    def close(self):
+        pass
+
+
 def test_startup_skips_llm_when_disabled(monkeypatch):
     monkeypatch.delenv("LLM_ENABLED", raising=False)
     monkeypatch.delenv("CLAUDE_API_KEY", raising=False)  # not required when off
+    # /health now gates on DB readiness (DB-readiness security gate merged from
+    # main); stub a reachable DB so this asserts the LLM-off path, not DB config.
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: _FakeConn())
+    config.reset_database_probe_cache()
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
         assert app.state.llm_client is None
         assert app.state.llm_config is None
+    config.reset_database_probe_cache()
 
 
 def test_startup_fails_loud_when_enabled_without_key(monkeypatch):

@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import intake
+from . import config, intake
 from .llm import ClaudeClient, load_llm_config
 from .logging_config import get_logger
 from .routers import applications, offers
@@ -70,6 +70,18 @@ async def unhandled(request: Request, exc: Exception):
 
 @app.get("/health")
 def health():
+    missing = config.missing_required_secrets()
+    if missing:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "service": "origination", "missing_secrets": missing},
+        )
+    ok, db_error = config.database_reachable()
+    if not ok:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "service": "origination", "database_error": db_error},
+        )
     return {"status": "ok", "service": "origination"}
 
 

@@ -4,7 +4,7 @@ Runs the SYNCHRONOUS decisioning chain inline on the request thread and persists
 bare outcome only. No reason codes, no model drivers, no inputs, no timestamp are stored
 (the missing decision audit trail). (D4, D9, D10)
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from .. import decision
 from ..logging_config import get_logger
@@ -23,7 +23,12 @@ def run_decision(body: DecisionIn):
         "ssn": payload.get("ssn") or "",
         "income": payload.get("annual_income") or 0,
     }
-    result = decision.decide(application)  # synchronous chain; persists outcome only (debt)
+    try:
+        result = decision.decide(application)  # synchronous chain; persists outcome only (debt)
+    except decision.CreditPullError as e:
+        # Fail closed: no decision is issued when the bureau pull cannot be made.
+        log.error("credit pull unavailable, refusing decision: %s", e)
+        raise HTTPException(status_code=503, detail="credit bureau unavailable") from e
     return DecisionOut(
         application_id=payload["application_id"],
         outcome=result["decision"],
