@@ -13,6 +13,9 @@ decisions off a stub score" gap.
 NOTE (intentional debt, left UNTESTED): there is deliberately NO test asserting a
 decision audit trail / reason-code accuracy exists (D4, D10, twists #1/#2).
 """
+import threading
+import time
+
 import pytest
 
 from app import config
@@ -278,6 +281,40 @@ def test_database_url_probe_result_is_cached_within_ttl(monkeypatch):
     config.database_reachable()
     config.database_reachable()
     assert calls["n"] == 1
+
+
+def test_database_url_probe_single_flight_under_concurrent_misses(monkeypatch):
+    # N threads hit a cold cache at once; single-flight must collapse them to ONE
+    # psycopg2.connect, not one connection per request (the /health-flood fix).
+    calls = {"n": 0}
+    count_lock = threading.Lock()
+    barrier = threading.Barrier(8)
+
+    def _slow_connect(*a, **k):
+        with count_lock:
+            calls["n"] += 1
+        time.sleep(0.05)  # hold the probe so all threads pile onto the miss path
+        return _FakeConn()
+
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", _slow_connect)
+
+    results = []
+
+    def worker():
+        barrier.wait()
+        results.append(config.database_reachable())
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert calls["n"] == 1
+    assert results == [(True, None)] * 8
 
 
 def test_health_flags_unreachable_database_url(monkeypatch):

@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from urllib.parse import unquote, urlparse
 
@@ -68,6 +69,9 @@ def database_url_configured() -> bool:
 # as a single tuple so a concurrent read never sees torn state under the GIL.
 _PROBE_TTL_SECONDS = 5.0
 _probe_state = (None, 0.0, (False, None))  # (dsn, monotonic_at, result)
+# Single-flight: only one thread probes per DSN/TTL window; concurrent misses wait
+# on this and reuse the fresh result instead of each opening its own connection.
+_probe_lock = threading.Lock()
 
 
 def reset_database_probe_cache() -> None:
@@ -95,9 +99,18 @@ def database_reachable(timeout: float = 2.0) -> tuple[bool, str | None]:
     dsn, at, result = _probe_state
     if dsn == DATABASE_URL and (time.monotonic() - at) < _PROBE_TTL_SECONDS:
         return result
-    result = _run_database_probe(timeout)
-    _probe_state = (DATABASE_URL, time.monotonic(), result)
-    return result
+    # Cold cache or expired TTL: single-flight so a burst of concurrent misses
+    # (e.g. an unauthenticated /health flood) performs ONE probe, not one Postgres
+    # connection per request. The check above stays lock-free for the warm path;
+    # only a miss contends on the lock, and the re-check inside lets every caller
+    # after the winner reuse the fresh result.
+    with _probe_lock:
+        dsn, at, result = _probe_state
+        if dsn == DATABASE_URL and (time.monotonic() - at) < _PROBE_TTL_SECONDS:
+            return result
+        result = _run_database_probe(timeout)
+        _probe_state = (DATABASE_URL, time.monotonic(), result)
+        return result
 
 
 def _run_database_probe(timeout: float) -> tuple[bool, str | None]:

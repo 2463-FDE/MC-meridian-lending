@@ -5,6 +5,9 @@ misconfigured so /health can report unhealthy instead of connecting
 unauthenticated or failing auth at first query. Covers the passwordless DSN
 (meridian:@postgres) the secret purge left behind and the shipped placeholder.
 """
+import threading
+import time
+
 import pytest
 
 from app import config
@@ -193,3 +196,37 @@ def test_probe_result_is_cached_within_ttl(monkeypatch):
     config.database_reachable()
     config.database_reachable()
     assert calls["n"] == 1  # second call served from cache, no new connection
+
+
+def test_probe_single_flight_under_concurrent_misses(monkeypatch):
+    # N threads hit a cold cache simultaneously; single-flight must collapse them
+    # to ONE psycopg2.connect, not one connection per request (the /health-flood fix).
+    calls = {"n": 0}
+    count_lock = threading.Lock()
+    barrier = threading.Barrier(8)
+
+    def _slow_connect(*a, **k):
+        with count_lock:
+            calls["n"] += 1
+        time.sleep(0.05)  # hold the probe so all threads pile onto the miss path
+        return _FakeConn()
+
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", _slow_connect)
+
+    results = []
+
+    def worker():
+        barrier.wait()  # release all threads at once -> simultaneous cold-cache miss
+        results.append(config.database_reachable())
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert calls["n"] == 1  # exactly one probe despite 8 concurrent misses
+    assert results == [(True, None)] * 8
