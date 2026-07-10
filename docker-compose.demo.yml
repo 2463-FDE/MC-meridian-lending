@@ -1,0 +1,17 @@
+# LOCAL DEMO ONLY — never use in a real environment.
+#
+# Enables synthetic credit scoring so the stack runs without a live Experian
+# bureau. Both gates are set here (ENVIRONMENT=development AND
+# ALLOW_SYNTHETIC_CREDIT=1); neither one alone enables it, and the default
+# .env / .env.example leave both off so a normal deploy fails closed.
+#
+# Run:
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up
+#
+# This override is NOT auto-loaded — you must pass it explicitly, so it can never
+# silently apply to a production `docker compose up`.
+services:
+  decision-service:
+    environment:
+      ENVIRONMENT: development
+      ALLOW_SYNTHETIC_CREDIT: "1"

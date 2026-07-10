@@ -24,10 +24,19 @@ coverage/
 .idea/
 .vscode/
 
+# secrets — never commit real credentials. Ship .env.example only.
+.env
+.env.local
+.env.*.local
+!.env.example
+*.pem
+*.key
+
 # logs — never commit runtime logs; they can carry unredacted PII (raw PANs/SSNs
-# were found in a checked-in log). If finance needs a sample, commit ONE redacted
-# example explicitly. NOTE: untracking does not purge PII already in git history —
-# a history rewrite (git filter-repo / BFG) is still required separately.
+# were found in a checked-in log; see docs/security-remediation-2026-07.md). If
+# finance needs a sample, commit ONE redacted example explicitly. NOTE:
+# untracking does not purge PII already in git history — a history rewrite
+# (git filter-repo / BFG) is still required separately.
 logs/
 **/logs/
 *.log

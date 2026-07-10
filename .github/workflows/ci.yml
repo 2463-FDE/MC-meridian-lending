@@ -85,6 +85,62 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_logging_redaction.py -q
 
+  synthetic-credit-gate:
+    # Fail-closed synthetic credit is a security control (approving loans on fake
+    # scores). Like redaction-tests, this MUST block the build — the `backend` job
+    # is continue-on-error, so a reopened gate would otherwise stay green. Guards
+    # the template a deploy inherits: exactly one ENVIRONMENT, not development, and
+    # no ALLOW_SYNTHETIC_CREDIT default. No continue-on-error, no `|| true`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: decision-service .env.example gate regression test
+        run: |
+          cd services/decision-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_decision.py::test_env_example_gate_stays_closed_by_parsing_the_template -q
+
+  db-readiness-gate:
+    # DB readiness is a security control: a passwordless / placeholder / stale
+    # DATABASE_URL must report unhealthy, not connect unauthenticated or fail
+    # auth at first query. The per-service test_db_readiness.py tests run in the
+    # `backend` job too, but that is continue-on-error/|| true, so a reopened
+    # gate would stay green. This job MUST block — no continue-on-error, no
+    # `|| true`. Covers every service that implements the gate.
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, origination-service, servicing-service, kyc-service, disclosure-service, payment-service]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ${{ matrix.service }} DB readiness regression tests
+        run: |
+          cd services/${{ matrix.service }}
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_db_readiness.py -q
+
+  decision-db-readiness-gate:
+    # decision-service implements the same DB readiness gate; its tests live in
+    # test_decision.py (alongside the bureau-key/synthetic gates). Blocking, like
+    # db-readiness-gate above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: decision-service DB readiness regression tests
+        run: |
+          cd services/decision-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_decision.py -k database_url -q
+
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -98,6 +154,47 @@ jobs:
           npm ci || npm install
           npm run build
 
-  # GAP: no secret scanning (gitleaks/trufflehog), no dependency audit, no SAST,
-  # no check that .env is untracked. A live bureau key + AWS key sail through CI.
+  secret-scan:
+    # Secret literals must never re-enter the tracked tree. Runs the same scan
+    # documented in docs/security-remediation-2026-07.md and BLOCKS the build on
+    # any hit — previously this was docs-only, so a config denylist re-committed
+    # the leaked Postgres password literal across all seven services and nothing
+    # caught it. Blocking, like the other security-control gates: no
+    # continue-on-error, no `|| true`.
+    #
+    # The scanner definitions here and in the remediation doc necessarily quote
+    # the patterns, so both files are excluded from their own scan; every other
+    # tracked path (incl. docs/, services/) is scanned. Intentional test fixtures
+    # under */tests/ are excluded.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No leaked secret literals in tracked tree
+        run: |
+          set -euo pipefail
+          if git grep -nIE 'cb_live_|proc_live_|EXAMPLE-LEAKED-KEY|meridian_dev_pw_2024' \
+              -- ':!docs/security-remediation-2026-07.md' \
+                 ':!.github/workflows/ci.yml' \
+                 ':!*/tests/*'; then
+            echo "FAIL: leaked secret literal found in tracked tree (see matches above)."
+            exit 1
+          fi
+          echo "OK: no leaked secret literals."
+      # NOTE: a blocking git-HISTORY scan (git log --all -G over all refs) is
+      # deliberately NOT here. Those literals are still reachable in history, so
+      # the scan is red until the credentials are rotated and history is
+      # rewritten (see docs/security-remediation-2026-07.md). Enabling it now
+      # would make this branch permanently unmergeable, conflating enforcement
+      # with the not-yet-done remediation. It lands as a separate follow-up PR
+      # AFTER the rewrite, when it can pass. Tracked in that follow-up.
+      - name: .env must not be tracked
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '(^|/)\.env$'; then
+            echo "FAIL: .env is tracked; it must be gitignored (.env.example is fine)."
+            exit 1
+          fi
+          echo "OK: no tracked .env."
+
+  # GAP: no dependency audit, no SAST, no container image scan.
   # GAP: backend tests are continue-on-error, so failing money-math tests are green.

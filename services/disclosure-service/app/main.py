@@ -10,6 +10,7 @@ import os
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from . import config
 from .logging_config import get_logger
 from .routers import offers
 
@@ -27,4 +28,16 @@ async def unhandled(request: Request, exc: Exception):
 
 @app.get("/health")
 def health():
+    missing = config.missing_required_secrets()
+    if missing:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "service": "disclosure-service", "missing_secrets": missing},
+        )
+    ok, db_error = config.database_reachable()
+    if not ok:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "service": "disclosure-service", "database_error": db_error},
+        )
     return {"status": "ok", "service": "disclosure-service"}
