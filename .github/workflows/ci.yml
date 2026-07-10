@@ -69,6 +69,19 @@ jobs:
           cd services/origination-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_redactor.py -q
+      - name: origination-service LLM client tests (provider/retry/schema/pre-send PII redaction)
+        # Highest-risk behavior in the LLM feature — must block the build. The
+        # `backend` job also runs these but under continue-on-error/|| true, so a
+        # failure there stays green; this step is the enforceable gate.
+        run: |
+          cd services/origination-service
+          python -m pytest tests/test_llm_client.py -q
+      - name: origination-service LLM startup wiring + config-range validation
+        # Startup must fail loud on a missing key or out-of-range numeric config
+        # (comment: nonsensical CLAUDE_* values). Blocking, like the client tests.
+        run: |
+          cd services/origination-service
+          python -m pytest tests/test_llm_startup.py -q
       - name: payment-service logging-redaction integration tests
         run: |
           cd services/payment-service

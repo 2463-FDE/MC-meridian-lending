@@ -1,11 +1,14 @@
 """Allowlist-logging regression for origination intake.
 
 create_application() must log only an allowlist of non-PII, non-free-text
-fields (amount / term / entity flag) — never the raw request dict. This closes
-the whole class of "PAN hidden in a free-text field reaches the log" bypasses at
-the source: client free text simply never gets logged. The shared redactor stays
-a backstop (covered by test_redactor.py), but the intake log must not depend on
-it. Exercises the real intake.create_application path with the DB mocked.
+fields (amount / term / entity flag) — never the raw request dict or the direct
+applicant identifiers (name/dob/ssn/ein/address). This closes the whole class of
+"PAN hidden in a free-text field reaches the log" bypasses at the source: client
+free text simply never gets logged. The redactor also has no shape to key on for
+name/dob/ein/address, so a full-payload dump (the old D5 'req=%s' line) leaked
+applicant identity outright. The shared redactor stays a backstop (covered by
+test_redactor.py), but the intake log must not depend on it. Exercises the real
+intake.create_application path with the DB stubbed.
 """
 import logging
 import os
@@ -21,18 +24,13 @@ from app.logging_config import get_logger
 @pytest.fixture
 def temp_log_dir(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
-        original = os.getenv("LOG_DIR")
-        os.environ["LOG_DIR"] = tmpdir
+        monkeypatch.setenv("LOG_DIR", tmpdir)
         logging.getLogger("intake").handlers.clear()
         # Rebuild intake's module logger so it writes into this temp dir.
         monkeypatch.setattr(intake, "log", get_logger("intake"))
-        # Mock the DB so create_application runs without a real connection.
+        # DB is not under test — stub both INSERTs to return a row with an id.
         monkeypatch.setattr(intake.db, "query", lambda *a, **k: [{"id": 1}])
         yield tmpdir
-        if original:
-            os.environ["LOG_DIR"] = original
-        else:
-            os.environ.pop("LOG_DIR", None)
 
 
 @pytest.mark.parametrize("hidden_pan", [
@@ -68,3 +66,26 @@ def test_intake_log_is_not_raw_payload_dump(temp_log_dir):
     content = (Path(temp_log_dir) / "origination-service.log").read_text()
     assert "req=" not in content, "raw payload dump reintroduced"
     assert "Jane" not in content
+
+
+def test_intake_log_omits_direct_identifiers(temp_log_dir):
+    intake.create_application({
+        "name": "Jane Doe",
+        "dob": "1970-01-01",
+        "address": "10 Main St",
+        "ein": "12-3456789",
+        "ssn": "412-55-9981",
+        "amount": 18000,
+        "term_months": 48,
+        "purpose": "auto",
+        "is_entity": False,
+    })
+    content = (Path(temp_log_dir) / "origination-service.log").read_text()
+    assert "Jane Doe" not in content, "raw name reached the log"
+    assert "1970-01-01" not in content, "DOB reached the log"
+    assert "10 Main St" not in content, "address reached the log"
+    assert "12-3456789" not in content, "EIN reached the log"
+    assert "412-55-9981" not in content, "raw SSN reached the log"
+    assert "req=" not in content, "full-payload dump reintroduced"
+    # Operational fields the officer needs for triage are still logged.
+    assert "amount=18000" in content

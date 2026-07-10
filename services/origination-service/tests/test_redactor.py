@@ -413,6 +413,85 @@ class TestPiiRedactorAdversarialFixes:
         text = "amount 1234567.89 usd"
         assert PiiRedactor.redact(text) == text
 
+    def test_ssn_number_label_variant_masked(self):
+        # Common structured key `ssn_number` (and plural/no/num variants) must
+        # match the SSN label gate — the narrow `ssn`-only set let these bypass.
+        for label in ("ssn_number", "ssn_no", "ssns", "tax_id_number"):
+            result = PiiRedactor.redact('{"%s": 412559981}' % label)
+            assert "412559981" not in result, label
+            assert "9981" in result, label
+
+    def test_phone_number_label_variant_masked(self):
+        for label in ("phone_number", "phone_no", "phones", "mobile_number"):
+            result = PiiRedactor.redact('{"%s": 5551234567}' % label)
+            assert "5551234567" not in result, label
+            assert "4567" in result, label
+
+    def test_account_number_masked_loan_number_untouched(self):
+        # account_number is label-gated and MUST be masked (ADR 0005: account
+        # identifiers must not leave the system, incl. to the third-party LLM).
+        # An unrelated labeled number (loan_number) stays intact — the `_number`
+        # suffix alone is not a trigger.
+        text = '{"loan_number": 412559981, "account_number": 5551234567}'
+        result = PiiRedactor.redact(text)
+        assert '"loan_number": 412559981' in result  # not an account/PII field
+        assert "5551234567" not in result            # account number masked
+        assert "4567" in result                       # last 4 preserved for audit
+
+    def test_bank_account_label_variants_masked(self):
+        # Label-gated bank/account/routing fields, various names + separators.
+        for label in ("account_number", "account_no", "acct", "bank_account",
+                      "routing_number", "routing", "aba", "rtn", "transit",
+                      "dda", "ach_account"):
+            result = PiiRedactor.redact('{"%s": "123456789012"}' % label)
+            assert "123456789012" not in result, label
+            assert "9012" in result, label            # last 4 preserved
+
+    def test_routing_number_bare_masked_in_field(self):
+        result = PiiRedactor.redact('{"routing_number": 123456789}')
+        assert "123456789" not in result
+        assert "6789" in result
+
+    def test_iban_masked_labeled_and_free_text(self):
+        # IBAN is self-identifying (ISO 13616), so it is redacted even in free text.
+        for text in ('{"iban": "GB82WEST12345698765432"}',
+                     "wire to GB82WEST12345698765432 today"):
+            result = PiiRedactor.redact(text)
+            assert "GB82WEST12345698765432" not in result
+            assert "5432" in result
+
+    def test_labeled_account_masked_any_separator_or_charset(self):
+        # Adversarial: the field name asserts an account number, so the WHOLE
+        # value must mask regardless of internal separators/charset. Enumerating
+        # separators (as the first cut did) left tails leaking: 555*1234*567*8901
+        # masked only "555". Now separator-agnostic via digit-count masking.
+        for val in ("555*1234*567*8901", "ACCT5551234567", "5551/2345/678",
+                    "5551 2345 678", "5551-2345-678"):
+            result = PiiRedactor.redact('{"account_number":"%s"}' % val)
+            # no run of >=4 consecutive raw account digits survives
+            import re as _re
+            digits = _re.sub(r"\D", "", val)
+            assert digits[:-4] not in result, f"account digits leaked for {val!r}: {result}"
+            assert digits[-4:] in result, f"last 4 missing for {val!r}: {result}"
+
+    def test_lowercase_iban_in_labeled_field_masked(self):
+        # A labeled iban field must mask regardless of case (6a value masking),
+        # even though free-text IBAN detection (6b) is uppercase-only per ISO 13616.
+        result = PiiRedactor.redact('{"iban":"gb82west12345698765432"}')
+        assert "gb82west12345698765432" not in result
+        assert "12345698765432" not in result
+        assert "5432" in result
+
+    def test_account_labels_no_false_positive_on_non_account(self):
+        # A field that merely contains 'account' in its name but is not a number
+        # (or is a different concept) must not be mangled.
+        for text in ('{"account_type": "checking"}',
+                     '{"account_name": "Jane Doe"}',
+                     '{"account_status": "open"}'):
+            assert PiiRedactor.redact(text) == text
+        # A bare 9-digit number NOT in an account field is left alone.
+        assert PiiRedactor.redact("ref 123456789 seen") == "ref 123456789 seen"
+
     def test_pii_embedded_in_free_text_note_masked(self):
         # Review ask: free-text is where redaction most often slips. PII buried in
         # a prose note (not a labeled field) must still be masked by shape.

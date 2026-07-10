@@ -40,3 +40,10 @@ coverage/
 logs/
 **/logs/
 *.log
+
+# secrets — never commit real credentials. The LLM/Bedrock key belongs in the
+# host shell env or an untracked override file, NOT in the committed .env.
+.env.local
+.env.*.local
+*.pem
+*.key

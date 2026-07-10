@@ -146,3 +146,53 @@ def call(
 - **PCI-DSS:** LLM client never stores or logs PAN/CVV/SSN. Redaction ensures this. (D1 in debt-log.)
 - **Privacy:** Redaction before sending to Claude satisfies privacy-first principle for customer data.
 - **Auditability:** Redacted logs allow debugging without exposing sensitive data.
+
+---
+
+## Revision 2026-07-07: Expanded build checklist (7 concerns)
+
+The original decision above described a single `ClaudeClient` class. Review added a
+seven-concern build checklist. This revision folds those concerns into the design and
+splits them into **Week 1 core** (build now) vs **Deferred** (later week), so the
+build traces to an explicit line.
+
+The client is decomposed into seven collaborators instead of one class, each mapping
+to one checklist concern:
+
+| # | Concern | Module | Scope | Notes |
+|---|---------|--------|-------|-------|
+| 1 | **Config** | `app/llm/config.py` | Week 1 | model id, default params, timeout in one `LLMConfig`; key from env; **fail loud at boot** (`load_llm_config()` raises `LLMConfigError` if `CLAUDE_API_KEY` missing — called at app startup, not lazily) |
+| 2 | **Model adapter** | `app/llm/adapter.py` | Week 1 | one `ModelAdapter` interface (`complete()` + `stream()`) hiding the provider; translation only, no business logic; `ClaudeAdapter` (lazy `anthropic` import) + `FakeAdapter` for tests |
+| 3 | **Request builder** | `app/llm/request_builder.py` | Week 1 | assembles system + examples + context + history + user; token budget (count, trim oldest history, reserve room for answer); pulls from prompt library, not inline |
+| 4 | **Resilient transport** | `app/llm/transport.py` | Week 1 | timeout every call; retry only 429/5xx, never 4xx; exponential backoff **+ jitter**; idempotency key threaded through and logged as request id |
+| 5 | **Streaming** | `adapter.stream()` | **Deferred** | interface defined + `ClaudeAdapter.stream()` implemented (buffer-then-validate), but not wired into a product path until the loan-summary feature (Week 2) needs a human-watching UI. Cancellation/mid-stream-failure hardening lands with that feature. |
+| 6 | **Validator / guardrail** | `app/llm/validator.py` | Week 1 (core) / Deferred (correction loop) | parse + JSON-schema check; **fallback** to a safe default or raise on failure — never pass malformed forward; content/length/leak guards on output. **retry-with-correction** deferred to Week 2 (needs prompt-feedback loop). |
+| 7 | **Logger** | reuses `logging_config.get_logger` + `PiiRedactor` | Week 1 | logs latency, token counts, model+params, retry count, request id; never the API key or raw PII (redactor already applied to all log output) |
+
+### Orchestration
+
+`ClaudeClient.summarize(...)` (and the lower-level `ClaudeClient.complete(...)`) wire
+the collaborators in order: build request → cost guard → transport (timeout/retry) →
+validate/guard → log metrics. The adapter is injected, so tests pass `FakeAdapter`
+and spend no tokens.
+
+### Idempotency (concern 4 detail)
+
+LLM completion has no server-side side effect, so retrying the *same* request is safe.
+We still generate an `idempotency_key` per logical request, thread it through, and log
+it as the request id — this makes retries traceable and prepares for future
+non-idempotent tool-calling (where the key would gate replay). We retry only 429/5xx;
+4xx (bad request, auth, budget) fail immediately with no retry.
+
+### What is explicitly NOT in Week 1
+
+- Streaming wired into a UI (interface only this week)
+- Retry-with-correction validation loop
+- Circuit breaker / provider fallback (still Week 3+, unchanged from above)
+- Shared cross-service package for the client (origination-only, unchanged)
+
+### Deliverables this cycle
+
+Per the assignment, the turn-in is three artifacts: **(1)** the client (the seven
+modules above), **(2)** a code review of that client against the review checklist
+(`docs/llm-client-code-review.md`), and **(3)** a prompt library (`app/prompts/`).

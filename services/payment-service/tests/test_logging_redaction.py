@@ -269,6 +269,47 @@ def test_no_leak_via_root_handler(temp_log_dir):
     assert logger.propagate is False, "service logger must not propagate to root"
 
 
+def test_charge_masks_invalid_luhn_labeled_pan(temp_log_dir, monkeypatch):
+    """An invalid-Luhn card in the labeled `pan` field is still cardholder data.
+
+    A mistyped / test / rejected card fails the Luhn checksum but must NOT be
+    logged in the clear. Exercises the real payments.charge log path (DB +
+    servicing call mocked) so the label-gated masking is proven end to end, not
+    just in the redactor unit.
+    """
+    from app import payments
+
+    logging.getLogger("payment").handlers.clear()
+    monkeypatch.setattr(payments, "log", get_logger("payment"))
+    monkeypatch.setattr(payments.db, "query", lambda *a, **k: [{"id": 1}])
+    monkeypatch.setattr(payments, "_apply_via_servicing", lambda *a, **k: None)
+
+    payments.charge(loan_id=7, pan="4111111111111112", cvv="123",
+                    amount=250.00, ssn="412-55-9981", name="Jane Doe")
+
+    content = (Path(temp_log_dir) / "payment-service.log").read_text()
+    assert "4111111111111112" not in content, "invalid-Luhn PAN logged in the clear"
+    assert "411111111111" not in content, "PAN prefix leaked"
+    assert "1112" in content, "last 4 should be preserved for reference"
+    assert "(PAN)" in content, "PAN redaction marker missing"
+    assert '"123"' not in content, "CVV should be redacted"
+    assert "412-55-9981" not in content, "SSN should be redacted"
+
+
+def test_labeled_pan_masked_regardless_of_luhn():
+    """Direct redactor unit: labeled card fields mask invalid-Luhn values, while
+    an UNLABELED non-Luhn digit run (order id) stays untouched."""
+    r = PiiRedactor.redact
+    assert "4111111111111112" not in r('{"pan":"4111111111111112"}')
+    assert "1112 (PAN)" in r('{"pan":"4111111111111112"}')
+    assert "1112 (PAN)" in r('{"card_number":"4111-1111-1111-1112"}')
+    assert "1112 (PAN)" in r('cc_number=4111111111111112')
+    # Unlabeled non-Luhn 16-digit run must NOT be masked (order id false positive).
+    assert r('{"order_id":"1234567890123456"}') == '{"order_id":"1234567890123456"}'
+    # A short value under a card key is left as-is (brand string, last-4).
+    assert r('{"pan":"visa"}') == '{"pan":"visa"}'
+
+
 def test_redacting_formatter_integration(temp_log_dir):
     """Test: RedactingFormatter is properly integrated."""
     logger = logging.getLogger("formatter_test")
