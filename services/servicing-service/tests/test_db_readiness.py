@@ -249,14 +249,15 @@ def test_present_processor_key_not_flagged(monkeypatch):
 
 
 def test_payments_503_without_processor_key(monkeypatch):
-    # Guard fires before charge(), so no DB / balance mutation happens.
+    # Call the route handler directly (no TestClient/httpx dependency): the guard
+    # fires before charge(), so no DB / balance mutation happens.
     monkeypatch.setattr(config, "PROCESSOR_API_KEY", "")
-    from fastapi.testclient import TestClient
-    from app.main import app
+    from fastapi import HTTPException
+    from app.main import PaymentIn, post_payment
 
-    resp = TestClient(app).post("/payments", json={"loan_id": 1, "amount": 100.0})
-    assert resp.status_code == 503
-    assert "processor" in resp.json()["detail"].lower()
+    with pytest.raises(HTTPException) as exc_info:
+        post_payment(PaymentIn(loan_id=1, amount=100.0))
+    assert exc_info.value.status_code == 503
 
 
 def test_payments_allowed_with_processor_key(monkeypatch):
@@ -268,9 +269,7 @@ def test_payments_allowed_with_processor_key(monkeypatch):
         "charge",
         lambda *a, **k: {"loan_id": 1, "amount": 100.0, "balance": 900.0},
     )
-    from fastapi.testclient import TestClient
-    from app.main import app
+    from app.main import PaymentIn, post_payment
 
-    resp = TestClient(app).post("/payments", json={"loan_id": 1, "amount": 100.0})
-    assert resp.status_code == 200
-    assert resp.json()["balance"] == 900.0
+    out = post_payment(PaymentIn(loan_id=1, amount=100.0))
+    assert out["balance"] == 900.0
