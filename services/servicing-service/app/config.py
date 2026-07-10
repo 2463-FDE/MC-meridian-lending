@@ -138,18 +138,33 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
 
 
 def missing_required_secrets() -> list:
-    """Config that MUST be present for a healthy runtime; surfaced by /health so
-    an unset or passwordless DATABASE_URL reports unhealthy instead of connecting
-    unauthenticated (or failing opaquely at query time) while looking OK."""
+    """Config that MUST be present for a healthy runtime; surfaced by /health.
+
+    An unset or passwordless DATABASE_URL reports unhealthy instead of connecting
+    unauthenticated. PROCESSOR_API_KEY is required too: without it this service
+    cannot authorize a real capture, and the direct /payments charge path would
+    otherwise record a 'captured' payment (and mutate the balance) that no
+    processor ever saw — so a keyless deploy must read unhealthy and /payments
+    must fail closed (see processor_configured)."""
     missing = []
     if not database_url_configured():
         missing.append("DATABASE_URL")
+    if not processor_configured():
+        missing.append("PROCESSOR_API_KEY")
     return missing
 
 
 # Processor key — env only; no committed default. Rotate the previously-committed
 # key (see docs/security-remediation-2026-07.md).
 PROCESSOR_API_KEY = os.getenv("PROCESSOR_API_KEY", "")
+
+
+def processor_configured() -> bool:
+    """The card-processor credential must be present to authorize/capture a payment.
+    After the secret purge there is no committed fallback, so an unset key means the
+    service cannot legitimately capture — fail closed (readiness AND the /payments
+    endpoint) rather than record a 'captured' payment no processor ever saw."""
+    return bool(PROCESSOR_API_KEY)
 PROCESSOR_BASE_URL = os.getenv("PROCESSOR_BASE_URL", "https://api.cardprocessor.example.com")
 SETTLEMENT_FILE = os.getenv("SETTLEMENT_FILE", "data/settlement.csv")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

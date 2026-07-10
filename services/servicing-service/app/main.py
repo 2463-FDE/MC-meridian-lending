@@ -8,7 +8,7 @@ implementation and accept ANY authenticated caller — no role check, no maker-c
 import logging
 import os
 
-from fastapi import FastAPI, Header, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -58,6 +58,13 @@ class PaymentIn(BaseModel):
 
 @app.post("/payments")
 def post_payment(body: PaymentIn):
+    # Fail closed without a processor credential: charge() inserts the payment and
+    # mutates the balance, recording a 'captured' payment no processor authorized.
+    if not config.processor_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="payment processor not configured (PROCESSOR_API_KEY unset)",
+        )
     # No idempotency key accepted or checked. Retried POST = second charge. (debt D2)
     return payments.charge(
         body.loan_id, body.pan, body.cvv, body.amount, body.ssn, body.name, body.method

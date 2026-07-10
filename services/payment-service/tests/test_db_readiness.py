@@ -230,3 +230,49 @@ def test_probe_single_flight_under_concurrent_misses(monkeypatch):
 
     assert calls["n"] == 1  # exactly one probe despite 8 concurrent misses
     assert results == [(True, None)] * 8
+
+
+# --- Processor-key readiness + fail-closed capture -------------------------
+# After the secret purge PROCESSOR_API_KEY has no committed fallback. Without it
+# the service cannot authorize a real capture, so it must read unhealthy AND
+# /payments must fail closed rather than record a 'captured' payment.
+
+
+def test_missing_processor_key_flags_readiness(monkeypatch):
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "")
+    assert "PROCESSOR_API_KEY" in config.missing_required_secrets()
+
+
+def test_present_processor_key_not_flagged(monkeypatch):
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "proc_test")
+    assert "PROCESSOR_API_KEY" not in config.missing_required_secrets()
+
+
+def test_payments_503_without_processor_key(monkeypatch):
+    # Guard fires before charge(), so no DB is touched.
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "")
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    resp = TestClient(app).post("/payments", json={"loan_id": 1, "amount": 100.0})
+    assert resp.status_code == 503
+    assert "processor" in resp.json()["detail"].lower()
+
+
+def test_payments_allowed_with_processor_key(monkeypatch):
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "proc_test")
+    from app import payments
+
+    monkeypatch.setattr(
+        payments,
+        "charge",
+        lambda *a, **k: {
+            "payment_id": 1, "loan_id": 1, "status": "captured", "applied_amount": 100.0
+        },
+    )
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    resp = TestClient(app).post("/payments", json={"loan_id": 1, "amount": 100.0})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "captured"
