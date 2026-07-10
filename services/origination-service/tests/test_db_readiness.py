@@ -5,7 +5,18 @@ misconfigured so /health can report unhealthy instead of connecting
 unauthenticated or failing auth at first query. Covers the passwordless DSN
 (meridian:@postgres) the secret purge left behind and the shipped placeholder.
 """
+import pytest
+
 from app import config
+
+
+@pytest.fixture(autouse=True)
+def _reset_probe_cache():
+    # database_reachable caches its result; reset around every test so the probe
+    # stubs below are observed fresh and cases don't leak into each other.
+    config.reset_database_probe_cache()
+    yield
+    config.reset_database_probe_cache()
 
 
 def test_unset_database_url_is_misconfigured(monkeypatch):
@@ -80,3 +91,105 @@ def test_url_encoded_reserved_char_password_is_ok(monkeypatch):
     )
     assert config.database_url_configured() is True
     assert "DATABASE_URL" not in config.missing_required_secrets()
+
+
+# --- Live connectivity probe (database_reachable) --------------------------
+# The config gate above cannot prove a password authenticates. database_reachable
+# opens a bounded connection and runs SELECT 1; these tests stub psycopg2.connect
+# so no real database is required.
+
+
+class _FakeCursor:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, *a, **k):
+        pass
+
+    def fetchone(self):
+        return (1,)
+
+
+class _FakeConn:
+    def __init__(self):
+        self.closed_flag = False
+
+    def cursor(self):
+        return _FakeCursor()
+
+    def close(self):
+        self.closed_flag = True
+
+
+def test_probe_ok_when_connection_succeeds(monkeypatch):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: _FakeConn())
+    ok, err = config.database_reachable()
+    assert ok is True
+    assert err is None
+
+
+def test_probe_fails_on_wrong_password_without_postgres_password(monkeypatch):
+    # The documented residual the config gate cannot catch: a real, non-placeholder
+    # DSN password with no POSTGRES_PASSWORD to compare against. database_url_configured
+    # accepts it; only the live probe detects that it does not authenticate.
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:wrong_pw@postgres:5432/meridian"
+    )
+    assert config.database_url_configured() is True  # config gate cannot tell
+
+    def _auth_fail(*a, **k):
+        raise config.psycopg2.OperationalError("password authentication failed")
+
+    monkeypatch.setattr(config.psycopg2, "connect", _auth_fail)
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "OperationalError"  # class name only — no DSN/password leak
+
+
+def test_probe_false_when_database_url_unset(monkeypatch):
+    monkeypatch.setattr(config, "DATABASE_URL", "")
+    ok, err = config.database_reachable()
+    assert ok is False
+
+
+def test_probe_passes_bounded_timeouts_and_closes(monkeypatch):
+    captured = {}
+    conn = _FakeConn()
+
+    def _capture(dsn, **kwargs):
+        captured.update(kwargs)
+        return conn
+
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", _capture)
+    config.database_reachable()
+    assert captured["connect_timeout"] >= 1
+    assert "statement_timeout" in captured["options"]
+    assert conn.closed_flag is True  # connection is always closed
+
+
+def test_probe_result_is_cached_within_ttl(monkeypatch):
+    # /health must not open a Postgres connection per request. Two calls within the
+    # TTL must reuse one connection — the DoS-amplifier fix.
+    calls = {"n": 0}
+
+    def _count(*a, **k):
+        calls["n"] += 1
+        return _FakeConn()
+
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", _count)
+    config.database_reachable()
+    config.database_reachable()
+    assert calls["n"] == 1  # second call served from cache, no new connection

@@ -6,7 +6,10 @@ in source (was: inline "so the demo just works"). Inject via the host env /
 secret manager; see docs/security-remediation-2026-07.md.
 """
 import os
+import time
 from urllib.parse import unquote, urlparse
+
+import psycopg2
 
 # --- Credit bureau (Experian) — env only; no committed default. Rotate the key
 # that was previously hardcoded/committed. ---
@@ -34,8 +37,9 @@ def database_url_configured() -> bool:
 
     Residual (documented): this proves the password is real and consistent, not
     that it authenticates. A wrong password with no POSTGRES_PASSWORD to compare
-    (e.g. an external managed DB whose secret lives only in the DSN) needs a live
-    connectivity probe — a follow-up. Passwordless auth (IAM/peer/PGPASSWORD)
+    (e.g. an external managed DB whose secret lives only in the DSN) is caught by
+    database_reachable(), the bounded live probe /health runs after this gate.
+    Passwordless auth (IAM/peer/PGPASSWORD)
     must revisit this gate — here, passwordless means misconfigured.
     """
     if not DATABASE_URL:
@@ -65,6 +69,71 @@ def database_url_configured() -> bool:
     if expected and password != expected:
         return False
     return True
+
+
+# Short-TTL cache of the last probe, keyed on the DSN. /health is unauthenticated
+# and hit by load balancers (and anyone on the published port); without this each
+# request would open a new, unpooled Postgres connection, so a flood could exhaust
+# max_connections or the sync threadpool. Collapsing bursts to one probe per TTL
+# removes that amplifier. Cost: /health can lag a DB up/down transition by up to
+# the TTL — acceptable for readiness (the healthcheck interval is longer). Stored
+# as a single tuple so a concurrent read never sees torn state under the GIL.
+_PROBE_TTL_SECONDS = 5.0
+_probe_state = (None, 0.0, (False, None))  # (dsn, monotonic_at, result)
+
+
+def reset_database_probe_cache() -> None:
+    """Drop the cached probe result (forces the next call to reconnect)."""
+    global _probe_state
+    _probe_state = (None, 0.0, (False, None))
+
+
+def database_reachable(timeout: float = 2.0) -> tuple[bool, str | None]:
+    """Bounded live probe (TTL-cached): open a Postgres connection, run SELECT 1.
+
+    database_url_configured() only proves the DSN password is non-placeholder and
+    (when POSTGRES_PASSWORD is set) matches it — it does NOT prove the password
+    authenticates. This closes that documented residual: a wrong password with no
+    POSTGRES_PASSWORD to compare against (e.g. an external managed DB whose secret
+    lives only in the DSN) is caught only by actually connecting. connect_timeout
+    and a server-side statement_timeout bound the probe so /health cannot hang; the
+    result is cached for _PROBE_TTL_SECONDS so a flood of /health calls cannot open
+    a Postgres connection per request.
+
+    Returns (ok, error); error is the exception class name only — never the DSN or
+    its password — so /health cannot leak credentials.
+    """
+    global _probe_state
+    dsn, at, result = _probe_state
+    if dsn == DATABASE_URL and (time.monotonic() - at) < _PROBE_TTL_SECONDS:
+        return result
+    result = _run_database_probe(timeout)
+    _probe_state = (DATABASE_URL, time.monotonic(), result)
+    return result
+
+
+def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
+    if not DATABASE_URL:
+        return False, "DATABASE_URL not set"
+    conn = None
+    try:
+        conn = psycopg2.connect(
+            DATABASE_URL,
+            connect_timeout=max(1, int(timeout)),
+            options="-c statement_timeout=2000",
+        )
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        return True, None
+    except Exception as exc:
+        return False, exc.__class__.__name__
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def missing_required_secrets() -> list:

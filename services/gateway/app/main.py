@@ -46,6 +46,12 @@ def health():
             status_code=503,
             content={"status": "unhealthy", "service": "gateway", "missing_secrets": missing},
         )
+    ok, db_error = config.database_reachable()
+    if not ok:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "service": "gateway", "database_error": db_error},
+        )
     return {"status": "ok", "service": "gateway"}
 
 

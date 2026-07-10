@@ -19,6 +19,15 @@ from app import config
 from app.decision import decide, CreditPullError
 
 
+@pytest.fixture(autouse=True)
+def _reset_probe_cache():
+    # database_reachable caches its result; reset around every test so probe stubs
+    # are observed fresh and /health cases don't leak into each other.
+    config.reset_database_probe_cache()
+    yield
+    config.reset_database_probe_cache()
+
+
 @pytest.fixture
 def synthetic_mode(monkeypatch):
     """Explicit local/demo mode: dev environment + opt-in flag + no key.
@@ -84,7 +93,12 @@ def test_health_reports_unhealthy_when_bureau_key_missing(prod_like):
     assert "EXPERIAN_KEY" in body["missing_secrets"]
 
 
-def test_health_ok_in_synthetic_mode(synthetic_mode):
+def test_health_ok_in_synthetic_mode(synthetic_mode, monkeypatch):
+    # /health now also runs a live DB probe; stub it as reachable so this exercises
+    # the config-readiness path (a real run reaches the compose Postgres). _FakeConn
+    # is defined below at module scope, so it resolves at call time.
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: _FakeConn())
+
     from fastapi.testclient import TestClient
     from app.main import app
 
@@ -185,6 +199,110 @@ def test_database_url_encoded_reserved_char_password_is_ok(monkeypatch):
     )
     assert config.database_url_configured() is True
     assert "DATABASE_URL" not in config.missing_required_secrets()
+
+
+# --- Live connectivity probe (database_reachable) --------------------------
+# database_url_configured cannot prove the password authenticates. The live probe
+# opens a bounded connection and runs SELECT 1; these tests stub psycopg2.connect
+# so no real database is required. Named with "database_url" so the CI readiness
+# gate (pytest -k database_url) selects them.
+
+
+class _FakeCursor:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, *a, **k):
+        pass
+
+    def fetchone(self):
+        return (1,)
+
+
+class _FakeConn:
+    def __init__(self):
+        self.closed_flag = False
+
+    def cursor(self):
+        return _FakeCursor()
+
+    def close(self):
+        self.closed_flag = True
+
+
+def test_database_url_probe_ok_when_connection_succeeds(monkeypatch):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: _FakeConn())
+    ok, err = config.database_reachable()
+    assert ok is True
+    assert err is None
+
+
+def test_database_url_probe_fails_on_wrong_password_without_postgres_password(monkeypatch):
+    # The documented residual the config gate cannot catch: a real, non-placeholder
+    # DSN password with no POSTGRES_PASSWORD to compare against. The gate accepts it;
+    # only the live probe detects that it does not authenticate.
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:wrong_pw@postgres:5432/meridian"
+    )
+    assert config.database_url_configured() is True  # config gate cannot tell
+
+    def _auth_fail(*a, **k):
+        raise config.psycopg2.OperationalError("password authentication failed")
+
+    monkeypatch.setattr(config.psycopg2, "connect", _auth_fail)
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "OperationalError"  # class name only — no DSN/password leak
+
+
+def test_database_url_probe_result_is_cached_within_ttl(monkeypatch):
+    # /health must not open a Postgres connection per request; two calls within the
+    # TTL reuse one connection (the DoS-amplifier fix).
+    calls = {"n": 0}
+
+    def _count(*a, **k):
+        calls["n"] += 1
+        return _FakeConn()
+
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", _count)
+    config.database_reachable()
+    config.database_reachable()
+    assert calls["n"] == 1
+
+
+def test_health_flags_unreachable_database_url(monkeypatch):
+    # config gate passes (real password, synthetic mode isolates the DB check) but
+    # the DB rejects auth; the live probe must drive /health to 503, not report ok.
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+    monkeypatch.setattr(config, "ENVIRONMENT", "development")
+    monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", True)
+    monkeypatch.setattr(config, "EXPERIAN_KEY", "")
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:wrong_pw@postgres:5432/meridian"
+    )
+    assert config.missing_required_secrets() == []
+
+    def _auth_fail(*a, **k):
+        raise config.psycopg2.OperationalError("password authentication failed")
+
+    monkeypatch.setattr(config.psycopg2, "connect", _auth_fail)
+
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    resp = TestClient(app).get("/health")
+    assert resp.status_code == 503
+    assert resp.json()["database_error"] == "OperationalError"
 
 
 def test_decision_endpoint_returns_503_when_key_missing(prod_like):

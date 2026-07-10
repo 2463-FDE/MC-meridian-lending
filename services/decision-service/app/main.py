@@ -38,4 +38,14 @@ def health():
                 "missing_secrets": missing,
             },
         )
+    ok, db_error = config.database_reachable()
+    if not ok:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "service": "decision-service",
+                "database_error": db_error,
+            },
+        )
     return {"status": "ok", "service": "decision-service"}
