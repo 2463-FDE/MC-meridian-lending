@@ -33,6 +33,15 @@ not via LLM calls.
 
 ## Decision
 
+The hygiene **policy** (what may enter a corpus, what must be refused, the gate
+before embedding) is durable architecture and is locked. The **Week 2 harness
+mechanics** that implement it (index shape, cache format, report-time snippet
+reconstruction) are design choices not yet validated in built code; they are
+marked **subject to implementation verification** and may change during the build
+without reopening this ADR, provided the policy still holds.
+
+### Policy (durable)
+
 1. **Allowed into a retrieval corpus:**
    - Curated policy documents (the `policies/` docs and successors) after passing the
      hygiene gate.
@@ -55,6 +64,12 @@ not via LLM calls.
    names `ssn`/`pan`/`dob`/`ein`) **before** any chunking or embedding. A file that fails
    is not embedded — the pipeline refuses it and reports finding counts with masked
    samples. There is no override flag.
+
+### Week 2 harness design (subject to implementation verification)
+
+These implement the policy above but are not yet validated against built code.
+Treat them as the current design intent, revisable during implementation as long
+as the policy holds.
 
 5. **Embedding cost discipline:** embeddings are computed once per content-hash and cached
    on disk; unchanged content is never re-embedded. Hygiene checks are pure regex/validator

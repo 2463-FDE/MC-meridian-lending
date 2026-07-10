@@ -1,6 +1,6 @@
 # ADR 0008: Retrievable Decision Records — Every Decision Must Record Its Reasons
 
-- **Status:** Accepted
+- **Status:** Accepted (field contract) — the specific Reg B citations are non-authoritative pending legal review
 - **Date:** 2026-07-07
 - **Author:** Claude Code
 - **Related:** ADR 0007 (corpus hygiene), docs/spec-rag-week2.md (D4), Reg B adverse action
@@ -33,8 +33,13 @@ never recorded**:
 **Regulatory stake:** Reg B (ECOA, 12 CFR Part 1002) requires an adverse-action notice
 stating the specific principal reason(s) for denial (§1002.9) and retention of the related
 records for 25 months for consumer credit (§1002.12(b)). If a regulator asked today for the
-reason behind denial #6012, Meridian could not produce it from stored data. (Statutory
-wording and citations to be confirmed with compliance before Week 3 implementation.)
+reason behind denial #6012, Meridian could not produce it from stored data.
+
+> **Compliance citations are non-authoritative.** The specific Reg B references above
+> (§1002.9, §1002.12(b)) are cited from memory to frame the risk and have **not** been
+> verified with compliance/legal. What this ADR locks is the field *contract*, which does
+> not depend on the exact citation numbers; the statutory wording and section numbers must
+> be confirmed by legal before any Week 3 implementation relies on them.
 
 ## Decision
 

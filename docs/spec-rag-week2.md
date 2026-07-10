@@ -13,9 +13,9 @@ a helper that answers from the lending-policy docs and past decisions. Before an
 built, this week delivers the **retrieval eval harness** that proves what the corpus can and
 cannot answer — and surfaces two blocking problems in the data Dana handed over:
 
-1. **The knowledge-base dump is radioactive.** `kb_dump/applications.jsonl` contains raw
-   SSN, PAN, DOB, name, and address in every record — unredacted, in the same corpus Dana
-   expects us to embed into a vector store.
+1. **The knowledge-base dump is contaminated with regulated identifiers.** `kb_dump/applications.jsonl` contains raw
+   SSN, PAN, DOB, name, and address in five of six records (the sixth, an entity, carries a
+   raw EIN) — unredacted, in the same corpus Dana expects us to embed into a vector store.
 2. **"Why was #6012 denied?" is unanswerable by design.** The `decisions` table records
    `(app_id, outcome)` only — no reason, no drivers, no timestamp. The empty retrieval is
    not a retrieval bug; the answer was never recorded anywhere. The policy docs themselves
