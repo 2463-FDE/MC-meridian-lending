@@ -76,6 +76,12 @@ jobs:
         run: |
           cd services/origination-service
           python -m pytest tests/test_llm_client.py -q
+      - name: origination-service LLM startup wiring + config-range validation
+        # Startup must fail loud on a missing key or out-of-range numeric config
+        # (comment: nonsensical CLAUDE_* values). Blocking, like the client tests.
+        run: |
+          cd services/origination-service
+          python -m pytest tests/test_llm_startup.py -q
       - name: payment-service logging-redaction integration tests
         run: |
           cd services/payment-service

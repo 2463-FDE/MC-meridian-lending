@@ -131,6 +131,52 @@ def test_unknown_provider_rejected(monkeypatch):
         load_llm_config()
 
 
+# --- Concern 1: numeric range validation (fail loud at boot) --------------
+
+@pytest.mark.parametrize(
+    "env, value",
+    [
+        ("CLAUDE_TIMEOUT", "0"),        # non-positive timeout
+        ("CLAUDE_TIMEOUT", "-1"),
+        ("CLAUDE_MAX_RETRIES", "-1"),   # negative retries
+        ("CLAUDE_MAX_TOKENS", "0"),     # non-positive answer cap
+        ("CLAUDE_MAX_TOKENS", "-5"),
+        ("CLAUDE_TEMPERATURE", "-0.1"),  # outside [0, 1]
+        ("CLAUDE_TEMPERATURE", "1.5"),
+        ("CLAUDE_TOKEN_BUDGET", "0"),   # below max_tokens -> refuses every request
+    ],
+)
+def test_config_rejects_out_of_range_numeric(monkeypatch, env, value):
+    monkeypatch.setenv("CLAUDE_API_KEY", "k")
+    monkeypatch.setenv(env, value)
+    with pytest.raises(LLMConfigError):
+        load_llm_config()
+
+
+def test_config_rejects_token_budget_below_max_tokens(monkeypatch):
+    # build_request reserves max_tokens for the answer, so a budget under it would
+    # refuse every request before the network — reject it at boot instead.
+    monkeypatch.setenv("CLAUDE_API_KEY", "k")
+    monkeypatch.setenv("CLAUDE_MAX_TOKENS", "1024")
+    monkeypatch.setenv("CLAUDE_TOKEN_BUDGET", "512")
+    with pytest.raises(LLMConfigError):
+        load_llm_config()
+
+
+def test_config_accepts_valid_boundaries(monkeypatch):
+    # max_retries=0 (no retries), temperature at an edge, and token_budget == max_tokens
+    # are all legal — validation must not over-reject.
+    monkeypatch.setenv("CLAUDE_API_KEY", "k")
+    monkeypatch.setenv("CLAUDE_MAX_RETRIES", "0")
+    monkeypatch.setenv("CLAUDE_TEMPERATURE", "1.0")
+    monkeypatch.setenv("CLAUDE_MAX_TOKENS", "100")
+    monkeypatch.setenv("CLAUDE_TOKEN_BUDGET", "100")
+    cfg = load_llm_config()
+    assert cfg.max_retries == 0
+    assert cfg.temperature == 1.0
+    assert cfg.token_budget == cfg.max_tokens == 100
+
+
 def test_injected_adapter_overrides_provider():
     """An explicitly injected adapter always wins, regardless of provider."""
     cfg = _config(provider="bedrock")

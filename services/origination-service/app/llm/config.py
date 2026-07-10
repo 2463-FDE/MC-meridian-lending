@@ -74,6 +74,10 @@ def load_llm_config() -> LLMConfig:
     supports auth methods (SSO, instance role) this function can't detect from
     env vars alone.
 
+    Numeric env vars are range-checked (timeout, retries, tokens, temperature,
+    budget); an out-of-range value raises LLMConfigError rather than silently
+    producing a client that fails or misbehaves on the first call.
+
     Call this at application startup (fail loud at boot) — not lazily on first use.
     """
     provider = os.getenv("CLAUDE_PROVIDER", "anthropic")
@@ -99,15 +103,49 @@ def load_llm_config() -> LLMConfig:
         except ValueError:
             raise LLMConfigError(f"{env}={raw!r} is not a valid {cast.__name__}.")
 
+    timeout = _num("CLAUDE_TIMEOUT", 30.0, float)
+    max_retries = _num("CLAUDE_MAX_RETRIES", 3, int)
+    max_tokens = _num("CLAUDE_MAX_TOKENS", 1024, int)
+    temperature = _num("CLAUDE_TEMPERATURE", 0.0, float)
+    token_budget = _num("CLAUDE_TOKEN_BUDGET", 20_000, int)
+
+    # A value that casts cleanly can still be nonsensical. Reject out-of-range
+    # config at boot (fail loud) instead of letting it corrupt calls later:
+    #   timeout<=0      -> libpq/httpx "no timeout" or every call errors
+    #   max_retries<0   -> retry loop math underflows / no attempts
+    #   max_tokens<=0   -> provider rejects the request
+    #   temperature outside [0,1] -> provider 4xx on every call
+    #   token_budget<max_tokens -> build_request reserves max_tokens for the answer
+    #                              and refuses EVERY request before the network
+    # (Per-request prompt+history overhead is still checked at call time in
+    # build_request via TokenBudgetExceeded; only the max_tokens floor is knowable
+    # here, since prompt size varies per request.)
+    if timeout <= 0:
+        raise LLMConfigError(f"CLAUDE_TIMEOUT must be > 0, got {timeout}.")
+    if max_retries < 0:
+        raise LLMConfigError(f"CLAUDE_MAX_RETRIES must be >= 0, got {max_retries}.")
+    if max_tokens <= 0:
+        raise LLMConfigError(f"CLAUDE_MAX_TOKENS must be > 0, got {max_tokens}.")
+    if not 0.0 <= temperature <= 1.0:
+        raise LLMConfigError(
+            f"CLAUDE_TEMPERATURE must be within [0.0, 1.0], got {temperature}."
+        )
+    if token_budget < max_tokens:
+        raise LLMConfigError(
+            f"CLAUDE_TOKEN_BUDGET ({token_budget}) must be >= CLAUDE_MAX_TOKENS "
+            f"({max_tokens}): every request reserves max_tokens for the answer, so a "
+            "smaller budget refuses all requests."
+        )
+
     default_model = _DEFAULT_BEDROCK_MODEL if provider == "bedrock" else _DEFAULT_MODEL
     return LLMConfig(
         api_key=api_key,
         provider=provider,
         model=os.getenv("CLAUDE_MODEL", default_model),
-        timeout=_num("CLAUDE_TIMEOUT", 30.0, float),
-        max_retries=_num("CLAUDE_MAX_RETRIES", 3, int),
-        max_tokens=_num("CLAUDE_MAX_TOKENS", 1024, int),
-        temperature=_num("CLAUDE_TEMPERATURE", 0.0, float),
-        token_budget=_num("CLAUDE_TOKEN_BUDGET", 20_000, int),
+        timeout=timeout,
+        max_retries=max_retries,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        token_budget=token_budget,
         aws_region=os.getenv("AWS_REGION"),
     )
