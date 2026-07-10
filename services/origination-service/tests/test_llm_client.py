@@ -500,11 +500,14 @@ def test_free_text_purpose_field_does_not_leak_identity():
 def test_lowercase_token_under_non_identity_key_masked():
     """Regression (review): the fail-closed guard used to pass any lowercase
     snake/alnum token raw under a non-identity key, so a lowercased bare name
-    (jane, jane_smith) — byte-identical to an operational code (debt_consolidation)
-    — leaked. No shape rule can tell them apart, so ALL non-empty string scalars
-    are now masked; numbers survive as triage data."""
-    # Values chosen absent from the few-shot example (which contains "auto").
-    for value in ("jane", "jane_smith", "debt_consolidation"):
+    (jane, jane_smith) — byte-identical in shape to an operational code — leaked.
+    No shape rule can tell them apart, so a string scalar under a non-identity key
+    is masked UNLESS it is a known code in an allowlisted categorical field's
+    controlled vocabulary (see test_safe_categorical_purpose_value_survives).
+    A lowercased bare name is not such a code, so it is still masked; numbers
+    survive as triage data."""
+    # Values that are NOT in any safe-categorical vocabulary — must be masked.
+    for value in ("jane", "jane_smith"):
         adapter = FakeAdapter(response=GOOD_SUMMARY)
         ClaudeClient(_config(), adapter=adapter).summarize_application(
             '{"purpose": "%s", "amount": 5000}' % value
@@ -512,6 +515,31 @@ def test_lowercase_token_under_non_identity_key_masked():
         sent = "".join(m["content"] for m in adapter.calls[0].messages)
         assert value not in sent, f"string value leaked under non-identity key: {value!r}"
         assert "5000" in sent  # numeric triage field survives
+
+
+def test_safe_categorical_purpose_value_survives():
+    """Regression (review): a normal application's `purpose` is a core
+    underwriting fact the loan-summary prompt is built around, so a value in the
+    field's controlled vocabulary must reach the model rather than being masked
+    as free text. This is a VALUE allowlist: the code survives, but a name/DOB
+    stuffed into the same unvalidated field does not (covered by
+    test_free_text_purpose_field_does_not_leak_identity /
+    test_lowercase_token_under_non_identity_key_masked)."""
+    for code in ("auto", "debt_consolidation", "home_improvement",
+                 "personal", "working_capital"):
+        adapter = FakeAdapter(response=GOOD_SUMMARY)
+        ClaudeClient(_config(), adapter=adapter).summarize_application(
+            '{"purpose": "%s", "amount": 18000}' % code
+        )
+        sent = "".join(m["content"] for m in adapter.calls[0].messages)
+        assert code in sent, f"safe categorical purpose masked: {code!r}"
+    # A value NOT in the vocabulary still fails closed even under `purpose`.
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    ClaudeClient(_config(), adapter=adapter).summarize_application(
+        '{"purpose": "jane_smith", "amount": 18000}'
+    )
+    sent = "".join(m["content"] for m in adapter.calls[0].messages)
+    assert "jane_smith" not in sent, "unlisted purpose value leaked"
 
 
 def test_history_lowercase_token_under_non_identity_key_masked():

@@ -45,6 +45,23 @@ _FREETEXT_MASK = "•••• (free text redacted)"
 # masked wholesale (see _is_field_name / _redact_key).
 _KEY_MASK = "•••• (key redacted)"
 
+# Safe categorical fields: field NAME -> the controlled vocabulary its value may
+# take. A value that matches (case-insensitive) is a known operational code and
+# is passed to the provider raw, because it is a core underwriting fact the
+# loan-summary prompt is built around (see prompts/loan_summary.py). Any value
+# NOT in the set fails closed through the normal string masking below — this is
+# a VALUE allowlist, not a field-name one: `purpose` is an unvalidated free-TEXT
+# column, so a name/DOB stuffed into it ({"purpose": "jane_smith"}) is not a
+# known code and is masked. Extend a set to admit a new legitimate code; an
+# unlisted code degrades gracefully (masked, not leaked). Keep every entry a
+# compound operational token that cannot collide with a plausible bare name.
+_SAFE_CATEGORICAL = {
+    "purpose": {
+        "auto", "debt_consolidation", "home_improvement", "personal",
+        "working_capital",
+    },
+}
+
 
 def _is_identity_key(key) -> bool:
     """True if a field NAME denotes a direct applicant identifier.
@@ -182,6 +199,14 @@ def _redact_scalar(key: str, value):
     """
     if isinstance(value, bool) or value is None:
         return value
+    # Safe categorical value: a string under an allowlisted field whose value is
+    # a KNOWN operational code (not a name/DOB hiding in an unvalidated field) is
+    # a core underwriting fact and is passed raw. Match is case-insensitive; an
+    # unlisted value falls through to the fail-closed masking below.
+    if isinstance(value, str):
+        allowed = _SAFE_CATEGORICAL.get(str(key).strip().lower())
+        if allowed is not None and value.strip().lower() in allowed:
+            return value
     # Step 1 — whitespace-bearing strings are free text: mask wholesale.
     if isinstance(value, str) and any(ch.isspace() for ch in value):
         return _FREETEXT_MASK
