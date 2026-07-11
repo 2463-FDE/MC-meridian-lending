@@ -1,6 +1,6 @@
 # ADR 0008: Retrievable Decision Records — Every Decision Must Record Its Reasons
 
-- **Status:** Accepted (field contract) — the specific Reg B citations are non-authoritative pending legal review
+- **Status:** Accepted as a **Week 2 planning contract** — the field contract is locked now; the schema migration and write-path implementation are deferred to Week 3+ and need their own implementation review (see *Scope*). The specific Reg B citations are **non-authoritative** pending legal review.
 - **Date:** 2026-07-07
 - **Author:** Claude Code
 - **Related:** ADR 0007 (corpus hygiene), docs/spec-rag-week2.md (D4), Reg B adverse action
@@ -86,6 +86,21 @@ it fixes a *contract*, not a delivered implementation:
   (Consequences below). These are scheduled when the decision-record feature is picked up
   and each needs its own implementation review; service-validation and migration details
   are explicitly deferred, not committed here.
+
+## Sign-off required before Week 3 implementation
+
+Because these are **regulated** decision records (Reg B adverse-action), the field contract
+above is not self-approving. No Week 3 schema or write-path work may begin, and nothing may
+depend on this contract, until **all four** owners below sign off. This ADR names the
+required roles; the actual approvals are recorded here (or in the Week 3 implementation ADR)
+when given.
+
+| Owner (role) | Approves |
+|--------------|----------|
+| Product | the record's business fields and the officer-retrieval use case |
+| Compliance / Legal | the Reg B principal-reason vocabulary and the statutory citations (§1002.9, §1002.12(b)) this ADR cites from memory — see the non-authoritative-citations note above |
+| Data owner | the `decisions` schema change, nullability of legacy rows, and 25-month retention on the shared-DB seam (ADR 0002/0004) |
+| Engineering | the decision-service write-path validation and the policy-band override enforcement (requirement 2) |
 
 ## Consequences
 

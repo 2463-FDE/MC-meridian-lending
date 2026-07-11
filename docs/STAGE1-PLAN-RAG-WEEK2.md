@@ -207,19 +207,21 @@ These carry the plan's direction but are **not yet proven**. Each is confirmed o
 revised as the harness is built, and the outcome recorded in the eval report or a
 follow-up ADR update:
 
-1. **Cache contents / source-text persistence.** The embedding cache is intended to
-   hold term-weight vectors + non-sensitive structural metadata only (source
-   filename, section heading, chunk id, content hash) — never raw chunk bodies, the
-   `kb_dump` records, or any PII sample (ADR 0007 rule 6). Verify against a real
-   `.cache/` artifact: assert no corpus body text and no PII string is present.
+1. **Cache contents / source-text persistence.** Verify against a real `.cache/`
+   artifact that no corpus body text and no PII string is present — the cache must
+   hold only term-weight vectors + non-sensitive structural metadata (ADR 0007
+   rule 6). Exact cache field shape: see *Implementation Notes* below.
 2. **Pure-Python TF-IDF sufficiency (DL-1).** Adequate on paper at ~9 chunks, but
    unproven until the gold set is calibrated. If hit@k / MRR are poor after first
    calibration, revisit (sklearn TF-IDF, or a local dense backend behind the same
    `Embedder` interface) — the interface exists precisely to keep this swap cheap.
-3. **Compliance / legal wording.** The Reg B adverse-action and 25-month retention
-   language (ADR 0008) and the "recoverable from most stores" risk claim (ADR 0007)
-   are directional; confirm the statutory citations and wording with a compliance
-   reviewer before Week 3 implementation.
+3. **Compliance / legal wording + sign-off.** The Reg B adverse-action and 25-month
+   retention language (ADR 0008) and the "recoverable from most stores" risk claim
+   (ADR 0007) are directional; confirm the statutory citations and wording with a
+   compliance reviewer before Week 3 implementation. The decision-record field
+   contract additionally requires named sign-off from **product, compliance/legal,
+   the data owner, and engineering** before any Week 3 schema/write-path work depends
+   on it — see ADR 0008, *Sign-off required before Week 3 implementation*.
 4. **ADR 0008 — contractual now vs implementation later.** Locked now: the field
    contract and the identifier-free projection (ADR 0007 depends on both). Week 3+
    implementation: the additive schema migration, decision-service write-path
@@ -235,9 +237,25 @@ follow-up ADR update:
 
 1. **Gold-set answer keys:** I will author the ≥10 queries + expected chunks from the
    policy docs. Sign-off happens at the Stage 2 verification gate.
-2. **Left over from Week 1 (not this feature):** the Luhn redactor work has since landed as
-   commits on `feature/pii-redaction` (`864a2c6`, `e5f01d2`), superseding the earlier stash
-   (retained as `stash@{0}`, safe to drop once verified). Payment-service integration tests
-   showed 5 pre-existing local failures at commit `7a8bd3c` despite the tracker's
-   "Integration ✓"; whether the newer commits repaired them is unverified — re-check before
-   that PR merges.
+2. **Left over from Week 1 (not this feature):** Week 1 redactor/stash cleanup and a
+   pre-existing payment-service test discrepancy — moved to *Implementation Notes* below;
+   neither blocks this planning gate.
+
+---
+
+## Implementation Notes (non-gating)
+
+Build-support detail kept out of the planning-gate contract above.
+
+**Embedding-cache field shape (DL-1 / DL-7, ADR 0007 rule 6).** The on-disk cache
+persists, per content-hash key: the term-weight vector plus non-sensitive structural
+metadata — source filename, section heading, chunk id. It MUST NOT persist raw chunk
+bodies, the refused `kb_dump` records, or any PII sample. Any snippet text a report
+needs is re-read at report time from the live, gate-passed source files, never from the
+cache.
+
+**Week 1 carry-over (not this feature).** The Luhn redactor work landed as commits on
+`feature/pii-redaction` (`864a2c6`, `e5f01d2`), superseding the earlier stash (retained
+as `stash@{0}`, safe to drop once verified). Payment-service integration tests showed 5
+pre-existing local failures at commit `7a8bd3c` despite the tracker's "Integration ✓";
+whether the newer commits repaired them is unverified — re-check before that PR merges.
