@@ -121,7 +121,7 @@ def _data_gaps_section(evals: list[QueryEval]) -> list[str]:
         "half of the helper ask is blocked on the data model, not on retrieval engineering.",
         "",
     ]
-    false_confident = [e for e in evals if e.unanswerable and not e.correct]
+    false_confident = [e for e in evals if e.unanswerable and not e.correct and e.retrieved]
     if false_confident:
         lines += ["### False-confident retrievals (helper risk)", ""]
         for e in false_confident:

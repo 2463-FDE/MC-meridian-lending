@@ -69,6 +69,13 @@ def run(base: Path = Path(".")) -> RunResult:
     for v in verdicts:
         if v.passed and v.path.endswith(".md"):
             chunks.extend(chunk_markdown(v.path))
+    if not chunks:
+        refused = sum(1 for v in verdicts if not v.passed)
+        raise RuntimeError(
+            f"no gate-passed corpus to index under {base.resolve()} "
+            f"({len(verdicts)} candidate files scanned, {refused} refused) — "
+            "run from the repo root, or fix the corpus"
+        )
 
     embedder = TfidfEmbedder()
     embedder.fit([c.text for c in chunks])

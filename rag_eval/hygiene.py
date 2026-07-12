@@ -22,9 +22,18 @@ SENSITIVE_FIELDS = {"ssn", "pan", "cvv", "dob", "ein"}
 
 _PAN_CANDIDATE = re.compile(r"\b\d(?:[ \-]?\d){12,18}\b")
 _SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+# A bare 9-digit run is too ambiguous to flag, but one *labeled* as an SSN is not.
+_SSN_LABELED = re.compile(r"\b(?:ssn|social security(?: number)?)\b\D{0,10}\d{9}\b", re.I)
 _EIN = re.compile(r"\b\d{2}-\d{7}\b")
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
-_PHONE = re.compile(r"\b\d{3}[.\-]\d{3}[.\-]\d{4}\b")
+_PHONE = re.compile(r"(?:\(\d{3}\)\s?|\b\d{3}[ .\-])\d{3}[ .\-]\d{4}\b")
+# DOB-shaped date in identity context (spec D2.1): a birth label followed
+# shortly by a date-shaped value (ISO or slashed/dashed US/EU order).
+_DOB_CONTEXT = re.compile(
+    r"\b(?:dob|date of birth|birth ?date|born)\b\W{0,10}"
+    r"(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{4})",
+    re.I,
+)
 
 
 def _luhn_valid(digits: str) -> bool:
@@ -77,6 +86,10 @@ def scan_text(text: str) -> list[Finding]:
         digits = re.sub(r"[ \-]", "", raw)
         if 13 <= len(digits) <= 19 and _luhn_valid(digits):
             findings.append(Finding("pan", _mask(digits)))
+    for m in _SSN_LABELED.finditer(text):
+        findings.append(Finding("ssn", _mask(m.group(0))))
+    for m in _DOB_CONTEXT.finditer(text):
+        findings.append(Finding("dob", _mask(m.group(1))))
     for m in _EIN.finditer(text):
         # An SSN match also contains a 2-7 digit shape; don't double-count.
         if not any(s <= m.start() and m.end() <= e for s, e in ssn_spans):
@@ -90,7 +103,11 @@ def scan_text(text: str) -> list[Finding]:
 
 
 def scan_record(obj: dict) -> list[Finding]:
-    """Scan one structured record: sensitive field names + all string values."""
+    """Scan one structured record: sensitive field names + all string values.
+
+    Recurses into nested dicts/lists so `{"applicant": {"ssn": ...}}` is caught
+    the same as a flat record.
+    """
     findings: list[Finding] = []
     for key, value in obj.items():
         if key.lower() in SENSITIVE_FIELDS and value not in (None, ""):
@@ -100,7 +117,15 @@ def scan_record(obj: dict) -> list[Finding]:
     # Value-level hits on already-flagged fields still add signal (they prove
     # the value is real PII, not just an unlucky field name).
     for value in obj.values():
-        if value is not None:
+        if isinstance(value, dict):
+            findings.extend(scan_record(value))
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    findings.extend(scan_record(item))
+                elif item is not None:
+                    findings.extend(scan_text(str(item)))
+        elif value is not None:
             findings.extend(scan_text(str(value)))
     return findings
 

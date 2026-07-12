@@ -120,3 +120,42 @@ def test_verdict_samples_contain_no_raw_pii():
     blob = " ".join(f.masked_sample for f in verdict.findings)
     for raw in ["330-90-5512", "4012888888881881", "412-55-9981", "1992-04-21"]:
         assert raw not in blob
+
+
+# --- Teeth-review regressions (2026-07-11): free-text blind spots ---
+
+def test_dob_in_identity_context_detected():
+    assert [f.pii_type for f in scan_text("DOB: 1992-04-21")] == ["dob"]
+    assert [f.pii_type for f in scan_text("date of birth 04/21/1992")] == ["dob"]
+    assert [f.pii_type for f in scan_text("Born: 21-04-1992")] == ["dob"]
+
+
+def test_plain_date_without_identity_context_passes():
+    assert scan_text("Last reviewed: 2024-11-01. Effective 01/01/2025.") == []
+
+
+def test_labeled_undashed_ssn_detected():
+    findings = scan_text("applicant ssn 330905512 on file")
+    assert [f.pii_type for f in findings] == ["ssn"]
+    assert "330905512" not in findings[0].masked_sample
+
+
+def test_bare_nine_digit_run_not_flagged():
+    assert scan_text("order id 123456789 shipped") == []
+
+
+def test_paren_and_space_phone_formats_detected():
+    assert [f.pii_type for f in scan_text("(901) 555-1234")] == ["phone"]
+    assert [f.pii_type for f in scan_text("call 901 555 1234 now")] == ["phone"]
+
+
+def test_nested_record_sensitive_fields_detected():
+    findings = scan_record({"applicant": {"ssn": "330905512", "dob": "1992-04-21"}})
+    types = {f.pii_type for f in findings}
+    assert "field:ssn" in types and "field:dob" in types
+
+
+def test_nested_list_of_records_scanned():
+    findings = scan_record({"applicants": [{"pan": "4111111111111111"}]})
+    types = {f.pii_type for f in findings}
+    assert "field:pan" in types and "pan" in types

@@ -32,9 +32,11 @@ class QueryEval:
         top_score = self.retrieved[0][1] if self.retrieved else 0.0
         if self.unanswerable:
             # Correct = the harness does NOT confidently retrieve something.
+            # Empty retrieval is always a correct abstention, whatever the
+            # threshold (a degenerate corpus calibrates it to 0.0).
             self.hits = {k: False for k in K_VALUES}
             self.reciprocal_rank = 0.0
-            self.correct = top_score < self.threshold
+            self.correct = not self.retrieved or top_score < self.threshold
         else:
             self.hits = {k: any(cid in self.expected for cid in ids[:k]) for k in K_VALUES}
             rank = next((i + 1 for i, cid in enumerate(ids) if cid in self.expected), None)

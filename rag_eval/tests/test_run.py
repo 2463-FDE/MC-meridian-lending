@@ -51,6 +51,26 @@ def test_gate_blocks_contaminated_file_from_index(tmp_path: Path):
     assert "REFUSED" in result.report_text
 
 
+def test_empty_corpus_aborts_loudly(tmp_path: Path):
+    # Teeth finding: no corpus must not yield a plausible-looking empty report.
+    import pytest
+
+    with pytest.raises(RuntimeError, match="no gate-passed corpus"):
+        run(base=tmp_path)
+
+
+def test_all_refused_corpus_aborts_loudly(tmp_path: Path):
+    policies = tmp_path / "policies"
+    policies.mkdir()
+    (policies / "dirty.md").write_text(
+        "# Leaky\n\n## A\n\nSSN 123-45-6789.\n", encoding="utf-8"
+    )
+    import pytest
+
+    with pytest.raises(RuntimeError, match="1 refused"):
+        run(base=tmp_path)
+
+
 def test_second_run_hits_cache_entirely(tmp_path: Path):
     policies = tmp_path / "policies"
     policies.mkdir()
