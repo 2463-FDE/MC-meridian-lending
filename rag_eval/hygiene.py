@@ -23,8 +23,20 @@ SENSITIVE_FIELDS = {"ssn", "pan", "cvv", "dob", "ein"}
 _PAN_CANDIDATE = re.compile(r"\b\d(?:[ \-]?\d){12,18}\b")
 _SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 # A bare 9-digit run is too ambiguous to flag, but one *labeled* as an SSN is not.
-_SSN_LABELED = re.compile(r"\b(?:ssn|social security(?: number)?)\b\D{0,10}\d{9}\b", re.I)
+_SSN_LABELED = re.compile(
+    r"\b(?:ssn|social security(?: number)?)\b\D{0,10}\d{9}\b", re.I
+)
 _EIN = re.compile(r"\b\d{2}-\d{7}\b")
+# A labeled card security code in free text. cvv is declared sensitive for JSONL
+# records (SENSITIVE_FIELDS); this is the matching free-text detector so a
+# markdown/note with "cvv: 123" is refused too. 3-4 digit code, label-gated to
+# avoid flagging every short number. Over-refusal here just excludes a file
+# (exclusion over redaction) — cheaper than leaking a card code into embeddings.
+_CVV_LABELED = re.compile(
+    r"\b(?:cvv2?|cvc2?|cv2|card security code|card verification(?: value)?|security code)"
+    r"\b\W{0,10}(\d{3,4})\b",
+    re.I,
+)
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
 _PHONE = re.compile(r"(?:\(\d{3}\)\s?|\b\d{3}[ .\-])\d{3}[ .\-]\d{4}\b")
 # DOB-shaped date in identity context (spec D2.1): a birth label followed
@@ -90,6 +102,8 @@ def scan_text(text: str) -> list[Finding]:
         findings.append(Finding("ssn", _mask(m.group(0))))
     for m in _DOB_CONTEXT.finditer(text):
         findings.append(Finding("dob", _mask(m.group(1))))
+    for m in _CVV_LABELED.finditer(text):
+        findings.append(Finding("cvv", _mask(m.group(1))))
     for m in _EIN.finditer(text):
         # An SSN match also contains a 2-7 digit shape; don't double-count.
         if not any(s <= m.start() and m.end() <= e for s, e in ssn_spans):

@@ -93,6 +93,41 @@ def test_main_allows_expected_legacy_dump_refusal(tmp_path: Path):
     main(base=tmp_path)  # no SystemExit
 
 
+def test_recursive_scan_catches_contaminated_subdir_policy(tmp_path: Path):
+    # A markdown doc in a policies/ SUBDIRECTORY must be scanned (not skipped by
+    # a shallow glob) and, if contaminated, fail the gate closed.
+    import pytest
+
+    from rag_eval.run import main
+
+    sub = tmp_path / "policies" / "2026"
+    sub.mkdir(parents=True)
+    (tmp_path / "policies" / "clean.md").write_text(
+        "# Clean\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+    (sub / "leaky.md").write_text(
+        "# Leaky\n\n## Card\n\ncvv: 123 and SSN 123-45-6789.\n", encoding="utf-8"
+    )
+    with pytest.raises(SystemExit) as e:
+        main(base=tmp_path)
+    assert e.value.code == 1
+
+
+def test_duplicate_stem_across_dirs_raises(tmp_path: Path):
+    # Two clean docs sharing a filename stem collide on the doc# id prefix.
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies" / "fees.md").write_text(
+        "# A\n\n## Late\n\nLate fee $35.\n", encoding="utf-8"
+    )
+    sub = tmp_path / "policies" / "archive"
+    sub.mkdir()
+    (sub / "fees.md").write_text("# B\n\n## Late\n\nLate fee $40.\n", encoding="utf-8")
+    import pytest
+
+    with pytest.raises(RuntimeError, match="duplicate chunk ids across corpus"):
+        run(base=tmp_path)
+
+
 def test_empty_corpus_aborts_loudly(tmp_path: Path):
     # Teeth finding: no corpus must not yield a plausible-looking empty report.
     import pytest

@@ -2,18 +2,29 @@
 
 from pathlib import Path
 
-import pytest
 
-from rag_eval.hygiene import Finding, _luhn_valid, _mask, scan_file, scan_record, scan_text
+from rag_eval.hygiene import (
+    _luhn_valid,
+    _mask,
+    scan_file,
+    scan_record,
+    scan_text,
+)
 
 REPO = Path(__file__).resolve().parents[2]
 
 
 # --- PAN / Luhn ---
 
+
 def test_luhn_valid_known_test_cards():
-    for pan in ["4111111111111111", "5500005555555559", "340000000000009",
-                "4012888888881881", "6011000990139424"]:
+    for pan in [
+        "4111111111111111",
+        "5500005555555559",
+        "340000000000009",
+        "4012888888881881",
+        "6011000990139424",
+    ]:
         assert _luhn_valid(pan), pan
 
 
@@ -40,6 +51,7 @@ def test_luhn_invalid_digit_run_not_flagged_as_pan():
 
 # --- SSN / EIN / email / phone ---
 
+
 def test_ssn_detected():
     findings = scan_text("ssn 412-55-9981")
     assert [f.pii_type for f in findings] == ["ssn"]
@@ -63,6 +75,7 @@ def test_phone_detected():
 
 # --- masking: no raw values in report material ---
 
+
 def test_masked_sample_keeps_only_last4():
     f = scan_text("4111111111111111")[0]
     assert f.masked_sample.endswith("1111")
@@ -74,6 +87,7 @@ def test_mask_short_value_fully_hidden():
 
 
 # --- structured records (JSONL) ---
+
 
 def test_sensitive_field_names_flagged_even_without_value_pattern():
     findings = scan_record({"dob": "1992-04-21", "income": 31000})
@@ -87,6 +101,7 @@ def test_null_sensitive_field_not_flagged():
 
 # --- clean text passes ---
 
+
 def test_clean_policy_text_passes():
     text = "Approve: model score >= 660 and DTI <= 43%. Late fee $35 or 5%."
     assert scan_text(text) == []
@@ -97,6 +112,7 @@ def test_bare_10_digit_number_not_phone():
 
 
 # --- real repo files (spec D2.2, D2.3) ---
+
 
 def test_kb_dump_refused():
     verdict = scan_file(REPO / "kb_dump" / "applications.jsonl")
@@ -123,6 +139,7 @@ def test_verdict_samples_contain_no_raw_pii():
 
 
 # --- Teeth-review regressions (2026-07-11): free-text blind spots ---
+
 
 def test_dob_in_identity_context_detected():
     assert [f.pii_type for f in scan_text("DOB: 1992-04-21")] == ["dob"]
@@ -159,3 +176,26 @@ def test_nested_list_of_records_scanned():
     findings = scan_record({"applicants": [{"pan": "4111111111111111"}]})
     types = {f.pii_type for f in findings}
     assert "field:pan" in types and "pan" in types
+
+
+def test_labeled_cvv_detected_in_free_text():
+    # cvv is declared sensitive for JSONL; the free-text path must catch it too.
+    for text in ("cvv: 123", "CVC 4567", "card security code 999", "cvv2=321"):
+        findings = scan_text(text)
+        assert "cvv" in [f.pii_type for f in findings], text
+    # The code itself is fully masked, never echoed.
+    f = scan_text("cvv: 123")[0]
+    assert "123" not in f.masked_sample
+
+
+def test_bare_three_digit_number_not_flagged_as_cvv():
+    # No label -> no CVV finding (avoid flagging every short number).
+    assert scan_text("see section 123 of the policy") == []
+
+
+def test_markdown_with_cvv_label_is_refused(tmp_path):
+    p = tmp_path / "note.md"
+    p.write_text("# Note\n\n## Card\n\nTest card cvv: 123 for QA.\n", encoding="utf-8")
+    verdict = scan_file(p)
+    assert not verdict.passed
+    assert "cvv" in verdict.counts()

@@ -99,9 +99,15 @@ def calibrate_threshold(
 
 
 def run(base: Path = Path(".")) -> RunResult:
-    policy_files = sorted((base / "policies").glob("*.md"))
-    kb_dump = base / "kb_dump" / "applications.jsonl"
-    candidates = policy_files + ([kb_dump] if kb_dump.exists() else [])
+    # Scan the corpus roots RECURSIVELY: a markdown doc dropped in a policies/
+    # subdirectory, or any .jsonl added under kb_dump/, must not slip past the
+    # gate unscanned. With main() failing closed on refusal, a wider scan means
+    # a contaminated file anywhere under a root trips the gate, not just the two
+    # original top-level paths. (Only these two known roots/extensions — not a
+    # generic all-types scan; there is no other corpus artifact shape yet.)
+    policy_files = sorted((base / "policies").rglob("*.md"))
+    kb_files = sorted((base / "kb_dump").rglob("*.jsonl"))
+    candidates = policy_files + kb_files
     verdicts = [scan_file(p) for p in candidates]
 
     # THE GATE (spec D2.4): only gate-passed markdown reaches the chunker.
@@ -109,6 +115,16 @@ def run(base: Path = Path(".")) -> RunResult:
     for v in verdicts:
         if v.passed and v.path.endswith(".md"):
             chunks.extend(chunk_markdown(v.path))
+    # Recursive discovery can surface two docs with the same stem in different
+    # folders → same doc# id prefix. The chunker guards collisions within one
+    # file; guard across files here so the gold-set id contract still holds.
+    ids = [c.chunk_id for c in chunks]
+    dupes = sorted({cid for cid in ids if ids.count(cid) > 1})
+    if dupes:
+        raise RuntimeError(
+            f"duplicate chunk ids across corpus files: {dupes} — two docs share "
+            "a filename stem; rename one so chunk ids stay unique"
+        )
     if not chunks:
         refused = sum(1 for v in verdicts if not v.passed)
         raise RuntimeError(
