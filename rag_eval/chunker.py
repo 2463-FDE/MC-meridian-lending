@@ -33,18 +33,36 @@ def chunk_markdown(path: str | Path) -> list[Chunk]:
     buf: list[str] = []
     chunks: list[Chunk] = []
 
+    seen: set[str] = set()
+
     def flush() -> None:
         text = "\n".join(buf).strip()
         if text:
             slug = "_intro" if section == "_intro" else _slug(section)
-            chunks.append(Chunk(f"{doc}#{slug}", doc, section, text))
+            chunk_id = f"{doc}#{slug}"
+            # Gold queries reference chunks by id, so ids MUST be unique — two
+            # headings that slug the same (or a symbol-only heading collapsing
+            # to _intro) would silently shadow one section's content. Fail loud;
+            # a colliding corpus is an authoring error, not a run to paper over.
+            if chunk_id in seen:
+                raise ValueError(
+                    f"duplicate chunk id {chunk_id!r} in {path} — two sections "
+                    f"slug to the same id (rename a heading so ids stay unique)"
+                )
+            seen.add(chunk_id)
+            chunks.append(Chunk(chunk_id, doc, section, text))
         buf.clear()
 
+    in_code = False
     for line in path.read_text(encoding="utf-8").splitlines():
-        if line.startswith("# ") and not title:
+        if line.lstrip().startswith("```"):
+            in_code = not in_code  # a ## or # inside a fence is content, not a heading
+            buf.append(line)
+            continue
+        if not in_code and line.startswith("# ") and not title:
             title = line[2:].strip()
             continue
-        if line.startswith("## "):
+        if not in_code and line.startswith("## "):
             flush()
             section = line[3:].strip()
             continue  # heading text is carried by metadata + title prefix
