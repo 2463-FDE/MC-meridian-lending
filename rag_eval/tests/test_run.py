@@ -163,6 +163,26 @@ def test_all_refused_corpus_aborts_loudly(tmp_path: Path):
         run(base=tmp_path)
 
 
+def test_all_refused_run_purges_stale_cache(tmp_path: Path):
+    # The abort path never reaches cache.save() (which prunes), so it must purge
+    # the prior run's cache itself — else PII-bearing vectors from a now-refused
+    # document linger on disk.
+    import pytest
+
+    cache = tmp_path / "rag_eval" / ".cache" / "embeddings.json"
+    cache.parent.mkdir(parents=True)
+    cache.write_text('{"stale-key": {"ssn": 1.0}}', encoding="utf-8")
+
+    policies = tmp_path / "policies"
+    policies.mkdir()
+    (policies / "dirty.md").write_text(
+        "# Leaky\n\n## A\n\nSSN 123-45-6789.\n", encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="no gate-passed corpus"):
+        run(base=tmp_path)
+    assert not cache.exists()  # stale cache purged before the abort
+
+
 def test_second_run_hits_cache_entirely(tmp_path: Path):
     policies = tmp_path / "policies"
     policies.mkdir()

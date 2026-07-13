@@ -126,6 +126,7 @@ def run(base: Path = Path(".")) -> RunResult:
     kb_files = sorted((base / "kb_dump").rglob("*.jsonl"))
     candidates = policy_files + kb_files
     verdicts = [scan_file(p) for p in candidates]
+    cache_path = base / "rag_eval" / ".cache" / "embeddings.json"
 
     # THE GATE (spec D2.4): only gate-passed markdown reaches the chunker.
     chunks: list[Chunk] = []
@@ -143,6 +144,11 @@ def run(base: Path = Path(".")) -> RunResult:
             "a filename stem; rename one so chunk ids stay unique"
         )
     if not chunks:
+        # Nothing survives the gate, so nothing should remain cached. save() —
+        # which prunes stale vectors — is never reached on this abort path, so
+        # purge the prior run's cache here; otherwise PII-bearing vectors from a
+        # now-removed/refused document would linger (cache.py, ADR 0007 rule 5).
+        cache_path.unlink(missing_ok=True)
         refused = sum(1 for v in verdicts if not v.passed)
         raise RuntimeError(
             f"no gate-passed corpus to index under {base.resolve()} "
@@ -152,7 +158,7 @@ def run(base: Path = Path(".")) -> RunResult:
 
     embedder = make_embedder()
     embedder.fit([c.text for c in chunks])
-    cache = EmbeddingCache(base / "rag_eval" / ".cache" / "embeddings.json")
+    cache = EmbeddingCache(cache_path)
     index = InMemoryIndex()
     for c in chunks:
         index.add(
