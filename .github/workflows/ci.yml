@@ -154,6 +154,26 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_decision.py -k database_url -q
 
+  rag-eval-gate:
+    # The RAG eval hygiene gate (refuses contaminated kb_dump: ssn/pan/ein) and
+    # the cache pruning are security controls: they prove raw PII never reaches
+    # the report or the embedding cache (ADR 0007). Like the other security
+    # gates, this MUST block — a regression in the gate or cache pruning must not
+    # ship on a green build. No continue-on-error, no `|| true`. The harness is
+    # offline by design (no service/docker dependency); tests need only pytest.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: rag_eval unit + integration tests
+        run: |
+          pip install pytest
+          python -m pytest rag_eval/tests -q
+      - name: rag_eval real-corpus smoke (refusal + no raw PII in report/cache)
+        run: ./scripts/smoke_rag_eval.sh
+
   frontend:
     runs-on: ubuntu-latest
     steps:
