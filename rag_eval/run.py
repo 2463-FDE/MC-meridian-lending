@@ -24,6 +24,18 @@ from rag_eval.metrics import Aggregate, QueryEval, aggregate
 
 GOLD_PATH = Path(__file__).parent / "gold_queries.json"
 
+# The ONE corpus file ADR 0007 documents as legacy-contaminated: kb_dump is the
+# raw pre-remediation dump, so its refusal is expected and is the whole point of
+# the hygiene report. EVERY other refusal — a policy doc, or any new file — is a
+# fresh PII-in-repo regression and must fail the CI gate (enforced in main()).
+_EXPECTED_CONTAMINATED = ("kb_dump", "applications.jsonl")
+
+
+def _refusal_is_expected(path_str: str) -> bool:
+    p = Path(path_str)
+    return (p.parent.name, p.name) == _EXPECTED_CONTAMINATED
+
+
 # Titan Embed Text v2 — AWS-native, cheap, 1024-dim. Confirm the id is enabled
 # in your account/region before relying on it (Bedrock model ids are
 # region/account-specific), same caveat as the LLM client's Bedrock model.
@@ -165,8 +177,8 @@ def run(base: Path = Path(".")) -> RunResult:
     )
 
 
-def main() -> None:
-    result = run()
+def main(base: Path = Path(".")) -> None:
+    result = run(base=base)
     refused = [v for v in result.verdicts if not v.passed]
     print(f"gate: {len(result.verdicts)} files scanned, {len(refused)} refused")
     for v in refused:
@@ -178,6 +190,19 @@ def main() -> None:
     )
     print(f"threshold: {result.threshold:.4f} (calibrated, see report)")
     print(f"report: {result.report_path}")
+
+    # Fail closed: the report is written above (so the refusal is always
+    # diagnosable), but a refusal of anything other than the known legacy dump
+    # is a new PII-in-repo regression and must break the CI rag-eval-gate.
+    unexpected = [v for v in refused if not _refusal_is_expected(v.path)]
+    if unexpected:
+        print(
+            "FAIL: hygiene gate refused non-legacy corpus file(s) — "
+            "new PII committed to the repo:"
+        )
+        for v in unexpected:
+            print(f"  {v.path}: {v.counts()}")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

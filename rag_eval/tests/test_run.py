@@ -55,6 +55,44 @@ def test_gate_blocks_contaminated_file_from_index(tmp_path: Path):
     assert "REFUSED" in result.report_text
 
 
+def test_main_exits_nonzero_on_refused_policy_file(tmp_path: Path):
+    # A NEW contaminated policy doc must break the CI gate — not be silently
+    # excluded while the run stays green (fail-closed security control).
+    import pytest
+
+    from rag_eval.run import main
+
+    policies = tmp_path / "policies"
+    policies.mkdir()
+    (policies / "clean.md").write_text(
+        "# Clean\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+    (policies / "dirty.md").write_text(
+        "# Leaky\n\n## Applicant\n\nSSN 123-45-6789 on file.\n", encoding="utf-8"
+    )
+    with pytest.raises(SystemExit) as e:
+        main(base=tmp_path)
+    assert e.value.code == 1
+    # The report is still written so the refusal is diagnosable.
+    assert (tmp_path / "rag_eval" / "eval_report.md").exists()
+
+
+def test_main_allows_expected_legacy_dump_refusal(tmp_path: Path):
+    # The one ADR 0007 legacy dump is expected-dirty: its refusal must NOT fail
+    # the gate, or the normal run would never be green.
+    from rag_eval.run import main
+
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies" / "clean.md").write_text(
+        "# Clean\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+    (tmp_path / "kb_dump").mkdir()
+    (tmp_path / "kb_dump" / "applications.jsonl").write_text(
+        '{"ssn": "123-45-6789"}\n', encoding="utf-8"
+    )
+    main(base=tmp_path)  # no SystemExit
+
+
 def test_empty_corpus_aborts_loudly(tmp_path: Path):
     # Teeth finding: no corpus must not yield a plausible-looking empty report.
     import pytest
