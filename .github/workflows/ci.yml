@@ -185,7 +185,13 @@ jobs:
       - name: No leaked secret literals in tracked tree
         run: |
           set -euo pipefail
-          if git grep -nIE 'cb_live_|proc_live_|EXAMPLE-LEAKED-KEY|meridian_dev_pw_2024' \
+          # AWS access-key-id shapes ((AKIA|ASIA)+16 upper-alnum) are added so an
+          # accidental Bedrock/AWS credential commit fails CI too, not just the
+          # four known-leaked literals. Secret-access keys (40-char base64) are
+          # too generic to match without false positives — the control is: creds
+          # live in ~/.aws or the shell env, never a tracked file (rag_eval reads
+          # boto3's resolver, never a literal; see docs/PHASE1-BEDROCK-PGVECTOR.md).
+          if git grep -nIE 'cb_live_|proc_live_|EXAMPLE-LEAKED-KEY|meridian_dev_pw_2024|(AKIA|ASIA)[0-9A-Z]{16}' \
               -- ':!docs/security-remediation-2026-07.md' \
                  ':!.github/workflows/ci.yml' \
                  ':!*/tests/*'; then
