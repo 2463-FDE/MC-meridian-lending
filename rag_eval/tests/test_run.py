@@ -1,8 +1,12 @@
 """Unit tests for the runner: threshold calibration + gate enforcement (spec D2.4, DL-6)."""
 
+import hashlib
+import io
+import json
 from pathlib import Path
 
-from rag_eval.run import calibrate_threshold, run
+from rag_eval.embedder import BedrockEmbedder
+from rag_eval.run import calibrate_threshold, make_embedder, run
 
 
 def test_calibrate_picks_minimal_error_split():
@@ -83,3 +87,66 @@ def test_second_run_hits_cache_entirely(tmp_path: Path):
     second = run(base=tmp_path)
     assert second.cache_misses == 0
     assert second.cache_hits == second.n_chunks
+
+
+# --- Bedrock backend end-to-end (fake client, no real API) ---
+
+
+class _DeterministicBedrockClient:
+    """Answers ANY input text with a stable 8-dim vector derived from its hash,
+    so the pipeline runs over arbitrary chunk/query text without canned data."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def invoke_model(self, modelId, body):  # noqa: N803 — boto3's kwarg name
+        self.calls += 1
+        text = json.loads(body)["inputText"]
+        digest = hashlib.sha256(text.encode()).digest()
+        vec = [digest[i] / 255.0 for i in range(8)]
+        payload = json.dumps({"embedding": vec})
+        return {"body": io.BytesIO(payload.encode())}
+
+
+def test_run_with_bedrock_backend(tmp_path: Path, monkeypatch):
+    # Dense vectors must flow gate -> cache -> index -> search -> metrics ->
+    # report with no type errors, and the report must name the backend.
+    policies = tmp_path / "policies"
+    policies.mkdir()
+    (policies / "clean.md").write_text(
+        "# Clean Policy\n\n## Fees\n\nLate payment fee is $35 flat.\n"
+        "\n## Approval\n\nApprove when model score is at least 660.\n",
+        encoding="utf-8",
+    )
+
+    def fake_make_embedder():
+        return BedrockEmbedder(
+            model_id="fake-model", client=_DeterministicBedrockClient()
+        )
+
+    monkeypatch.setattr("rag_eval.run.make_embedder", fake_make_embedder)
+
+    result = run(base=tmp_path)
+    assert result.n_chunks == 2
+    assert result.embedder_signature == "bedrock-v1:fake-model"
+    assert "bedrock-v1:fake-model" in result.report_text
+    # Dense vectors landed in the cache as JSON lists, not sparse dicts.
+    cached = json.loads(
+        (tmp_path / "rag_eval" / ".cache" / "embeddings.json").read_text()
+    )
+    assert all(isinstance(v, list) for v in cached.values())
+
+
+def test_make_embedder_default_is_tfidf(monkeypatch):
+    monkeypatch.delenv("RAG_EMBEDDER", raising=False)
+    from rag_eval.embedder import TfidfEmbedder
+
+    assert isinstance(make_embedder(), TfidfEmbedder)
+
+
+def test_make_embedder_rejects_unknown(monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("RAG_EMBEDDER", "word2vec")
+    with pytest.raises(ValueError, match="RAG_EMBEDDER"):
+        make_embedder()

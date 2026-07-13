@@ -10,18 +10,43 @@ ADR 0007 rule 4): chunks are only ever produced from gate-passed files inside
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from rag_eval import report as report_mod
 from rag_eval.cache import EmbeddingCache
 from rag_eval.chunker import Chunk, chunk_markdown
-from rag_eval.embedder import TfidfEmbedder
+from rag_eval.embedder import BedrockEmbedder, TfidfEmbedder
 from rag_eval.hygiene import FileVerdict, scan_file
 from rag_eval.index import InMemoryIndex
 from rag_eval.metrics import Aggregate, QueryEval, aggregate
 
 GOLD_PATH = Path(__file__).parent / "gold_queries.json"
+
+# Titan Embed Text v2 — AWS-native, cheap, 1024-dim. Confirm the id is enabled
+# in your account/region before relying on it (Bedrock model ids are
+# region/account-specific), same caveat as the LLM client's Bedrock model.
+_DEFAULT_BEDROCK_MODEL = "amazon.titan-embed-text-v2:0"
+
+
+def make_embedder():
+    """Pick the embedding backend from ``RAG_EMBEDDER`` (default ``tfidf``).
+
+    ``tfidf`` (default) keeps CI keyless and stdlib-only. ``bedrock`` uses
+    Amazon Bedrock via boto3 (``RAG_BEDROCK_MODEL``, ``AWS_REGION``, AWS creds)
+    — the scaling path. An unknown value fails loud rather than silently
+    falling back to a different backend than asked for.
+    """
+    name = os.getenv("RAG_EMBEDDER", "tfidf")
+    if name == "tfidf":
+        return TfidfEmbedder()
+    if name == "bedrock":
+        return BedrockEmbedder(
+            model_id=os.getenv("RAG_BEDROCK_MODEL", _DEFAULT_BEDROCK_MODEL),
+            region=os.getenv("AWS_REGION"),
+        )
+    raise ValueError(f"RAG_EMBEDDER={name!r} is not one of ('tfidf', 'bedrock').")
 
 
 @dataclass
@@ -35,9 +60,12 @@ class RunResult:
     agg: Aggregate
     report_path: Path
     report_text: str
+    embedder_signature: str
 
 
-def calibrate_threshold(answerable_tops: list[float], unanswerable_tops: list[float]) -> float:
+def calibrate_threshold(
+    answerable_tops: list[float], unanswerable_tops: list[float]
+) -> float:
     """Empirical threshold (DL-6): midpoint split minimizing gold-set errors.
 
     Candidate thresholds are midpoints between adjacent distinct top scores.
@@ -77,12 +105,14 @@ def run(base: Path = Path(".")) -> RunResult:
             "run from the repo root, or fix the corpus"
         )
 
-    embedder = TfidfEmbedder()
+    embedder = make_embedder()
     embedder.fit([c.text for c in chunks])
     cache = EmbeddingCache(base / "rag_eval" / ".cache" / "embeddings.json")
     index = InMemoryIndex()
     for c in chunks:
-        index.add(c.chunk_id, cache.get_or_embed(embedder.signature, c.text, embedder.embed))
+        index.add(
+            c.chunk_id, cache.get_or_embed(embedder.signature, c.text, embedder.embed)
+        )
     cache.save()
 
     gold = json.loads(GOLD_PATH.read_text(encoding="utf-8"))["queries"]
@@ -117,6 +147,7 @@ def run(base: Path = Path(".")) -> RunResult:
         threshold=threshold,
         evals=evals,
         agg=agg,
+        embedder_signature=embedder.signature,
     )
     report_path = base / "rag_eval" / "eval_report.md"
     report_path.write_text(report_text, encoding="utf-8")
@@ -130,6 +161,7 @@ def run(base: Path = Path(".")) -> RunResult:
         agg=agg,
         report_path=report_path,
         report_text=report_text,
+        embedder_signature=embedder.signature,
     )
 
 
@@ -139,6 +171,7 @@ def main() -> None:
     print(f"gate: {len(result.verdicts)} files scanned, {len(refused)} refused")
     for v in refused:
         print(f"  REFUSED {v.path}: {v.counts()}")
+    print(f"embedder: {result.embedder_signature}")
     print(
         f"embeddings: {result.n_chunks} chunks, "
         f"{result.cache_misses} embedded this run, {result.cache_hits} from cache"

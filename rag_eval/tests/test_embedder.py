@@ -1,11 +1,13 @@
-"""Unit tests for TF-IDF embedder + embedding cache (spec D1.2–D1.3)."""
+"""Unit tests for embedders + embedding cache (spec D1.2–D1.3)."""
 
+import io
+import json
 import math
 
 import pytest
 
 from rag_eval.cache import EmbeddingCache
-from rag_eval.embedder import TfidfEmbedder, cosine, tokenize
+from rag_eval.embedder import BedrockEmbedder, TfidfEmbedder, cosine, tokenize
 
 CORPUS = [
     "Approve: model score >= 660 and DTI <= 43%",
@@ -59,6 +61,7 @@ def test_embed_before_fit_raises():
 
 # --- cache ---
 
+
 def test_cache_second_run_all_hits(tmp_path):
     e = _fitted()
     path = tmp_path / "emb.json"
@@ -96,3 +99,83 @@ def test_cache_file_contains_no_joined_source_text(tmp_path):
     c.get_or_embed(e.signature, CORPUS[0], e.embed)
     c.save()
     assert CORPUS[0] not in path.read_text()
+
+
+# --- dense cosine (Bedrock-shaped vectors) ---
+
+
+def test_dense_cosine_identical_and_orthogonal():
+    a = [0.6, 0.8]  # already unit-norm
+    assert abs(cosine(a, a) - 1.0) < 1e-9
+    assert abs(cosine([1.0, 0.0], [0.0, 1.0])) < 1e-9
+
+
+def test_dense_cosine_matches_manual_dot():
+    a, b = [0.5, 0.5, 0.5, 0.5], [1.0, 0.0, 0.0, 0.0]
+    assert abs(cosine(a, b) - 0.5) < 1e-9
+
+
+# --- BedrockEmbedder (injected fake client — no real API call) ---
+
+
+class _FakeBedrockClient:
+    """Stands in for boto3 bedrock-runtime: canned raw vectors per input text.
+
+    Returns un-normalized vectors so the test proves the embedder normalizes.
+    Records call count so we can assert the cache prevents re-embedding.
+    """
+
+    def __init__(self, vectors: dict[str, list[float]]):
+        self._vectors = vectors
+        self.calls = 0
+
+    def invoke_model(self, modelId, body):  # noqa: N803 — boto3's kwarg name
+        self.calls += 1
+        text = json.loads(body)["inputText"]
+        payload = json.dumps({"embedding": self._vectors[text]})
+        return {"body": io.BytesIO(payload.encode())}
+
+
+def _bedrock(vectors):
+    return BedrockEmbedder(model_id="fake-model", client=_FakeBedrockClient(vectors))
+
+
+def test_bedrock_embed_normalizes():
+    e = _bedrock({"hello world": [3.0, 4.0]})  # norm 5 -> [0.6, 0.8]
+    e.fit(["hello world"])
+    vec = e.embed("hello world")
+    assert vec == pytest.approx([0.6, 0.8])
+    assert abs(math.sqrt(sum(w * w for w in vec)) - 1.0) < 1e-9
+
+
+def test_bedrock_signature_is_model_bound():
+    a = _bedrock({})
+    a.fit([])
+    b = BedrockEmbedder(model_id="other-model", client=_FakeBedrockClient({}))
+    b.fit([])
+    assert a.signature == "bedrock-v1:fake-model"
+    assert a.signature != b.signature
+
+
+def test_bedrock_embed_before_fit_raises():
+    with pytest.raises(RuntimeError):
+        _bedrock({}).embed("x")
+
+
+def test_bedrock_cache_prevents_re_embedding(tmp_path):
+    client = _FakeBedrockClient({"doc a": [1.0, 0.0], "doc b": [0.0, 2.0]})
+    e = BedrockEmbedder(model_id="fake-model", client=client)
+    e.fit(["doc a", "doc b"])
+    path = tmp_path / "emb.json"
+
+    c1 = EmbeddingCache(path)
+    for t in ("doc a", "doc b"):
+        c1.get_or_embed(e.signature, t, e.embed)
+    c1.save()
+    assert client.calls == 2  # embedded once each
+
+    c2 = EmbeddingCache(path)
+    vecs = [c2.get_or_embed(e.signature, t, e.embed) for t in ("doc a", "doc b")]
+    assert (c2.hits, c2.misses) == (2, 0)
+    assert client.calls == 2  # cache hit — no new Bedrock calls
+    assert vecs[0] == pytest.approx([1.0, 0.0])

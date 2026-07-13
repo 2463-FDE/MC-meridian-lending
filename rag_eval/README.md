@@ -29,10 +29,12 @@ re-embeds nothing (the run summary proves it).
    (raw SSN/PAN in 5 of 6 records, EIN in the 6th).
 2. **Ingest** (`chunker.py`) — gate-passed markdown only; one chunk per `##`
    section, stable ids (`doc#section-slug`).
-3. **Embed** (`embedder.py`, `cache.py`) — pure-Python TF-IDF behind a minimal
-   `fit/embed/signature` interface (swap in a dense backend later without touching
-   callers). Vectors cached on disk keyed by content hash; the cache stores
-   term-weight vectors only, never chunk bodies or PII.
+3. **Embed** (`embedder.py`, `cache.py`) — the embedding backend behind a minimal
+   `fit/embed/signature` interface, selected by `RAG_EMBEDDER` (see **Backends**).
+   Default is pure-Python TF-IDF; Bedrock is the drop-in scaling backend, and
+   callers are unchanged either way. Vectors cached on disk keyed by content hash
+   (signature + text); the cache stores term-weight/float vectors only, never chunk
+   bodies or PII.
 4. **Retrieve + score** (`index.py`, `metrics.py`) — in-memory exact cosine index,
    rebuilt each run; hit@1/3/5 and MRR per query and aggregate over
    `gold_queries.json` (10 answerable officer questions + the #6012 trap + an
@@ -43,17 +45,53 @@ re-embeds nothing (the run summary proves it).
    (`decisions(app_id, outcome)` records no reason — see ADR 0008), and the
    false-confident-retrieval risk for a naive helper.
 
+## Backends
+
+The embedding backend is chosen by `RAG_EMBEDDER` (default `tfidf`). All other
+stages — gate, chunker, cache, index, metrics, report — are identical across
+backends; only the vector shape differs (sparse dict vs dense list), and
+`cosine()` handles both.
+
+| `RAG_EMBEDDER` | Backend | Deps | Auth |
+|----------------|---------|------|------|
+| `tfidf` (default) | Pure-Python TF-IDF | none (stdlib) | none |
+| `bedrock` | Amazon Bedrock dense embeddings | `boto3` | AWS credentials |
+
+TF-IDF is the CI/offline default — keyless, deterministic, no network. Bedrock is
+the **scaling path** (Phase 1 of `docs/PHASE1-BEDROCK-PGVECTOR.md`):
+
+```bash
+pip install -r rag_eval/requirements-bedrock.txt
+export RAG_EMBEDDER=bedrock
+export AWS_REGION=us-east-1                        # or your enabled region
+# AWS creds via env/profile/role (never an API key literal); optionally:
+# export RAG_BEDROCK_MODEL=amazon.titan-embed-text-v2:0   # the default
+python3 -m rag_eval.run
+```
+
+Switching backends changes the embedder `signature`, which cleanly invalidates
+the on-disk cache (nothing from one backend is ever compared against another).
+The confidence threshold recalibrates automatically per run and is recorded, with
+the backend signature, in the report.
+
+The retrieval index stays **in-memory** for both backends (ADR 0007 rule 6). A
+persistent pgvector store is **Phase 2**, gated on corpus growth (~hundreds+ of
+chunks), not on the embedding swap — see `docs/PHASE1-BEDROCK-PGVECTOR.md`.
+
 ## Tests
 
 ```bash
 python3 -m pytest rag_eval/tests -q        # unit + integration (real corpus)
 ```
 
+Tests never call Bedrock: `BedrockEmbedder` takes an injected client, so the
+suite stays keyless and offline.
+
 ## Known limits
 
-- TF-IDF is lexical: no stemming/synonyms. Adequate at 9 chunks (hit@3 = 1.0 on
-  the gold set); the `Embedder` interface exists so a dense backend can replace it
-  when the corpus grows.
+- TF-IDF (the default) is lexical: no stemming/synonyms. Adequate at 9 chunks
+  (hit@3 = 1.0 on the gold set). When the corpus grows, switch to the dense
+  Bedrock backend (`RAG_EMBEDDER=bedrock`) — no caller changes, just recalibrate.
 - The confidence threshold is calibrated to this gold set; re-calibrate on any
   corpus or backend change (method recorded in the report).
 - The gate is a floor, not a ceiling (regex+Luhn misses novel PII shapes); corpus

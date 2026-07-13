@@ -20,7 +20,11 @@ class EmbeddingCache:
         self.path = Path(path)
         self.hits = 0
         self.misses = 0
-        self._data: dict[str, dict[str, float]] = {}
+        # Values are whatever the embedder returns — sparse term→weight dicts
+        # (TF-IDF) or dense float lists (Bedrock). The key includes the
+        # embedder signature, so entries from different backends never collide
+        # in one file.
+        self._data: dict[str, object] = {}
         if self.path.exists():
             self._data = json.loads(self.path.read_text(encoding="utf-8"))
 
@@ -28,7 +32,7 @@ class EmbeddingCache:
     def key(signature: str, text: str) -> str:
         return hashlib.sha256(f"{signature}\x00{text}".encode()).hexdigest()
 
-    def get_or_embed(self, signature: str, text: str, embed_fn) -> dict[str, float]:
+    def get_or_embed(self, signature: str, text: str, embed_fn):
         k = self.key(signature, text)
         if k in self._data:
             self.hits += 1

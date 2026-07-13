@@ -16,9 +16,9 @@ from rag_eval.metrics import Aggregate, K_VALUES, QueryEval
 # docs/security-remediation-2026-07.md) because neighboring lines held raw
 # PAN/SSN — which is itself evidence: logs are ephemeral, not a system of record.
 _LOG_TRACE = (
-    '`logs/payment-service.log:14` (purged from the repo by commit `9ba96ee`; '
+    "`logs/payment-service.log:14` (purged from the repo by commit `9ba96ee`; "
     "recoverable only from git history): "
-    '`GET /decision app_id=6012 model_score=612 decision=deny '
+    "`GET /decision app_id=6012 model_score=612 decision=deny "
     'adverse_action_reason="purchasing history"`'
 )
 
@@ -44,7 +44,9 @@ def _hygiene_section(verdicts: list[FileVerdict]) -> list[str]:
     return lines
 
 
-def _metrics_section(evals: list[QueryEval], agg: Aggregate, threshold: float) -> list[str]:
+def _metrics_section(
+    evals: list[QueryEval], agg: Aggregate, threshold: float, embedder_signature: str
+) -> list[str]:
     lines = ["## Retrieval metrics", ""]
     hit_cells = " · ".join(f"hit@{k} = {agg.hit_at_k[k]:.2f}" for k in K_VALUES)
     lines.append(
@@ -59,7 +61,9 @@ def _metrics_section(evals: list[QueryEval], agg: Aggregate, threshold: float) -
     ]
     for e in evals:
         expected = ", ".join(f"`{c}`" for c in e.expected) or "*(unanswerable)*"
-        top = ", ".join(f"`{cid}` ({score:.3f})" for cid, score in e.retrieved[:3]) or "—"
+        top = (
+            ", ".join(f"`{cid}` ({score:.3f})" for cid, score in e.retrieved[:3]) or "—"
+        )
         if e.unanswerable:
             hits = "—"
             verdict = "below threshold ✓" if e.correct else "**false-confident ✗**"
@@ -78,8 +82,9 @@ def _metrics_section(evals: list[QueryEval], agg: Aggregate, threshold: float) -
         "are midpoints between adjacent distinct top-1 scores; the chosen value minimizes "
         "classification errors (answerable tops that would wrongly abstain + unanswerable "
         "tops retrieved with false confidence), preferring the widest score gap on ties. "
-        "TF-IDF cosine over a ~9-chunk corpus is lumpy; this value is calibrated to this "
-        "gold set and must be re-calibrated when the corpus or backend changes.",
+        f"Cosine scores from embedder `{embedder_signature}` over a ~9-chunk corpus are "
+        "lumpy; this value is calibrated to this gold set and this backend, and must be "
+        "re-calibrated when the corpus or embedding backend changes.",
         "",
     ]
     return lines
@@ -88,22 +93,22 @@ def _metrics_section(evals: list[QueryEval], agg: Aggregate, threshold: float) -
 def _data_gaps_section(evals: list[QueryEval]) -> list[str]:
     lines = ["## Data gaps", ""]
     lines += [
-        "### Why \"why was application #6012 denied?\" cannot be answered",
+        '### Why "why was application #6012 denied?" cannot be answered',
         "",
         "This is a **data-capture failure, not a retrieval bug**. The answer was never "
         "recorded anywhere retrievable:",
         "",
         "- The `decisions` table stores outcome only — `decisions(app_id, outcome)`, "
         "no reason, no drivers, no timestamp, no decider (`db/init/001_schema.sql:59`; "
-        "schema comment: *\"Decision: OUTCOME ONLY.\"*).",
-        "- The seed data says it outright: *\"Denials 6012/6013 have no recorded reason "
-        "anywhere\"* (`db/init/002_seed.sql:38`).",
-        "- The underwriting guidelines flag the practice themselves: *\"the tool currently "
+        'schema comment: *"Decision: OUTCOME ONLY."*).',
+        '- The seed data says it outright: *"Denials 6012/6013 have no recorded reason '
+        'anywhere"* (`db/init/002_seed.sql:38`).',
+        '- The underwriting guidelines flag the practice themselves: *"the tool currently '
         "records the outcome of a decision but the reasons are produced ad hoc at "
-        "letter-generation time\"* (`policies/underwriting_guidelines.md`, Adverse action).",
+        'letter-generation time"* (`policies/underwriting_guidelines.md`, Adverse action).',
         f"- The only trace in the whole estate is one unstructured log line: {_LOG_TRACE}. "
         "It is ephemeral, non-queryable, and not a system of record — and its content is "
-        "itself non-compliant: \"purchasing history\" is not specific Reg B principal-reason "
+        'itself non-compliant: "purchasing history" is not specific Reg B principal-reason '
         "language, and `model_score=612` falls in the policy's **refer band (600–659)** per "
         "`policies/underwriting_guidelines.md` — yet the recorded outcome is deny, with no "
         "record of who overrode the band or why.",
@@ -117,17 +122,19 @@ def _data_gaps_section(evals: list[QueryEval]) -> list[str]:
         "`kb_dump/applications.jsonl` was refused by the hygiene gate (raw SSN/PAN/DOB in "
         "five of six records, raw EIN in the sixth) and carries no answer content anyway — "
         "outcome without reason. Per ADR 0007, past decisions enter the corpus only as an "
-        "identifier-free projection after ADR 0008's fields exist. The \"past decisions\" "
+        'identifier-free projection after ADR 0008\'s fields exist. The "past decisions" '
         "half of the helper ask is blocked on the data model, not on retrieval engineering.",
         "",
     ]
-    false_confident = [e for e in evals if e.unanswerable and not e.correct and e.retrieved]
+    false_confident = [
+        e for e in evals if e.unanswerable and not e.correct and e.retrieved
+    ]
     if false_confident:
         lines += ["### False-confident retrievals (helper risk)", ""]
         for e in false_confident:
             top_id, top_score = e.retrieved[0]
             lines.append(
-                f"- **{e.query_id}** (\"{e.query}\"): top hit `{top_id}` scored "
+                f'- **{e.query_id}** ("{e.query}"): top hit `{top_id}` scored '
                 f"{top_score:.3f}, above the calibrated threshold. The chunk describes "
                 "*process/policy*, not the answer — it does not contain why this specific "
                 "application was denied. A naive helper would return plausible-but-wrong "
@@ -148,6 +155,7 @@ def build(
     threshold: float,
     evals: list[QueryEval],
     agg: Aggregate,
+    embedder_signature: str,
 ) -> str:
     refused = sum(1 for v in verdicts if not v.passed)
     lines = [
@@ -161,11 +169,16 @@ def build(
         f"- Files scanned by hygiene gate: {len(verdicts)} ({refused} refused)",
         f"- Chunks indexed: {n_chunks}",
         f"- Embeddings computed this run: {cache_misses}; served from cache: {cache_hits}"
-        + (" — **unchanged corpus, nothing re-embedded** (spec D1.3)" if cache_misses == 0 else ""),
+        + (
+            " — **unchanged corpus, nothing re-embedded** (spec D1.3)"
+            if cache_misses == 0
+            else ""
+        ),
+        f"- Embedding backend: `{embedder_signature}`",
         f"- Calibrated confidence threshold: {threshold:.4f}",
         "",
     ]
     lines += _hygiene_section(verdicts)
-    lines += _metrics_section(evals, agg, threshold)
+    lines += _metrics_section(evals, agg, threshold, embedder_signature)
     lines += _data_gaps_section(evals)
     return "\n".join(lines)

@@ -1,0 +1,5 @@
+# Optional — only needed for the Bedrock embedding backend (RAG_EMBEDDER=bedrock).
+# The default TF-IDF backend and the whole test suite stay stdlib-only; do NOT
+# add this to CI. boto3 resolves AWS credentials from the environment/profile/
+# role at call time — no API key literal (ADR 0007, mirrors the LLM client).
+boto3
