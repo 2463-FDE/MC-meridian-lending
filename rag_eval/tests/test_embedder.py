@@ -92,6 +92,30 @@ def test_cache_invalidated_by_signature_change(tmp_path):
     assert c2.misses == 1
 
 
+def test_cache_save_prunes_stale_entries(tmp_path):
+    # A source embedded in an earlier run but absent from the current run must
+    # not survive on disk — even when .cache is never deleted between runs.
+    e = _fitted()
+    path = tmp_path / "emb.json"
+
+    c1 = EmbeddingCache(path)
+    for t in CORPUS:
+        c1.get_or_embed(e.signature, t, e.embed)
+    c1.save()
+    stale_key = EmbeddingCache.key(e.signature, CORPUS[0])
+    assert stale_key in json.loads(path.read_text())
+
+    # Second run touches only the other two chunks (CORPUS[0] removed/refused).
+    c2 = EmbeddingCache(path)
+    for t in CORPUS[1:]:
+        c2.get_or_embed(e.signature, t, e.embed)
+    c2.save()
+
+    on_disk = json.loads(path.read_text())
+    assert stale_key not in on_disk
+    assert len(on_disk) == 2
+
+
 def test_cache_file_contains_no_joined_source_text(tmp_path):
     e = _fitted()
     path = tmp_path / "emb.json"

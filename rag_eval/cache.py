@@ -25,6 +25,13 @@ class EmbeddingCache:
         # embedder signature, so entries from different backends never collide
         # in one file.
         self._data: dict[str, object] = {}
+        # Keys touched this run. save() rewrites the file with ONLY these, so
+        # vectors for sources removed from the corpus or newly refused by the
+        # hygiene gate do not linger on disk. Without this, every corpus change
+        # refits the embedder (new signature -> new keys) and orphans the old
+        # entries, accumulating token-bearing vectors from prior states forever
+        # (ADR 0007 rule 5: the cache is a PII-sensitive artifact).
+        self._used: set[str] = set()
         if self.path.exists():
             self._data = json.loads(self.path.read_text(encoding="utf-8"))
 
@@ -34,6 +41,7 @@ class EmbeddingCache:
 
     def get_or_embed(self, signature: str, text: str, embed_fn):
         k = self.key(signature, text)
+        self._used.add(k)
         if k in self._data:
             self.hits += 1
             return self._data[k]
@@ -43,5 +51,8 @@ class EmbeddingCache:
         return vec
 
     def save(self) -> None:
+        # Prune to this run's live keys before persisting — stale entries never
+        # reach disk.
+        self._data = {k: self._data[k] for k in self._used}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self._data), encoding="utf-8")
