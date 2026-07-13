@@ -53,8 +53,11 @@ keyless/offline. Index stays in-memory.
   (no real API); full `run()` over a dense backend; factory default/reject. 68 pass.
 
 ### Design decisions
-- **Auth mirrors ADR 0005.** Bedrock uses AWS credentials resolved by boto3
-  (env/profile/role), never an API-key literal. `AWS_REGION` optional.
+- **Auth mirrors ADR 0005.** Bedrock creds are resolved by boto3, never an
+  API-key literal in code. Any boto3-supported method works: an IAM
+  access-key/profile/role, **or** a Bedrock API key (bearer token) via
+  `AWS_BEARER_TOKEN_BEDROCK` (what the smoke used). `run.py` only ever reads
+  `AWS_REGION`/`RAG_BEDROCK_MODEL`; the credential is boto3's concern.
 - **boto3 is lazy.** Imported only when `RAG_EMBEDDER=bedrock` is actually chosen,
   so the default path and the whole test suite stay stdlib-only.
 - **Threshold auto-recalibrates.** Dense scores distribute differently than
@@ -67,20 +70,41 @@ keyless/offline. Index stays in-memory.
 
 ### Run it with a real key
 ```bash
-pip install -r rag_eval/requirements-bedrock.txt
-export RAG_EMBEDDER=bedrock AWS_REGION=us-east-1     # your enabled region
-# AWS creds via env/profile/role. Optionally RAG_BEDROCK_MODEL=<id>
+pip install -U -r rag_eval/requirements-bedrock.txt   # -U: bearer-token support needs botocore >= 1.35
+export RAG_EMBEDDER=bedrock AWS_REGION=us-east-1       # your enabled region
+# Credential — either an IAM access-key/profile, or a Bedrock API key:
+#   read -rs AWS_BEARER_TOKEN_BEDROCK && export AWS_BEARER_TOKEN_BEDROCK
+# (read -s keeps the token off screen and out of shell history; a real TTY is
+#  required, so run in a terminal, not a non-interactive `!` shell.)
+# Optionally RAG_BEDROCK_MODEL=<id>
 python3 -m rag_eval.run
 ```
 Default model: `amazon.titan-embed-text-v2:0` (1024-dim). Confirm the id is enabled
 in your account/region — Bedrock model ids are region/account-specific.
 
-### One-time smoke checklist (needs AWS creds — not yet run)
-- [ ] Gate still refuses `kb_dump/applications.jsonl`.
-- [ ] Embeddings hit Bedrock once, then serve from cache on a second run.
-- [ ] hit@3 stays ≈ 1.0 on the gold set (or investigate if it drops).
-- [ ] Report shows `bedrock-v1:<model>` and a recalibrated threshold.
-- [ ] Record the numbers here for comparison against the TF-IDF baseline.
+### One-time smoke — PASS (2026-07-13, `amazon.titan-embed-text-v2:0`)
+- [x] Gate still refuses `kb_dump/applications.jsonl` (ssn/pan/dob ×5, ein ×1), masked samples.
+- [x] Embeddings hit Bedrock once (9 embedded this run, 0 from cache); second run serves all from cache.
+- [x] hit@3 held at 1.00 on the gold set.
+- [x] Report shows `bedrock-v1:amazon.titan-embed-text-v2:0` and a recalibrated threshold (0.2397, was 0.1806 for TF-IDF).
+
+**Results vs the TF-IDF baseline** (9-chunk corpus, 10 answerable + 2 unanswerable):
+
+| Metric | TF-IDF (default) | Bedrock Titan v2 |
+|--------|------------------|------------------|
+| hit@1  | 0.90 | 0.70 |
+| hit@3  | 1.00 | 1.00 |
+| hit@5  | 1.00 | 1.00 |
+| MRR    | 0.95 | 0.85 |
+| Unanswerable correct | 1/2 (#6012 false-confident) | **2/2** |
+| Calibrated threshold | 0.1806 | 0.2397 |
+
+Read: at 9 chunks TF-IDF wins on top-1 (lexical overlap is strong on keyword-dense
+policy text), but both put every answerable query in the top 3. Titan's semantic
+separation **fixed the #6012 trap** — the adverse-action chunk TF-IDF retrieved with
+false confidence now scores below threshold, so both unanswerable queries correctly
+abstain. Conclusion holds: TF-IDF stays the default at this corpus size; Titan's edge
+appears as the corpus grows past lexical overlap — the Phase 2 trigger.
 
 ---
 
