@@ -8,6 +8,8 @@ from pathlib import Path
 from rag_eval.embedder import BedrockEmbedder
 from rag_eval.run import calibrate_threshold, make_embedder, run
 
+REPO = Path(__file__).resolve().parents[2]
+
 
 def test_calibrate_picks_minimal_error_split():
     # answerable tops all >= 0.3, unanswerable all <= 0.1: clean separation.
@@ -77,9 +79,19 @@ def test_main_exits_nonzero_on_refused_policy_file(tmp_path: Path):
     assert (tmp_path / "rag_eval" / "eval_report.md").exists()
 
 
-def test_main_allows_expected_legacy_dump_refusal(tmp_path: Path):
-    # The one ADR 0007 legacy dump is expected-dirty: its refusal must NOT fail
-    # the gate, or the normal run would never be green.
+def test_legacy_dump_expected_only_at_baseline_hash():
+    # The real, unmodified legacy dump is the one tolerated refusal.
+    from rag_eval.run import _refusal_is_expected
+
+    real = REPO / "kb_dump" / "applications.jsonl"
+    assert _refusal_is_expected(str(real))
+
+
+def test_main_fails_when_legacy_dump_is_tampered(tmp_path: Path):
+    # Adding fresh PII to the legacy dump changes its hash: the path-only
+    # exception no longer covers it, so the gate must fail closed.
+    import pytest
+
     from rag_eval.run import main
 
     (tmp_path / "policies").mkdir()
@@ -87,10 +99,13 @@ def test_main_allows_expected_legacy_dump_refusal(tmp_path: Path):
         "# Clean\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
     )
     (tmp_path / "kb_dump").mkdir()
+    # Not the approved baseline content -> hash mismatch -> unexpected refusal.
     (tmp_path / "kb_dump" / "applications.jsonl").write_text(
-        '{"ssn": "123-45-6789"}\n', encoding="utf-8"
+        '{"ssn": "999-88-7777", "pan": "4111111111111111"}\n', encoding="utf-8"
     )
-    main(base=tmp_path)  # no SystemExit
+    with pytest.raises(SystemExit) as e:
+        main(base=tmp_path)
+    assert e.value.code == 1
 
 
 def test_recursive_scan_catches_contaminated_subdir_policy(tmp_path: Path):

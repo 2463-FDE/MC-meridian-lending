@@ -9,6 +9,7 @@ ADR 0007 rule 4): chunks are only ever produced from gate-passed files inside
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -30,10 +31,26 @@ GOLD_PATH = Path(__file__).parent / "gold_queries.json"
 # fresh PII-in-repo regression and must fail the CI gate (enforced in main()).
 _EXPECTED_CONTAMINATED = ("kb_dump", "applications.jsonl")
 
+# The exception is pinned to this EXACT content. A path-only allowlist would let
+# someone add fresh SSNs/PANs/CVVs to the legacy dump and still exit green (the
+# file stays "refused"). Pinning the hash means any change to the dump flips
+# this digest and fails the gate closed, forcing explicit human re-approval of
+# the new baseline in review. Regenerate after an approved change with:
+#   shasum -a 256 kb_dump/applications.jsonl
+_LEGACY_DUMP_SHA256 = "38d3ffdc0e85e2ac423173299a4f35efbff73c003adcf59c0745fcae68eb7711"
+
 
 def _refusal_is_expected(path_str: str) -> bool:
     p = Path(path_str)
-    return (p.parent.name, p.name) == _EXPECTED_CONTAMINATED
+    if (p.parent.name, p.name) != _EXPECTED_CONTAMINATED:
+        return False
+    try:
+        digest = hashlib.sha256(p.read_bytes()).hexdigest()
+    except OSError:
+        return False
+    # Expected only at the approved content — a modified dump is treated as a new
+    # refusal and fails the gate.
+    return digest == _LEGACY_DUMP_SHA256
 
 
 # Titan Embed Text v2 — AWS-native, cheap, 1024-dim. Confirm the id is enabled
