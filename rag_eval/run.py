@@ -56,6 +56,19 @@ def _refusal_is_expected(path_str: str, base: Path) -> bool:
     return digest == _LEGACY_DUMP_SHA256
 
 
+def _gold_strings(value):
+    """Yield every string in a gold-query object (recursing dicts/lists) so the
+    PII scan covers id/expected/note, not just the query text."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _gold_strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _gold_strings(v)
+
+
 # Titan Embed Text v2 — AWS-native, cheap, 1024-dim. Confirm the id is enabled
 # in your account/region before relying on it (Bedrock model ids are
 # region/account-specific), same caveat as the LLM client's Bedrock model.
@@ -160,27 +173,40 @@ def run(base: Path = Path(".")) -> RunResult:
         )
 
     # Gold queries are a committed input surface too. An author could paste a
-    # real officer question carrying customer PII — which would be embedded (sent
-    # to the external API on the Bedrock backend) and written verbatim into the
-    # report. Scan and fail closed HERE, before any embedder/cache side effect,
-    # so a dirty committed query costs no external calls or cache writes.
+    # real officer example carrying customer PII — which would be embedded (sent
+    # to the external API on the Bedrock backend) and written into the report.
+    # The report prints query_id and expected as well as the query, so scan
+    # EVERY string field, not just the query. Fail closed HERE, before any
+    # embedder/cache side effect, and identify offenders by position only —
+    # never echo a field value (the id itself could be the PII).
     gold = json.loads(GOLD_PATH.read_text(encoding="utf-8"))["queries"]
-    dirty = [q["id"] for q in gold if scan_text(q["query"])]
+    dirty = [
+        i for i, q in enumerate(gold) if any(scan_text(s) for s in _gold_strings(q))
+    ]
     if dirty:
         raise RuntimeError(
-            f"gold queries contain PII and must be sanitized: {dirty} "
-            "(rag_eval/gold_queries.json) — the query text is not echoed here"
+            f"gold queries at position(s) {dirty} contain PII and must be "
+            "sanitized (rag_eval/gold_queries.json) — no field values are echoed"
         )
 
     embedder = make_embedder()
     embedder.fit([c.text for c in chunks])
     cache = EmbeddingCache(cache_path)
     index = InMemoryIndex()
-    for c in chunks:
-        index.add(
-            c.chunk_id, cache.get_or_embed(embedder.signature, c.text, embedder.embed)
-        )
-    cache.save()
+    try:
+        for c in chunks:
+            index.add(
+                c.chunk_id,
+                cache.get_or_embed(embedder.signature, c.text, embedder.embed),
+            )
+        cache.save()
+    except Exception:
+        # A partial/failed embed run (e.g. a Bedrock timeout mid-loop) must not
+        # leave the prior cache — which may hold vectors for a now-removed or
+        # newly refused source — intact on disk. Purge it so a retry rebuilds
+        # cleanly rather than serving stale PII-bearing vectors (ADR 0007 rule 5).
+        cache_path.unlink(missing_ok=True)
+        raise
 
     retrieved = {q["id"]: index.search(embedder.embed(q["query"]), k=5) for q in gold}
 

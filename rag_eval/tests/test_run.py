@@ -190,14 +190,78 @@ def test_gold_query_with_pii_fails_closed(tmp_path: Path, monkeypatch):
     )
     monkeypatch.setattr(run_mod, "GOLD_PATH", gold)
 
-    with pytest.raises(RuntimeError, match="gold queries contain PII") as e:
+    with pytest.raises(RuntimeError, match="contain PII") as e:
         run_mod.run(base=tmp_path)
-    assert "412-55-9981" not in str(e.value)  # id only, never the raw query
+    assert "412-55-9981" not in str(e.value)  # position only, never a value
     report = tmp_path / "rag_eval" / "eval_report.md"
     if report.exists():
         assert "412-55-9981" not in report.read_text()
     # Validation runs BEFORE any embedding/cache side effect: no cache written.
     assert not (tmp_path / "rag_eval" / ".cache" / "embeddings.json").exists()
+
+
+def test_gold_pii_in_id_or_expected_fails_without_echo(tmp_path: Path, monkeypatch):
+    # PII in id or expected (both printed in the report) must fail closed, and
+    # the error must not echo the offending value.
+    import pytest
+
+    from rag_eval import run as run_mod
+
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies" / "clean.md").write_text(
+        "# Clean\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+    gold = tmp_path / "gold.json"
+    gold.write_text(
+        json.dumps(
+            {
+                "queries": [
+                    {"id": "ssn-412-55-9981", "query": "approve cutoff?"},
+                    {"id": "q2", "query": "dti?", "expected": ["ssn 330-90-5512"]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(run_mod, "GOLD_PATH", gold)
+
+    with pytest.raises(RuntimeError, match="contain PII") as e:
+        run_mod.run(base=tmp_path)
+    msg = str(e.value)
+    assert "412-55-9981" not in msg and "330-90-5512" not in msg
+    assert not (tmp_path / "rag_eval" / ".cache" / "embeddings.json").exists()
+
+
+def test_embed_failure_purges_stale_cache(tmp_path: Path, monkeypatch):
+    # A mid-loop embed failure (e.g. Bedrock timeout) must not leave a prior
+    # run's PII-bearing cache on disk — save()/prune never runs on this path.
+    import pytest
+
+    from rag_eval import run as run_mod
+
+    class _BoomEmbedder:
+        def __init__(self):
+            self.signature = ""
+
+        def fit(self, texts):
+            self.signature = "boom-v1"
+
+        def embed(self, text):
+            raise RuntimeError("bedrock timeout")
+
+    monkeypatch.setattr(run_mod, "make_embedder", lambda: _BoomEmbedder())
+
+    cache = tmp_path / "rag_eval" / ".cache" / "embeddings.json"
+    cache.parent.mkdir(parents=True)
+    cache.write_text('{"stale-key": {"ssn": 1.0}}', encoding="utf-8")
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies" / "clean.md").write_text(
+        "# Clean\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+
+    with pytest.raises(RuntimeError, match="bedrock timeout"):
+        run_mod.run(base=tmp_path)
+    assert not cache.exists()  # stale cache purged on the failure path
 
 
 def test_empty_corpus_aborts_loudly(tmp_path: Path):
