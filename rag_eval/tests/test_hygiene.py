@@ -478,6 +478,38 @@ def test_legit_headers_with_spaces_and_symbols_pass(tmp_path):
     assert scan_file(p).passed
 
 
+def test_headerless_name_only_csv_refused(tmp_path):
+    # No SSN/PAN/date anchor — just bare names across rows. The name-column
+    # heuristic must catch it.
+    p = tmp_path / "names.csv"
+    p.write_text("Alice Smith,Bob Jones\nCarol White,Dan Brown\n", encoding="utf-8")
+    verdict = scan_file(p)
+    assert not verdict.passed
+    assert "name-column" in verdict.counts()
+
+
+def test_single_row_name_only_csv_refused(tmp_path):
+    # One headerless row -> zero data rows after DictReader -> unverifiable.
+    p = tmp_path / "names.csv"
+    p.write_text("Alice Smith,Bob Jones\n", encoding="utf-8")
+    verdict = scan_file(p)
+    assert not verdict.passed
+    assert "no-data-rows" in verdict.counts()
+
+
+def test_name_address_only_csv_refused(tmp_path):
+    p = tmp_path / "customers.csv"
+    p.write_text("Alice Smith,123 Main St\nBob Jones,45 Oak Ave\n", encoding="utf-8")
+    assert not scan_file(p).passed
+
+
+def test_multirow_clean_reference_csv_passes(tmp_path):
+    # A genuine two-row lookup with non-name data must still pass.
+    p = tmp_path / "products.csv"
+    p.write_text("product,rate\nLoan A,5.0\nLoan B,6.0\n", encoding="utf-8")
+    assert scan_file(p).passed
+
+
 def test_month_name_dob_detected():
     for text in (
         "DOB: Jan 2, 1980",

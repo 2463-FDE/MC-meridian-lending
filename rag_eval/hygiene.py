@@ -275,6 +275,11 @@ _DELIMITED = {".csv": ",", ".tsv": "\t"}
 # dump whose unlabeled SSN/DOB cells cannot be structurally bound, so the file
 # is refused rather than trusted.
 _PLAUSIBLE_HEADER = re.compile(r"[A-Za-z][\w %./()$#&-]{0,60}")
+# Person-name shape: two or more Title-Case words ("Alice Smith", "Carol White").
+# Used only for delimited files, to catch a name column that carries no other
+# detectable signal. Over-refuses a CSV whose header/values are genuinely
+# Title-Case proper nouns (rare under a corpus root) — acceptable fail-closed.
+_PERSON_NAME = re.compile(r"[A-Z][a-z]+(?:[ '-][A-Z][a-z]+)+")
 
 
 def _scan_json_value(value) -> list[Finding]:
@@ -344,24 +349,41 @@ def scan_file(path: str | Path) -> FileVerdict:
         findings.extend(scan_text(text))
         reader = csv.DictReader(io.StringIO(text), delimiter=_DELIMITED[suffix])
         fieldnames = reader.fieldnames or []
+        rows = list(reader)
         # The header cells may themselves be data (headerless file), so scan
         # them as text too.
         for name in fieldnames:
             findings.extend(scan_text(name))
-        # If any header cell isn't a plausible column name, the first row is
-        # data, not a header — a headerless dump. Its cells (unlabeled name,
-        # bare-9 SSN, unlabeled DOB) can't be bound to sensitive headers, so
-        # refuse rather than mark clean.
+        # Scan each row like a JSON record so a sensitive header (ssn/name/dob)
+        # flags its cell even when the value has no self-identifying shape.
+        for row in rows:
+            findings.extend(scan_record(row))
+        # Zero data rows means the only row was consumed as the header — a
+        # headerless dump we cannot structurally verify (and a header-only file
+        # carries no corpus data anyway). Fail closed.
+        if not rows:
+            findings.append(Finding("no-data-rows", suffix.lstrip(".")))
+        # A header cell that isn't a plausible column name (starts non-letter,
+        # bare number/date) means the first row is data, not a header.
         if any(
             name.strip() and not _PLAUSIBLE_HEADER.fullmatch(name.strip())
             for name in fieldnames
         ):
             findings.append(Finding("data-shaped-header", suffix.lstrip(".")))
-        for row in reader:
-            # DictReader keys are the header row; scan each row like a JSON
-            # record so a sensitive header (ssn/name/dob/...) flags its cell even
-            # when the value has no self-identifying shape.
-            findings.extend(scan_record(row))
+        # A column whose cells are person-name-shaped (Title Case, 2+ words) is a
+        # name column even without a sensitive header label — bare names have no
+        # other detectable shape. Two such cells (header counts) is the signal; a
+        # legit "Loan Amount" header over numeric data stays under the bar.
+        for col in fieldnames:
+            cells = [col] + [r.get(col) for r in rows]
+            nameish = sum(
+                1
+                for c in cells
+                if isinstance(c, str) and _PERSON_NAME.fullmatch(c.strip())
+            )
+            if nameish >= 2:
+                findings.append(Finding("name-column", suffix.lstrip(".")))
+                break
     elif suffix in _SCANNABLE_TEXT:
         findings.extend(scan_text(text))
     else:
