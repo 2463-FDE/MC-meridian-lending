@@ -108,7 +108,8 @@ def test_clean_policy_text_passes():
 
 
 def test_bare_10_digit_number_not_phone():
-    assert scan_text("account 5551234567") == []
+    # No sensitive label -> a bare 10-digit run is neither phone nor bank id.
+    assert scan_text("order 5551234567") == []
 
 
 # --- real repo files (spec D2.2, D2.3) ---
@@ -246,3 +247,43 @@ def test_markdown_with_alias_labeled_ssn_is_refused(tmp_path):
     verdict = scan_file(p)
     assert not verdict.passed
     assert "ssn" in verdict.counts()
+
+
+# --- labeled bank / routing / IBAN identifiers ---
+
+
+def test_labeled_bank_and_routing_detected_in_free_text():
+    for text in (
+        "routing number 021000021",
+        "bank account 123456789012",
+        "acct_no: 4455667788",
+        "ACH account 998877665544",
+        "IBAN GB29NWBK60161331926819",
+    ):
+        assert "bank" in [f.pii_type for f in scan_text(text)], text
+
+
+def test_free_text_iban_without_label_detected():
+    assert "bank" in [f.pii_type for f in scan_text("wire to GB29NWBK60161331926819")]
+
+
+def test_bank_label_without_identifier_not_flagged():
+    # Label present but no identifier-length digit run -> not PII.
+    assert scan_text("the account holder must sign the form") == []
+    assert scan_text("see account 4 of the addendum") == []
+
+
+def test_bank_record_key_flagged():
+    types = {f.pii_type for f in scan_record({"routing_number": "021000021"})}
+    assert "field:routing_number" in types
+
+
+def test_markdown_with_routing_number_is_refused(tmp_path):
+    p = tmp_path / "note.md"
+    p.write_text(
+        "# Note\n\n## Wire\n\nSend to routing number 021000021 for settlement.\n",
+        encoding="utf-8",
+    )
+    verdict = scan_file(p)
+    assert not verdict.passed
+    assert "bank" in verdict.counts()

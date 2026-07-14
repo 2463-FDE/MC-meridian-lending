@@ -29,7 +29,9 @@ _SENSITIVE_KEY = re.compile(
     r"^[\"']?(?:ssn|social[_ ]?security(?:[_ ]?(?:no|num|number))?"
     r"|tax[_ ]?id|tin|ein|pan|cvv2?|cvc2?|dob|date[_ ]?of[_ ]?birth"
     r"|card[_ ]?(?:number|no|num)|cc[_ ]?(?:number|no|num)|credit[_ ]?card"
-    r"|account[_ ]?(?:number|no|num)|acct[_ ]?(?:number|no|num))[\"']?$",
+    r"|(?:account|acct|bank[_ ]?account|dda|ach(?:[_ ]?account)?"
+    r"|routing|aba|rtn|transit|iban)(?:[_ ]?(?:number|no|num))?)"
+    r"[\"']?$",
     re.I,
 )
 
@@ -44,6 +46,20 @@ _PAN_LABELED = re.compile(
     r"|primary[_ ]?account[_ ]?number)\b\W{0,4}(\d(?:[ _\-/*.]?\d){12,24})",
     re.I,
 )
+# Label-gated bank/account/routing/IBAN identifiers. These are plain digit runs
+# with no self-identifying shape (no Luhn, no 3-2-4), so — like a bare SSN — only
+# the field label makes them detectable. Labels mirror the redactor's _BANK_KEY
+# (services/*/app/redactor.py). The value must start with a digit and carry >=6
+# identifier chars (or be an IBAN), so "account holder" / "account 4" don't trip.
+_BANK_LABELED = re.compile(
+    r"\b(?:bank[_ ]?account|account|acct|dda|ach(?:[_ ]?account)?"
+    r"|routing|aba|rtn|transit|iban)(?:[_ ]?(?:number|no|num))?\b"
+    r"\W{0,10}(\d[\d\-\s]{5,32}|[A-Z]{2}\d{2}[A-Za-z0-9]{11,30})",
+    re.I,
+)
+# IBAN in free text: self-identifying (country + 2 check digits + alnum), so no
+# label needed. A labeled IBAN is already covered by _BANK_LABELED.
+_IBAN = re.compile(r"\b[A-Z]{2}\d{2}[A-Za-z0-9]{11,30}\b")
 _SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 # A bare 9-digit run is too ambiguous to flag, but one *labeled* is. Alias set and
 # 3-2-4 optional-separator value mirror the redactor: ssn / social security /
@@ -148,6 +164,14 @@ def scan_text(text: str) -> list[Finding]:
     for m in _PHONE.finditer(text):
         if m.span() not in ssn_spans:
             findings.append(Finding("phone", _mask(m.group(0))))
+    bank_spans = []
+    for m in _BANK_LABELED.finditer(text):
+        findings.append(Finding("bank", _mask(m.group(1))))
+        bank_spans.append(m.span())
+    for m in _IBAN.finditer(text):
+        # A labeled IBAN is already reported by _BANK_LABELED; don't double-count.
+        if not any(s <= m.start() and m.end() <= e for s, e in bank_spans):
+            findings.append(Finding("bank", _mask(m.group(0))))
     return findings
 
 
