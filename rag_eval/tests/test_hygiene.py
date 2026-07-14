@@ -431,6 +431,44 @@ def test_csv_with_only_nonsensitive_headers_passes(tmp_path):
     assert scan_file(p).passed
 
 
+def test_pii_embedded_in_record_key_detected():
+    # PII in a JSON key / CSV header name (not the value) must be caught.
+    assert "ssn" in [f.pii_type for f in scan_record({"ssn 330-90-5512": "x"})]
+    assert "pan" in [f.pii_type for f in scan_record({"note-4111111111111111": "ok"})]
+    # Benign keys (even sensitive-looking labels with no value) stay clean.
+    assert scan_record({"product": "A", "rate": "5.0"}) == []
+
+
+def test_pii_in_csv_header_detected(tmp_path):
+    p = tmp_path / "h.csv"
+    p.write_text("id,4111111111111111\n1,ok\n", encoding="utf-8")
+    assert "pan" in scan_file(p).counts()
+
+
+def test_headerless_csv_pii_detected(tmp_path):
+    # A single headerless row is consumed as column names by DictReader (zero
+    # data rows); the raw-text + fieldname passes must still catch the PII.
+    p = tmp_path / "dump.csv"
+    p.write_text("Alice,123-45-6789,4111111111111111\n", encoding="utf-8")
+    counts = scan_file(p).counts()
+    assert "ssn" in counts and "pan" in counts
+
+
+def test_month_name_dob_detected():
+    for text in (
+        "DOB: Jan 2, 1980",
+        "birth date: January 2 1980",
+        "born 2nd Feb 1975",
+        "date of birth: 15 December 1990",
+    ):
+        assert "dob" in [f.pii_type for f in scan_text(text)], text
+
+
+def test_month_name_without_birth_label_not_flagged():
+    assert scan_text("Effective as of January 2024") == []
+    assert scan_text("born in the winter of 1980") == []
+
+
 def test_empty_file_passes_regardless_of_extension(tmp_path):
     p = tmp_path / "placeholder.dat"
     p.write_text("", encoding="utf-8")

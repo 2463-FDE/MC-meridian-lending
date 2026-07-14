@@ -98,10 +98,18 @@ _CVV_LABELED = re.compile(
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
 _PHONE = re.compile(r"(?:\(\d{3}\)\s?|\b\d{3}[ .\-])\d{3}[ .\-]\d{4}\b")
 # DOB-shaped date in identity context (spec D2.1): a birth label followed
-# shortly by a date-shaped value (ISO or slashed/dashed US/EU order).
+# shortly by a date-shaped value — ISO/slashed/dashed numeric, OR a month-name
+# form ("Jan 2, 1980" / "2 January 1980") which is just as much a birth date.
+_MONTH = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?"
+    r"|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+)
 _DOB_CONTEXT = re.compile(
     r"\b(?:dob|date of birth|birth ?date|born)\b\W{0,10}"
-    r"(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{4})",
+    r"(\d{4}[-/]\d{1,2}[-/]\d{1,2}"
+    r"|\d{1,2}[-/]\d{1,2}[-/]\d{4}"
+    r"|" + _MONTH + r"\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}"
+    r"|\d{1,2}(?:st|nd|rd|th)?\s+" + _MONTH + r"\.?,?\s+\d{4})",
     re.I,
 )
 # Free-text labeled name / address (the scan_record key path handles structured
@@ -218,11 +226,13 @@ def scan_record(obj: dict) -> list[Finding]:
     """
     findings: list[Finding] = []
     for key, value in obj.items():
-        if (
-            isinstance(key, str)
-            and _SENSITIVE_KEY.match(key)
-            and value not in (None, "")
-        ):
+        if not isinstance(key, str):
+            continue
+        # The key/header string is itself corpus content — a JSON key or CSV
+        # header can carry raw PII (e.g. {"ssn 330-90-5512": ...} or a header row
+        # that is a PAN). Scan it like any text, not just for a label match.
+        findings.extend(scan_text(key))
+        if _SENSITIVE_KEY.match(key) and value not in (None, ""):
             findings.append(Finding(f"field:{key.lower()}", _mask(str(value))))
     # Scan each value separately — joining them would let the PAN pattern's
     # legal space separator fuse adjacent digit fields into one oversized run.
@@ -321,7 +331,16 @@ def scan_file(path: str | Path) -> FileVerdict:
         except json.JSONDecodeError:
             findings.extend(scan_text(text))
     elif suffix in _DELIMITED:
+        # Free-text pass over the whole file catches self-identifying PII
+        # (dashed SSN, PAN, IBAN) regardless of row structure — including a
+        # headerless/single-row export whose only row DictReader consumes as
+        # column names, leaving zero data rows.
+        findings.extend(scan_text(text))
         reader = csv.DictReader(io.StringIO(text), delimiter=_DELIMITED[suffix])
+        # The header cells may themselves be data (headerless file), so scan
+        # them as text too.
+        for name in reader.fieldnames or []:
+            findings.extend(scan_text(name))
         for row in reader:
             # DictReader keys are the header row; scan each row like a JSON
             # record so a sensitive header (ssn/name/dob/...) flags its cell even
