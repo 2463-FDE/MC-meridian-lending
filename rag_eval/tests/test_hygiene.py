@@ -396,6 +396,22 @@ def test_unsupported_extension_refused(tmp_path):
     assert "unsupported-file" in verdict.counts()
 
 
+def test_yaml_with_structured_pii_refused(tmp_path):
+    # .yaml/.yml are structured key/value, not free text: labeled identity fields
+    # whose values dodge scan_text's value-shape detectors (lowercase name,
+    # PO-box address, bare city) would otherwise pass clean. They must fail
+    # closed as unsupported until a structural YAML scanner exists.
+    for ext in (".yaml", ".yml"):
+        p = tmp_path / f"corpus{ext}"
+        p.write_text(
+            "name: alice smith\naddress: PO Box 123\ncity: Boston\n",
+            encoding="utf-8",
+        )
+        verdict = scan_file(p)
+        assert not verdict.passed, ext
+        assert "unsupported-file" in verdict.counts(), ext
+
+
 def test_csv_and_json_corpus_files_scanned(tmp_path):
     csv = tmp_path / "customers.csv"
     csv.write_text("name,ssn\nAlice,123-45-6789\n", encoding="utf-8")

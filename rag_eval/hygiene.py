@@ -252,17 +252,22 @@ def scan_record(obj: dict) -> list[Finding]:
     return findings
 
 
-# Extensions the gate knows how to read as text/JSON. Anything else under a
+# Extensions the gate knows how to read as plain free text. Anything else under a
 # corpus root cannot be proven PII-free, so scan_file refuses it (fail closed) —
 # a new customers.csv or a binary dump must break the gate, not slip through
 # unscanned.
+# NOTE: .yaml/.yml are deliberately excluded. They are structured key/value
+# formats, but scan_text's name/address detectors are value-shape-gated
+# (Title-case names, house-number addresses), so labeled identity fields whose
+# values dodge those shapes — "name: alice smith", "address: PO Box 123",
+# "city: Boston" — would pass a free-text scan clean. Rather than run scan_text
+# on them (a bypass), YAML fails closed as unsupported until a structural scanner
+# parses key/value records through scan_record like JSON/CSV.
 _SCANNABLE_TEXT = {
     ".md",
     ".markdown",
     ".txt",
     ".text",
-    ".yaml",
-    ".yml",
     ".log",
 }
 # CSV/TSV are scanned STRUCTURALLY (headers as keys), not as a free-text blob —
