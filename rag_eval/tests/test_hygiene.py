@@ -199,3 +199,50 @@ def test_markdown_with_cvv_label_is_refused(tmp_path):
     verdict = scan_file(p)
     assert not verdict.passed
     assert "cvv" in verdict.counts()
+
+
+# --- labeled aliases + separators (parity with the production redactor) ---
+
+
+def test_ssn_aliases_and_underscores_detected_in_free_text():
+    for text in (
+        "social_security_number: 330905512",
+        "social security no 330905512",
+        "tax_id 330905512",
+        "tin: 330-90-5512",
+    ):
+        assert "ssn" in [f.pii_type for f in scan_text(text)], text
+
+
+def test_ssn_alias_record_key_flagged():
+    findings = scan_record({"social_security_number": "330905512"})
+    assert [f.pii_type for f in findings] == ["field:social_security_number"]
+
+
+def test_labeled_pan_with_nonstandard_separators_detected():
+    # Underscore/slash/star separators evade the bare-run PAN pattern but not the
+    # labeled-card pass (separator-agnostic, Luhn-checked).
+    for text in (
+        "card_number: 4111_1111_1111_1111",
+        "credit card 4111/1111/1111/1111",
+        "acct_no 4111*1111*1111*1111",
+    ):
+        assert "pan" in [f.pii_type for f in scan_text(text)], text
+    # A labeled field whose value is NOT card-length/Luhn is not flagged as PAN.
+    assert "pan" not in [f.pii_type for f in scan_text("account number 12")]
+
+
+def test_card_alias_record_key_flagged():
+    types = {f.pii_type for f in scan_record({"card_number": "4111111111111111"})}
+    assert "field:card_number" in types
+
+
+def test_markdown_with_alias_labeled_ssn_is_refused(tmp_path):
+    p = tmp_path / "note.md"
+    p.write_text(
+        "# Note\n\n## Applicant\n\nsocial_security_number: 330905512 on file.\n",
+        encoding="utf-8",
+    )
+    verdict = scan_file(p)
+    assert not verdict.passed
+    assert "ssn" in verdict.counts()

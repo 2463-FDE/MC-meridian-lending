@@ -20,11 +20,38 @@ from pathlib import Path
 # regardless of whether the value matches a regex (e.g. dob is just a date by value).
 SENSITIVE_FIELDS = {"ssn", "pan", "cvv", "dob", "ein"}
 
+# Field-name aliases (any record key matching this is sensitive), mirroring the
+# production redactor's label sets (services/*/app/redactor.py, _PAN_KEY + SSN
+# label group; consolidate per DL-5 when that branch merges). Catches
+# social_security_number / tax_id / tin / card_number / account_number etc. that
+# the bare SENSITIVE_FIELDS set misses.
+_SENSITIVE_KEY = re.compile(
+    r"^[\"']?(?:ssn|social[_ ]?security(?:[_ ]?(?:no|num|number))?"
+    r"|tax[_ ]?id|tin|ein|pan|cvv2?|cvc2?|dob|date[_ ]?of[_ ]?birth"
+    r"|card[_ ]?(?:number|no|num)|cc[_ ]?(?:number|no|num)|credit[_ ]?card"
+    r"|account[_ ]?(?:number|no|num)|acct[_ ]?(?:number|no|num))[\"']?$",
+    re.I,
+)
+
 _PAN_CANDIDATE = re.compile(r"\b\d(?:[ \-]?\d){12,18}\b")
+# A labeled card/account field is separator-agnostic: the label asserts a PAN, so
+# underscore/slash/star separators that evade _PAN_CANDIDATE (space/hyphen only)
+# are still caught. Extracted digits are Luhn-checked. Mirrors the redactor's
+# labeled-PAN pass, which does not rely on separator enumeration.
+_PAN_LABELED = re.compile(
+    r"\b(?:pan|card[_ ]?(?:number|no|num)|cc[_ ]?(?:number|no|num)|credit[_ ]?card"
+    r"|account[_ ]?(?:number|no|num)|acct[_ ]?(?:number|no|num)"
+    r"|primary[_ ]?account[_ ]?number)\b\W{0,4}(\d(?:[ _\-/*.]?\d){12,24})",
+    re.I,
+)
 _SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
-# A bare 9-digit run is too ambiguous to flag, but one *labeled* as an SSN is not.
+# A bare 9-digit run is too ambiguous to flag, but one *labeled* is. Alias set and
+# 3-2-4 optional-separator value mirror the redactor: ssn / social security /
+# tax id / tin, with or without underscores and no/num/number suffixes.
 _SSN_LABELED = re.compile(
-    r"\b(?:ssn|social security(?: number)?)\b\D{0,10}\d{9}\b", re.I
+    r"\b(?:ssn|social[_ ]?security|tax[_ ]?id|tin)(?:[_ ]?(?:no|num|number))?s?\b"
+    r"\W{0,10}\d{3}[-\s]?\d{2}[-\s]?\d{4}\b",
+    re.I,
 )
 _EIN = re.compile(r"\b\d{2}-\d{7}\b")
 # A labeled card security code in free text. cvv is declared sensitive for JSONL
@@ -98,8 +125,16 @@ def scan_text(text: str) -> list[Finding]:
         digits = re.sub(r"[ \-]", "", raw)
         if 13 <= len(digits) <= 19 and _luhn_valid(digits):
             findings.append(Finding("pan", _mask(digits)))
+    for m in _PAN_LABELED.finditer(text):
+        digits = re.sub(r"\D", "", m.group(1))
+        if 13 <= len(digits) <= 19 and _luhn_valid(digits):
+            findings.append(Finding("pan", _mask(digits)))
     for m in _SSN_LABELED.finditer(text):
-        findings.append(Finding("ssn", _mask(m.group(0))))
+        # A dashed SSN is already caught by _SSN; don't double-count when the
+        # labeled match just wraps that same value.
+        if not any(m.start() <= s and e <= m.end() for s, e in ssn_spans):
+            findings.append(Finding("ssn", _mask(m.group(0))))
+            ssn_spans.append(m.span())
     for m in _DOB_CONTEXT.finditer(text):
         findings.append(Finding("dob", _mask(m.group(1))))
     for m in _CVV_LABELED.finditer(text):
@@ -124,7 +159,7 @@ def scan_record(obj: dict) -> list[Finding]:
     """
     findings: list[Finding] = []
     for key, value in obj.items():
-        if key.lower() in SENSITIVE_FIELDS and value not in (None, ""):
+        if _SENSITIVE_KEY.match(key) and value not in (None, ""):
             findings.append(Finding(f"field:{key.lower()}", _mask(str(value))))
     # Scan each value separately — joining them would let the PAN pattern's
     # legal space separator fuse adjacent digit fields into one oversized run.
