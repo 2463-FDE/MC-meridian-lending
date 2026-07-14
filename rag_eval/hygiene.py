@@ -11,6 +11,8 @@ Findings carry masked samples only; raw values must never appear in reports.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
 from dataclasses import dataclass, field
@@ -216,7 +218,11 @@ def scan_record(obj: dict) -> list[Finding]:
     """
     findings: list[Finding] = []
     for key, value in obj.items():
-        if _SENSITIVE_KEY.match(key) and value not in (None, ""):
+        if (
+            isinstance(key, str)
+            and _SENSITIVE_KEY.match(key)
+            and value not in (None, "")
+        ):
             findings.append(Finding(f"field:{key.lower()}", _mask(str(value))))
     # Scan each value separately — joining them would let the PAN pattern's
     # legal space separator fuse adjacent digit fields into one oversized run.
@@ -245,12 +251,14 @@ _SCANNABLE_TEXT = {
     ".markdown",
     ".txt",
     ".text",
-    ".csv",
-    ".tsv",
     ".yaml",
     ".yml",
     ".log",
 }
+# CSV/TSV are scanned STRUCTURALLY (headers as keys), not as a free-text blob —
+# a blob loses the header→cell binding, so a `ssn` column of undashed 9-digit
+# values would pass. Delimiter picked by extension.
+_DELIMITED = {".csv": ",", ".tsv": "\t"}
 
 
 def _scan_json_value(value) -> list[Finding]:
@@ -296,6 +304,15 @@ def scan_file(path: str | Path) -> FileVerdict:
             findings.extend(_scan_json_value(json.loads(text)))
         except json.JSONDecodeError:
             findings.extend(scan_text(text))
+    elif suffix in _DELIMITED:
+        reader = csv.DictReader(
+            io.StringIO(raw.decode("utf-8", "replace")), delimiter=_DELIMITED[suffix]
+        )
+        for row in reader:
+            # DictReader keys are the header row; scan each row like a JSON
+            # record so a sensitive header (ssn/name/dob/...) flags its cell even
+            # when the value has no self-identifying shape.
+            findings.extend(scan_record(row))
     elif suffix in _SCANNABLE_TEXT:
         findings.extend(scan_text(raw.decode("utf-8", "replace")))
     else:

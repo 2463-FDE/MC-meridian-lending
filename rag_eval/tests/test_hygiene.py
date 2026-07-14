@@ -405,6 +405,32 @@ def test_csv_and_json_corpus_files_scanned(tmp_path):
     assert not scan_file(js).passed
 
 
+def test_csv_scanned_structurally_by_header_not_as_blob(tmp_path):
+    # Undashed SSN, plain DOB, comma-separated name/address — none regex-shaped
+    # on their own; only the header binding flags them.
+    p = tmp_path / "export.csv"
+    p.write_text(
+        "name,ssn,dob,address\nAlice Smith,330905512,1992-04-21,123 Main St\n",
+        encoding="utf-8",
+    )
+    counts = scan_file(p).counts()
+    assert {"field:name", "field:ssn", "field:dob", "field:address"} <= set(counts)
+
+
+def test_tsv_routing_and_account_headers_flagged(tmp_path):
+    p = tmp_path / "accts.tsv"
+    p.write_text(
+        "routing_number\taccount_number\n021000021\t123456789012\n", encoding="utf-8"
+    )
+    assert not scan_file(p).passed
+
+
+def test_csv_with_only_nonsensitive_headers_passes(tmp_path):
+    p = tmp_path / "rates.csv"
+    p.write_text("product,rate\nLoan A,5.0\n", encoding="utf-8")
+    assert scan_file(p).passed
+
+
 def test_empty_file_passes_regardless_of_extension(tmp_path):
     p = tmp_path / "placeholder.dat"
     p.write_text("", encoding="utf-8")
