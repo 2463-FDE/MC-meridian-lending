@@ -287,3 +287,58 @@ def test_markdown_with_routing_number_is_refused(tmp_path):
     verdict = scan_file(p)
     assert not verdict.passed
     assert "bank" in verdict.counts()
+
+
+# --- structured name / address fields (no reliable value regex, key-gated) ---
+
+
+def test_name_and_address_record_fields_detected():
+    findings = scan_record(
+        {"name": "Alice Smith", "address": "123 Main St, Boston MA 02110"}
+    )
+    types = {f.pii_type for f in findings}
+    assert "field:name" in types and "field:address" in types
+
+
+def test_name_address_aliases_and_components_detected():
+    findings = scan_record(
+        {
+            "applicant_name": "Bob",
+            "street_address": "1 Elm",
+            "city": "Boston",
+            "zip": "02110",
+        }
+    )
+    types = {f.pii_type for f in findings}
+    assert {
+        "field:applicant_name",
+        "field:street_address",
+        "field:city",
+        "field:zip",
+    } <= types
+
+
+def test_nested_name_address_detected():
+    findings = scan_record({"applicant": {"full_name": "X", "home_address": "Y"}})
+    types = {f.pii_type for f in findings}
+    assert "field:full_name" in types and "field:home_address" in types
+
+
+def test_name_field_value_fully_masked():
+    f = [x for x in scan_record({"name": "Alice Smith"}) if x.pii_type == "field:name"][
+        0
+    ]
+    assert "Alice" not in f.masked_sample and "Smith" not in f.masked_sample
+
+
+def test_jsonl_with_only_name_address_is_refused(tmp_path):
+    # A remediated dump with SSN/PAN removed but names/addresses retained, or a
+    # new customer export, must still be refused.
+    p = tmp_path / "customers.jsonl"
+    p.write_text(
+        '{"name": "Alice Smith", "address": "123 Main St, Boston MA 02110"}\n',
+        encoding="utf-8",
+    )
+    verdict = scan_file(p)
+    assert not verdict.passed
+    assert "field:name" in verdict.counts()

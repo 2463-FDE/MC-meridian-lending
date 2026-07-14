@@ -30,7 +30,15 @@ _SENSITIVE_KEY = re.compile(
     r"|tax[_ ]?id|tin|ein|pan|cvv2?|cvc2?|dob|date[_ ]?of[_ ]?birth"
     r"|card[_ ]?(?:number|no|num)|cc[_ ]?(?:number|no|num)|credit[_ ]?card"
     r"|(?:account|acct|bank[_ ]?account|dda|ach(?:[_ ]?account)?"
-    r"|routing|aba|rtn|transit|iban)(?:[_ ]?(?:number|no|num))?)"
+    r"|routing|aba|rtn|transit|iban)(?:[_ ]?(?:number|no|num))?"
+    # Personal name / postal address. No reliable value regex (ordinary words),
+    # so these are caught by field name only — like the redactor's label-gated
+    # fields. The kb_dump spec lists name/address as PII and the smoke keeps them
+    # out of artifacts, so a customer export or a remediated dump keeping only
+    # names/addresses must still be refused.
+    r"|(?:[a-z]+[_ ])?name|(?:sur|given|maiden|first|last|middle|full|f|l|m)[_ ]?name"
+    r"|(?:mailing|home|billing|postal|street)[_ ]?address|addr(?:ess)?|street"
+    r"|city|zip(?:[_ ]?code)?|postal[_ ]?code)"
     r"[\"']?$",
     re.I,
 )
