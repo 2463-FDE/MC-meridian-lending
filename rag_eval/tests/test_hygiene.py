@@ -476,6 +476,23 @@ def test_birth_date_alias_flagged_in_record_and_csv(tmp_path):
     assert "field:birth_date" in verdict.counts()
 
 
+def test_malformed_json_and_jsonl_fail_closed(tmp_path):
+    # A JSON/JSONL parse error must refuse, not fall back to a key-blind text scan
+    # that lets structured PII (lowercase name, PO-box address, birth_date) slip
+    # through unterminated objects.
+    cases = (
+        (".json", "json", '{"name":"alice smith"'),
+        (".json", "json", '{"address":"PO Box 123"'),
+        (".jsonl", "jsonl", '{"birth_date":"1992-04-21"'),
+    )
+    for ext, tag, body in cases:
+        p = tmp_path / f"corpus{ext}"
+        p.write_text(body, encoding="utf-8")
+        verdict = scan_file(p)
+        assert not verdict.passed, body
+        assert f"malformed-{tag}" in verdict.counts(), body
+
+
 def test_headerless_csv_pii_detected(tmp_path):
     # A single headerless row is consumed as column names by DictReader (zero
     # data rows); the raw-text + fieldname passes must still catch the PII.

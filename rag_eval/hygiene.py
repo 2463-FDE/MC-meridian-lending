@@ -338,14 +338,21 @@ def scan_file(path: str | Path) -> FileVerdict:
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
-                findings.extend(scan_text(line))
+                # A malformed line cannot be scanned structurally, and a free-text
+                # fallback loses scan_record's key-aware protection — an
+                # unterminated {"name":"alice smith" or {"birth_date":"..."} would
+                # dodge the value-shape detectors and pass. Fail closed; don't put
+                # the raw line in the sample (it is the PII we are refusing).
+                findings.append(Finding("malformed-jsonl", suffix.lstrip(".")))
             else:
                 findings.extend(_scan_json_value(obj))
     elif suffix == ".json":
         try:
             findings.extend(_scan_json_value(json.loads(text)))
         except json.JSONDecodeError:
-            findings.extend(scan_text(text))
+            # Same reasoning as .jsonl above: no structural scan possible, so
+            # refuse rather than fall back to a weaker key-blind text scan.
+            findings.append(Finding("malformed-json", suffix.lstrip(".")))
     elif suffix in _DELIMITED:
         # Free-text pass over the whole file catches self-identifying PII
         # (dashed SSN, PAN, IBAN) regardless of row structure — including a
