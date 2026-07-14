@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,14 @@ GOLD_PATH = Path(__file__).parent / "gold_queries.json"
 # narrow: any OTHER dot-prefixed file (e.g. .customers.csv) is scanned like a
 # normal corpus file, so a hidden data dump cannot bypass the gate.
 _SKIP_NAMES = {".gitkeep", ".gitignore", ".gitattributes", ".ds_store"}
+
+# A safe corpus filename: lowercase-kebab/snake slug plus dots for extensions.
+# Uppercase letters and spaces are refused so an unlabeled name/address
+# ("Jane-Doe.md", "123 Main St.txt") cannot ride in a filename into a chunk id
+# or the report (see run() gate). A leading dot IS allowed — dot-prefixed data
+# files are deliberately still content-scanned (see _SKIP_NAMES note), so the
+# name convention must not short-circuit that path.
+_SAFE_FILENAME = re.compile(r"\.?[a-z0-9][a-z0-9._-]*")
 
 # The ONE corpus file ADR 0007 documents as legacy-contaminated: kb_dump is the
 # raw pre-remediation dump, so its refusal is expected and is the whole point of
@@ -168,6 +177,32 @@ def run(base: Path = Path(".")) -> RunResult:
         raise RuntimeError(
             f"corpus file path(s) at position(s) {pii_paths} contain PII in their "
             "names — rename them (paths are not echoed here)"
+        )
+
+    # scan_text above only catches self-identifying PII in a path (SSN, PAN,
+    # email). It CANNOT catch an unlabeled person name or street address —
+    # "Jane-Doe.md" is shape-identical to a policy title "Fee-Schedule.md", so a
+    # name-shape detector would refuse the whole policies/ tree. Instead require
+    # every corpus path COMPONENT (each parent directory AND the filename) to be
+    # a lowercase slug: a real name/address committed to the tree is
+    # conventionally Title-Cased or spaced ("Jane-Doe", "123 Main St"), so
+    # anything with an uppercase letter, space, or other unsafe char is refused
+    # before its stem becomes a chunk id / its path enters the report. Checking
+    # every component (not just p.name) closes the directory bypass — the report
+    # emits the full path, so a "policies/Jane-Doe/fees.md" dir would leak too.
+    # (A deliberately all-lowercase name is out of scope here; file CONTENT is
+    # still fully scanned by scan_file. A leading dot is allowed so hidden data
+    # files still reach the content scan rather than being refused on name.)
+    unsafe_names = [
+        i
+        for i, p in enumerate(candidates)
+        if not all(_SAFE_FILENAME.fullmatch(part) for part in p.relative_to(base).parts)
+    ]
+    if unsafe_names:
+        raise RuntimeError(
+            f"corpus path(s) at position(s) {unsafe_names} have a non-slug "
+            "component — rename dirs/files to [a-z0-9._-] so unlabeled "
+            "names/addresses cannot leak via the path (path not echoed here)"
         )
 
     verdicts = [scan_file(p) for p in candidates]

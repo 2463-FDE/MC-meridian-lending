@@ -322,6 +322,66 @@ def test_pii_in_filename_fails_before_artifacts(tmp_path: Path):
     assert not (tmp_path / "rag_eval" / ".cache" / "embeddings.json").exists()
 
 
+def test_name_only_filename_refused_as_unsafe_slug(tmp_path: Path):
+    # A clean-content file whose NAME is an unlabeled person name has no
+    # self-identifying shape for scan_text, so the lowercase-slug convention must
+    # refuse it before the stem becomes a chunk id / the path enters the report.
+    import pytest
+
+    policies = tmp_path / "policies"
+    policies.mkdir()
+    (policies / "Jane-Doe.md").write_text(
+        "# Doc\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="non-slug component") as e:
+        run(base=tmp_path)
+    assert "Jane" not in str(e.value)  # position only, name not echoed
+    assert not (tmp_path / "rag_eval" / "eval_report.md").exists()
+    assert not (tmp_path / "rag_eval" / ".cache" / "embeddings.json").exists()
+
+
+def test_name_shaped_directory_refused(tmp_path: Path):
+    # The report emits the full path, so a person-name DIRECTORY leaks even when
+    # the filename itself is a clean slug. Every path component must be checked,
+    # not just the basename.
+    import pytest
+
+    d = tmp_path / "policies" / "Jane-Doe"
+    d.mkdir(parents=True)
+    (d / "fees.md").write_text(
+        "# Fees\n\n## Late\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="non-slug component") as e:
+        run(base=tmp_path)
+    assert "Jane" not in str(e.value)  # path not echoed
+    assert not (tmp_path / "rag_eval" / "eval_report.md").exists()
+
+
+def test_safe_filename_convention():
+    # Locks the lowercase-slug convention: unlabeled name/address filenames the
+    # content/path scans cannot catch must be refused; legit slugs must pass.
+    from rag_eval.run import _SAFE_FILENAME
+
+    for bad in (
+        "Jane-Doe.md",
+        "Alice-Smith-policy.md",
+        "123 Main St.md",
+        "Report FINAL.txt",
+        "José-García.md",
+    ):
+        assert not _SAFE_FILENAME.fullmatch(bad), bad
+    for ok in (
+        "late-payment-policy.md",
+        "applications.jsonl",
+        "fee_schedule.md",
+        "kb-dump-2026.txt",
+        "doc1.md",
+        # leading dot allowed: hidden data files still reach the content scan.
+        ".customers.csv",
+    ):
+        assert _SAFE_FILENAME.fullmatch(ok), ok
+
+
 def test_empty_corpus_aborts_loudly(tmp_path: Path):
     # Teeth finding: no corpus must not yield a plausible-looking empty report.
     import pytest
