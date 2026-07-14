@@ -43,11 +43,16 @@ _SENSITIVE_KEY = re.compile(
     re.I,
 )
 
-_PAN_CANDIDATE = re.compile(r"\b\d(?:[ \-]?\d){12,18}\b")
-# A labeled card/account field is separator-agnostic: the label asserts a PAN, so
-# underscore/slash/star separators that evade _PAN_CANDIDATE (space/hyphen only)
-# are still caught. Extracted digits are Luhn-checked. Mirrors the redactor's
-# labeled-PAN pass, which does not rely on separator enumeration.
+# Free-text PAN candidate: 13-19 digits with at most ONE non-digit separator
+# between them (space, hyphen, slash, star, dot, a stray letter — any single
+# char, but not a newline, so it never runs across lines). This mirrors the
+# redactor's separator-agnostic free-text pass; Luhn (in scan_text) rejects
+# ordinary long digit runs. Bounded to a single separator so it cannot greedily
+# swallow surrounding text.
+_PAN_CANDIDATE = re.compile(r"\b\d(?:[^0-9\n]?\d){12,18}\b")
+# A labeled card/account field is also separator-agnostic; the label lets it
+# catch card values even where the free-text pass's single-separator bound would
+# miss (e.g. doubled separators). Extracted digits are Luhn-checked.
 _PAN_LABELED = re.compile(
     r"\b(?:pan|card[_ ]?(?:number|no|num)|cc[_ ]?(?:number|no|num)|credit[_ ]?card"
     r"|account[_ ]?(?:number|no|num)|acct[_ ]?(?:number|no|num)"
@@ -145,8 +150,7 @@ def scan_text(text: str) -> list[Finding]:
         findings.append(Finding("ssn", _mask(m.group(0))))
         ssn_spans.append(m.span())
     for m in _PAN_CANDIDATE.finditer(text):
-        raw = m.group(0)
-        digits = re.sub(r"[ \-]", "", raw)
+        digits = re.sub(r"\D", "", m.group(0))
         if 13 <= len(digits) <= 19 and _luhn_valid(digits):
             findings.append(Finding("pan", _mask(digits)))
     for m in _PAN_LABELED.finditer(text):

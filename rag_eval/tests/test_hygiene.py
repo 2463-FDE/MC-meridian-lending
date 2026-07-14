@@ -49,6 +49,22 @@ def test_luhn_invalid_digit_run_not_flagged_as_pan():
     assert "pan" not in types
 
 
+def test_unlabeled_pan_with_nonspace_separators_detected():
+    # Free-text PANs with */./slash/letter separators (no card label) must flag.
+    for text in (
+        "4111*1111*1111*1111",
+        "4111/1111/1111/1111",
+        "4111.1111.1111.1111",
+        "4111x1111x1111x1111",
+    ):
+        assert [f.pii_type for f in scan_text(text)] == ["pan"], text
+
+
+def test_unlabeled_pan_separator_scan_is_luhn_gated():
+    # Same shape but Luhn-invalid -> not a PAN (bounded, no false positive).
+    assert "pan" not in [f.pii_type for f in scan_text("4111x1111x1111x1112")]
+
+
 # --- SSN / EIN / email / phone ---
 
 
