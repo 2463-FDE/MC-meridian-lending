@@ -28,20 +28,46 @@ SENSITIVE_FIELDS = {"ssn", "pan", "cvv", "dob", "ein"}
 # social_security_number / tax_id / tin / card_number / account_number etc. that
 # the bare SENSITIVE_FIELDS set misses.
 _SENSITIVE_KEY = re.compile(
-    r"^[\"']?(?:ssn(?:[_ ]?(?:no|num|number))?|social[_ ]?security(?:[_ ]?(?:no|num|number))?"
-    r"|tax[_ ]?id|tin|ein|pan|cvv2?|cvc2?|dob|date[_ ]?of[_ ]?birth|birth[_ ]?date"
-    r"|card[_ ]?(?:number|no|num)|cc[_ ]?(?:number|no|num)|credit[_ ]?card"
+    r"^[\"']?(?:"
+    # SSN / tax / employer identifiers. Base terms carry the shared no/num/number
+    # suffix group so ssn_number, ein_no, tax_identification_number etc. all match
+    # (a bare 9-digit value is intentionally not flagged, so the key must be).
+    r"ssn(?:[_ ]?(?:no|num|number))?|ss[_ ]?(?:no|num|number)"
+    r"|social[_ ]?security(?:[_ ]?(?:no|num|number))?"
+    r"|tax[_ ]?id(?:entification)?(?:[_ ]?(?:no|num|number))?|tin"
+    r"|ein(?:[_ ]?(?:no|num|number))?"
+    r"|employer[_ ]?id(?:entification)?(?:[_ ]?(?:no|num|number))?"
+    r"|(?:individual[_ ]?)?(?:taxpayer[_ ]?id|itin)(?:[_ ]?(?:no|num|number))?"
+    # Government / KYC identity documents (ITIN is a direct SSN substitute;
+    # passport and driver's-license numbers are standard lending KYC).
+    r"|passport(?:[_ ]?(?:no|num|number))?"
+    r"|driver'?s?[_ ]?license(?:[_ ]?(?:no|num|number))?"
+    r"|(?:license|dl)[_ ]?(?:no|num|number)"
+    # Date of birth (bare date value has no birth context, so key-gated).
+    r"|dob|date[_ ]?of[_ ]?birth|birth[_ ]?date|birth[_ ]?day"
+    # Card / PAN / security code.
+    r"|pan(?:[_ ]?(?:number|no|num))?|primary[_ ]?account[_ ]?number"
+    r"|card[_ ]?(?:number|no|num)|cc[_ ]?(?:number|no|num)"
+    r"|(?:credit|debit)[_ ]?card(?:[_ ]?(?:number|no|num))?"
+    r"|cvv2?(?:[_ ]?code)?|cvc2?|cv2|(?:card[_ ]?)?security[_ ]?code"
+    # Bank / account / routing identifiers.
     r"|(?:account|acct|bank[_ ]?account|dda|ach(?:[_ ]?account)?"
-    r"|routing|aba|rtn|transit|iban)(?:[_ ]?(?:number|no|num))?"
+    r"|routing|aba|rtn|transit|iban|swift|bic|sort[_ ]?code)"
+    r"(?:[_ ]?(?:number|no|num))?"
     # Personal name / postal address. No reliable value regex (ordinary words),
     # so these are caught by field name only — like the redactor's label-gated
     # fields. The kb_dump spec lists name/address as PII and the smoke keeps them
     # out of artifacts, so a customer export or a remediated dump keeping only
     # names/addresses must still be refused.
     r"|(?:[a-z]+[_ ])?name|(?:sur|given|maiden|first|last|middle|full|f|l|m)[_ ]?name"
-    r"|(?:mailing|home|billing|postal|street)[_ ]?address|addr(?:ess)?|street"
-    r"|city|zip(?:[_ ]?code)?|postal[_ ]?code)"
-    r"[\"']?$",
+    r"|(?:mailing|home|billing|postal|street|residential)[_ ]?address(?:[_ ]?line)?[_ ]?\d*"
+    r"|address(?:[_ ]?line)?[_ ]?\d*|addr(?:ess)?\d*|street"
+    r"|city|zip(?:[_ ]?code)?|postal[_ ]?code"
+    # Contact identifiers (email/phone are PII; a bare-digit phone or an obscured
+    # email value dodges the value regexes, so the key is flagged too).
+    r"|e[-_ ]?mail(?:[_ ]?address)?"
+    r"|phone(?:[_ ]?(?:number|no|num))?|fax(?:[_ ]?(?:number|no|num))?"
+    r")[\"']?$",
     re.I,
 )
 

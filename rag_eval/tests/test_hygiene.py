@@ -251,6 +251,90 @@ def test_ssn_number_aliases_flagged_in_record_and_jsonl(tmp_path):
     assert "field:ssn_number" in verdict.counts()
 
 
+def test_sensitive_key_alias_sweep():
+    # Locks the structured-key alias space against regression: every spelling a
+    # value-shape-blind PII field could hide behind must be flagged, and benign /
+    # out-of-scope keys must stay clean (no over-refusal). Grouped by PII type.
+    from rag_eval.hygiene import _SENSITIVE_KEY
+
+    must_flag = [
+        # SSN / tax / employer
+        "ss_number",
+        "ein_number",
+        "ein_no",
+        "tax_identification_number",
+        "employer_id",
+        "employer_identification_number",
+        # government / KYC identity documents
+        "itin",
+        "itin_number",
+        "taxpayer_id",
+        "individual_taxpayer_id",
+        "passport",
+        "passport_number",
+        "drivers_license",
+        "driver_license",
+        "dl_number",
+        "license_number",
+        "license_no",
+        # card / PAN / security code
+        "pan_number",
+        "credit_card_number",
+        "debit_card",
+        "primary_account_number",
+        "cv2",
+        "cvv_code",
+        "card_security_code",
+        "security_code",
+        # DOB
+        "birthday",
+        "birth_day",
+        # bank / routing
+        "swift",
+        "bic",
+        "sort_code",
+        # address / contact
+        "address_line_1",
+        "address1",
+        "addr1",
+        "email",
+        "email_address",
+        "phone",
+        "phone_number",
+        "fax",
+    ]
+    for k in must_flag:
+        assert _SENSITIVE_KEY.match(k), f"should flag: {k}"
+
+    must_stay_clean = [
+        "product",
+        "rate",
+        "loan_amount",
+        "account_status",
+        "state",
+        "county",
+        "country",
+        "user_id",
+        "loan_id",
+        "card_type",
+        "filename",
+        "username",
+        "balance",
+        "term",
+        "apr",
+        "national_id",
+        "card",
+        "mobile",
+        "cell",
+        "license",
+        "dl",
+        "driver",
+        "passporting",
+    ]
+    for k in must_stay_clean:
+        assert not _SENSITIVE_KEY.match(k), f"should NOT flag: {k}"
+
+
 def test_labeled_pan_with_nonstandard_separators_detected():
     # Underscore/slash/star separators evade the bare-run PAN pattern but not the
     # labeled-card pass (separator-agnostic, Luhn-checked).
