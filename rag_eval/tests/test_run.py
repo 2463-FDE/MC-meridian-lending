@@ -266,11 +266,61 @@ def test_gold_pii_in_id_or_expected_fails_without_echo(tmp_path: Path, monkeypat
     )
     monkeypatch.setattr(run_mod, "GOLD_PATH", gold)
 
-    with pytest.raises(RuntimeError, match="contain PII") as e:
+    # Fails closed before any embed/cache side effect, and the offending values
+    # are never echoed. (An SSN-shaped id trips the PII scan; a non-chunk-id
+    # 'expected' trips the structured-field schema — either way it aborts.)
+    with pytest.raises(RuntimeError) as e:
         run_mod.run(base=tmp_path)
     msg = str(e.value)
     assert "412-55-9981" not in msg and "330-90-5512" not in msg
     assert not (tmp_path / "rag_eval" / ".cache" / "embeddings.json").exists()
+
+
+def test_gold_schema_rejects_malformed_structured_fields(tmp_path: Path, monkeypatch):
+    # Structured gold fields are locked to machine shapes so they cannot smuggle
+    # free-text PII, and unknown keys are refused so no unscanned free-text field
+    # can appear. Each malformed case must fail closed before any embed/cache.
+    import pytest
+
+    from rag_eval import run as run_mod
+
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies" / "clean.md").write_text(
+        "# Clean\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+    gold = tmp_path / "gold.json"
+    cases = [
+        ({"id": "q1", "query": "ok?", "surprise": "extra"}, "unknown field"),
+        ({"id": "Q_BAD", "query": "ok?"}, "non-slug id"),
+        ({"id": "q1", "query": "ok?", "expected": ["not-a-chunk-id"]}, "chunk-id slug"),
+        ({"id": "q1", "query": "ok?", "unanswerable": "yes"}, "non-boolean"),
+        ({"id": "q1", "query": ""}, "non-empty 'query'"),
+    ]
+    for q, needle in cases:
+        gold.write_text(json.dumps({"queries": [q]}), encoding="utf-8")
+        monkeypatch.setattr(run_mod, "GOLD_PATH", gold)
+        with pytest.raises(RuntimeError, match=needle):
+            run_mod.run(base=tmp_path)
+        assert not (tmp_path / "rag_eval" / ".cache" / "embeddings.json").exists()
+
+
+def test_gold_freetext_name_is_documented_residual():
+    # Under the slug/schema approach an unlabeled name in free QUERY text is NOT
+    # auto-rejected — a name detector would also reject legitimate regulatory
+    # phrases ("Fair Credit Reporting Act"). This is the documented
+    # author-responsibility residual; assert it explicitly so the limitation is
+    # intentional, not a silent gap.
+    from rag_eval.hygiene import scan_text
+    from rag_eval.run import _CHUNK_ID, _GOLD_ID
+
+    q = {
+        "id": "q-x",
+        "query": "why was Alice Smith denied?",
+        "expected": ["policy#intro"],
+    }
+    assert _GOLD_ID.fullmatch(q["id"])
+    assert all(_CHUNK_ID.fullmatch(e) for e in q["expected"])
+    assert scan_text(q["query"]) == []  # unlabeled name not caught — by design
 
 
 def test_embed_failure_purges_stale_cache(tmp_path: Path, monkeypatch):

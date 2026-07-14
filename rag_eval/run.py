@@ -39,6 +39,18 @@ _SKIP_NAMES = {".gitkeep", ".gitignore", ".gitattributes", ".ds_store"}
 # name convention must not short-circuit that path.
 _SAFE_FILENAME = re.compile(r"\.?[a-z0-9][a-z0-9._-]*")
 
+# Gold-query STRUCTURED fields are locked to machine shapes so they cannot carry
+# free-text PII: an id is a slug, an expected entry is a chunk id (doc#section,
+# from chunker.py). That leaves only the natural-language query/note as free
+# text — screened by scan_text for self-identifying PII (SSN/PAN/email) and, per
+# the gold_queries.json contract, required to describe synthetic scenarios only.
+# (An unlabeled person name in free query text cannot be caught by regex without
+# also rejecting legitimate regulatory phrases like "Fair Credit Reporting Act",
+# so it stays the author's responsibility — same residual as filename slugs.)
+_GOLD_ID = re.compile(r"[a-z0-9][a-z0-9-]*")
+_CHUNK_ID = re.compile(r"[a-z0-9][a-z0-9._-]*#[a-z0-9._-]+")
+_ALLOWED_GOLD_KEYS = {"id", "query", "expected", "unanswerable", "note"}
+
 # The ONE corpus file ADR 0007 documents as legacy-contaminated: kb_dump is the
 # raw pre-remediation dump, so its refusal is expected and is the whole point of
 # the hygiene report. EVERY other refusal — a policy doc, or any new file — is a
@@ -244,6 +256,46 @@ def run(base: Path = Path(".")) -> RunResult:
     # embedder/cache side effect, and identify offenders by position only —
     # never echo a field value (the id itself could be the PII).
     gold = json.loads(GOLD_PATH.read_text(encoding="utf-8"))["queries"]
+    # Schema-harden first: lock the structured fields to machine shapes so they
+    # cannot smuggle free-text PII (a name hidden in an id or an expected entry),
+    # and reject unknown keys so a future free-text field cannot appear that the
+    # scan below never anticipated. Offenders by position only — never echo a
+    # value, which could itself be the PII.
+    for i, q in enumerate(gold):
+        if not isinstance(q, dict):
+            raise RuntimeError(f"gold query at position {i} is not an object")
+        extra = set(q) - _ALLOWED_GOLD_KEYS
+        if extra:
+            raise RuntimeError(
+                f"gold query at position {i} has unknown field(s) {sorted(extra)} "
+                f"— allowed keys are {sorted(_ALLOWED_GOLD_KEYS)}"
+            )
+        if not (isinstance(q.get("id"), str) and _GOLD_ID.fullmatch(q["id"])):
+            raise RuntimeError(
+                f"gold query at position {i} has a missing or non-slug id "
+                "(must match [a-z0-9-])"
+            )
+        if not (isinstance(q.get("query"), str) and q["query"].strip()):
+            raise RuntimeError(
+                f"gold query at position {i} is missing a non-empty 'query' string"
+            )
+        expected = q.get("expected", [])
+        if not (
+            isinstance(expected, list)
+            and all(isinstance(e, str) and _CHUNK_ID.fullmatch(e) for e in expected)
+        ):
+            raise RuntimeError(
+                f"gold query at position {i} has an 'expected' that is not a list "
+                "of chunk-id slugs (doc#section)"
+            )
+        if "unanswerable" in q and not isinstance(q["unanswerable"], bool):
+            raise RuntimeError(
+                f"gold query at position {i} has a non-boolean 'unanswerable'"
+            )
+        if "note" in q and not isinstance(q["note"], str):
+            raise RuntimeError(f"gold query at position {i} has a non-string 'note'")
+
+    # Then screen the remaining free text (query/note) for self-identifying PII.
     dirty = [
         i for i, q in enumerate(gold) if any(scan_text(s) for s in _gold_strings(q))
     ]
