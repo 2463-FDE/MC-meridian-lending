@@ -236,6 +236,21 @@ def test_ssn_alias_record_key_flagged():
     assert [f.pii_type for f in findings] == ["field:social_security_number"]
 
 
+def test_ssn_number_aliases_flagged_in_record_and_jsonl(tmp_path):
+    # _SENSITIVE_KEY's ssn branch was bare, so ssn_number/ssn_num/ssn_no (and the
+    # separatorless ssnnumber) bypassed the structured scan while bare 9-digit
+    # values are intentionally not flagged. All must now be caught by key name.
+    for key in ("ssn_number", "ssn_num", "ssn_no", "ssnnumber"):
+        findings = scan_record({key: "123456789"})
+        assert any(f.pii_type.startswith("field:") for f in findings), key
+    # JSONL file variant: undashed SSN under an alias key must refuse.
+    p = tmp_path / "corpus.jsonl"
+    p.write_text('{"ssn_number": "123456789"}\n', encoding="utf-8")
+    verdict = scan_file(p)
+    assert not verdict.passed
+    assert "field:ssn_number" in verdict.counts()
+
+
 def test_labeled_pan_with_nonstandard_separators_detected():
     # Underscore/slash/star separators evade the bare-run PAN pattern but not the
     # labeled-card pass (separator-agnostic, Luhn-checked).
