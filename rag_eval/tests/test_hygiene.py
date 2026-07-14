@@ -461,6 +461,21 @@ def test_pii_in_csv_header_detected(tmp_path):
     assert "pan" in scan_file(p).counts()
 
 
+def test_birth_date_alias_flagged_in_record_and_csv(tmp_path):
+    # _SENSITIVE_KEY listed dob/date_of_birth but not birth_date/birthdate, so a
+    # DOB under those structured headers scanned clean (fail-open). All spellings
+    # must now be caught by field name, regardless of value shape.
+    for key in ("birth_date", "birthdate", "birth date"):
+        findings = scan_record({key: "1992-04-21"})
+        assert any(f.pii_type.startswith("field:") for f in findings), key
+    # CSV-style row variant: a birth_date column with an unlabeled date value.
+    p = tmp_path / "customers.csv"
+    p.write_text("id,birth_date\n1,1992-04-21\n", encoding="utf-8")
+    verdict = scan_file(p)
+    assert not verdict.passed
+    assert "field:birth_date" in verdict.counts()
+
+
 def test_headerless_csv_pii_detected(tmp_path):
     # A single headerless row is consumed as column names by DictReader (zero
     # data rows); the raw-text + fieldname passes must still catch the PII.

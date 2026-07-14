@@ -29,7 +29,7 @@ SENSITIVE_FIELDS = {"ssn", "pan", "cvv", "dob", "ein"}
 # the bare SENSITIVE_FIELDS set misses.
 _SENSITIVE_KEY = re.compile(
     r"^[\"']?(?:ssn|social[_ ]?security(?:[_ ]?(?:no|num|number))?"
-    r"|tax[_ ]?id|tin|ein|pan|cvv2?|cvc2?|dob|date[_ ]?of[_ ]?birth"
+    r"|tax[_ ]?id|tin|ein|pan|cvv2?|cvc2?|dob|date[_ ]?of[_ ]?birth|birth[_ ]?date"
     r"|card[_ ]?(?:number|no|num)|cc[_ ]?(?:number|no|num)|credit[_ ]?card"
     r"|(?:account|acct|bank[_ ]?account|dda|ach(?:[_ ]?account)?"
     r"|routing|aba|rtn|transit|iban)(?:[_ ]?(?:number|no|num))?"
