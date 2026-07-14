@@ -286,9 +286,26 @@ def scan_file(path: str | Path) -> FileVerdict:
     if not raw.strip():
         return FileVerdict(str(path), True)  # empty file holds no PII
 
+    # Fail closed on non-UTF-8 / binary content. A UTF-16 or Latin-1 file can
+    # hide PII from the UTF-8 regexes — "SSN 123-45-6789" as UTF-16LE is
+    # NUL-interleaved (S\x00S\x00N\x00...), which no detector matches. A NUL byte
+    # never appears in legitimate UTF-8 corpus text, so its presence (or a strict
+    # decode failure) means we cannot prove the file clean — refuse rather than
+    # lossily decode with errors="replace".
+    if b"\x00" in raw:
+        return FileVerdict(
+            str(path), False, [Finding("non-utf8-file", suffix or "(none)")]
+        )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return FileVerdict(
+            str(path), False, [Finding("non-utf8-file", suffix or "(none)")]
+        )
+
     findings: list[Finding] = []
     if suffix == ".jsonl":
-        for line in raw.decode("utf-8", "replace").splitlines():
+        for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -299,22 +316,19 @@ def scan_file(path: str | Path) -> FileVerdict:
             else:
                 findings.extend(_scan_json_value(obj))
     elif suffix == ".json":
-        text = raw.decode("utf-8", "replace")
         try:
             findings.extend(_scan_json_value(json.loads(text)))
         except json.JSONDecodeError:
             findings.extend(scan_text(text))
     elif suffix in _DELIMITED:
-        reader = csv.DictReader(
-            io.StringIO(raw.decode("utf-8", "replace")), delimiter=_DELIMITED[suffix]
-        )
+        reader = csv.DictReader(io.StringIO(text), delimiter=_DELIMITED[suffix])
         for row in reader:
             # DictReader keys are the header row; scan each row like a JSON
             # record so a sensitive header (ssn/name/dob/...) flags its cell even
             # when the value has no self-identifying shape.
             findings.extend(scan_record(row))
     elif suffix in _SCANNABLE_TEXT:
-        findings.extend(scan_text(raw.decode("utf-8", "replace")))
+        findings.extend(scan_text(text))
     else:
         # Unknown/unsupported extension under a corpus root — refuse rather than
         # ignore, so it fails the gate instead of bypassing it.

@@ -435,3 +435,39 @@ def test_empty_file_passes_regardless_of_extension(tmp_path):
     p = tmp_path / "placeholder.dat"
     p.write_text("", encoding="utf-8")
     assert scan_file(p).passed
+
+
+# --- non-UTF-8 / binary content fails closed ---
+
+
+def test_utf16_markdown_with_ssn_refused(tmp_path):
+    # UTF-16 hides "SSN 123-45-6789" as NUL-interleaved bytes the UTF-8 regexes
+    # never match, so it must be refused rather than lossily decoded.
+    p = tmp_path / "leaky.md"
+    p.write_bytes("SSN 123-45-6789 on file".encode("utf-16-le"))
+    verdict = scan_file(p)
+    assert not verdict.passed
+    assert "non-utf8-file" in verdict.counts()
+
+
+def test_invalid_utf8_bytes_refused(tmp_path):
+    # Latin-1 accented byte (0xE9) is not valid UTF-8 -> refuse.
+    p = tmp_path / "note.md"
+    p.write_bytes(b"applicant Jos\xe9 SSN 123-45-6789")
+    assert not scan_file(p).passed
+
+
+def test_utf16_csv_with_pii_refused(tmp_path):
+    p = tmp_path / "export.csv"
+    p.write_bytes("name,ssn\nAlice,330905512\n".encode("utf-16-le"))
+    assert not scan_file(p).passed
+
+
+def test_valid_utf8_with_accents_still_scanned(tmp_path):
+    # A legitimately UTF-8 file with accents must NOT be refused as non-utf8;
+    # it should scan normally (and here, flag the SSN).
+    p = tmp_path / "ok.md"
+    p.write_text("cliente José, SSN 123-45-6789", encoding="utf-8")
+    verdict = scan_file(p)
+    assert not verdict.passed
+    assert "ssn" in verdict.counts()  # decoded fine, PII detected

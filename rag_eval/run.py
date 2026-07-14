@@ -25,6 +25,11 @@ from rag_eval.metrics import Aggregate, QueryEval, aggregate
 
 GOLD_PATH = Path(__file__).parent / "gold_queries.json"
 
+# Benign VCS/OS metadata skipped during corpus discovery. Kept deliberately
+# narrow: any OTHER dot-prefixed file (e.g. .customers.csv) is scanned like a
+# normal corpus file, so a hidden data dump cannot bypass the gate.
+_SKIP_NAMES = {".gitkeep", ".gitignore", ".gitattributes", ".ds_store"}
+
 # The ONE corpus file ADR 0007 documents as legacy-contaminated: kb_dump is the
 # raw pre-remediation dump, so its refusal is expected and is the whole point of
 # the hygiene report. EVERY other refusal — a policy doc, or any new file — is a
@@ -132,16 +137,18 @@ def calibrate_threshold(
 
 
 def run(base: Path = Path(".")) -> RunResult:
-    # Scan EVERY non-hidden file under the corpus roots, recursively and
-    # regardless of extension. scan_file reads known text/JSON formats and
-    # refuses unknown ones (fail closed), so a new customers.csv or a copied
-    # text dump under a root trips the gate instead of slipping past an
-    # extension filter. With main() failing closed on refusal, a contaminated
-    # file anywhere under a root breaks CI. Hidden files (.gitkeep, OS/VCS
-    # artifacts) are skipped — corpus data is never dot-prefixed.
+    # Scan EVERY file under the corpus roots, recursively and regardless of
+    # extension. scan_file reads known text/JSON formats and refuses unknown or
+    # non-UTF-8 ones (fail closed), so a new customers.csv or a copied text dump
+    # trips the gate instead of slipping past an extension filter. With main()
+    # failing closed on refusal, a contaminated file anywhere under a root breaks
+    # CI. Only a narrow allowlist of benign VCS/OS metadata is skipped — a
+    # dot-prefixed data file (.customers.csv) is NOT hidden from the gate.
     def _corpus_files(root: Path) -> list[Path]:
         return [
-            p for p in root.rglob("*") if p.is_file() and not p.name.startswith(".")
+            p
+            for p in root.rglob("*")
+            if p.is_file() and p.name.lower() not in _SKIP_NAMES
         ]
 
     candidates = sorted(

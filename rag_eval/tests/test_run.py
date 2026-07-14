@@ -174,6 +174,27 @@ def test_unsupported_kb_dump_file_fails_gate(tmp_path: Path):
     assert e.value.code == 1
 
 
+def test_hidden_data_file_is_scanned_and_fails_gate(tmp_path: Path):
+    # A dot-prefixed data file must NOT bypass the gate; only benign VCS/OS
+    # metadata (.gitkeep etc.) is skipped.
+    import pytest
+
+    from rag_eval.run import main
+
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies" / "clean.md").write_text(
+        "# Clean\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+    (tmp_path / "kb_dump").mkdir()
+    (tmp_path / "kb_dump" / ".customers.csv").write_text(
+        "name,ssn\nAlice,123-45-6789\n", encoding="utf-8"
+    )
+    (tmp_path / "kb_dump" / ".gitkeep").write_text("", encoding="utf-8")  # skipped
+    with pytest.raises(SystemExit) as e:
+        main(base=tmp_path)
+    assert e.value.code == 1
+
+
 def test_duplicate_stem_across_dirs_raises(tmp_path: Path):
     # Two clean docs sharing a filename stem collide on the doc# id prefix.
     (tmp_path / "policies").mkdir()
