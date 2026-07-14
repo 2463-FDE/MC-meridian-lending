@@ -154,6 +154,26 @@ def test_recursive_scan_catches_contaminated_subdir_policy(tmp_path: Path):
     assert e.value.code == 1
 
 
+def test_unsupported_kb_dump_file_fails_gate(tmp_path: Path):
+    # A non-.md/.jsonl file under a corpus root (e.g. a CSV export) must be
+    # scanned and fail the gate, not bypass it on an extension filter.
+    import pytest
+
+    from rag_eval.run import main
+
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies" / "clean.md").write_text(
+        "# Clean\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+    (tmp_path / "kb_dump").mkdir()
+    (tmp_path / "kb_dump" / "customers.csv").write_text(
+        "name,ssn\nAlice,123-45-6789\n", encoding="utf-8"
+    )
+    with pytest.raises(SystemExit) as e:
+        main(base=tmp_path)
+    assert e.value.code == 1
+
+
 def test_duplicate_stem_across_dirs_raises(tmp_path: Path):
     # Two clean docs sharing a filename stem collide on the doc# id prefix.
     (tmp_path / "policies").mkdir()

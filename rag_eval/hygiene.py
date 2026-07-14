@@ -102,6 +102,23 @@ _DOB_CONTEXT = re.compile(
     r"(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{4})",
     re.I,
 )
+# Free-text labeled name / address (the scan_record key path handles structured
+# records; this is the markdown / gold-query path). Conservative: a label,
+# then ':' or '=', then a value that looks like the datum — a Title-cased name,
+# or a street address that starts with a house number. Requiring the separator
+# and value shape keeps "name the beneficiary" / "address the risk" from
+# tripping. The value groups use (?-i:...) so the Title-case guard survives the
+# re.I on the label.
+_NAME_LABELED = re.compile(
+    r"\b(?:full|first|last|middle|legal|given|maiden|applicant|borrower|customer)?"
+    r"[ _]?name\s*[:=]\s*(?-i:([A-Z][a-z]+(?:[ '-][A-Z][a-z]+){1,3}))",
+    re.I,
+)
+_ADDRESS_LABELED = re.compile(
+    r"\b(?:home|mailing|billing|street|postal|residential)?[ _]?address\s*[:=]\s*"
+    r"(\d{1,6}\s+[A-Za-z0-9][A-Za-z0-9 .,'#-]{3,60})",
+    re.I,
+)
 
 
 def _luhn_valid(digits: str) -> bool:
@@ -184,6 +201,10 @@ def scan_text(text: str) -> list[Finding]:
         # A labeled IBAN is already reported by _BANK_LABELED; don't double-count.
         if not any(s <= m.start() and m.end() <= e for s, e in bank_spans):
             findings.append(Finding("bank", _mask(m.group(0))))
+    for m in _NAME_LABELED.finditer(text):
+        findings.append(Finding("name", _mask(m.group(1))))
+    for m in _ADDRESS_LABELED.finditer(text):
+        findings.append(Finding("address", _mask(m.group(1))))
     return findings
 
 
@@ -215,12 +236,51 @@ def scan_record(obj: dict) -> list[Finding]:
     return findings
 
 
+# Extensions the gate knows how to read as text/JSON. Anything else under a
+# corpus root cannot be proven PII-free, so scan_file refuses it (fail closed) —
+# a new customers.csv or a binary dump must break the gate, not slip through
+# unscanned.
+_SCANNABLE_TEXT = {
+    ".md",
+    ".markdown",
+    ".txt",
+    ".text",
+    ".csv",
+    ".tsv",
+    ".yaml",
+    ".yml",
+    ".log",
+}
+
+
+def _scan_json_value(value) -> list[Finding]:
+    if isinstance(value, dict):
+        return scan_record(value)
+    if isinstance(value, list):
+        out: list[Finding] = []
+        for item in value:
+            out.extend(_scan_json_value(item))
+        return out
+    if value is None:
+        return []
+    return scan_text(str(value))
+
+
 def scan_file(path: str | Path) -> FileVerdict:
     path = Path(path)
-    text = path.read_text(encoding="utf-8")
+    suffix = path.suffix.lower()
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return FileVerdict(
+            str(path), False, [Finding("unreadable-file", suffix or "(none)")]
+        )
+    if not raw.strip():
+        return FileVerdict(str(path), True)  # empty file holds no PII
+
     findings: list[Finding] = []
-    if path.suffix == ".jsonl":
-        for line in text.splitlines():
+    if suffix == ".jsonl":
+        for line in raw.decode("utf-8", "replace").splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -228,11 +288,20 @@ def scan_file(path: str | Path) -> FileVerdict:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 findings.extend(scan_text(line))
-                continue
-            if isinstance(obj, dict):
-                findings.extend(scan_record(obj))
             else:
-                findings.extend(scan_text(line))
+                findings.extend(_scan_json_value(obj))
+    elif suffix == ".json":
+        text = raw.decode("utf-8", "replace")
+        try:
+            findings.extend(_scan_json_value(json.loads(text)))
+        except json.JSONDecodeError:
+            findings.extend(scan_text(text))
+    elif suffix in _SCANNABLE_TEXT:
+        findings.extend(scan_text(raw.decode("utf-8", "replace")))
     else:
-        findings.extend(scan_text(text))
+        # Unknown/unsupported extension under a corpus root — refuse rather than
+        # ignore, so it fails the gate instead of bypassing it.
+        return FileVerdict(
+            str(path), False, [Finding("unsupported-file", suffix or "(none)")]
+        )
     return FileVerdict(path=str(path), passed=not findings, findings=findings)

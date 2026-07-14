@@ -132,15 +132,21 @@ def calibrate_threshold(
 
 
 def run(base: Path = Path(".")) -> RunResult:
-    # Scan the corpus roots RECURSIVELY: a markdown doc dropped in a policies/
-    # subdirectory, or any .jsonl added under kb_dump/, must not slip past the
-    # gate unscanned. With main() failing closed on refusal, a wider scan means
-    # a contaminated file anywhere under a root trips the gate, not just the two
-    # original top-level paths. (Only these two known roots/extensions — not a
-    # generic all-types scan; there is no other corpus artifact shape yet.)
-    policy_files = sorted((base / "policies").rglob("*.md"))
-    kb_files = sorted((base / "kb_dump").rglob("*.jsonl"))
-    candidates = policy_files + kb_files
+    # Scan EVERY non-hidden file under the corpus roots, recursively and
+    # regardless of extension. scan_file reads known text/JSON formats and
+    # refuses unknown ones (fail closed), so a new customers.csv or a copied
+    # text dump under a root trips the gate instead of slipping past an
+    # extension filter. With main() failing closed on refusal, a contaminated
+    # file anywhere under a root breaks CI. Hidden files (.gitkeep, OS/VCS
+    # artifacts) are skipped — corpus data is never dot-prefixed.
+    def _corpus_files(root: Path) -> list[Path]:
+        return [
+            p for p in root.rglob("*") if p.is_file() and not p.name.startswith(".")
+        ]
+
+    candidates = sorted(
+        _corpus_files(base / "policies") + _corpus_files(base / "kb_dump")
+    )
     verdicts = [scan_file(p) for p in candidates]
     cache_path = base / "rag_eval" / ".cache" / "embeddings.json"
 

@@ -358,3 +358,54 @@ def test_jsonl_with_only_name_address_is_refused(tmp_path):
     verdict = scan_file(p)
     assert not verdict.passed
     assert "field:name" in verdict.counts()
+
+
+def test_free_text_labeled_name_and_address_detected():
+    assert "name" in [f.pii_type for f in scan_text("applicant name: Alice Smith")]
+    assert "address" in [
+        f.pii_type for f in scan_text("home address: 123 Main St, Boston")
+    ]
+    # Value never echoed raw in the sample.
+    f = [x for x in scan_text("borrower name: Alice Smith") if x.pii_type == "name"][0]
+    assert "Alice" not in f.masked_sample
+
+
+def test_name_address_labels_as_verbs_not_flagged():
+    assert scan_text("name the beneficiary on the form") == []
+    assert scan_text("address the risk described in section 3") == []
+    assert scan_text("plan name: Standard") == []  # single word, too ambiguous
+
+
+def test_markdown_with_labeled_name_is_refused(tmp_path):
+    p = tmp_path / "note.md"
+    p.write_text(
+        "# Note\n\n## Applicant\n\nApplicant name: Alice Smith, approved.\n",
+        encoding="utf-8",
+    )
+    assert not scan_file(p).passed
+
+
+# --- unsupported / non-.md,.jsonl corpus files fail closed ---
+
+
+def test_unsupported_extension_refused(tmp_path):
+    p = tmp_path / "dump.bin"
+    p.write_text("some opaque content", encoding="utf-8")
+    verdict = scan_file(p)
+    assert not verdict.passed
+    assert "unsupported-file" in verdict.counts()
+
+
+def test_csv_and_json_corpus_files_scanned(tmp_path):
+    csv = tmp_path / "customers.csv"
+    csv.write_text("name,ssn\nAlice,123-45-6789\n", encoding="utf-8")
+    assert not scan_file(csv).passed
+    js = tmp_path / "applications.json"
+    js.write_text('{"ssn": "123-45-6789"}', encoding="utf-8")
+    assert not scan_file(js).passed
+
+
+def test_empty_file_passes_regardless_of_extension(tmp_path):
+    p = tmp_path / "placeholder.dat"
+    p.write_text("", encoding="utf-8")
+    assert scan_file(p).passed
