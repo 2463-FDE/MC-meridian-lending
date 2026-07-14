@@ -84,7 +84,33 @@ def test_legacy_dump_expected_only_at_baseline_hash():
     from rag_eval.run import _refusal_is_expected
 
     real = REPO / "kb_dump" / "applications.jsonl"
-    assert _refusal_is_expected(str(real))
+    assert _refusal_is_expected(str(real), REPO)
+
+
+def test_duplicate_nested_legacy_copy_is_not_expected(tmp_path: Path):
+    # A second copy of the legacy dump at a nested path with identical (approved)
+    # content must NOT inherit the exception — only the exact canonical path does.
+    import pytest
+
+    from rag_eval.run import _refusal_is_expected, main
+
+    real = (REPO / "kb_dump" / "applications.jsonl").read_bytes()
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies" / "clean.md").write_text(
+        "# Clean\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+    canonical = tmp_path / "kb_dump" / "applications.jsonl"
+    canonical.parent.mkdir()
+    canonical.write_bytes(real)
+    dupe = tmp_path / "kb_dump" / "archive" / "kb_dump" / "applications.jsonl"
+    dupe.parent.mkdir(parents=True)
+    dupe.write_bytes(real)
+
+    assert _refusal_is_expected(str(canonical), tmp_path)
+    assert not _refusal_is_expected(str(dupe), tmp_path)  # same content, wrong path
+    with pytest.raises(SystemExit) as e:
+        main(base=tmp_path)  # the nested duplicate trips the gate
+    assert e.value.code == 1
 
 
 def test_main_fails_when_legacy_dump_is_tampered(tmp_path: Path):
@@ -170,6 +196,8 @@ def test_gold_query_with_pii_fails_closed(tmp_path: Path, monkeypatch):
     report = tmp_path / "rag_eval" / "eval_report.md"
     if report.exists():
         assert "412-55-9981" not in report.read_text()
+    # Validation runs BEFORE any embedding/cache side effect: no cache written.
+    assert not (tmp_path / "rag_eval" / ".cache" / "embeddings.json").exists()
 
 
 def test_empty_corpus_aborts_loudly(tmp_path: Path):

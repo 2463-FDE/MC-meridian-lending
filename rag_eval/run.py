@@ -29,7 +29,7 @@ GOLD_PATH = Path(__file__).parent / "gold_queries.json"
 # raw pre-remediation dump, so its refusal is expected and is the whole point of
 # the hygiene report. EVERY other refusal — a policy doc, or any new file — is a
 # fresh PII-in-repo regression and must fail the CI gate (enforced in main()).
-_EXPECTED_CONTAMINATED = ("kb_dump", "applications.jsonl")
+_EXPECTED_CONTAMINATED = Path("kb_dump") / "applications.jsonl"
 
 # The exception is pinned to this EXACT content. A path-only allowlist would let
 # someone add fresh SSNs/PANs/CVVs to the legacy dump and still exit green (the
@@ -40,9 +40,12 @@ _EXPECTED_CONTAMINATED = ("kb_dump", "applications.jsonl")
 _LEGACY_DUMP_SHA256 = "38d3ffdc0e85e2ac423173299a4f35efbff73c003adcf59c0745fcae68eb7711"
 
 
-def _refusal_is_expected(path_str: str) -> bool:
+def _refusal_is_expected(path_str: str, base: Path) -> bool:
     p = Path(path_str)
-    if (p.parent.name, p.name) != _EXPECTED_CONTAMINATED:
+    # Exact canonical path only — not a parent/name suffix. Recursive scanning
+    # would otherwise let a second copy at kb_dump/archive/kb_dump/applications.jsonl
+    # inherit the exception and smuggle duplicate PII past the gate.
+    if p.resolve() != (base / _EXPECTED_CONTAMINATED).resolve():
         return False
     try:
         digest = hashlib.sha256(p.read_bytes()).hexdigest()
@@ -156,6 +159,19 @@ def run(base: Path = Path(".")) -> RunResult:
             "run from the repo root, or fix the corpus"
         )
 
+    # Gold queries are a committed input surface too. An author could paste a
+    # real officer question carrying customer PII — which would be embedded (sent
+    # to the external API on the Bedrock backend) and written verbatim into the
+    # report. Scan and fail closed HERE, before any embedder/cache side effect,
+    # so a dirty committed query costs no external calls or cache writes.
+    gold = json.loads(GOLD_PATH.read_text(encoding="utf-8"))["queries"]
+    dirty = [q["id"] for q in gold if scan_text(q["query"])]
+    if dirty:
+        raise RuntimeError(
+            f"gold queries contain PII and must be sanitized: {dirty} "
+            "(rag_eval/gold_queries.json) — the query text is not echoed here"
+        )
+
     embedder = make_embedder()
     embedder.fit([c.text for c in chunks])
     cache = EmbeddingCache(cache_path)
@@ -166,17 +182,6 @@ def run(base: Path = Path(".")) -> RunResult:
         )
     cache.save()
 
-    gold = json.loads(GOLD_PATH.read_text(encoding="utf-8"))["queries"]
-    # Gold queries are a committed input surface too. An author could paste a
-    # real officer question carrying customer PII — which would be embedded (sent
-    # to the external API on the Bedrock backend) and written verbatim into the
-    # report. Scan with the same gate and fail closed before either can happen.
-    dirty = [q["id"] for q in gold if scan_text(q["query"])]
-    if dirty:
-        raise RuntimeError(
-            f"gold queries contain PII and must be sanitized: {dirty} "
-            "(rag_eval/gold_queries.json) — the query text is not echoed here"
-        )
     retrieved = {q["id"]: index.search(embedder.embed(q["query"]), k=5) for q in gold}
 
     def tops(unanswerable: bool) -> list[float]:
@@ -243,7 +248,7 @@ def main(base: Path = Path(".")) -> None:
     # Fail closed: the report is written above (so the refusal is always
     # diagnosable), but a refusal of anything other than the known legacy dump
     # is a new PII-in-repo regression and must break the CI rag-eval-gate.
-    unexpected = [v for v in refused if not _refusal_is_expected(v.path)]
+    unexpected = [v for v in refused if not _refusal_is_expected(v.path, base)]
     if unexpected:
         print(
             "FAIL: hygiene gate refused non-legacy corpus file(s) — "
