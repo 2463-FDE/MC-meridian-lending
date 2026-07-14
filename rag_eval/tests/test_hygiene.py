@@ -454,6 +454,30 @@ def test_headerless_csv_pii_detected(tmp_path):
     assert "ssn" in counts and "pan" in counts
 
 
+def test_headerless_csv_with_unlabeled_pii_refused(tmp_path):
+    # Unlabeled name + bare-9 SSN + unlabeled DOB: none is self-identifying, so
+    # the free-text pass alone misses them. The data-shaped-header check refuses
+    # the file because the "header" row is really data.
+    p = tmp_path / "export.csv"
+    p.write_text("Alice Smith,330905512,1992-04-21\n", encoding="utf-8")
+    verdict = scan_file(p)
+    assert not verdict.passed
+    assert "data-shaped-header" in verdict.counts()
+
+
+def test_multirow_headerless_csv_refused(tmp_path):
+    p = tmp_path / "export.csv"
+    p.write_text("Alice,330905512\nBob,440506612\n", encoding="utf-8")
+    assert not scan_file(p).passed
+
+
+def test_legit_headers_with_spaces_and_symbols_pass(tmp_path):
+    # Real column names (letters, spaces, %) must not be mistaken for data.
+    p = tmp_path / "rates.csv"
+    p.write_text("Loan Amount,APR %\n5000,5.0\n", encoding="utf-8")
+    assert scan_file(p).passed
+
+
 def test_month_name_dob_detected():
     for text in (
         "DOB: Jan 2, 1980",

@@ -269,6 +269,12 @@ _SCANNABLE_TEXT = {
 # a blob loses the header→cell binding, so a `ssn` column of undashed 9-digit
 # values would pass. Delimiter picked by extension.
 _DELIMITED = {".csv": ",", ".tsv": "\t"}
+# A legitimate header cell is a COLUMN NAME: starts with a letter, then
+# name-ish characters. A cell that starts with a digit or is a bare number/date
+# (330905512, 1992-04-21) means the "header" row is really data — a headerless
+# dump whose unlabeled SSN/DOB cells cannot be structurally bound, so the file
+# is refused rather than trusted.
+_PLAUSIBLE_HEADER = re.compile(r"[A-Za-z][\w %./()$#&-]{0,60}")
 
 
 def _scan_json_value(value) -> list[Finding]:
@@ -337,10 +343,20 @@ def scan_file(path: str | Path) -> FileVerdict:
         # column names, leaving zero data rows.
         findings.extend(scan_text(text))
         reader = csv.DictReader(io.StringIO(text), delimiter=_DELIMITED[suffix])
+        fieldnames = reader.fieldnames or []
         # The header cells may themselves be data (headerless file), so scan
         # them as text too.
-        for name in reader.fieldnames or []:
+        for name in fieldnames:
             findings.extend(scan_text(name))
+        # If any header cell isn't a plausible column name, the first row is
+        # data, not a header — a headerless dump. Its cells (unlabeled name,
+        # bare-9 SSN, unlabeled DOB) can't be bound to sensitive headers, so
+        # refuse rather than mark clean.
+        if any(
+            name.strip() and not _PLAUSIBLE_HEADER.fullmatch(name.strip())
+            for name in fieldnames
+        ):
+            findings.append(Finding("data-shaped-header", suffix.lstrip(".")))
         for row in reader:
             # DictReader keys are the header row; scan each row like a JSON
             # record so a sensitive header (ssn/name/dob/...) flags its cell even
