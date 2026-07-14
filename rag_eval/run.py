@@ -147,6 +147,22 @@ def run(base: Path = Path(".")) -> RunResult:
     candidates = sorted(
         _corpus_files(base / "policies") + _corpus_files(base / "kb_dump")
     )
+
+    # A filename is committed corpus metadata — an input surface too. A file with
+    # clean CONTENT but PII in its name (policies/Jane-Doe-330-90-5512.md) would
+    # pass scan_file, then its path is written into the report and its stem
+    # becomes the chunk id. Scan the corpus-relative path and fail closed BEFORE
+    # any report/chunk/cache work, identifying offenders by position only so the
+    # raw name is never echoed to logs or artifacts.
+    pii_paths = [
+        i for i, p in enumerate(candidates) if scan_text(str(p.relative_to(base)))
+    ]
+    if pii_paths:
+        raise RuntimeError(
+            f"corpus file path(s) at position(s) {pii_paths} contain PII in their "
+            "names — rename them (paths are not echoed here)"
+        )
+
     verdicts = [scan_file(p) for p in candidates]
     cache_path = base / "rag_eval" / ".cache" / "embeddings.json"
 

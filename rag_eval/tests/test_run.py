@@ -284,6 +284,23 @@ def test_embed_failure_purges_stale_cache(tmp_path: Path, monkeypatch):
     assert not cache.exists()  # stale cache purged on the failure path
 
 
+def test_pii_in_filename_fails_before_artifacts(tmp_path: Path):
+    # A clean-content file whose NAME carries PII (SSN) must fail closed before
+    # the report/cache are written, and the raw name must not be echoed.
+    import pytest
+
+    policies = tmp_path / "policies"
+    policies.mkdir()
+    (policies / "Jane-Doe-330-90-5512.md").write_text(
+        "# Doc\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="contain PII in their names") as e:
+        run(base=tmp_path)
+    assert "330-90-5512" not in str(e.value)  # position only, name not echoed
+    assert not (tmp_path / "rag_eval" / "eval_report.md").exists()
+    assert not (tmp_path / "rag_eval" / ".cache" / "embeddings.json").exists()
+
+
 def test_empty_corpus_aborts_loudly(tmp_path: Path):
     # Teeth finding: no corpus must not yield a plausible-looking empty report.
     import pytest
