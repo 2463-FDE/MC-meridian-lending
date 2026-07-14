@@ -143,6 +143,35 @@ def test_duplicate_stem_across_dirs_raises(tmp_path: Path):
         run(base=tmp_path)
 
 
+def test_gold_query_with_pii_fails_closed(tmp_path: Path, monkeypatch):
+    # A gold query carrying PII must not be embedded (external API on Bedrock)
+    # or written to the report — the runner scans queries and fails closed.
+    import pytest
+
+    from rag_eval import run as run_mod
+
+    policies = tmp_path / "policies"
+    policies.mkdir()
+    (policies / "clean.md").write_text(
+        "# Clean\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+    gold = tmp_path / "gold.json"
+    gold.write_text(
+        json.dumps(
+            {"queries": [{"id": "q-pii", "query": "why was ssn 412-55-9981 denied?"}]}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(run_mod, "GOLD_PATH", gold)
+
+    with pytest.raises(RuntimeError, match="gold queries contain PII") as e:
+        run_mod.run(base=tmp_path)
+    assert "412-55-9981" not in str(e.value)  # id only, never the raw query
+    report = tmp_path / "rag_eval" / "eval_report.md"
+    if report.exists():
+        assert "412-55-9981" not in report.read_text()
+
+
 def test_empty_corpus_aborts_loudly(tmp_path: Path):
     # Teeth finding: no corpus must not yield a plausible-looking empty report.
     import pytest

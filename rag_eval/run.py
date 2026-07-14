@@ -19,7 +19,7 @@ from rag_eval import report as report_mod
 from rag_eval.cache import EmbeddingCache
 from rag_eval.chunker import Chunk, chunk_markdown
 from rag_eval.embedder import BedrockEmbedder, TfidfEmbedder
-from rag_eval.hygiene import FileVerdict, scan_file
+from rag_eval.hygiene import FileVerdict, scan_file, scan_text
 from rag_eval.index import InMemoryIndex
 from rag_eval.metrics import Aggregate, QueryEval, aggregate
 
@@ -167,6 +167,16 @@ def run(base: Path = Path(".")) -> RunResult:
     cache.save()
 
     gold = json.loads(GOLD_PATH.read_text(encoding="utf-8"))["queries"]
+    # Gold queries are a committed input surface too. An author could paste a
+    # real officer question carrying customer PII — which would be embedded (sent
+    # to the external API on the Bedrock backend) and written verbatim into the
+    # report. Scan with the same gate and fail closed before either can happen.
+    dirty = [q["id"] for q in gold if scan_text(q["query"])]
+    if dirty:
+        raise RuntimeError(
+            f"gold queries contain PII and must be sanitized: {dirty} "
+            "(rag_eval/gold_queries.json) — the query text is not echoed here"
+        )
     retrieved = {q["id"]: index.search(embedder.embed(q["query"]), k=5) for q in gold}
 
     def tops(unanswerable: bool) -> list[float]:
