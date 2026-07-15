@@ -42,11 +42,11 @@ _SAFE_FILENAME = re.compile(r"\.?[a-z0-9][a-z0-9._-]*")
 # Gold-query STRUCTURED fields are locked to machine shapes so they cannot carry
 # free-text PII: an id is a slug, an expected entry is a chunk id (doc#section,
 # from chunker.py). That leaves only the natural-language query/note as free
-# text — screened by scan_text for self-identifying PII (SSN/PAN/email) and, per
-# the gold_queries.json contract, required to describe synthetic scenarios only.
-# (An unlabeled person name in free query text cannot be caught by regex without
-# also rejecting legitimate regulatory phrases like "Fair Credit Reporting Act",
-# so it stays the author's responsibility — same residual as filename slugs.)
+# text — screened by scan_text for self-identifying PII (SSN/PAN/email) AND by
+# _looks_like_person_name below for a probable applicant name, per the
+# gold_queries.json contract that queries describe synthetic scenarios only.
+# (Legitimate multi-word proper nouns like "Fair Credit Reporting Act" are
+# allowlisted so the name guard doesn't refuse them.)
 _GOLD_ID = re.compile(r"[a-z0-9][a-z0-9-]*")
 _CHUNK_ID = re.compile(r"[a-z0-9][a-z0-9._-]*#[a-z0-9._-]+")
 _ALLOWED_GOLD_KEYS = {"id", "query", "expected", "unanswerable", "note"}
@@ -93,6 +93,34 @@ def _gold_strings(value):
     elif isinstance(value, list):
         for v in value:
             yield from _gold_strings(v)
+
+
+# Multi-word proper nouns that are legitimately Title-Cased in a lending query
+# (regulations, statutes, the lender itself) — allowlisted so the person-name
+# guard below does not refuse them. Extend as new legitimate proper nouns appear.
+_NAME_ALLOWLIST = (
+    "Fair Credit Reporting Act",
+    "Equal Credit Opportunity Act",
+    "Fair Debt Collection Practices Act",
+    "Truth in Lending Act",
+    "Consumer Financial Protection Bureau",
+    "Social Security",
+    "Meridian Lending",
+)
+# A run of two or more consecutive Title-Case words (each an initial capital + a
+# lowercase tail) is a probable person name. Single sentence-initial capitals,
+# ALL-CAPS acronyms (DTI, NSF), and ids (#6012) do not match, so the 12 real gold
+# queries pass clean. Gold queries are a committed input embedded to an external
+# API (Bedrock) and printed verbatim into eval_report.md, so a real applicant
+# name must fail closed before either — scan_text cannot catch an unlabeled name
+# without also refusing regulatory phrases, so this gold-specific guard does.
+_PERSON_NAME = re.compile(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+")
+
+
+def _looks_like_person_name(text: str) -> bool:
+    for phrase in _NAME_ALLOWLIST:
+        text = text.replace(phrase, " ")
+    return bool(_PERSON_NAME.search(text))
 
 
 # Titan Embed Text v2 — AWS-native, cheap, 1024-dim. Confirm the id is enabled
@@ -303,6 +331,20 @@ def run(base: Path = Path(".")) -> RunResult:
         raise RuntimeError(
             f"gold queries at position(s) {dirty} contain PII and must be "
             "sanitized (rag_eval/gold_queries.json) — no field values are echoed"
+        )
+    # scan_text is label-gated for names; also refuse a probable person name in
+    # free text, which would otherwise be embedded (Bedrock) and printed to the
+    # report. Position-only — the name itself is the PII, so it is never echoed.
+    named = [
+        i
+        for i, q in enumerate(gold)
+        if any(_looks_like_person_name(s) for s in _gold_strings(q))
+    ]
+    if named:
+        raise RuntimeError(
+            f"gold queries at position(s) {named} contain a probable person name "
+            "and must use synthetic ids/placeholders (rag_eval/gold_queries.json) "
+            "— no field values are echoed"
         )
 
     embedder = make_embedder()

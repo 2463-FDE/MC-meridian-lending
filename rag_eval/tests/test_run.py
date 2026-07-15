@@ -331,23 +331,65 @@ def test_gold_schema_rejects_malformed_structured_fields(tmp_path: Path, monkeyp
         assert not (tmp_path / "rag_eval" / ".cache" / "embeddings.json").exists()
 
 
-def test_gold_freetext_name_is_documented_residual():
-    # Under the slug/schema approach an unlabeled name in free QUERY text is NOT
-    # auto-rejected — a name detector would also reject legitimate regulatory
-    # phrases ("Fair Credit Reporting Act"). This is the documented
-    # author-responsibility residual; assert it explicitly so the limitation is
-    # intentional, not a silent gap.
-    from rag_eval.hygiene import scan_text
-    from rag_eval.run import _CHUNK_ID, _GOLD_ID
+def test_gold_person_name_guard():
+    # An unlabeled person name in free query text (which scan_text is label-gated
+    # against) is caught by the gold-specific name-shape guard: a run of 2+
+    # consecutive Title-Case words is a probable applicant name and fails closed.
+    import json as _json
+    from pathlib import Path as _Path
 
-    q = {
-        "id": "q-x",
-        "query": "why was Alice Smith denied?",
-        "expected": ["policy#intro"],
-    }
-    assert _GOLD_ID.fullmatch(q["id"])
-    assert all(_CHUNK_ID.fullmatch(e) for e in q["expected"])
-    assert scan_text(q["query"]) == []  # unlabeled name not caught — by design
+    from rag_eval.run import _looks_like_person_name
+
+    # Probable person names are flagged.
+    assert _looks_like_person_name("why was Alice Smith denied?")
+    assert _looks_like_person_name("status of Bob Jones application")
+    # scan_text still misses it (guard is gold-specific, not in scan_text).
+    from rag_eval.hygiene import scan_text
+
+    assert scan_text("why was Alice Smith denied?") == []
+
+    # The 12 real gold queries pass clean — no false positive.
+    repo = _Path(__file__).resolve().parents[2]
+    gold = _json.loads((repo / "rag_eval" / "gold_queries.json").read_text())["queries"]
+    for q in gold:
+        assert not _looks_like_person_name(q["query"]), q["id"]
+        assert not _looks_like_person_name(q.get("note", "")), q["id"]
+
+    # Allowlisted multi-word proper nouns are not treated as names.
+    assert not _looks_like_person_name(
+        "What does the Fair Credit Reporting Act require?"
+    )
+    assert not _looks_like_person_name("What is the Social Security check?")
+    # Single sentence-initial capital and acronyms/ids stay clean.
+    assert not _looks_like_person_name("Why was application #6012 denied under DTI?")
+
+
+def test_gold_query_person_name_fails_closed(tmp_path: Path, monkeypatch):
+    # A gold query carrying a real applicant name must abort BEFORE any embedder
+    # call (Bedrock) and before the report is written — not echoing the name.
+    import pytest
+
+    from rag_eval import run as run_mod
+
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies" / "clean.md").write_text(
+        "# Clean\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+    gold = tmp_path / "gold.json"
+    gold.write_text(
+        json.dumps(
+            {"queries": [{"id": "q-x", "query": "why was Alice Smith denied?"}]}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(run_mod, "GOLD_PATH", gold)
+
+    with pytest.raises(RuntimeError, match="probable person name") as e:
+        run_mod.run(base=tmp_path)
+    assert "Alice" not in str(e.value) and "Smith" not in str(e.value)  # no echo
+    assert not (tmp_path / "rag_eval" / ".cache" / "embeddings.json").exists()
+    report = tmp_path / "rag_eval" / "eval_report.md"
+    assert not (report.exists() and "Alice Smith" in report.read_text())
 
 
 def test_embed_failure_purges_stale_cache(tmp_path: Path, monkeypatch):
