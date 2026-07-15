@@ -17,11 +17,14 @@ Wraps a `ModelAdapter.complete` call with bounded retries. Policy:
 `sleep` and `rng` are injectable so tests drive the retry path deterministically
 without real delays.
 """
+
 from __future__ import annotations
 
 import random
 import time
 from typing import Callable
+
+from langsmith import traceable
 
 from .adapter import Completion, CompletionRequest, ModelAdapter
 from .errors import LLMHTTPError, LLMTimeoutError
@@ -29,12 +32,36 @@ from .errors import LLMHTTPError, LLMTimeoutError
 _BACKOFF_BASE = 2  # seconds: 2**attempt -> 1, 2, 4, ...
 
 
+def _trace_transport_inputs(inputs: dict) -> dict:
+    """Export only the provider-bound request to LangSmith.
+
+    `req` was produced by `build_request`, which already redacted PII — this is
+    exactly the payload the provider sees, so tracing it adds no new exposure.
+    Drops the adapter object and injected callables (not serializable, not
+    interesting).
+    """
+    req = inputs.get("req")
+    if req is None:
+        return {}
+    return {
+        "system": req.system,
+        "messages": req.messages,
+        "model": req.model,
+        "max_tokens": req.max_tokens,
+        "temperature": req.temperature,
+        "timeout": req.timeout,
+        "idempotency_key": req.idempotency_key,
+        "max_retries": inputs.get("max_retries"),
+    }
+
+
 def _backoff_delay(attempt: int, rng: Callable[[], float]) -> float:
     """Equal-jitter exponential backoff for retry `attempt` (0-indexed)."""
-    ceiling = _BACKOFF_BASE ** attempt
+    ceiling = _BACKOFF_BASE**attempt
     return ceiling / 2 + rng() * (ceiling / 2)
 
 
+@traceable(name="llm.transport", process_inputs=_trace_transport_inputs)
 def call_with_retry(
     adapter: ModelAdapter,
     req: CompletionRequest,
