@@ -4,16 +4,18 @@ Endpoints: application intake, KYC (CIP), decisioning, offer/disclosure, and the
 LOS->LSS boarding seam. Read paths (list/detail) use SQLAlchemy; the older write paths
 (intake, decisioning, boarding) still use raw psycopg2 — a partial, unfinished migration.
 """
-import logging
+
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import config, intake
+from . import assistant, config, intake
 from .llm import ClaudeClient, load_llm_config
+from .llm.errors import LLMError
 from .logging_config import get_logger
 from .routers import applications, offers
 
@@ -74,15 +76,48 @@ def health():
     if missing:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "service": "origination", "missing_secrets": missing},
+            content={
+                "status": "unhealthy",
+                "service": "origination",
+                "missing_secrets": missing,
+            },
         )
     ok, db_error = config.database_reachable()
     if not ok:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "service": "origination", "database_error": db_error},
+            content={
+                "status": "unhealthy",
+                "service": "origination",
+                "database_error": db_error,
+            },
         )
     return {"status": "ok", "service": "origination"}
+
+
+@app.post("/assistant/decisions/{app_id}")
+def assistant_decide(app_id: int, client: ClaudeClient = Depends(get_llm_client)):
+    """Decision an application through the officer assistant (ADR 0009 §5).
+
+    The agent's score tool performs the regulated decision + record write in
+    decision-service; the response below is validated against that persisted record
+    (recorded facts win over narration). Gated by LLM_ENABLED like all LLM routes.
+    """
+    try:
+        return assistant.run(app_id, client)
+    except assistant.ApplicationNotFound:
+        raise HTTPException(status_code=404, detail="application not found")
+    except assistant.AssistantError as exc:
+        log.error("assistant failed for app_id=%s: %s", app_id, exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except LLMError as exc:
+        log.error("assistant LLM failure for app_id=%s: %s", app_id, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="assistant unavailable") from exc
+    except httpx.HTTPStatusError as exc:
+        # The score tool's downstream refusal (e.g. decision-service failing closed
+        # on bureau or record write) surfaces as service-unavailable, not a 500.
+        log.error("assistant downstream failure for app_id=%s: %s", app_id, exc)
+        raise HTTPException(status_code=503, detail="decisioning unavailable") from exc
 
 
 class BoardIn(BaseModel):
@@ -97,7 +132,10 @@ class BoardIn(BaseModel):
 def board(body: BoardIn):
     """Legacy direct-boarding endpoint (the LOS->LSS seam). See docs/architecture.md."""
     loan_id = intake.board_to_servicing(
-        body.app_id, body.applicant_name, body.principal,
-        body.annual_rate_pct, body.term_months,
+        body.app_id,
+        body.applicant_name,
+        body.principal,
+        body.annual_rate_pct,
+        body.term_months,
     )
     return {"loan_id": loan_id}

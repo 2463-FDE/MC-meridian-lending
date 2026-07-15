@@ -170,8 +170,13 @@ def get_application(app_id: int, session: Session = Depends(get_session)):
     )
 
 
-@router.post("/{app_id}/decision", response_model=DecisionOut)
-def run_decision(app_id: int):
+def decision_request_payload(app_id: int) -> dict:
+    """Build the decision-service request for an application from the LOS database.
+
+    Also the assistant's score tool (app/assistant.py): applicant data is looked up
+    here by code — the model supplies only an application id, never applicant fields.
+    Returns None when the application does not exist.
+    """
     rows = db.query(
         "SELECT a.id, a.applicant_id, a.amount, a.term_months, a.income, "
         "a.employment_years, ap.name, ap.ssn "
@@ -179,25 +184,29 @@ def run_decision(app_id: int):
         (app_id,),
     )
     if not rows:
-        raise HTTPException(status_code=404, detail="application not found")
+        return None
     r = rows[0]
+    return {
+        "application_id": app_id,
+        "applicant_id": r.get("applicant_id"),
+        "name": r.get("name"),
+        "ssn": r.get("ssn") or "",
+        "requested_amount": r.get("amount"),
+        "term_months": r.get("term_months"),
+        "annual_income": r.get("income") or 0,
+        "monthly_debt": 0,  # not captured in the LOS today
+        "employment_years": r.get("employment_years") or 0,
+        "credit_score": None,  # pulled downstream by decision-service
+    }
+
+
+@router.post("/{app_id}/decision", response_model=DecisionOut)
+def run_decision(app_id: int):
+    payload = decision_request_payload(app_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="application not found")
     # Decisioning moved to decision-service; it persists the decision_events record.
-    resp = clients.post(
-        clients.DECISION_URL,
-        "/decisions",
-        {
-            "application_id": app_id,
-            "applicant_id": r.get("applicant_id"),
-            "name": r.get("name"),
-            "ssn": r.get("ssn") or "",
-            "requested_amount": r.get("amount"),
-            "term_months": r.get("term_months"),
-            "annual_income": r.get("income") or 0,
-            "monthly_debt": 0,  # not captured in the LOS today
-            "employment_years": r.get("employment_years") or 0,
-            "credit_score": None,  # pulled downstream by decision-service
-        },
-    )
+    resp = clients.post(clients.DECISION_URL, "/decisions", payload)
     return DecisionOut(
         app_id=app_id,
         decision=resp["outcome"],
