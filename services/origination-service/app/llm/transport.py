@@ -25,11 +25,25 @@ import time
 from typing import Callable
 
 from langsmith import traceable
+from langsmith.run_helpers import get_current_run_tree
 
 from .adapter import Completion, CompletionRequest, ModelAdapter
 from .errors import LLMHTTPError, LLMTimeoutError
 
 _BACKOFF_BASE = 2  # seconds: 2**attempt -> 1, 2, 4, ...
+
+# LangSmith prices canonical model names, not Bedrock inference-profile ids
+# (e.g. "us.anthropic.claude-haiku-4-5-20251001-v1:0" carries no price). Map the
+# provider model string to a name LangSmith's cost table recognizes; unknown
+# strings pass through unchanged (still traced, just uncosted).
+_CANONICAL_MODEL = {
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0": "claude-haiku-4-5",
+    "claude-haiku-4-5-20251001": "claude-haiku-4-5",
+}
+
+
+def _canonical_model(model: str) -> str:
+    return _CANONICAL_MODEL.get(model, model)
 
 
 def _trace_transport_inputs(inputs: dict) -> dict:
@@ -55,13 +69,36 @@ def _trace_transport_inputs(inputs: dict) -> dict:
     }
 
 
+def _trace_transport_outputs(completion: Completion) -> dict:
+    """Shape the traced output so LangSmith computes token cost.
+
+    `usage_metadata` is the shape LangSmith's cost engine reads; without it the
+    span shows latency/text but no tokens and no cost. Values come from the
+    Completion the adapter already fills.
+    """
+    return {
+        "text": completion.text,
+        "stop_reason": completion.stop_reason,
+        "usage_metadata": {
+            "input_tokens": completion.input_tokens,
+            "output_tokens": completion.output_tokens,
+            "total_tokens": completion.input_tokens + completion.output_tokens,
+        },
+    }
+
+
 def _backoff_delay(attempt: int, rng: Callable[[], float]) -> float:
     """Equal-jitter exponential backoff for retry `attempt` (0-indexed)."""
     ceiling = _BACKOFF_BASE**attempt
     return ceiling / 2 + rng() * (ceiling / 2)
 
 
-@traceable(name="llm.transport", process_inputs=_trace_transport_inputs)
+@traceable(
+    name="llm.transport",
+    run_type="llm",
+    process_inputs=_trace_transport_inputs,
+    process_outputs=_trace_transport_outputs,
+)
 def call_with_retry(
     adapter: ModelAdapter,
     req: CompletionRequest,
@@ -76,6 +113,12 @@ def call_with_retry(
     Total attempts = 1 + `max_retries`. Raises the last error if retries are
     exhausted, or immediately on a non-retryable error.
     """
+    # Tag the LLM run with a priceable model name so LangSmith can cost it.
+    # req.model is known up front; canonicalize the Bedrock profile id.
+    run_tree = get_current_run_tree()
+    if run_tree is not None:
+        run_tree.metadata["ls_model_name"] = _canonical_model(req.model)
+
     attempt = 0
     while True:
         try:
