@@ -258,7 +258,13 @@ def scan_record(obj: dict) -> list[Finding]:
         # header can carry raw PII (e.g. {"ssn 330-90-5512": ...} or a header row
         # that is a PAN). Scan it like any text, not just for a label match.
         findings.extend(scan_text(key))
-        if _SENSITIVE_KEY.match(key) and value not in (None, ""):
+        # Normalize the separator style before the alias match: real headers come
+        # as social-security-number / social_security_number / "social security
+        # number" interchangeably, and _SENSITIVE_KEY only spells underscore/space
+        # separators — collapse [-_\s]+ to a single underscore so every style hits
+        # the same alias (a bare value has no shape, so the key is the only signal).
+        norm_key = re.sub(r"[-_\s]+", "_", key.strip().lower())
+        if _SENSITIVE_KEY.match(norm_key) and value not in (None, ""):
             findings.append(Finding(f"field:{key.lower()}", _mask(str(value))))
     # Scan each value separately — joining them would let the PAN pattern's
     # legal space separator fuse adjacent digit fields into one oversized run.

@@ -560,6 +560,37 @@ def test_pii_in_csv_header_detected(tmp_path):
     assert "pan" in scan_file(p).counts()
 
 
+def test_hyphenated_sensitive_keys_flagged():
+    # Real JSON/CSV headers use hyphens as often as underscores; the key match
+    # normalizes [-_\s]+ so social-security-number, date-of-birth, etc. all hit
+    # the same alias as their underscore forms (bare values have no shape).
+    for key in (
+        "social-security-number",
+        "date-of-birth",
+        "full-name",
+        "account-number",
+        "phone-number",
+        "email-address",
+        "ssn-number",
+        "birth-date",
+        "credit-card-number",
+    ):
+        findings = scan_record({key: "123456789"})
+        assert any(f.pii_type.startswith("field:") for f in findings), key
+    # Benign hyphenated keys must stay clean (no over-refusal).
+    for key in ("account-status", "loan-amount", "card-type", "product-id"):
+        assert scan_record({key: "x"}) == [], key
+
+
+def test_hyphenated_csv_header_with_bare_value_refused(tmp_path):
+    # A hyphenated sensitive header over an unlabeled value must refuse.
+    p = tmp_path / "customers.csv"
+    p.write_text("id,social-security-number\n1,123456789\n", encoding="utf-8")
+    verdict = scan_file(p)
+    assert not verdict.passed
+    assert "field:social-security-number" in verdict.counts()
+
+
 def test_birth_date_alias_flagged_in_record_and_csv(tmp_path):
     # _SENSITIVE_KEY listed dob/date_of_birth but not birth_date/birthdate, so a
     # DOB under those structured headers scanned clean (fail-open). All spellings
