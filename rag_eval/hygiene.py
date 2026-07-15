@@ -27,46 +27,56 @@ SENSITIVE_FIELDS = {"ssn", "pan", "cvv", "dob", "ein"}
 # label group; consolidate per DL-5 when that branch merges). Catches
 # social_security_number / tax_id / tin / card_number / account_number etc. that
 # the bare SENSITIVE_FIELDS set misses.
+# Each alternative is wrapped in a named group whose name is the CANONICAL
+# category (ssn, name, …). scan_record emits `field:<group name>`, never the raw
+# key: a key can itself carry PII (e.g. `alice_name`), and pii_type flows into
+# counts() → the report → CI logs, so echoing the raw key would turn the refusal
+# path into a disclosure path. Keep every group named (m.lastgroup relies on it).
 _SENSITIVE_KEY = re.compile(
     r"^[\"']?(?:"
-    # SSN / tax / employer identifiers. Base terms carry the shared no/num/number
-    # suffix group so ssn_number, ein_no, tax_identification_number etc. all match
-    # (a bare 9-digit value is intentionally not flagged, so the key must be).
-    r"ssn(?:[_ ]?(?:no|num|number))?|ss[_ ]?(?:no|num|number)"
+    # SSN / tax identifiers. Base terms carry the shared no/num/number suffix
+    # group so ssn_number, tax_identification_number etc. all match (a bare
+    # 9-digit value is intentionally not flagged, so the key must be). ITIN/TIN
+    # are direct SSN substitutes, so they share the ssn category.
+    r"(?P<ssn>ssn(?:[_ ]?(?:no|num|number))?|ss[_ ]?(?:no|num|number)"
     r"|social[_ ]?security(?:[_ ]?(?:no|num|number))?"
     r"|tax[_ ]?id(?:entification)?(?:[_ ]?(?:no|num|number))?|tin"
-    r"|ein(?:[_ ]?(?:no|num|number))?"
-    r"|employer[_ ]?id(?:entification)?(?:[_ ]?(?:no|num|number))?"
-    r"|(?:individual[_ ]?)?(?:taxpayer[_ ]?id|itin)(?:[_ ]?(?:no|num|number))?"
-    # Government / KYC identity documents (ITIN is a direct SSN substitute;
-    # passport and driver's-license numbers are standard lending KYC).
-    r"|passport(?:[_ ]?(?:no|num|number))?"
-    r"|driver'?s?[_ ]?license(?:[_ ]?(?:no|num|number))?"
-    r"|(?:license|dl)[_ ]?(?:no|num|number)"
+    r"|(?:individual[_ ]?)?(?:taxpayer[_ ]?id|itin)(?:[_ ]?(?:no|num|number))?)"
+    # Employer identifiers.
+    r"|(?P<ein>ein(?:[_ ]?(?:no|num|number))?"
+    r"|employer[_ ]?id(?:entification)?(?:[_ ]?(?:no|num|number))?)"
+    # Government / KYC identity documents (passport and driver's-license numbers
+    # are standard lending KYC).
+    r"|(?P<passport>passport(?:[_ ]?(?:no|num|number))?)"
+    r"|(?P<license>driver'?s?[_ ]?license(?:[_ ]?(?:no|num|number))?"
+    r"|(?:license|dl)[_ ]?(?:no|num|number))"
     # Date of birth (bare date value has no birth context, so key-gated).
-    r"|dob|date[_ ]?of[_ ]?birth|birth[_ ]?date|birth[_ ]?day"
-    # Card / PAN / security code.
-    r"|pan(?:[_ ]?(?:number|no|num))?|primary[_ ]?account[_ ]?number"
+    r"|(?P<dob>dob|date[_ ]?of[_ ]?birth|birth[_ ]?date|birth[_ ]?day)"
+    # Card / PAN.
+    r"|(?P<pan>pan(?:[_ ]?(?:number|no|num))?|primary[_ ]?account[_ ]?number"
     r"|card[_ ]?(?:number|no|num)|cc[_ ]?(?:number|no|num)"
-    r"|(?:credit|debit)[_ ]?card(?:[_ ]?(?:number|no|num))?"
-    r"|cvv2?(?:[_ ]?code)?|cvc2?|cv2|(?:card[_ ]?)?security[_ ]?code"
+    r"|(?:credit|debit)[_ ]?card(?:[_ ]?(?:number|no|num))?)"
+    # Card security code.
+    r"|(?P<cvv>cvv2?(?:[_ ]?code)?|cvc2?|cv2|(?:card[_ ]?)?security[_ ]?code)"
     # Bank / account / routing identifiers.
-    r"|(?:account|acct|bank[_ ]?account|dda|ach(?:[_ ]?account)?"
+    r"|(?P<bank>(?:account|acct|bank[_ ]?account|dda|ach(?:[_ ]?account)?"
     r"|routing|aba|rtn|transit|iban|swift|bic|sort[_ ]?code)"
-    r"(?:[_ ]?(?:number|no|num))?"
-    # Personal name / postal address. No reliable value regex (ordinary words),
-    # so these are caught by field name only — like the redactor's label-gated
-    # fields. The kb_dump spec lists name/address as PII and the smoke keeps them
-    # out of artifacts, so a customer export or a remediated dump keeping only
-    # names/addresses must still be refused.
-    r"|(?:[a-z]+[_ ])?name|(?:sur|given|maiden|first|last|middle|full|f|l|m)[_ ]?name"
-    r"|(?:mailing|home|billing|postal|street|residential)[_ ]?address(?:[_ ]?line)?[_ ]?\d*"
-    r"|address(?:[_ ]?line)?[_ ]?\d*|addr(?:ess)?\d*|street"
-    r"|city|zip(?:[_ ]?code)?|postal[_ ]?code"
+    r"(?:[_ ]?(?:number|no|num))?)"
+    # Personal name. No reliable value regex (ordinary words), so caught by field
+    # name only — like the redactor's label-gated fields. A remediated dump
+    # keeping only names/addresses must still be refused.
+    r"|(?P<name>(?:[a-z]+[_ ])?name"
+    r"|(?:sur|given|maiden|first|last|middle|full|f|l|m)[_ ]?name)"
+    # Postal address.
+    r"|(?P<address>(?:mailing|home|billing|postal|street|residential)"
+    r"[_ ]?address(?:[_ ]?line)?[_ ]?\d*"
+    r"|address(?:[_ ]?line)?[_ ]?\d*|addr(?:ess)?\d*|street)"
+    r"|(?P<city>city)"
+    r"|(?P<zip>zip(?:[_ ]?code)?|postal[_ ]?code)"
     # Contact identifiers (email/phone are PII; a bare-digit phone or an obscured
     # email value dodges the value regexes, so the key is flagged too).
-    r"|e[-_ ]?mail(?:[_ ]?address)?"
-    r"|phone(?:[_ ]?(?:number|no|num))?|fax(?:[_ ]?(?:number|no|num))?"
+    r"|(?P<email>e[-_ ]?mail(?:[_ ]?address)?)"
+    r"|(?P<phone>phone(?:[_ ]?(?:number|no|num))?|fax(?:[_ ]?(?:number|no|num))?)"
     r")[\"']?$",
     re.I,
 )
@@ -265,8 +275,13 @@ def scan_record(obj: dict) -> list[Finding]:
         # separators — collapse [-_\s]+ to a single underscore so every style hits
         # the same alias (a bare value has no shape, so the key is the only signal).
         norm_key = re.sub(r"[-_\s]+", "_", key.strip().lower())
-        if _SENSITIVE_KEY.match(norm_key) and value not in (None, ""):
-            findings.append(Finding(f"field:{key.lower()}", _mask(str(value))))
+        m = _SENSITIVE_KEY.match(norm_key)
+        if m and value not in (None, ""):
+            # Emit the canonical category (field:ssn, field:name, …), never the
+            # raw key — pii_type flows into counts()/the report/CI logs, and a key
+            # can itself carry PII, so echoing it would leak. Exactly one named
+            # group matches the full key, so lastgroup is the category.
+            findings.append(Finding(f"field:{m.lastgroup}", _mask(str(value))))
     # Scan each value separately — joining them would let the PAN pattern's
     # legal space separator fuse adjacent digit fields into one oversized run.
     # Value-level hits on already-flagged fields still add signal (they prove

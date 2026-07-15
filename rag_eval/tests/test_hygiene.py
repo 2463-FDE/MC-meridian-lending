@@ -4,12 +4,14 @@ from pathlib import Path
 
 
 from rag_eval.hygiene import (
+    FileVerdict,
     _luhn_valid,
     _mask,
     scan_file,
     scan_record,
     scan_text,
 )
+from rag_eval.report import _hygiene_section
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -233,7 +235,7 @@ def test_ssn_aliases_and_underscores_detected_in_free_text():
 
 def test_ssn_alias_record_key_flagged():
     findings = scan_record({"social_security_number": "330905512"})
-    assert [f.pii_type for f in findings] == ["field:social_security_number"]
+    assert [f.pii_type for f in findings] == ["field:ssn"]
 
 
 def test_ssn_number_aliases_flagged_in_record_and_jsonl(tmp_path):
@@ -248,7 +250,7 @@ def test_ssn_number_aliases_flagged_in_record_and_jsonl(tmp_path):
     p.write_text('{"ssn_number": "123456789"}\n', encoding="utf-8")
     verdict = scan_file(p)
     assert not verdict.passed
-    assert "field:ssn_number" in verdict.counts()
+    assert "field:ssn" in verdict.counts()
 
 
 def test_sensitive_key_alias_sweep():
@@ -350,7 +352,7 @@ def test_labeled_pan_with_nonstandard_separators_detected():
 
 def test_card_alias_record_key_flagged():
     types = {f.pii_type for f in scan_record({"card_number": "4111111111111111"})}
-    assert "field:card_number" in types
+    assert "field:pan" in types
 
 
 def test_markdown_with_alias_labeled_ssn_is_refused(tmp_path):
@@ -390,7 +392,7 @@ def test_bank_label_without_identifier_not_flagged():
 
 def test_bank_record_key_flagged():
     types = {f.pii_type for f in scan_record({"routing_number": "021000021"})}
-    assert "field:routing_number" in types
+    assert "field:bank" in types
 
 
 def test_markdown_with_routing_number_is_refused(tmp_path):
@@ -426,8 +428,8 @@ def test_name_address_aliases_and_components_detected():
     )
     types = {f.pii_type for f in findings}
     assert {
-        "field:applicant_name",
-        "field:street_address",
+        "field:name",
+        "field:address",
         "field:city",
         "field:zip",
     } <= types
@@ -436,7 +438,7 @@ def test_name_address_aliases_and_components_detected():
 def test_nested_name_address_detected():
     findings = scan_record({"applicant": {"full_name": "X", "home_address": "Y"}})
     types = {f.pii_type for f in findings}
-    assert "field:full_name" in types and "field:home_address" in types
+    assert "field:name" in types and "field:address" in types
 
 
 def test_name_field_value_fully_masked():
@@ -444,6 +446,30 @@ def test_name_field_value_fully_masked():
         0
     ]
     assert "Alice" not in f.masked_sample and "Smith" not in f.masked_sample
+
+
+def test_pii_bearing_key_not_echoed_in_type_counts_or_report():
+    # A structured key can itself carry PII: the person's name is IN the key
+    # (`alice_name`), and _SENSITIVE_KEY's `(?:[a-z]+[_ ])?name` branch flags it.
+    # The record must be refused, but pii_type — which flows into counts(), the
+    # rendered report, and CI logs — must expose only the canonical category,
+    # never the raw key, or the refusal path becomes a PII disclosure path.
+    findings = scan_record({"alice_name": "redacted", "john-name": "x"})
+    types = [f.pii_type for f in findings]
+    assert types, "PII-bearing name key must be refused"
+    # Every field: finding is the canonical category; no raw name leaks into it.
+    field_types = [t for t in types if t.startswith("field:")]
+    assert field_types == ["field:name", "field:name"]
+    for raw in ("alice", "john"):
+        assert all(raw not in t for t in types), raw
+    # counts() keys (report.py renders them, run.py logs them) carry no raw key.
+    verdict = FileVerdict("corpus.jsonl", False, findings)
+    counts = verdict.counts()
+    assert counts == {"field:name": 2}
+    # The rendered report table must not contain the raw key either.
+    report = "\n".join(_hygiene_section([verdict]))
+    for raw in ("alice", "john"):
+        assert raw not in report.lower(), raw
 
 
 def test_jsonl_with_only_name_address_is_refused(tmp_path):
@@ -588,7 +614,7 @@ def test_hyphenated_csv_header_with_bare_value_refused(tmp_path):
     p.write_text("id,social-security-number\n1,123456789\n", encoding="utf-8")
     verdict = scan_file(p)
     assert not verdict.passed
-    assert "field:social-security-number" in verdict.counts()
+    assert "field:ssn" in verdict.counts()
 
 
 def test_hyphenated_free_text_labels_flagged():
@@ -630,7 +656,7 @@ def test_birth_date_alias_flagged_in_record_and_csv(tmp_path):
     p.write_text("id,birth_date\n1,1992-04-21\n", encoding="utf-8")
     verdict = scan_file(p)
     assert not verdict.passed
-    assert "field:birth_date" in verdict.counts()
+    assert "field:dob" in verdict.counts()
 
 
 def test_malformed_json_and_jsonl_fail_closed(tmp_path):
