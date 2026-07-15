@@ -139,6 +139,16 @@ _CVV_LABELED = re.compile(
 )
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
 _PHONE = re.compile(r"(?:\(\d{3}\)\s?|\b\d{3}[ .\-])\d{3}[ .\-]\d{4}\b")
+# A labeled phone in free text. _PHONE above catches SEPARATED numbers regardless
+# of label; this adds the label-gated BARE 10-digit form ("phone: 2125551212",
+# "cell 2125551212") that _PHONE intentionally skips so an unlabeled bare 10-digit
+# id isn't flagged. Mirrors the production redactor's labeled-phone rule
+# (services/*/app/redactor.py); over-refusal just excludes a file.
+_PHONE_LABELED = re.compile(
+    r"\b(?:phone|telephone|tel|mobile|cell|fax)(?:[-_ ]?(?:no|num|number))?s?\b"
+    r"\W{0,10}(\+?1?[\s.\-]?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4})\b",
+    re.I,
+)
 # DOB-shaped date in identity context (spec D2.1): a birth label followed
 # shortly by a date-shaped value — ISO/slashed/dashed numeric, OR a month-name
 # form ("Jan 2, 1980" / "2 January 1980") which is just as much a birth date.
@@ -242,9 +252,17 @@ def scan_text(text: str) -> list[Finding]:
             findings.append(Finding("ein", _mask(m.group(0))))
     for m in _EMAIL.finditer(text):
         findings.append(Finding("email", "••••@" + m.group(0).split("@", 1)[1]))
+    phone_spans = []
     for m in _PHONE.finditer(text):
         if m.span() not in ssn_spans:
             findings.append(Finding("phone", _mask(m.group(0))))
+            phone_spans.append(m.span())
+    for m in _PHONE_LABELED.finditer(text):
+        # _PHONE already caught separated numbers; only add the label-gated bare
+        # form when it doesn't overlap one already reported.
+        if not any(s < m.end() and m.start() < e for s, e in phone_spans):
+            findings.append(Finding("phone", _mask(m.group(1))))
+            phone_spans.append(m.span())
     bank_spans = []
     for m in _BANK_LABELED.finditer(text):
         findings.append(Finding("bank", _mask(m.group(1))))

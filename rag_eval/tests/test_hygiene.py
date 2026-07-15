@@ -198,6 +198,31 @@ def test_paren_and_space_phone_formats_detected():
     assert [f.pii_type for f in scan_text("call 901 555 1234 now")] == ["phone"]
 
 
+def test_labeled_bare_phone_detected():
+    # _PHONE needs separators; a labeled BARE 10-digit phone (in a markdown note
+    # or a gold query) must still be caught — mirrors the production redactor's
+    # labeled-phone rule. Was a bypass: scan_text("phone: 2125551212") == [].
+    for text in (
+        "phone: 2125551212",
+        "phone number: 2125551212",
+        "cell 2125551212",
+        "fax 2125551212",
+        "mobile no 212-555-1212",
+    ):
+        assert "phone" in [f.pii_type for f in scan_text(text)], text
+    # A separated labeled number is reported once, not double-counted.
+    assert [f.pii_type for f in scan_text("mobile: 212 555 1212")] == ["phone"]
+    # Only the last 4 survive masking; leading digits are hidden.
+    f = [x for x in scan_text("phone: 2125551212") if x.pii_type == "phone"][0]
+    assert "212555" not in f.masked_sample and f.masked_sample.endswith("1212")
+
+
+def test_unlabeled_bare_10_digit_not_flagged_as_phone():
+    # No phone label -> a bare 10-digit run stays a non-PII id (order/reference).
+    assert scan_text("order 5551234567 shipped") == []
+    assert "phone" not in [f.pii_type for f in scan_text("ref 2125551212 logged")]
+
+
 def test_nested_record_sensitive_fields_detected():
     findings = scan_record({"applicant": {"ssn": "330905512", "dob": "1992-04-21"}})
     types = {f.pii_type for f in findings}
