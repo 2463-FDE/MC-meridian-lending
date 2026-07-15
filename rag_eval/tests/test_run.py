@@ -241,6 +241,33 @@ def test_gold_query_with_pii_fails_closed(tmp_path: Path, monkeypatch):
     assert not (tmp_path / "rag_eval" / ".cache" / "embeddings.json").exists()
 
 
+def test_gold_query_unlabeled_spaced_ssn_fails_closed(tmp_path: Path, monkeypatch):
+    # Regression: a bare, UNLABELED space-separated SSN in a gold query used to
+    # slip the scan (only the dashed bare form was caught), reaching Bedrock and
+    # eval_report.md. It must now abort before any embedding/cache side effect.
+    import pytest
+
+    from rag_eval import run as run_mod
+
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies" / "clean.md").write_text(
+        "# Clean\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+    gold = tmp_path / "gold.json"
+    gold.write_text(
+        json.dumps(
+            {"queries": [{"id": "q-pii", "query": "why was 412 55 9981 denied?"}]}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(run_mod, "GOLD_PATH", gold)
+
+    with pytest.raises(RuntimeError, match="contain PII") as e:
+        run_mod.run(base=tmp_path)
+    assert "412 55 9981" not in str(e.value)  # position only, never a value
+    assert not (tmp_path / "rag_eval" / ".cache" / "embeddings.json").exists()
+
+
 def test_gold_pii_in_id_or_expected_fails_without_echo(tmp_path: Path, monkeypatch):
     # PII in id or expected (both printed in the report) must fail closed, and
     # the error must not echo the offending value.

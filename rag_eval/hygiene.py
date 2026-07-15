@@ -111,10 +111,15 @@ _BANK_LABELED = re.compile(
 # IBAN in free text: self-identifying (country + 2 check digits + alnum), so no
 # label needed. A labeled IBAN is already covered by _BANK_LABELED.
 _IBAN = re.compile(r"\b[A-Z]{2}\d{2}[A-Za-z0-9]{11,30}\b")
-_SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
-# A bare 9-digit run is too ambiguous to flag, but one *labeled* is. Alias set and
-# 3-2-4 optional-separator value mirror the redactor: ssn / social security /
-# tax id / tin, with or without underscores and no/num/number suffixes.
+# Bare SSN: the 3-2-4 grouping is the tell, so flag it whether dash- or
+# space-separated (412-55-9981 / 412 55 9981) — matching the production redactor,
+# which carries both bare forms (services/*/app/redactor.py). A separator is
+# required: a bare undashed 9-digit run stays too ambiguous to flag (an order id,
+# a bare account number), so only a *labeled* one is caught below.
+_SSN = re.compile(r"\b\d{3}[- ]\d{2}[- ]\d{4}\b")
+# The labeled alias set and 3-2-4 optional-separator value mirror the redactor:
+# ssn / social security / tax id / tin, with or without underscores and
+# no/num/number suffixes.
 _SSN_LABELED = re.compile(
     r"\b(?:ssn|social[-_ ]?security|tax[-_ ]?id|tin)(?:[-_ ]?(?:no|num|number))?s?\b"
     r"\W{0,10}\d{3}[-\s]?\d{2}[-\s]?\d{4}\b",

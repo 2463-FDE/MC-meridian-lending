@@ -176,8 +176,21 @@ def test_labeled_undashed_ssn_detected():
     assert "330905512" not in findings[0].masked_sample
 
 
+def test_bare_ssn_detected_dashed_and_spaced():
+    # The 3-2-4 grouping is the tell: flag it dash- OR space-separated, matching
+    # the production redactor (which carries both bare forms). Previously only the
+    # dashed form was caught, so a space-separated SSN slipped through unlabeled.
+    for text in ("why was 412-55-9981 denied?", "why was 412 55 9981 denied?"):
+        assert [f.pii_type for f in scan_text(text)] == ["ssn"], text
+        # Only the last 4 survive masking; the leading digits are hidden.
+        assert "412" not in scan_text(text)[0].masked_sample, text
+
+
 def test_bare_nine_digit_run_not_flagged():
+    # A separator is required; a bare undashed 9-digit run stays too ambiguous.
     assert scan_text("order id 123456789 shipped") == []
+    # A 3-3-4 group is a phone shape, not an SSN — must not misfire as ssn.
+    assert "ssn" not in [f.pii_type for f in scan_text("ref 901 555 1234 today")]
 
 
 def test_paren_and_space_phone_formats_detected():
