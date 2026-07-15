@@ -154,6 +154,26 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_decision.py -k database_url -q
 
+  rag-eval-gate:
+    # The RAG eval hygiene gate (refuses contaminated kb_dump: ssn/pan/ein) and
+    # the cache pruning are security controls: they prove raw PII never reaches
+    # the report or the embedding cache (ADR 0007). Like the other security
+    # gates, this MUST block — a regression in the gate or cache pruning must not
+    # ship on a green build. No continue-on-error, no `|| true`. The harness is
+    # offline by design (no service/docker dependency); tests need only pytest.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: rag_eval unit + integration tests
+        run: |
+          pip install pytest
+          python -m pytest rag_eval/tests -q
+      - name: rag_eval real-corpus smoke (refusal + no raw PII in report/cache)
+        run: ./scripts/smoke_rag_eval.sh
+
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -185,7 +205,17 @@ jobs:
       - name: No leaked secret literals in tracked tree
         run: |
           set -euo pipefail
-          if git grep -nIE 'cb_live_|proc_live_|EXAMPLE-LEAKED-KEY|meridian_dev_pw_2024' \
+          # AWS credential shapes are added so an accidental Bedrock/AWS credential
+          # commit fails CI too, not just the four known-leaked literals:
+          #   (AKIA|ASIA)+16     — IAM access-key IDs
+          #   ABSKQmVkcm9ja      — Bedrock long-term API key (fixed base64 prefix)
+          #   bedrock-api-key-   — Bedrock short-term API key
+          # Both Bedrock forms are bearer tokens consumed by boto3 via
+          # AWS_BEARER_TOKEN_BEDROCK; rag_eval never reads them as a literal. IAM
+          # secret-access keys (40-char base64) are too generic to match without
+          # false positives — the control is: creds live in ~/.aws or the shell
+          # env, never a tracked file (see docs/PHASE1-BEDROCK-PGVECTOR.md).
+          if git grep -nIE 'cb_live_|proc_live_|EXAMPLE-LEAKED-KEY|meridian_dev_pw_2024|(AKIA|ASIA)[0-9A-Z]{16}|ABSKQmVkcm9ja|bedrock-api-key-' \
               -- ':!docs/security-remediation-2026-07.md' \
                  ':!.github/workflows/ci.yml' \
                  ':!*/tests/*'; then

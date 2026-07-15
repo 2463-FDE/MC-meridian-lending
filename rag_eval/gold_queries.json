@@ -1,0 +1,69 @@
+{
+  "_comment": "Gold query set (spec D1.4, DL-6). Queries mirror real officer questions. 'expected' lists acceptable source chunk_ids (doc#section-slug from chunker.py). 'unanswerable: true' marks queries whose answer does not exist in any allowed corpus source — the harness scores these correct when retrieval confidence stays BELOW the calibrated threshold, and the report routes them to the Data-gaps section. PRIVACY CONTRACT: query and note text is embedded (sent to the external API on the Bedrock backend) and printed verbatim into eval_report.md, so it MUST describe synthetic scenarios only — never a real applicant's name, address, or other PII. run.py locks the structured fields (id/expected/unanswerable), scans all strings for self-identifying PII (SSN/PAN/email/phone/bank/DOB), AND fails closed on any run of 2+ consecutive Title-Case words (a probable person name) before embedding or report generation. Legitimate multi-word proper nouns (Fair Credit Reporting Act, Regulation Z, Meridian Lending, Social Security, etc.) are allowlisted in run.py::_NAME_ALLOWLIST — extend it if a new legitimate proper noun trips the guard. Reference individuals by synthetic id/placeholder (e.g. 'application #6012'), never a real name/address. Allowed keys per query: id, query, expected, unanswerable, note.",
+  "queries": [
+    {
+      "id": "q01-approve-cutoff",
+      "query": "What model score and DTI are required to approve a loan?",
+      "expected": ["underwriting_guidelines#credit-decisioning"]
+    },
+    {
+      "id": "q02-refer-band",
+      "query": "When does an application get referred for manual review?",
+      "expected": ["underwriting_guidelines#credit-decisioning"]
+    },
+    {
+      "id": "q03-dti-definition",
+      "query": "How is debt-to-income calculated?",
+      "expected": ["underwriting_guidelines#debt-to-income-dti"]
+    },
+    {
+      "id": "q04-adverse-action-timing",
+      "query": "How many days do we have to send an adverse-action notice after a denial?",
+      "expected": ["underwriting_guidelines#adverse-action-reg-b"]
+    },
+    {
+      "id": "q05-late-fee",
+      "query": "How much is the late payment fee?",
+      "expected": ["fee_schedule#_intro"]
+    },
+    {
+      "id": "q06-nsf-fee",
+      "query": "What is the returned payment NSF fee?",
+      "expected": ["fee_schedule#_intro"]
+    },
+    {
+      "id": "q07-note-rate-range",
+      "query": "What note rates apply to standard personal installment loans?",
+      "expected": ["fee_schedule#interest"]
+    },
+    {
+      "id": "q08-payment-waterfall",
+      "query": "In what order is a received payment applied to fees, interest, and principal?",
+      "expected": ["fee_schedule#apr-finance-charge"]
+    },
+    {
+      "id": "q09-eligibility",
+      "query": "What is the minimum age and allowed loan amount range for applicants?",
+      "expected": ["underwriting_guidelines#eligibility"]
+    },
+    {
+      "id": "q10-retention",
+      "query": "How long must applications and adverse-action records be retained?",
+      "expected": ["underwriting_guidelines#records-retention"]
+    },
+    {
+      "id": "q11-why-6012-denied",
+      "query": "Why was application #6012 denied?",
+      "expected": [],
+      "unanswerable": true,
+      "note": "Headline data gap: decisions table stores (app_id, outcome) only — the reason was never recorded. Not a retrieval bug. See the report's Data-gaps section."
+    },
+    {
+      "id": "q12-off-corpus",
+      "query": "What is the escrow policy for mortgage accounts?",
+      "expected": [],
+      "unanswerable": true,
+      "note": "Off-corpus control: Meridian's policy docs cover personal installment loans only; no mortgage/escrow content exists to retrieve."
+    }
+  ]
+}
