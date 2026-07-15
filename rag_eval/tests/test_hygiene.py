@@ -591,6 +591,33 @@ def test_hyphenated_csv_header_with_bare_value_refused(tmp_path):
     assert "field:social-security-number" in verdict.counts()
 
 
+def test_hyphenated_free_text_labels_flagged():
+    # The free-text label detectors (.md/.txt/.log path) must treat hyphen the
+    # same as underscore/space — matching the scan_record key normalization.
+    cases = {
+        "ssn-number: 123456789": "ssn",
+        "date-of-birth: 1980-01-02": "dob",
+        "birth-date: 1980-01-02": "dob",
+        "routing-number: 123456789": "bank",
+        "account-number: 12345678": "bank",
+        "card-security-code: 123": "cvv",
+    }
+    for text, pii in cases.items():
+        assert pii in [f.pii_type for f in scan_text(text)], text
+    # Underscore/space forms must still work (no regression).
+    for text in ("ssn number: 123456789", "date of birth: 1980-01-02"):
+        assert scan_text(text), text
+
+
+def test_hyphenated_label_in_markdown_file_refused(tmp_path):
+    # A .md note with a hyphenated PII label over a bare value must fail the gate.
+    p = tmp_path / "note.md"
+    p.write_text("# Applicant\n\nssn-number: 123456789\n", encoding="utf-8")
+    verdict = scan_file(p)
+    assert not verdict.passed
+    assert "ssn" in verdict.counts()
+
+
 def test_birth_date_alias_flagged_in_record_and_csv(tmp_path):
     # _SENSITIVE_KEY listed dob/date_of_birth but not birth_date/birthdate, so a
     # DOB under those structured headers scanned clean (fail-open). All spellings

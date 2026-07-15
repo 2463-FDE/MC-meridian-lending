@@ -82,9 +82,9 @@ _PAN_CANDIDATE = re.compile(r"\b\d(?:[^0-9\n]?\d){12,18}\b")
 # catch card values even where the free-text pass's single-separator bound would
 # miss (e.g. doubled separators). Extracted digits are Luhn-checked.
 _PAN_LABELED = re.compile(
-    r"\b(?:pan|card[_ ]?(?:number|no|num)|cc[_ ]?(?:number|no|num)|credit[_ ]?card"
-    r"|account[_ ]?(?:number|no|num)|acct[_ ]?(?:number|no|num)"
-    r"|primary[_ ]?account[_ ]?number)\b\W{0,4}(\d(?:[ _\-/*.]?\d){12,24})",
+    r"\b(?:pan|card[-_ ]?(?:number|no|num)|cc[-_ ]?(?:number|no|num)|credit[-_ ]?card"
+    r"|account[-_ ]?(?:number|no|num)|acct[-_ ]?(?:number|no|num)"
+    r"|primary[-_ ]?account[-_ ]?number)\b\W{0,4}(\d(?:[ _\-/*.]?\d){12,24})",
     re.I,
 )
 # Label-gated bank/account/routing/IBAN identifiers. These are plain digit runs
@@ -93,8 +93,8 @@ _PAN_LABELED = re.compile(
 # (services/*/app/redactor.py). The value must start with a digit and carry >=6
 # identifier chars (or be an IBAN), so "account holder" / "account 4" don't trip.
 _BANK_LABELED = re.compile(
-    r"\b(?:bank[_ ]?account|account|acct|dda|ach(?:[_ ]?account)?"
-    r"|routing|aba|rtn|transit|iban)(?:[_ ]?(?:number|no|num))?\b"
+    r"\b(?:bank[-_ ]?account|account|acct|dda|ach(?:[-_ ]?account)?"
+    r"|routing|aba|rtn|transit|iban)(?:[-_ ]?(?:number|no|num))?\b"
     r"\W{0,10}(\d[\d\-\s]{5,32}|[A-Z]{2}\d{2}[A-Za-z0-9]{11,30})",
     re.I,
 )
@@ -106,7 +106,7 @@ _SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 # 3-2-4 optional-separator value mirror the redactor: ssn / social security /
 # tax id / tin, with or without underscores and no/num/number suffixes.
 _SSN_LABELED = re.compile(
-    r"\b(?:ssn|social[_ ]?security|tax[_ ]?id|tin)(?:[_ ]?(?:no|num|number))?s?\b"
+    r"\b(?:ssn|social[-_ ]?security|tax[-_ ]?id|tin)(?:[-_ ]?(?:no|num|number))?s?\b"
     r"\W{0,10}\d{3}[-\s]?\d{2}[-\s]?\d{4}\b",
     re.I,
 )
@@ -117,7 +117,8 @@ _EIN = re.compile(r"\b\d{2}-\d{7}\b")
 # avoid flagging every short number. Over-refusal here just excludes a file
 # (exclusion over redaction) — cheaper than leaking a card code into embeddings.
 _CVV_LABELED = re.compile(
-    r"\b(?:cvv2?|cvc2?|cv2|card security code|card verification(?: value)?|security code)"
+    r"\b(?:cvv2?|cvc2?|cv2|card[-_ ]?security[-_ ]?code"
+    r"|card[-_ ]?verification(?:[-_ ]?value)?|security[-_ ]?code)"
     r"\b\W{0,10}(\d{3,4})\b",
     re.I,
 )
@@ -131,7 +132,7 @@ _MONTH = (
     r"|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
 )
 _DOB_CONTEXT = re.compile(
-    r"\b(?:dob|date of birth|birth ?date|born)\b\W{0,10}"
+    r"\b(?:dob|date[-_ ]?of[-_ ]?birth|birth[-_ ]?date|born)\b\W{0,10}"
     r"(\d{4}[-/]\d{1,2}[-/]\d{1,2}"
     r"|\d{1,2}[-/]\d{1,2}[-/]\d{4}"
     r"|" + _MONTH + r"\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}"
