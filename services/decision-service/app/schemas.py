@@ -29,3 +29,22 @@ class DecisionOut(BaseModel):
     # Specific Reg B principal reasons: [{code, reason, feature}, ...] (ADR 0009 §3).
     principal_reasons: list = []
     decided_by: Optional[str] = None
+
+
+class DecisionRecordOut(BaseModel):
+    """Identifier-free projection of the latest decision event (ADR 0009 §4).
+
+    status is "recorded" when an event exists; "no_record_legacy" when only a
+    pre-feature outcome row exists — reasons for those were never captured and are
+    unrecoverable (ADR 0008 req. 4). Distinct from 404 (never decisioned).
+    """
+
+    application_id: int
+    status: str
+    outcome: Optional[str] = None
+    principal_reasons: list = []
+    drivers: dict = {}
+    policy_band: Optional[str] = None
+    inputs: dict = {}
+    decided_by: Optional[str] = None
+    decided_at: Optional[str] = None

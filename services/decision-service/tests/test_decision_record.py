@@ -127,3 +127,54 @@ def test_human_override_contradicting_band_is_allowed():
         {"model_score": 612},
         "underwriter:jane",
     )
+
+
+# --- GET /decisions/{app_id}/record (memory-tool projection, ADR 0009 §5) ----------
+
+
+def _record_client(monkeypatch, responses):
+    """TestClient with routers.decisions.db.query returning canned rows per call."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from app.routers import decisions as decisions_router
+
+    calls = iter(responses)
+    monkeypatch.setattr(decisions_router.db, "query", lambda sql, params=None: next(calls))
+    return TestClient(app)
+
+
+def test_record_endpoint_returns_recorded_event(monkeypatch):
+    import datetime
+
+    event_row = {
+        "outcome": "deny",
+        "principal_reasons": [{"code": "R02", "reason": "Excessive obligations in relation to income",
+                               "feature": "payment_burden"}],
+        "drivers": {"model_id": "meridian-risk-stub", "model_score": 518},
+        "policy_band": "deny",
+        "inputs": {"bureau_score": 612},
+        "decided_by": "meridian-risk-stub:v1",
+        "decided_at": datetime.datetime(2026, 7, 15, 12, 0, 0),
+    }
+    resp = _record_client(monkeypatch, [[event_row]]).get("/decisions/12/record")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "recorded"
+    assert body["principal_reasons"][0]["code"] == "R02"
+    assert body["decided_at"].startswith("2026-07-15")
+
+
+def test_record_endpoint_distinguishes_legacy_no_record(monkeypatch):
+    # decisions row exists (pre-feature outcome) but no event: reasons unrecoverable.
+    resp = _record_client(monkeypatch, [[], [{"outcome": "deny"}]]).get("/decisions/6012/record")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "no_record_legacy"
+    assert body["outcome"] == "deny"
+    assert body["principal_reasons"] == []
+
+
+def test_record_endpoint_404_when_never_decisioned(monkeypatch):
+    resp = _record_client(monkeypatch, [[], []]).get("/decisions/999/record")
+    assert resp.status_code == 404
