@@ -3,23 +3,32 @@
 The scorecard tests run in explicit SYNTHETIC-credit mode (ALLOW_SYNTHETIC_CREDIT):
 there is no live Experian in the test environment, so `_pull_credit` uses its
 deterministic stub (680 for an SSN ending in an even digit, 612 otherwise).
-Persistence is best-effort and swallowed when no DB is present.
+Persistence is now MANDATORY (fail closed, ADR 0009 §4) — these tests stub
+app.decision.db.query so no live Postgres is required.
 
 The fail-closed tests prove the security fix: with NO bureau key and synthetic mode
 OFF (a production-like config), decision-service must NOT issue a decision, and
 /health must report unhealthy — closing the "keyless deploy silently issues
 decisions off a stub score" gap.
 
-NOTE (intentional debt, left UNTESTED): there is deliberately NO test asserting a
-decision audit trail / reason-code accuracy exists (D4, D10, twists #1/#2).
+The decision audit trail / reason-code contract (formerly intentional untested debt
+D4/D10) is covered in test_decision_record.py.
 """
+
 import threading
 import time
 
 import pytest
 
 from app import config
+from app import decision as decision_mod
 from app.decision import decide, CreditPullError
+
+
+@pytest.fixture
+def event_sink(monkeypatch):
+    """Swallow the mandatory decision-event write (no Postgres in unit tests)."""
+    monkeypatch.setattr(decision_mod.db, "query", lambda sql, params=None: [])
 
 
 @pytest.fixture(autouse=True)
@@ -65,18 +74,41 @@ def env_example_semantics(monkeypatch):
     monkeypatch.setattr(config, "EXPERIAN_KEY", "")
 
 
-def test_clear_approve(synthetic_mode):
+def test_clear_approve(synthetic_mode, event_sink):
     # SSN ends in an even digit -> stub bureau score 680; high income clears.
-    result = decide({"app_id": 1, "ssn": "123456782", "income": 100000})
+    result = decide(
+        {
+            "app_id": 1,
+            "ssn": "123456782",
+            "income": 100000,
+            "amount": 15000,
+            "term_months": 36,
+            "employment_years": 5,
+        }
+    )
     assert result["decision"] == "approve"
     assert result["score"] >= 660
 
 
-def test_clear_deny(synthetic_mode):
+def test_clear_deny(synthetic_mode, event_sink):
     # SSN ends in an odd digit -> stub bureau score 612; zero income sinks it.
-    result = decide({"app_id": 2, "ssn": "123456781", "income": 0})
+    result = decide(
+        {
+            "app_id": 2,
+            "ssn": "123456781",
+            "income": 0,
+            "amount": 15000,
+            "term_months": 36,
+        }
+    )
     assert result["decision"] == "deny"
     assert result["score"] < 600
+    # Adverse action now carries specific principal reasons, never the generic string.
+    assert result["principal_reasons"]
+    assert all(
+        "purchasing history" not in r["reason"].lower()
+        for r in result["principal_reasons"]
+    )
 
 
 def test_missing_key_fails_closed_no_decision(prod_like):
@@ -181,7 +213,9 @@ def test_health_flags_database_url_password_drift(monkeypatch):
     monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", True)
     monkeypatch.setattr(config, "EXPERIAN_KEY", "")
     monkeypatch.setattr(
-        config, "DATABASE_URL", "postgresql://meridian:stale_old_pw@postgres:5432/meridian"
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:stale_old_pw@postgres:5432/meridian",
     )
     assert config.database_url_configured() is False
     assert "DATABASE_URL" in config.missing_required_secrets()
@@ -246,7 +280,9 @@ def test_database_url_probe_ok_when_connection_succeeds(monkeypatch):
     assert err is None
 
 
-def test_database_url_probe_fails_on_wrong_password_without_postgres_password(monkeypatch):
+def test_database_url_probe_fails_on_wrong_password_without_postgres_password(
+    monkeypatch,
+):
     # The documented residual the config gate cannot catch: a real, non-placeholder
     # DSN password with no POSTGRES_PASSWORD to compare against. The gate accepts it;
     # only the live probe detects that it does not authenticate.
@@ -349,9 +385,14 @@ def test_decision_endpoint_returns_503_when_key_missing(prod_like):
     resp = TestClient(app).post(
         "/decisions",
         json={
-            "application_id": 9, "applicant_id": 9, "name": "Test Applicant",
-            "ssn": "123456782", "requested_amount": 15000, "term_months": 36,
-            "annual_income": 100000, "monthly_debt": 0,
+            "application_id": 9,
+            "applicant_id": 9,
+            "name": "Test Applicant",
+            "ssn": "123456782",
+            "requested_amount": 15000,
+            "term_months": 36,
+            "annual_income": 100000,
+            "monthly_debt": 0,
         },
     )
     assert resp.status_code == 503  # fail closed — no decision issued

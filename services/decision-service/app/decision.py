@@ -1,33 +1,39 @@
 """Credit decisioning.
 
-This logic was lifted verbatim out of the origination service into its own
-decision-service — the behaviour (and the debt) is unchanged by the split.
+The credit pull and the model run remain a SYNCHRONOUS chain executed inline on the
+request thread (load note: timeouts past ~20 concurrent apps — documented and deferred
+in ADR 0009 §6).
 
-The credit pull, the bureau call, and the model run are a SYNCHRONOUS chain executed
-inline on the request thread (load note: timeouts past ~20 concurrent apps).
-
-Adverse-action reasons are a generic nearest-checkbox string ("purchasing history") that
-does NOT reflect the model's actual top features. No decision record is persisted beyond
-the bare outcome in the `decisions` table — no inputs, no model drivers, no reason, no
-timestamp. There is no append-only audit trail. (D4, D9, D10)
+Scoring runs through the vendor-model stand-in (model_vendor, ADR 0009 §2). Adverse-
+action reasons are specific principal reasons derived from the model's actual top
+negative attributions (reasons.py, ADR 0009 §3). Every decision persists an append-only
+decision_events record atomically with the outcome; a decision that cannot be recorded
+is refused (fail closed), because an unprovable decision is a Reg B liability, not a
+success (ADR 0009 §4).
 """
-import time
+
+import json
+
 import httpx
 from . import config
+from . import model_vendor
+from . import reasons
 from .logging_config import get_logger
 from . import db
 
 log = get_logger("decision")
-
-# Generic adverse-action reasons. The model emits one of these regardless of the real
-# driver — a "nearest checkbox," not the specific principal reason Reg B requires.
-GENERIC_REASONS = ["purchasing history", "insufficient credit profile"]
 
 
 class CreditPullError(RuntimeError):
     """The bureau credit pull could not be completed. Raised so decisioning FAILS
     CLOSED — no decision is issued off a synthetic score in a production-like
     (non-synthetic) configuration."""
+
+
+class DecisionRecordError(RuntimeError):
+    """The decision-event record could not be validated or persisted. Raised so
+    decisioning FAILS CLOSED — no outcome is issued without its Reg B record
+    (ADR 0008 requirement 2, enforced here)."""
 
 
 def _synthetic_score(ssn: str) -> int:
@@ -72,43 +78,122 @@ def _pull_credit(ssn: str) -> int:
         raise CreditPullError(f"bureau credit pull failed: {type(e).__name__}") from e
 
 
-def _run_model(bureau_score: int, application: dict) -> dict:
-    """The rules-based risk scorecard. Returns a score + decision + a GENERIC reason.
+def _validate_record(
+    outcome: str, band: str, principal_reasons: list, drivers: dict, decided_by: str
+) -> None:
+    """ADR 0008 requirement 2, enforced: no outcome without reasons+drivers; a system
+    decision cannot contradict the policy band (the #6012 refer-band-deny class)."""
+    if outcome in ("deny", "refer") and not principal_reasons:
+        raise DecisionRecordError(
+            f"refusing {outcome}: no specific principal reasons derived — an adverse "
+            "action without recorded reasons violates the write-path contract"
+        )
+    if not drivers:
+        raise DecisionRecordError("refusing decision: no model drivers to record")
+    if outcome != band and decided_by == model_vendor.model_signature():
+        raise DecisionRecordError(
+            f"refusing decision: system outcome '{outcome}' contradicts policy band "
+            f"'{band}' — overrides require a human decided_by"
+        )
 
-    (This is the legacy statistical scorecard. The client keeps asking for a smarter
-    "AI" model — that work has not started; there is no ML/LLM in the baseline.)
-    """
-    time.sleep(0.05)  # stand-in for a slow scorecard pass on the request thread
-    model_score = int(bureau_score * 0.9 + (application.get("income", 0) / 1000))
-    if model_score >= 660:
-        return {"score": model_score, "decision": "approve", "adverse_action_reason": None}
-    decision = "deny" if model_score < 600 else "refer"
-    # generic reason — not mapped to the model's actual top features
-    return {
-        "score": model_score,
-        "decision": decision,
-        "adverse_action_reason": GENERIC_REASONS[0],
-    }
+
+def _persist_event(
+    app_id: int,
+    outcome: str,
+    principal_reasons: list,
+    drivers: dict,
+    band: str,
+    inputs: dict,
+    decided_by: str,
+) -> None:
+    """Append the decision event and update the current-state pointer in ONE atomic
+    statement. Persistence failure refuses the decision (fail closed) — the record IS
+    the deliverable, not a best-effort side effect."""
+    try:
+        db.query(
+            "WITH ev AS ("
+            "  INSERT INTO decision_events"
+            "    (app_id, outcome, principal_reasons, drivers, policy_band, inputs, decided_by)"
+            "  VALUES (%s, %s, %s::jsonb, %s::jsonb, %s, %s::jsonb, %s)"
+            "  RETURNING app_id, outcome"
+            ") "
+            "INSERT INTO decisions (app_id, outcome) SELECT app_id, outcome FROM ev "
+            "ON CONFLICT (app_id) DO UPDATE SET outcome = EXCLUDED.outcome",
+            (
+                app_id,
+                outcome,
+                json.dumps(principal_reasons),
+                json.dumps(drivers),
+                band,
+                json.dumps(inputs),
+                decided_by,
+            ),
+        )
+    except Exception as e:
+        log.error(
+            "decision event persist failed for app_id=%s: %s", app_id, type(e).__name__
+        )
+        raise DecisionRecordError(
+            "decision refused: event record could not be persisted"
+        ) from e
 
 
 def decide(application: dict) -> dict:
-    """Full synchronous decisioning chain. Persists OUTCOME ONLY."""
+    """Full synchronous decisioning chain.
+
+    Persists an append-only decision_events row (inputs, model outputs, reason codes)
+    atomically with the outcome, or refuses the decision.
+    """
     bureau_score = _pull_credit(application.get("ssn", ""))
-    result = _run_model(bureau_score, application)
+
+    # Identifier-free model inputs (ADR 0007 rule 1) — this dict is persisted verbatim.
+    inputs = {
+        "bureau_score": bureau_score,
+        "annual_income": application.get("income", 0),
+        "requested_amount": application.get("amount", 0),
+        "term_months": application.get("term_months", 36),
+        "monthly_debt": application.get("monthly_debt", 0),
+        "employment_years": application.get("employment_years", 0),
+    }
+    model_out = model_vendor.score_application(inputs)
+    band = model_vendor.policy_band(model_out["score"])
+    outcome = band  # system decisions follow the band; overrides are human-only
+    principal_reasons = (
+        []
+        if outcome == "approve"
+        else reasons.principal_reasons(model_out["attributions"])
+    )
+    drivers = {
+        "model_id": model_out["model_id"],
+        "model_version": model_out["model_version"],
+        "model_score": model_out["score"],
+        "attributions": model_out["attributions"],
+        "band_cutoffs": {
+            "approve": model_vendor.APPROVE_CUTOFF,
+            "deny": model_vendor.DENY_CUTOFF,
+        },
+    }
+    decided_by = model_vendor.model_signature()
+
+    _validate_record(outcome, band, principal_reasons, drivers, decided_by)
 
     app_id = application.get("app_id")
-    # The only thing recorded: the outcome. No reason, no inputs, no model drivers, no time.
-    try:
-        db.query(
-            "INSERT INTO decisions (app_id, outcome) VALUES (%s, %s) "
-            "ON CONFLICT (app_id) DO UPDATE SET outcome = EXCLUDED.outcome",
-            (app_id, result["decision"]),
-        )
-    except Exception as e:  # noqa
-        log.warning("could not persist decision: %s", e)
+    _persist_event(
+        app_id, outcome, principal_reasons, drivers, band, inputs, decided_by
+    )
 
     log.info(
-        "GET /decision app_id=%s model_score=%s decision=%s adverse_action_reason=%s",
-        app_id, result["score"], result["decision"], result["adverse_action_reason"],
+        "decision recorded app_id=%s model_score=%s outcome=%s band=%s reasons=%s",
+        app_id,
+        model_out["score"],
+        outcome,
+        band,
+        [r["code"] for r in principal_reasons],
     )
-    return result
+    return {
+        "score": model_out["score"],
+        "decision": outcome,
+        "policy_band": band,
+        "principal_reasons": principal_reasons,
+        "decided_by": decided_by,
+    }
