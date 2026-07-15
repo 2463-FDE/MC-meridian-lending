@@ -133,12 +133,37 @@ the field contract itself is honored verbatim):
 ### 5. Agent architecture: regulated write inside the score tool
 
 Single agent, hosted in origination-service (where the ADR 0005 LLM client lives;
-decision-service stays LLM-free), running on `ClaudeClient` extended with tool use:
+decision-service stays LLM-free), running on `ClaudeClient`.
+
+**Amendment (2026-07-15, at implementation):** tool use is implemented as a
+**prompt-level JSON action protocol**, not Anthropic API-native tool blocks. Each turn
+the model returns one schema-validated JSON object — `{action: "tool", tool, input}` or
+`{action: "final", outcome, reason_codes, summary}` — and a deterministic loop in code
+executes the tool and feeds its result back as a JSON-object history turn. Why the
+deviation from the original "extend the client with API tool blocks" intent:
+
+- The ADR 0005 redaction pipeline requires every history turn to be a JSON **object**
+  and fails closed on free strings. Tool results are JSON objects of enum codes and
+  numbers, so they ride the existing fail-closed path verbatim; API-native tool blocks
+  would need a new content-block shape threaded through builder, adapter, validator,
+  and FakeAdapter — new attack surface on a hardened seam, for no capability this
+  feature needs.
+- Every agent turn goes through the untouched `complete()` path: token budget, retry,
+  schema validation, output PII guards all apply per step.
+- Tool-result vocabulary (outcome/band/status/reason codes) is admitted via the
+  redactor's designed `_SAFE_CATEGORICAL` extension point; adverse-action reason texts
+  reach the model only via the authored system prompt, never as caller data.
+
+API-native tool blocks remain future work if a feature needs parallel or streaming
+tool calls.
+
+The agent's tools:
 
 - **Score tool** → decision-service decisioning endpoint. The `decision_events` write
   happens **inside this call, atomically with the decision**. The LLM cannot decision an
   application without the record being written — a compliance write an agent could skip
-  is not a control.
+  is not a control. The tool takes only an application id; applicant data is looked up
+  by code, never supplied by the model.
 - **Decision-memory tool** → retrieves the persisted record by `app_id`
   (identifier-free projection).
 - The agent's officer-facing answer is **validated against the persisted event** before

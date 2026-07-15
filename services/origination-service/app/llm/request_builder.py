@@ -12,6 +12,7 @@ Token counting is a heuristic (~4 characters per token, per ADR 0005). It is an
 estimate used for budgeting only — deliberately conservative so we refuse early
 rather than overshoot. Swap in a real tokenizer later without changing callers.
 """
+
 from __future__ import annotations
 
 import json
@@ -57,9 +58,23 @@ _KEY_MASK = "•••• (key redacted)"
 # compound operational token that cannot collide with a plausible bare name.
 _SAFE_CATEGORICAL = {
     "purpose": {
-        "auto", "debt_consolidation", "home_improvement", "personal",
+        "auto",
+        "debt_consolidation",
+        "home_improvement",
+        "personal",
         "working_capital",
     },
+    # Decisioning-assistant protocol vocabulary (ADR 0009 §5): the agent's history
+    # turns are JSON objects whose string values are drawn from these closed enums
+    # (plus numbers, which pass structurally). System-defined codes, not caller
+    # data — none can collide with a plausible bare name.
+    "action": {"tool", "final"},
+    "tool": {"score_application", "get_decision_record"},
+    "task": {"decision"},
+    "outcome": {"approve", "refer", "deny", "counteroffer"},
+    "policy_band": {"approve", "refer", "deny"},
+    "status": {"recorded", "no_record_legacy", "not_found"},
+    "reason_codes": {"r01", "r02", "r03", "r04"},
 }
 
 
@@ -88,13 +103,22 @@ def _is_identity_key(key) -> bool:
     if kn == "dob" or "birth" in kn:
         return True
     # postal address family (city/zip alone are quasi-identifiers; mask them too)
-    if "address" in kn or kn.startswith(("street", "zip", "postal", "postcode")) \
-            or kn == "city":
+    if (
+        "address" in kn
+        or kn.startswith(("street", "zip", "postal", "postcode"))
+        or kn == "city"
+    ):
         return True
     # employer identification: ein (any prefix: federal_ein, employer_ein), employer*,
     # company; and job title (employment identity, like employer).
-    if kn == "ein" or kn.endswith("ein") or kn.startswith("employer") \
-            or kn == "company" or "jobtitle" in kn or kn == "title":
+    if (
+        kn == "ein"
+        or kn.endswith("ein")
+        or kn.startswith("employer")
+        or kn == "company"
+        or "jobtitle" in kn
+        or kn == "title"
+    ):
         return True
     return False
 
@@ -145,8 +169,10 @@ def _is_numeric_identity_key(key) -> bool:
     # Distinctive identity tokens — safe as substrings (catches social_security_no,
     # taxpayer_id, tax_id_number, national_id, itin without an ordinary field name
     # embedding them by accident).
-    if any(tok in kn for tok in ("socialsecurity", "taxpayer", "taxid",
-                                 "itin", "nationalid")):
+    if any(
+        tok in kn
+        for tok in ("socialsecurity", "taxpayer", "taxid", "itin", "nationalid")
+    ):
         return True
     # Short/ambiguous tokens — anchored so a substring like the "tin" inside
     # "routing_number" or the "ssn" inside "cross_number" cannot false-positive.
@@ -221,10 +247,15 @@ def _redact_scalar(key: str, value):
             # value slice would be misaligned. Fall back to redacting the value
             # alone — loses the label hint but stays correct and JSON-valid.
             return _strip_fragment_digits(
-                PiiRedactor.redact(value if isinstance(value, str) else json.dumps(value)))
-        masked = redacted[len(prefix):]
+                PiiRedactor.redact(
+                    value if isinstance(value, str) else json.dumps(value)
+                )
+            )
+        masked = redacted[len(prefix) :]
         if len(masked) >= 2 and masked[0] == '"' and masked[-1] == '"':
-            masked = masked[1:-1]  # drop the quotes json.dumps added; re-quoted on output
+            masked = masked[
+                1:-1
+            ]  # drop the quotes json.dumps added; re-quoted on output
         return _strip_fragment_digits(masked)
     # Nothing shaped. Fail closed: any non-empty string under a non-identity key
     # can hide label-less identity (a lowercased bare name is indistinguishable
@@ -234,8 +265,11 @@ def _redact_scalar(key: str, value):
     # An SSN/TIN under its own label may arrive as a number that lost its leading
     # zero (012-34-5678 coerced to int 12345678) — neither 9 digits nor a valid
     # date, so the checks below miss it. Mask any number under an SSN/TIN label.
-    if _is_numeric_identity_key(key) and isinstance(value, (int, float)) \
-            and not isinstance(value, bool):
+    if (
+        _is_numeric_identity_key(key)
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+    ):
         return _IDENTITY_MASK
     # A bare SSN/DOB/phone packed as a JSON number has no separators/label for the
     # pattern pass to key on, so match it structurally and mask it. (A card PAN as
@@ -505,8 +539,10 @@ def build_request(
                         f"non-JSON-serializable {type(value).__name__}."
                     ) from e
             variables[var] = _redact_json_var(var, value)
-    user_msg = {"role": "user",
-                "content": PiiRedactor.redact(template.render_user(**variables))}
+    user_msg = {
+        "role": "user",
+        "content": PiiRedactor.redact(template.render_user(**variables)),
+    }
     example_msgs = _expand_examples(template.examples)
 
     # Reserve room for the answer so prompt + response stays under budget.
