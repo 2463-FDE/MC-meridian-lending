@@ -180,7 +180,7 @@ def decision_request_payload(app_id: int) -> dict:
     """
     rows = db.query(
         "SELECT a.id, a.applicant_id, a.amount, a.term_months, a.income, "
-        "a.employment_years, ap.name, ap.ssn "
+        "a.monthly_debt, a.employment_years, ap.name, ap.ssn "
         "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id WHERE a.id = %s",
         (app_id,),
     )
@@ -195,7 +195,9 @@ def decision_request_payload(app_id: int) -> dict:
         "requested_amount": r.get("amount"),
         "term_months": r.get("term_months"),
         "annual_income": r.get("income") or 0,
-        "monthly_debt": 0,  # not captured in the LOS today
+        # Real captured inputs (PR #7 review): no longer a fabricated 0. Legacy rows
+        # predating the monthly_debt column fall back to 0.
+        "monthly_debt": r.get("monthly_debt") or 0,
         "employment_years": r.get("employment_years") or 0,
         "credit_score": None,  # pulled downstream by decision-service
     }

@@ -4,6 +4,7 @@ A funded loan is boarded to servicing by a DIRECT INSERT into the servicing tabl
 (`loans`, `balances`) from this origination code path. No boarding API, no event,
 no contract. (brownfield seam #1 — see docs/architecture.md, ADR 0002)
 """
+
 from .logging_config import get_logger
 from . import db
 
@@ -22,31 +23,48 @@ def create_application(payload: dict) -> int:
     """
     log.info(
         "POST /applications intake amount=%s term_months=%s is_entity=%s",
-        payload.get("amount"), payload.get("term_months", 36),
+        payload.get("amount"),
+        payload.get("term_months", 36),
         payload.get("is_entity", False),
     )
     applicant = db.query(
         "INSERT INTO applicants (name, dob, ssn, ein, is_entity, address) "
         "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
         (
-            payload.get("name"), payload.get("dob"), payload.get("ssn"),
-            payload.get("ein"), payload.get("is_entity", False), payload.get("address"),
+            payload.get("name"),
+            payload.get("dob"),
+            payload.get("ssn"),
+            payload.get("ein"),
+            payload.get("is_entity", False),
+            payload.get("address"),
         ),
     )
     applicant_id = applicant[0]["id"]
     app_row = db.query(
-        "INSERT INTO applications (applicant_id, amount, term_months, purpose, income) "
-        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+        "INSERT INTO applications "
+        "(applicant_id, amount, term_months, purpose, income, monthly_debt, "
+        "employment_years) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
         (
-            applicant_id, payload.get("amount"), payload.get("term_months", 36),
-            payload.get("purpose"), payload.get("income"),
+            applicant_id,
+            payload.get("amount"),
+            payload.get("term_months", 36),
+            payload.get("purpose"),
+            payload.get("income"),
+            payload.get("monthly_debt"),
+            payload.get("employment_years"),
         ),
     )
     return app_row[0]["id"]
 
 
-def board_to_servicing(app_id: int, applicant_name: str, principal: float,
-                       annual_rate_pct: float, term_months: int) -> int:
+def board_to_servicing(
+    app_id: int,
+    applicant_name: str,
+    principal: float,
+    annual_rate_pct: float,
+    term_months: int,
+) -> int:
     """Direct cross-schema insert into the LSS tables. The 'seam'."""
     loan = db.query(
         "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
@@ -58,7 +76,7 @@ def board_to_servicing(app_id: int, applicant_name: str, principal: float,
     db.query(
         "INSERT INTO balances (loan_id, balance) VALUES (%s, %s) "
         "ON CONFLICT (loan_id) DO NOTHING",
-        (loan_id, float(principal)),   # money as float
+        (loan_id, float(principal)),  # money as float
     )
     log.info("boarded app_id=%s -> loan_id=%s (direct LSS insert)", app_id, loan_id)
     return loan_id

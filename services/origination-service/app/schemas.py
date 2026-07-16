@@ -1,4 +1,5 @@
 """Pydantic request/response models for the LOS API."""
+
 from typing import Generic, Optional, TypeVar
 
 from pydantic import BaseModel, Field
@@ -19,6 +20,7 @@ class ApplicationIn(BaseModel):
     term_months: int = Field(default=36, ge=12, le=60)
     purpose: Optional[str] = None
     income: Optional[float] = Field(default=None, ge=0)
+    monthly_debt: Optional[float] = Field(default=None, ge=0)
     employer: Optional[str] = None
     job_title: Optional[str] = None
     employment_years: Optional[float] = Field(default=None, ge=0)

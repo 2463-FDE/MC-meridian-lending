@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS applications (
     term_months       INTEGER NOT NULL,
     purpose           TEXT,
     income            DOUBLE PRECISION,            -- money as float
+    monthly_debt      DOUBLE PRECISION,            -- money as float; model DTI input
     employer          TEXT,
     job_title         TEXT,
     employment_years  DOUBLE PRECISION,

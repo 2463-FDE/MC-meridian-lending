@@ -36,6 +36,7 @@ interface FormState {
   employer: string;
   job_title: string;
   annual_income: string;
+  monthly_debt: string;
   employment_years: string;
   amount: number;
   term_months: string;
@@ -98,6 +99,7 @@ export default function ApplyPage() {
     employer: "",
     job_title: "",
     annual_income: "",
+    monthly_debt: "",
     employment_years: "",
     amount: 15000,
     term_months: "36",
@@ -137,6 +139,9 @@ export default function ApplyPage() {
       if (!form.annual_income.trim()) e.annual_income = "Required";
       else if (Number(form.annual_income) <= 0)
         e.annual_income = "Must be greater than 0";
+      if (!form.monthly_debt.trim()) e.monthly_debt = "Required";
+      else if (Number(form.monthly_debt) < 0)
+        e.monthly_debt = "Cannot be negative";
       if (!form.employment_years.trim()) e.employment_years = "Required";
       else if (Number(form.employment_years) < 0)
         e.employment_years = "Cannot be negative";
@@ -169,7 +174,8 @@ export default function ApplyPage() {
         phone: form.phone,
         employer: form.employer,
         job_title: form.job_title,
-        annual_income: parseFloat(form.annual_income || "0"),
+        income: parseFloat(form.annual_income || "0"),
+        monthly_debt: parseFloat(form.monthly_debt || "0"),
         employment_years: parseInt(form.employment_years || "0", 10),
         amount: form.amount,
         term_months: parseInt(form.term_months, 10),
@@ -347,6 +353,20 @@ export default function ApplyPage() {
                 />
               </Field>
             </div>
+            <div className="field-row">
+              <Field
+                label="Monthly debt payments (USD)"
+                error={errors.monthly_debt}
+              >
+                <input
+                  type="number"
+                  min="0"
+                  value={form.monthly_debt}
+                  onChange={(e) => set("monthly_debt", e.target.value)}
+                  placeholder="500"
+                />
+              </Field>
+            </div>
           </>
         )}
 
@@ -425,6 +445,10 @@ export default function ApplyPage() {
               <SummaryRow
                 label="Annual income"
                 value={usd(form.annual_income)}
+              />
+              <SummaryRow
+                label="Monthly debt payments"
+                value={usd(form.monthly_debt)}
               />
               <SummaryRow
                 label="Years at employer"
