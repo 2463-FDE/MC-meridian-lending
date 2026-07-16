@@ -1,5 +1,6 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -218,7 +219,15 @@ def run_decision(
     if idempotency_key:
         payload["request_id"] = idempotency_key
     # Decisioning moved to decision-service; it persists the decision_events record.
-    resp = clients.post(clients.DECISION_URL, "/decisions", payload)
+    try:
+        resp = clients.post(clients.DECISION_URL, "/decisions", payload)
+    except httpx.HTTPStatusError as exc:
+        # decision-service fails closed with a 503 on bureau/record/unmapped-feature
+        # refusals — surface that as a retryable decisioning-unavailable, not a LOS 500,
+        # so officers and monitoring see the fail-closed reason class (matches the
+        # assistant route's handling).
+        log.error("decision-service refused decision for app_id=%s: %s", app_id, exc)
+        raise HTTPException(status_code=503, detail="decisioning unavailable") from exc
     return DecisionOut(
         app_id=app_id,
         decision=resp["outcome"],

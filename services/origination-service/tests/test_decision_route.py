@@ -5,6 +5,7 @@ its request_id so a retry after a timeout replays the recorded decision instead 
 re-pulling credit and appending a second regulated event. Downstream HTTP is stubbed.
 """
 
+import httpx
 import pytest
 from fastapi import HTTPException
 
@@ -44,3 +45,25 @@ def test_overlong_idempotency_key_rejected_before_downstream(captured_payload):
         applications.run_decision(42, idempotency_key="x" * 65)
     assert exc.value.status_code == 400
     assert captured_payload == {}  # rejected before any downstream decision call
+
+
+def test_downstream_refusal_maps_to_503_not_500(monkeypatch):
+    # PR #7 review: decision-service fails closed with 503 (bureau/record/unmapped
+    # feature). run_decision must surface that as a retryable decisioning-unavailable,
+    # not let it bubble to FastAPI's global handler as a LOS 500.
+    monkeypatch.setattr(
+        applications,
+        "decision_request_payload",
+        lambda app_id: {"application_id": app_id},
+    )
+
+    def _post_503(base, path, payload):
+        request = httpx.Request("POST", f"{base}{path}")
+        response = httpx.Response(503, request=request, json={"detail": "unavailable"})
+        raise httpx.HTTPStatusError("503", request=request, response=response)
+
+    monkeypatch.setattr(applications.clients, "post", _post_503)
+    with pytest.raises(HTTPException) as exc:
+        applications.run_decision(42, idempotency_key=None)
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "decisioning unavailable"
