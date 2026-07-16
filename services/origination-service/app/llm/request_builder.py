@@ -285,9 +285,19 @@ def _is_field_name(s: str) -> bool:
     (contains whitespace, opens with a digit or symbol, or holds `.`/`@`/`:`) is
     caller data, not a label. Application/history keys in this system are all such
     tokens; names/DOB-text/addresses carry spaces or lead with a digit/symbol and
-    fail this test. Residual (inherent, documented): a no-separator bare name used
-    as a key (`{"JaneSmith": 1}`) is indistinguishable from a field name and still
-    passes — the same limit as a lowercased bare name in a value (_redact_scalar).
+    fail this test.
+
+    Residual (inherent, ACCEPTED — see tests/test_pii_matrix.py::test_documented
+    _residual_bare_name_key). A no-separator bare name used as a KEY
+    (`{"JaneSmith": 1}`) is byte-identical to a field name and passes. This is an
+    asymmetry with the VALUE side, which fails closed: a bare name as a value
+    (`{"purpose": "JaneSmith"}`) IS masked wholesale (_redact_scalar step 2). We
+    cannot fail closed on key SHAPE the same way — every legitimate schema key
+    (`amount`, `purpose`, `term_months`) is exactly a no-separator bare token, so
+    masking that shape would destroy the payload. Accepted because keys in this
+    system are system-defined schema/ADR-0009 vocab tokens, not caller free-text;
+    a name-in-key needs a caller stuffing data into a key position. Closing it
+    would require an allowlist of the canonical key set (deferred, not built).
     """
     if not s or not (s[0].isalpha() or s[0] == "_"):
         return False
