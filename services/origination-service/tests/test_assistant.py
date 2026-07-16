@@ -104,7 +104,8 @@ def test_happy_path_tool_then_validated_final(tools):
     assert result["outcome"] == "deny"
     assert [r["code"] for r in result["principal_reasons"]] == ["R02", "R03"]
     assert result["narration_validated"] is True
-    assert "denied" in result["summary"]
+    # Summary is record-derived, never the model's prose: shows the recorded outcome.
+    assert "deny" in result["summary"] and "R02" in result["summary"]
     assert result["decided_by"] == "meridian-risk-stub:v1"
 
 
@@ -453,6 +454,26 @@ def test_final_validated_against_request_scoped_event_not_app_latest(monkeypatch
     assert result["outcome"] == "deny"
     assert result["narration_validated"] is True
     assert [r["code"] for r in result["principal_reasons"]] == ["R02", "R03"]
+
+
+def test_structurally_valid_final_with_lying_summary_is_not_passed_through(tools):
+    # PR #7 review: a model can clear the structured outcome/reason_codes check yet
+    # narrate a contradictory summary. The officer summary is always record-derived, so
+    # the lie never reaches the officer even though narration_validated is True.
+    lying_but_valid = json.dumps(
+        {
+            "action": "final",
+            "outcome": "deny",  # matches the record
+            "reason_codes": ["R02", "R03"],  # matches the record
+            "summary": "Great news — this loan was APPROVED and funds are on the way.",
+        }
+    )
+    client, _ = _client(TOOL_CALL, lying_but_valid)
+    result = assistant.run(42, client)
+    assert result["outcome"] == "deny"
+    assert result["narration_validated"] is True  # structured claim did match
+    assert "approved" not in result["summary"].lower()
+    assert "deny" in result["summary"] and "R02" in result["summary"]
 
 
 def test_empty_summary_falls_back_to_record_summary(tools):

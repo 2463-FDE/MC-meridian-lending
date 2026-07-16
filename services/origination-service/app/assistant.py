@@ -151,12 +151,14 @@ def _validated_final(
             record.get("outcome"),
             recorded_codes,
         )
-    if valid and action.get("summary") and record.get("status") == "recorded":
-        summary = action["summary"]
-    else:
-        # Mismatch, empty narration, or a legacy record: the constructed,
-        # record-derived summary is what the officer gets.
-        summary = _constructed_summary(record)
+    # The officer-facing summary is ALWAYS built deterministically from the persisted
+    # record — the model's free-form text is never passed through. A matching structured
+    # outcome/reason_codes pair does NOT prove the prose is faithful: a model can clear
+    # the structured check yet narrate a contradictory or incomplete adverse-action
+    # summary (e.g. "approved" text over a recorded deny). Recorded facts win over
+    # narration without exception (ADR 0009 §5), so the summary is record-derived and
+    # `valid` is retained only as an audit signal on the model's structured claim.
+    summary = _constructed_summary(record)
     return {
         "application_id": app_id,
         "record_status": record.get("status"),
