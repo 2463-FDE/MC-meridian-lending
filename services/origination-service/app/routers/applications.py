@@ -1,6 +1,6 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -201,10 +201,22 @@ def decision_request_payload(app_id: int) -> dict:
 
 
 @router.post("/{app_id}/decision", response_model=DecisionOut)
-def run_decision(app_id: int):
+def run_decision(
+    app_id: int,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    # Optional Idempotency-Key header is forwarded as the decision-service request_id:
+    # a retry after a timeout on this officer path replays the recorded decision instead
+    # of re-pulling credit and appending a second regulated event (PR #7 review).
+    if idempotency_key is not None and len(idempotency_key) > 64:
+        raise HTTPException(
+            status_code=400, detail="Idempotency-Key must be at most 64 characters"
+        )
     payload = decision_request_payload(app_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="application not found")
+    if idempotency_key:
+        payload["request_id"] = idempotency_key
     # Decisioning moved to decision-service; it persists the decision_events record.
     resp = clients.post(clients.DECISION_URL, "/decisions", payload)
     return DecisionOut(
