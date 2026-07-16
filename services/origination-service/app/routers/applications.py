@@ -222,6 +222,14 @@ def run_decision(
     try:
         resp = clients.post(clients.DECISION_URL, "/decisions", payload)
     except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code if exc.response is not None else 503
+        if status == 409:
+            # Reused idempotency key with changed inputs: surface the conflict, not a
+            # generic unavailability, so the caller does not blindly retry.
+            raise HTTPException(
+                status_code=409,
+                detail="Idempotency-Key reused with different decision inputs",
+            ) from exc
         # decision-service fails closed with a 503 on bureau/record/unmapped-feature
         # refusals — surface that as a retryable decisioning-unavailable, not a LOS 500,
         # so officers and monitoring see the fail-closed reason class (matches the

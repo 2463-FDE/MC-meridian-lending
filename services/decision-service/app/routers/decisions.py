@@ -86,6 +86,13 @@ def run_decision(body: DecisionIn):
     }
     try:
         result = decision.decide(application)
+    except decision.DecisionInputMismatch as e:
+        # A reused idempotency key arrived with different decision inputs: replaying the
+        # recorded outcome would be stale. 409 Conflict, not a silent replay.
+        log.warning("idempotency conflict: %s", e)
+        raise HTTPException(
+            status_code=409, detail="request_id reused with different decision inputs"
+        ) from e
     except decision.CreditPullError as e:
         # Fail closed: no decision is issued when the bureau pull cannot be made.
         log.error("credit pull unavailable, refusing decision: %s", e)

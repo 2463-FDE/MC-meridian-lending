@@ -38,6 +38,13 @@ class DecisionRecordError(RuntimeError):
     (ADR 0008 requirement 2, enforced here)."""
 
 
+class DecisionInputMismatch(RuntimeError):
+    """A request_id was reused for the same application but with different decision
+    inputs (amount/income/term/debt/employment). Replaying the recorded decision would
+    return a STALE outcome for changed data, so we fail closed with a conflict instead
+    (PR #7 review). Maps to HTTP 409 at the router."""
+
+
 def _synthetic_score(ssn: str) -> int:
     """Deterministic demo score — ONLY used when synthetic credit is enabled
     (ENVIRONMENT=development AND ALLOW_SYNTHETIC_CREDIT; see config)."""
@@ -114,8 +121,31 @@ def _validate_record(
 
 
 _EVENT_COLUMNS = (
-    "outcome, principal_reasons, drivers, policy_band, decided_by, request_id"
+    "outcome, principal_reasons, drivers, policy_band, decided_by, request_id, inputs"
 )
+
+
+def _request_inputs(application: dict) -> dict:
+    """The request-supplied decision inputs, built with the SAME defaults as the
+    persisted inputs dict so a faithful replay compares equal. Excludes bureau_score (a
+    pull result, not a request field) and SSN (never persisted — identifier-free)."""
+    return {
+        "annual_income": application.get("income", 0),
+        "requested_amount": application.get("amount", 0),
+        "term_months": application.get("term_months", 36),
+        "monthly_debt": application.get("monthly_debt", 0),
+        "employment_years": application.get("employment_years", 0),
+    }
+
+
+def _inputs_conflict(stored: dict | None, current: dict) -> bool:
+    """True when a reused request_id arrives with decision inputs that differ from the
+    recorded request. Money is float throughout this system, so compare as floats.
+    Absent stored inputs (theoretical: request_id and inputs were co-added, so any keyed
+    event has them) skip the check rather than false-reject a legitimate replay."""
+    if not stored:
+        return False
+    return any(float(stored.get(k) or 0) != float(current[k] or 0) for k in current)
 
 
 def _result_from_event(row: dict) -> dict:
@@ -221,6 +251,16 @@ def decide(application: dict) -> dict:
     if request_id:
         existing = _find_event_by_request(application.get("app_id"), request_id)
         if existing is not None:
+            if _inputs_conflict(existing.get("inputs"), _request_inputs(application)):
+                log.warning(
+                    "request_id reused with changed inputs app_id=%s request_id=%s — "
+                    "refusing to replay a stale decision",
+                    application.get("app_id"),
+                    request_id,
+                )
+                raise DecisionInputMismatch(
+                    "request_id reused with different decision inputs"
+                )
             log.info(
                 "decision replayed from record app_id=%s request_id=%s",
                 application.get("app_id"),
@@ -273,6 +313,13 @@ def decide(application: dict) -> dict:
         request_id,
     )
     if raced is not None:
+        # Lost the insert race to a concurrent request that reused this key. If that
+        # winner decisioned DIFFERENT inputs, the two requests are not the same logical
+        # action — fail closed with a conflict rather than serve a stale outcome.
+        if _inputs_conflict(raced.get("inputs"), _request_inputs(application)):
+            raise DecisionInputMismatch(
+                "request_id reused with different decision inputs"
+            )
         return _result_from_event(raced)
 
     log.info(

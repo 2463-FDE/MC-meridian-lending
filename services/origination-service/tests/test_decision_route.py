@@ -67,3 +67,23 @@ def test_downstream_refusal_maps_to_503_not_500(monkeypatch):
         applications.run_decision(42, idempotency_key=None)
     assert exc.value.status_code == 503
     assert exc.value.detail == "decisioning unavailable"
+
+
+def test_downstream_conflict_maps_to_409_not_503(monkeypatch):
+    # A reused idempotency key with changed inputs comes back from decision-service as
+    # 409; the LOS must preserve the conflict, not mask it as a retryable 503.
+    monkeypatch.setattr(
+        applications,
+        "decision_request_payload",
+        lambda app_id: {"application_id": app_id},
+    )
+
+    def _post_409(base, path, payload):
+        request = httpx.Request("POST", f"{base}{path}")
+        response = httpx.Response(409, request=request, json={"detail": "conflict"})
+        raise httpx.HTTPStatusError("409", request=request, response=response)
+
+    monkeypatch.setattr(applications.clients, "post", _post_409)
+    with pytest.raises(HTTPException) as exc:
+        applications.run_decision(42, idempotency_key="reused-key")
+    assert exc.value.status_code == 409

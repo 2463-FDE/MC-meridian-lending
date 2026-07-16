@@ -316,6 +316,15 @@ EXISTING_EVENT_ROW = {
     "policy_band": "deny",
     "decided_by": "meridian-risk-stub:v1",
     "request_id": "req-abc",
+    # Persisted request inputs (identifier-free), used to detect key reuse with drift.
+    "inputs": {
+        "bureau_score": 612,
+        "annual_income": 0,
+        "requested_amount": 15000,
+        "term_months": 36,
+        "monthly_debt": 0,
+        "employment_years": 0,
+    },
 }
 
 
@@ -385,6 +394,76 @@ def test_request_id_reuse_across_apps_never_replays_other_apps_record(
     assert len(calls["inserts"]) == 1  # fresh event for app 12, never app 11's record
     assert calls["inserts"][0][0] == 12  # the appended event belongs to app 12
     assert result["decision"] == "deny"  # decided on app 12's own inputs
+
+
+def test_reused_request_id_with_changed_amount_conflicts(monkeypatch):
+    # PR #7 review: replay is keyed by (app_id, request_id) but must not serve a stale
+    # decision when the payload changed. Same key + larger requested_amount = conflict.
+    def _db(sql, params=None):
+        assert sql.strip().startswith("SELECT")  # conflict is caught before any insert
+        return [dict(EXISTING_EVENT_ROW)]  # recorded amount was 15000
+
+    monkeypatch.setattr(decision.db, "query", _db)
+
+    def _no_pull(ssn):
+        raise AssertionError("conflict must be detected before a fresh credit pull")
+
+    monkeypatch.setattr(decision, "_pull_credit", _no_pull)
+    with pytest.raises(decision.DecisionInputMismatch):
+        decision.decide(dict(WEAK_APP, request_id="req-abc", amount=25000))
+
+
+def test_reused_request_id_with_changed_income_conflicts(monkeypatch):
+    monkeypatch.setattr(
+        decision.db, "query", lambda sql, params=None: [dict(EXISTING_EVENT_ROW)]
+    )
+    monkeypatch.setattr(
+        decision, "_pull_credit", lambda ssn: (_ for _ in ()).throw(AssertionError())
+    )
+    with pytest.raises(decision.DecisionInputMismatch):
+        decision.decide(dict(WEAK_APP, request_id="req-abc", income=90000))
+
+
+def test_reused_request_id_same_inputs_still_replays(monkeypatch):
+    # Identical inputs on the same key: legitimate retry — replay, no conflict.
+    monkeypatch.setattr(
+        decision.db, "query", lambda sql, params=None: [dict(EXISTING_EVENT_ROW)]
+    )
+    monkeypatch.setattr(
+        decision, "_pull_credit", lambda ssn: (_ for _ in ()).throw(AssertionError())
+    )
+    result = decision.decide(dict(WEAK_APP, request_id="req-abc"))
+    assert result["decision"] == "deny"
+    assert result["score"] == 518
+
+
+def test_reused_key_changed_inputs_returns_409(monkeypatch):
+    # End-to-end at the router: the conflict surfaces as 409, not a silent replay.
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from app.routers import decisions as decisions_router
+
+    monkeypatch.setattr(
+        decisions_router.decision.db,
+        "query",
+        lambda sql, params=None: [dict(EXISTING_EVENT_ROW)],
+    )
+    resp = TestClient(app, raise_server_exceptions=False).post(
+        "/decisions",
+        json={
+            "application_id": 12,
+            "applicant_id": 12,
+            "name": "Test Applicant",
+            "ssn": "123456781",
+            "requested_amount": 25000,  # recorded event had 15000
+            "term_months": 36,
+            "annual_income": 0,
+            "monthly_debt": 0,
+            "request_id": "req-abc",
+        },
+    )
+    assert resp.status_code == 409
 
 
 def test_absent_request_id_is_an_explicit_redecision(synthetic_mode, captured_events):

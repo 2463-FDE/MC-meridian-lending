@@ -143,6 +143,12 @@ def _run_assistant(
         log.error("assistant LLM failure for app_id=%s: %s", app_id, type(exc).__name__)
         raise HTTPException(status_code=503, detail="assistant unavailable") from exc
     except httpx.HTTPStatusError as exc:
+        if exc.response is not None and exc.response.status_code == 409:
+            # Reused idempotency key with changed inputs — a conflict, not an outage.
+            raise HTTPException(
+                status_code=409,
+                detail="Idempotency-Key reused with different decision inputs",
+            ) from exc
         # The score tool's downstream refusal (e.g. decision-service failing closed
         # on bureau or record write) surfaces as service-unavailable, not a 500.
         log.error("assistant downstream failure for app_id=%s: %s", app_id, exc)
