@@ -70,7 +70,7 @@ _SAFE_CATEGORICAL = {
     # data — none can collide with a plausible bare name.
     "action": {"tool", "final"},
     "tool": {"score_application", "get_decision_record"},
-    "task": {"decision"},
+    "task": {"decision", "explain"},
     "outcome": {"approve", "refer", "deny", "counteroffer"},
     "policy_band": {"approve", "refer", "deny"},
     "status": {"recorded", "no_record_legacy", "not_found"},

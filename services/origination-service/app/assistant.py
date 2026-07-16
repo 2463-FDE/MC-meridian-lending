@@ -76,19 +76,42 @@ _TOOLS = {
 }
 
 
-def _validated_final(action: dict, app_id: int) -> dict:
+def _constructed_summary(record: dict) -> str:
+    """Deterministic officer summary built purely from the persisted record."""
+    if record.get("status") == "no_record_legacy":
+        # Honest legacy answer (ADR 0008 req. 4): the outcome exists, the reasons
+        # were never captured and cannot be recovered — never invent them.
+        return (
+            f"Recorded outcome: {record.get('outcome')}. This decision predates the "
+            "decision-record system; its reasons were never recorded and cannot be "
+            "recovered."
+        )
+    reasons = record.get("principal_reasons") or []
+    reason_text = (
+        "; ".join(f"{r['code']}: {r['reason']}" for r in reasons)
+        or "no adverse-action reasons (approval)"
+    )
+    return (
+        f"Recorded decision: {record.get('outcome')} "
+        f"(policy band {record.get('policy_band')}). {reason_text}."
+    )
+
+
+def _validated_final(action: dict, app_id: int, task: str) -> dict:
     """Check the model's final answer against the persisted record (ADR 0009 §5:
     validated, not trusted). Returns the officer-facing result; on mismatch the
     recorded facts win and the narration is replaced."""
     record_resp = clients.get(clients.DECISION_URL, f"/decisions/{app_id}/record")
     if record_resp.status_code == 404:
+        if task == "explain":
+            raise ApplicationNotFound(f"application {app_id} was never decisioned")
         raise AssistantError(
             "assistant returned a final answer but no decision record exists — "
             "refusing an unrecorded decision"
         )
     record_resp.raise_for_status()
     record = record_resp.json()
-    if record.get("status") != "recorded":
+    if record.get("status") != "recorded" and task == "decision":
         raise AssistantError(
             "assistant returned a final answer but the application has no recorded "
             "decision event (legacy outcome only) — refusing an unrecorded decision"
@@ -101,9 +124,7 @@ def _validated_final(action: dict, app_id: int) -> dict:
     valid = claimed_outcome == record.get("outcome") and set(claimed_codes) == set(
         recorded_codes
     )
-    if valid:
-        summary = action.get("summary") or ""
-    else:
+    if not valid:
         log.warning(
             "assistant narration contradicted the record for app_id=%s "
             "(claimed %s/%s, recorded %s/%s) — returning recorded facts",
@@ -113,16 +134,15 @@ def _validated_final(action: dict, app_id: int) -> dict:
             record.get("outcome"),
             recorded_codes,
         )
-        reason_text = (
-            "; ".join(f"{r['code']}: {r['reason']}" for r in recorded_reasons)
-            or "no adverse-action reasons (approval)"
-        )
-        summary = (
-            f"Recorded decision: {record.get('outcome')} "
-            f"(policy band {record.get('policy_band')}). {reason_text}."
-        )
+    if valid and action.get("summary") and record.get("status") == "recorded":
+        summary = action["summary"]
+    else:
+        # Mismatch, empty narration, or a legacy record: the constructed,
+        # record-derived summary is what the officer gets.
+        summary = _constructed_summary(record)
     return {
         "application_id": app_id,
+        "record_status": record.get("status"),
         "outcome": record.get("outcome"),
         "policy_band": record.get("policy_band"),
         "principal_reasons": recorded_reasons,
@@ -133,15 +153,21 @@ def _validated_final(action: dict, app_id: int) -> dict:
     }
 
 
-def run(application_id: int, client) -> dict:
-    """Decision an application through the agent and return the officer-facing result.
+def run(application_id: int, client, task: str = "decision") -> dict:
+    """Run the agent for one officer request and return the record-backed result.
+
+    task="decision": decision the application (the score tool performs the regulated
+    decision + record write). task="explain": read-only — report the existing decision
+    from the record; NEVER scores, so asking about an application cannot trigger a
+    fresh credit pull.
 
     `client` is a ClaudeClient (injected so tests pass a FakeAdapter-backed one).
     Raises AssistantError when the agent cannot produce a record-backed answer, and
     propagates typed LLM errors (budget/transport/validation) and tool HTTP errors.
     """
     history = []
-    request = {"application_id": application_id, "task": "decision"}
+    request = {"application_id": application_id, "task": task}
+    score_result = None  # the regulated decision happens AT MOST ONCE per run
     for _ in range(_MAX_STEPS):
         action = client.complete(
             "decision_assistant",
@@ -157,7 +183,20 @@ def run(application_id: int, client) -> dict:
             # The model's only accepted input is the application id — and we use the
             # ID FROM THE OFFICER'S REQUEST, not the model's echo, so the agent can
             # never wander to another applicant's file.
-            result = tool(application_id)
+            if name == "score_application":
+                if task == "explain":
+                    # Read-only task: a scoring request would be a fresh credit pull
+                    # the officer never asked for. Serve the record instead.
+                    result = _TOOLS["get_decision_record"](application_id)
+                elif score_result is None:
+                    score_result = tool(application_id)
+                    result = score_result
+                else:
+                    # Repeat request returns the cached result — the model cannot
+                    # compound bureau pulls or decision events within one request.
+                    result = score_result
+            else:
+                result = tool(application_id)
             history.append({"role": "assistant", "content": json.dumps(action)})
             history.append(
                 {
@@ -167,6 +206,6 @@ def run(application_id: int, client) -> dict:
             )
             continue
         if kind == "final":
-            return _validated_final(action, application_id)
+            return _validated_final(action, application_id, task)
         raise AssistantError(f"assistant returned unknown action {kind!r}")
     raise AssistantError(f"assistant gave no final answer within {_MAX_STEPS} steps")

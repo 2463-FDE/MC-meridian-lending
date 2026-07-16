@@ -103,8 +103,23 @@ def assistant_decide(app_id: int, client: ClaudeClient = Depends(get_llm_client)
     decision-service; the response below is validated against that persisted record
     (recorded facts win over narration). Gated by LLM_ENABLED like all LLM routes.
     """
+    return _run_assistant(app_id, client, "decision")
+
+
+@app.get("/assistant/decisions/{app_id}")
+def assistant_explain(app_id: int, client: ClaudeClient = Depends(get_llm_client)):
+    """Explain an EXISTING decision from the persisted record (ADR 0009 §5 amendment).
+
+    Read-only: never scores, so asking about an application cannot trigger a fresh
+    credit pull. Legacy outcomes (pre-record, e.g. #6012) are answered honestly as
+    unrecoverable, distinct from 404 never-decisioned.
+    """
+    return _run_assistant(app_id, client, "explain")
+
+
+def _run_assistant(app_id: int, client: ClaudeClient, task: str):
     try:
-        return assistant.run(app_id, client)
+        return assistant.run(app_id, client, task)
     except assistant.ApplicationNotFound:
         raise HTTPException(status_code=404, detail="application not found")
     except assistant.AssistantError as exc:

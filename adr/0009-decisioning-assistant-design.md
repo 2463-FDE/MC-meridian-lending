@@ -105,6 +105,17 @@ Rules:
 - **Fail closed on unmapped features:** a model emitting a feature with no reason mapping
   is a contract violation — the decision is refused, not issued with a fallback reason.
   This is the integration gate for any future real vendor model: no mapping, no go-live.
+  *(Amendment, 2026-07-15 adversarial review: the vocabulary check runs on EVERY
+  outcome, including approve — a model whose features we cannot explain must not decide
+  in any direction.)*
+- **Refer with no negative drivers records empty reasons** *(amendment, 2026-07-15
+  adversarial review)*: a refer-band score can arise from uniformly non-negative feature
+  contributions (demonstrated: score 647 with all four contributions ≥ 0). Refer routes
+  the file to manual review and is not itself the Reg B adverse-action notice, so such a
+  refer is recorded with `principal_reasons: []` rather than refused — the original rule
+  would have made that applicant class permanently undecisionable, with a fresh bureau
+  pull on every retry. Deny still unconditionally requires ≥1 reason, and a refer whose
+  drivers DO include negative attributions still must carry them.
 - Reason *texts* use adverse-action vocabulary and are subject to the open
   compliance/legal review; the *mechanism* (top-attribution-derived, per-applicant) is
   what this ADR locks.
@@ -166,6 +177,13 @@ The agent's tools:
   by code, never supplied by the model.
 - **Decision-memory tool** → retrieves the persisted record by `app_id`
   (identifier-free projection).
+- *(Amendments, 2026-07-15 adversarial review)*: the score tool executes **at most once
+  per agent run** — repeat requests return the cached result, so the model can never
+  compound bureau pulls or decision events within one officer request. A separate
+  read-only **explain** task (GET) answers "what was decided and why" purely from the
+  memory tool — asking about an application never triggers a fresh decision; legacy
+  records answer honestly that reasons were never captured. The append-only trigger also
+  covers TRUNCATE, not just UPDATE/DELETE.
 - The agent's officer-facing answer is **validated against the persisted event** before
   returning: on mismatch, the recorded facts are returned, never the narration.
 - All prompts/tool results pass the ADR 0005/0006 redaction pipeline; tool results are

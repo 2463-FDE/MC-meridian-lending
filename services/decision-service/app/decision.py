@@ -78,15 +78,29 @@ def _pull_credit(ssn: str) -> int:
         raise CreditPullError(f"bureau credit pull failed: {type(e).__name__}") from e
 
 
+def _has_negative_drivers(drivers: dict) -> bool:
+    return any(a.get("contribution", 0) < 0 for a in drivers.get("attributions", []))
+
+
 def _validate_record(
     outcome: str, band: str, principal_reasons: list, drivers: dict, decided_by: str
 ) -> None:
     """ADR 0008 requirement 2, enforced: no outcome without reasons+drivers; a system
-    decision cannot contradict the policy band (the #6012 refer-band-deny class)."""
-    if outcome in ("deny", "refer") and not principal_reasons:
+    decision cannot contradict the policy band (the #6012 refer-band-deny class).
+
+    Deny unconditionally requires reasons. Refer requires them only when the drivers
+    include negative attributions — a borderline-band refer with uniformly non-negative
+    contributions has no adverse reason to state and routes to manual review (ADR 0009
+    §3 amendment; the original rule made that applicant class undecisionable)."""
+    if outcome == "deny" and not principal_reasons:
         raise DecisionRecordError(
-            f"refusing {outcome}: no specific principal reasons derived — an adverse "
+            "refusing deny: no specific principal reasons derived — an adverse "
             "action without recorded reasons violates the write-path contract"
+        )
+    if outcome == "refer" and not principal_reasons and _has_negative_drivers(drivers):
+        raise DecisionRecordError(
+            "refusing refer: negative model drivers exist but no principal reasons "
+            "were derived — the record would hide the adverse drivers"
         )
     if not drivers:
         raise DecisionRecordError("refusing decision: no model drivers to record")
@@ -158,11 +172,11 @@ def decide(application: dict) -> dict:
     model_out = model_vendor.score_application(inputs)
     band = model_vendor.policy_band(model_out["score"])
     outcome = band  # system decisions follow the band; overrides are human-only
-    principal_reasons = (
-        []
-        if outcome == "approve"
-        else reasons.principal_reasons(model_out["attributions"])
-    )
+    # The mapper validates the model's WHOLE vocabulary (fail closed on any unmapped
+    # feature) on every outcome — approvals included (ADR 0009 §3 amendment). Adverse
+    # reasons are only attached to non-approve outcomes.
+    mapped_reasons = reasons.principal_reasons(model_out["attributions"])
+    principal_reasons = [] if outcome == "approve" else mapped_reasons
     drivers = {
         "model_id": model_out["model_id"],
         "model_version": model_out["model_version"],

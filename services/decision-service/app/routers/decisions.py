@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 
 from .. import db, decision
 from ..logging_config import get_logger
+from ..reasons import UnmappedFeatureError
 from ..schemas import DecisionIn, DecisionOut, DecisionRecordOut
 
 log = get_logger("decisions")
@@ -72,6 +73,14 @@ def run_decision(body: DecisionIn):
         log.error("decision record refused: %s", e)
         raise HTTPException(
             status_code=503, detail="decision could not be recorded"
+        ) from e
+    except UnmappedFeatureError as e:
+        # Fail closed: the model's vocabulary cannot be explained (ADR 0009 §3 gate).
+        # A typed refusal, not a 500 — the model integration is unfit, not the service.
+        log.error("decision refused, unmapped model feature: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="decision refused: model feature has no mapped adverse-action reason",
         ) from e
     principal_reasons = result.get("principal_reasons") or []
     return DecisionOut(

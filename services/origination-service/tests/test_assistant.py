@@ -210,5 +210,125 @@ def test_endpoint_returns_503_when_llm_disabled(monkeypatch):
     from app.main import app
 
     with TestClient(app) as tc:
-        resp = tc.post("/assistant/decisions/42")
-    assert resp.status_code == 503
+        assert tc.post("/assistant/decisions/42").status_code == 503
+        assert tc.get("/assistant/decisions/42").status_code == 503
+
+
+# --- Adversarial-review fixes (teeth 2026-07-15) ------------------------------------
+
+
+def test_repeated_score_requests_execute_once(tools):
+    # H2: the model cannot compound bureau pulls / decision events in one request —
+    # repeat score requests are served from the run-local cache.
+    client, _ = _client(TOOL_CALL, TOOL_CALL, TOOL_CALL, FINAL_DENY)
+    result = assistant.run(42, client)
+    assert tools["score"] == 1
+    assert result["outcome"] == "deny"
+
+
+def test_explain_task_never_scores(tools, monkeypatch):
+    # M4: read-only explain — even a model that asks to score gets the record instead.
+    record_result = {
+        "status": "recorded",
+        "outcome": "deny",
+        "policy_band": "deny",
+        "score": 518,
+        "reason_codes": ["R02", "R03"],
+    }
+    monkeypatch.setitem(
+        assistant._TOOLS, "get_decision_record", lambda app_id: dict(record_result)
+    )
+    client, _ = _client(TOOL_CALL, FINAL_DENY)  # model (wrongly) asks to score
+    result = assistant.run(42, client, task="explain")
+    assert tools["score"] == 0  # no fresh credit pull, ever, on explain
+    assert result["outcome"] == "deny"
+    assert result["record_status"] == "recorded"
+
+
+def test_explain_legacy_record_answers_honestly(monkeypatch):
+    # M4/ADR 0008 req.4: legacy outcome (e.g. #6012) — reasons unrecoverable, say so.
+    legacy_body = {
+        "application_id": 6012,
+        "status": "no_record_legacy",
+        "outcome": "deny",
+        "policy_band": None,
+        "principal_reasons": [],
+        "drivers": {},
+        "inputs": {},
+        "decided_by": None,
+        "decided_at": None,
+    }
+
+    class _LegacyResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return legacy_body
+
+    monkeypatch.setattr(assistant.clients, "get", lambda base, path: _LegacyResp())
+    monkeypatch.setitem(
+        assistant._TOOLS,
+        "get_decision_record",
+        lambda app_id: {
+            "status": "no_record_legacy",
+            "outcome": "deny",
+            "policy_band": None,
+            "score": None,
+            "reason_codes": [],
+        },
+    )
+    record_call = json.dumps(
+        {
+            "action": "tool",
+            "tool": "get_decision_record",
+            "input": {"application_id": 6012},
+        }
+    )
+    final = json.dumps(
+        {
+            "action": "final",
+            "outcome": "deny",
+            "reason_codes": [],
+            "summary": "ignored — legacy summaries are constructed, never narrated",
+        }
+    )
+    client, _ = _client(record_call, final)
+    result = assistant.run(6012, client, task="explain")
+    assert result["record_status"] == "no_record_legacy"
+    assert result["outcome"] == "deny"
+    assert result["principal_reasons"] == []
+    assert "never recorded" in result["summary"]
+
+
+def test_explain_never_decisioned_raises_not_found(monkeypatch):
+    monkeypatch.setattr(
+        assistant.clients, "get", lambda base, path: _NotFoundResponse()
+    )
+    monkeypatch.setitem(
+        assistant._TOOLS, "get_decision_record", lambda app_id: {"status": "not_found"}
+    )
+    record_call = json.dumps(
+        {
+            "action": "tool",
+            "tool": "get_decision_record",
+            "input": {"application_id": 7},
+        }
+    )
+    final = json.dumps({"action": "final", "summary": "nothing found"})
+    client, _ = _client(record_call, final)
+    with pytest.raises(assistant.ApplicationNotFound):
+        assistant.run(7, client, task="explain")
+
+
+def test_empty_summary_falls_back_to_record_summary(tools):
+    # L1: matching facts but no narration — officer still gets a summary, from the record.
+    final_no_summary = json.dumps(
+        {"action": "final", "outcome": "deny", "reason_codes": ["R02", "R03"]}
+    )
+    client, _ = _client(TOOL_CALL, final_no_summary)
+    result = assistant.run(42, client)
+    assert result["narration_validated"] is True
+    assert "R02" in result["summary"] and "deny" in result["summary"]

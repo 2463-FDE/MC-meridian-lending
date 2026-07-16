@@ -70,8 +70,9 @@ SYSTEM = (
     'approve>], "summary": <2-3 plain sentences for the officer>}\n'
     "\n"
     "Rules:\n"
-    "1. For a decision task, call score_application first; base your final answer on "
-    "its result.\n"
+    "1. The officer request has a task field. task=decision: call score_application "
+    "first and base your final answer on its result. task=explain: call "
+    "get_decision_record ONLY — never score; report the existing decision.\n"
     "2. outcome and reason_codes in your final answer MUST match the tool result "
     "exactly. The summary explains them in plain language using the reason texts "
     "above.\n"

@@ -28,3 +28,9 @@ DROP TRIGGER IF EXISTS trg_decision_events_append_only ON decision_events;
 CREATE TRIGGER trg_decision_events_append_only
     BEFORE UPDATE OR DELETE ON decision_events
     FOR EACH ROW EXECUTE FUNCTION decision_events_append_only();
+
+-- Row-level triggers do not fire on TRUNCATE; block it explicitly.
+DROP TRIGGER IF EXISTS trg_decision_events_no_truncate ON decision_events;
+CREATE TRIGGER trg_decision_events_no_truncate
+    BEFORE TRUNCATE ON decision_events
+    FOR EACH STATEMENT EXECUTE FUNCTION decision_events_append_only();

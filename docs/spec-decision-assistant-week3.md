@@ -61,8 +61,15 @@ A deterministic module in decision-service standing in for the licensed model:
 ### D2. Feature → adverse-action reason mapping
 - A mapping from model features to specific Reg B principal-reason codes (adverse-action
   vocabulary), locked in the ADR (D5).
-- Deny/refer outcomes MUST carry ≥1 specific principal reason derived from the model's
-  actual top negative features. The generic "purchasing history" string MUST be removed.
+- Deny outcomes MUST carry ≥1 specific principal reason derived from the model's actual
+  top negative features. Refer outcomes carry reasons derived the same way when negative
+  features exist, and MAY carry none when the model reports no negative drivers (a
+  borderline-band refer routes to manual review; the refer itself is not the
+  adverse-action notice). *(Amended 2026-07-15 after adversarial review: the original
+  "deny/refer MUST carry ≥1 reason" locked an impossible invariant — a refer-band score
+  can arise from uniformly non-negative feature contributions, which would have made
+  that applicant class permanently undecisionable.)* The generic "purchasing history"
+  string MUST be removed.
 - Every feature the stub model can emit has a mapped reason (no unmappable feature).
 
 **Acceptance:**
@@ -110,8 +117,12 @@ An LLM agent (ADR 0005 `ClaudeClient`, extended with tool use) with two tools:
   results are identifier-free by construction.
 
 **Acceptance:**
-1. Officer-facing endpoint: given an `application_id`, the agent decisions the app and
-   returns a plain-language result naming outcome + specific reasons.
+1. Officer-facing endpoints: given an `application_id`, the agent decisions the app and
+   returns a plain-language result naming outcome + specific reasons (POST), and a
+   read-only explain path reports an existing decision from the record WITHOUT
+   re-decisioning — asking about an application must never trigger a fresh credit pull
+   (GET). *(Amended 2026-07-15 after adversarial review: the original single POST path
+   silently re-decisioned legacy applications when officers asked about them.)*
 2. Agent tool loop runs through `ClaudeClient` (no raw SDK calls outside ADR 0005).
 3. Outcome/reasons in the response match the persisted event record exactly (LLM cannot
    contradict the record — validated, not trusted).
