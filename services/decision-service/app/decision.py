@@ -130,10 +130,13 @@ def _result_from_event(row: dict) -> dict:
     }
 
 
-def _find_event_by_request(request_id: str):
+def _find_event_by_request(app_id: int, request_id: str):
+    """Replay lookup is scoped to (app_id, request_id): a request_id reused on a
+    different application never replays another application's record (PR #7 review)."""
     rows = db.query(
-        f"SELECT {_EVENT_COLUMNS} FROM decision_events WHERE request_id = %s",
-        (request_id,),
+        f"SELECT {_EVENT_COLUMNS} FROM decision_events"
+        " WHERE app_id = %s AND request_id = %s",
+        (app_id, request_id),
     )
     return rows[0] if rows else None
 
@@ -182,7 +185,7 @@ def _persist_event(
     except pg_errors.UniqueViolation:
         # Concurrent duplicate of the same request: the first writer won; serve its
         # record (idempotent), never a second event.
-        existing = _find_event_by_request(request_id) if request_id else None
+        existing = _find_event_by_request(app_id, request_id) if request_id else None
         if existing is not None:
             log.info(
                 "duplicate decision request replayed app_id=%s request_id=%s",
@@ -209,12 +212,14 @@ def decide(application: dict) -> dict:
     atomically with the outcome, or refuses the decision.
 
     Idempotency (PR #7 review): when the caller supplies a request_id and an event
-    with that id already exists, the recorded decision is replayed — no bureau pull,
-    no new event. A request WITHOUT a request_id is an explicit re-decision.
+    with that id already exists FOR THE SAME application, the recorded decision is
+    replayed — no bureau pull, no new event. A request WITHOUT a request_id is an
+    explicit re-decision. The key is scoped per application: reused on a different
+    app_id it is an independent key, never a replay of another application's record.
     """
     request_id = application.get("request_id") or None
     if request_id:
-        existing = _find_event_by_request(request_id)
+        existing = _find_event_by_request(application.get("app_id"), request_id)
         if existing is not None:
             log.info(
                 "decision replayed from record app_id=%s request_id=%s",

@@ -279,6 +279,7 @@ def test_same_request_id_replays_without_bureau_pull_or_new_event(monkeypatch):
     def _db(sql, params=None):
         calls["sql"].append(sql.strip().split()[0])  # SELECT / WITH
         assert sql.strip().startswith("SELECT"), "replay must not reach the insert"
+        assert params == (12, "req-abc")  # lookup scoped to THIS application
         return [dict(EXISTING_EVENT_ROW)]
 
     monkeypatch.setattr(decision.db, "query", _db)
@@ -314,6 +315,30 @@ def test_concurrent_duplicate_request_serves_first_writers_record(
     assert result["decision"] == "deny"
     assert result["score"] == 518
     assert state["n"] == 3
+
+
+def test_request_id_reuse_across_apps_never_replays_other_apps_record(
+    synthetic_mode, monkeypatch
+):
+    # PR #7 review: app 12 reusing app 11's request_id must NOT be served app 11's
+    # recorded decision. The replay lookup is scoped to (app_id, request_id), so the
+    # pre-check for app 12 misses and app 12 gets its own fresh decision and event.
+    calls = {"selects": [], "inserts": []}
+
+    def _db(sql, params=None):
+        if sql.strip().startswith("SELECT"):
+            assert "app_id = %s AND request_id = %s" in sql
+            calls["selects"].append(params)
+            return []  # "req-abc" exists only for app 11; scoped lookup misses
+        calls["inserts"].append(params)
+        return []
+
+    monkeypatch.setattr(decision.db, "query", _db)
+    result = decision.decide(dict(WEAK_APP, request_id="req-abc"))
+    assert calls["selects"] == [(12, "req-abc")]
+    assert len(calls["inserts"]) == 1  # fresh event for app 12, never app 11's record
+    assert calls["inserts"][0][0] == 12  # the appended event belongs to app 12
+    assert result["decision"] == "deny"  # decided on app 12's own inputs
 
 
 def test_absent_request_id_is_an_explicit_redecision(synthetic_mode, captured_events):

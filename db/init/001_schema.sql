@@ -126,11 +126,11 @@ CREATE TABLE IF NOT EXISTS decision_events (
     inputs            JSONB NOT NULL,              -- identifier-free (ADR 0007 rule 1): no SSN/name/DOB/address/PAN
     decided_by        TEXT NOT NULL,               -- model id+version, or user id for manual/override decisions
     decided_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    request_id        TEXT                         -- optional idempotency key; retries replay, absence = explicit re-decision
+    request_id        TEXT                         -- optional idempotency key; retries replay within the same app_id, absence = explicit re-decision
 );
 CREATE INDEX IF NOT EXISTS idx_decision_events_app ON decision_events(app_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_decision_events_request
-    ON decision_events (request_id) WHERE request_id IS NOT NULL;
+    ON decision_events (app_id, request_id) WHERE request_id IS NOT NULL;
 
 -- Append-only enforced at the database (contrast audit_logs above, which is mutable).
 CREATE OR REPLACE FUNCTION decision_events_append_only() RETURNS trigger AS $$

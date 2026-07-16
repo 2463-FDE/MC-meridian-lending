@@ -6,5 +6,9 @@
 
 ALTER TABLE decision_events ADD COLUMN IF NOT EXISTS request_id TEXT;
 
+-- Scoped to (app_id, request_id): a request_id replays only within its own
+-- application. Reused on a different application it is an independent key (fresh
+-- decision), never a replay of another application's record.
+DROP INDEX IF EXISTS uq_decision_events_request;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_decision_events_request
-    ON decision_events (request_id) WHERE request_id IS NOT NULL;
+    ON decision_events (app_id, request_id) WHERE request_id IS NOT NULL;
