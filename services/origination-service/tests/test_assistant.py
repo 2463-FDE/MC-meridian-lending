@@ -86,7 +86,7 @@ def tools(monkeypatch):
     """Stub both tools' HTTP seams; record score-tool invocations."""
     calls = {"score": 0}
 
-    def _score(app_id):
+    def _score(app_id, request_id=None):
         calls["score"] += 1
         return dict(SCORE_RESULT)
 
@@ -169,7 +169,7 @@ def test_step_budget_exhaustion_is_refused(tools):
 def test_tool_uses_officer_app_id_not_model_echo(tools, monkeypatch):
     seen = []
 
-    def _score(app_id):
+    def _score(app_id, request_id=None):
         seen.append(app_id)
         return dict(SCORE_RESULT)
 
@@ -350,6 +350,45 @@ def test_request_id_forwarded_to_decision_service(monkeypatch):
     captured.clear()
     assistant._score_application(42)
     assert "request_id" not in captured
+
+
+def test_final_validated_against_request_scoped_event_not_app_latest(monkeypatch):
+    # PR #7 review: a concurrent re-decision landing between scoring and final
+    # validation must not swap the validated record. The record fetch is scoped to this
+    # run's request_id, so validation binds to the event this request created even when
+    # a NEWER (different) event exists for the same application.
+    newer_body = {
+        **RECORD_BODY,
+        "outcome": "approve",
+        "policy_band": "approve",
+        "principal_reasons": [],
+    }
+
+    def _get(base, path):
+        if "request_id=" in path:
+            return _FakeRecordResponse()  # this request's event: deny / R02,R03
+
+        class _NewerResponse(_FakeRecordResponse):
+            def json(self):
+                return newer_body  # what an unscoped app-latest fetch would return
+
+        return _NewerResponse()
+
+    monkeypatch.setattr(assistant.clients, "get", _get)
+
+    def _score(app_id, request_id=None):
+        # request_id is always present now (run() auto-generates one), and it is what
+        # scopes the validation fetch below.
+        assert request_id
+        return dict(SCORE_RESULT)
+
+    monkeypatch.setitem(assistant._TOOLS, "score_application", _score)
+    client, _ = _client(TOOL_CALL, FINAL_DENY)
+    result = assistant.run(42, client)
+    # Bound to our own event, not the concurrent 'approve' that landed after scoring.
+    assert result["outcome"] == "deny"
+    assert result["narration_validated"] is True
+    assert [r["code"] for r in result["principal_reasons"]] == ["R02", "R03"]
 
 
 def test_empty_summary_falls_back_to_record_summary(tools):

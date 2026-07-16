@@ -5,7 +5,7 @@ ADR 0009 §6) and persists an append-only decision_events record atomically with
 outcome — or refuses the decision (fail closed, ADR 0009 §4).
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from .. import db, decision
 from ..logging_config import get_logger
@@ -17,16 +17,37 @@ router = APIRouter(prefix="/decisions", tags=["decisions"])
 
 
 @router.get("/{app_id}/record", response_model=DecisionRecordOut)
-def get_decision_record(app_id: int):
-    """Latest decision event for an application — the identifier-free projection the
-    officer assistant's memory tool reads (ADR 0009 §5). Legacy outcomes whose reasons
-    were never captured answer status=no_record_legacy, distinct from 404."""
-    events = db.query(
-        "SELECT outcome, principal_reasons, drivers, policy_band, inputs, "
-        "decided_by, decided_at FROM decision_events "
-        "WHERE app_id = %s ORDER BY id DESC LIMIT 1",
-        (app_id,),
-    )
+def get_decision_record(
+    app_id: int,
+    request_id: str | None = Query(default=None, max_length=64),
+):
+    """Decision event for an application — the identifier-free projection the officer
+    assistant's memory tool reads (ADR 0009 §5). Legacy outcomes whose reasons were
+    never captured answer status=no_record_legacy, distinct from 404.
+
+    When request_id is supplied the lookup is scoped to that exact event (the one the
+    caller's own decision created) instead of the app's latest, so a concurrent
+    re-decision landing between scoring and validation cannot swap the record out from
+    under the request (PR #7 review). A scoped miss is a 404 — legacy rows carry no
+    request_id, so falling back to app-latest would return an unrelated event."""
+    if request_id is not None:
+        events = db.query(
+            "SELECT outcome, principal_reasons, drivers, policy_band, inputs, "
+            "decided_by, decided_at FROM decision_events "
+            "WHERE app_id = %s AND request_id = %s ORDER BY id DESC LIMIT 1",
+            (app_id, request_id),
+        )
+        if not events:
+            raise HTTPException(
+                status_code=404, detail="no decision event for this request_id"
+            )
+    else:
+        events = db.query(
+            "SELECT outcome, principal_reasons, drivers, policy_band, inputs, "
+            "decided_by, decided_at FROM decision_events "
+            "WHERE app_id = %s ORDER BY id DESC LIMIT 1",
+            (app_id,),
+        )
     if events:
         e = events[0]
         return DecisionRecordOut(

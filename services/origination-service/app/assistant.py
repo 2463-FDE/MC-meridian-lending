@@ -18,7 +18,8 @@ Compliance posture:
 """
 
 import json
-
+import uuid
+from urllib.parse import quote
 
 from . import clients
 from .logging_config import get_logger
@@ -103,11 +104,21 @@ def _constructed_summary(record: dict) -> str:
     )
 
 
-def _validated_final(action: dict, app_id: int, task: str) -> dict:
+def _validated_final(
+    action: dict, app_id: int, task: str, request_id: str | None = None
+) -> dict:
     """Check the model's final answer against the persisted record (ADR 0009 §5:
     validated, not trusted). Returns the officer-facing result; on mismatch the
-    recorded facts win and the narration is replaced."""
-    record_resp = clients.get(clients.DECISION_URL, f"/decisions/{app_id}/record")
+    recorded facts win and the narration is replaced.
+
+    On the decision task the fetch is scoped to request_id so validation binds to the
+    exact event this request created, not the app's latest — a concurrent re-decision
+    cannot swap the validated record (PR #7 review). Explain is read-only and
+    intentionally reports current app state, so it fetches unscoped."""
+    path = f"/decisions/{app_id}/record"
+    if request_id and task == "decision":
+        path += f"?request_id={quote(request_id, safe='')}"
+    record_resp = clients.get(clients.DECISION_URL, path)
     if record_resp.status_code == 404:
         if task == "explain":
             raise ApplicationNotFound(f"application {app_id} was never decisioned")
@@ -180,6 +191,11 @@ def run(
     Raises AssistantError when the agent cannot produce a record-backed answer, and
     propagates typed LLM errors (budget/transport/validation) and tool HTTP errors.
     """
+    # Always carry a request_id: an officer-supplied key gives cross-request idempotency,
+    # and an auto-generated one still binds this run's final validation to the exact
+    # event its score tool created (PR #7 review). A fresh key means no replay of a prior
+    # event, so an assistant retry without an officer key stays an explicit re-decision.
+    request_id = request_id or uuid.uuid4().hex
     history = []
     request = {"application_id": application_id, "task": task}
     score_result = None  # the regulated decision happens AT MOST ONCE per run
@@ -204,11 +220,7 @@ def run(
                     # the officer never asked for. Serve the record instead.
                     result = _TOOLS["get_decision_record"](application_id)
                 elif score_result is None:
-                    score_result = (
-                        tool(application_id, request_id)
-                        if request_id
-                        else tool(application_id)
-                    )
+                    score_result = tool(application_id, request_id)
                     result = score_result
                 else:
                     # Repeat request returns the cached result — the model cannot
@@ -225,6 +237,6 @@ def run(
             )
             continue
         if kind == "final":
-            return _validated_final(action, application_id, task)
+            return _validated_final(action, application_id, task, request_id)
         raise AssistantError(f"assistant returned unknown action {kind!r}")
     raise AssistantError(f"assistant gave no final answer within {_MAX_STEPS} steps")

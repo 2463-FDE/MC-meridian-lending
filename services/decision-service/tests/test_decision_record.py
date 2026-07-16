@@ -199,6 +199,52 @@ def test_record_endpoint_404_when_never_decisioned(monkeypatch):
     assert resp.status_code == 404
 
 
+def test_record_endpoint_scopes_fetch_to_request_id(monkeypatch):
+    # PR #7 review: with ?request_id= the lookup binds to that exact event (not the
+    # app's latest), so the officer assistant validates against the event its own
+    # decision created even when a concurrent re-decision has since landed.
+    import datetime
+
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from app.routers import decisions as decisions_router
+
+    captured = {}
+    event_row = {
+        "outcome": "deny",
+        "principal_reasons": [
+            {"code": "R02", "reason": "x", "feature": "payment_burden"}
+        ],
+        "drivers": {"model_score": 518},
+        "policy_band": "deny",
+        "inputs": {"bureau_score": 612},
+        "decided_by": "meridian-risk-stub:v1",
+        "decided_at": datetime.datetime(2026, 7, 15, 12, 0, 0),
+    }
+
+    def _capture(sql, params=None):
+        captured["sql"] = sql
+        captured["params"] = params
+        return [event_row]
+
+    monkeypatch.setattr(decisions_router.db, "query", _capture)
+    resp = TestClient(app).get("/decisions/12/record?request_id=req-abc")
+    assert resp.status_code == 200
+    assert "request_id = %s" in captured["sql"]  # scoped, not app-latest
+    assert captured["params"] == (12, "req-abc")
+    assert resp.json()["outcome"] == "deny"
+
+
+def test_record_endpoint_scoped_miss_is_404_not_legacy(monkeypatch):
+    # A scoped miss must NOT fall back to app-latest/legacy: legacy rows carry no
+    # request_id, so serving one for a mismatched key would return an unrelated event.
+    resp = _record_client(monkeypatch, [[]]).get(
+        "/decisions/6012/record?request_id=no-such-key"
+    )
+    assert resp.status_code == 404
+
+
 # --- Adversarial-review fixes (teeth 2026-07-15) ------------------------------------
 
 
