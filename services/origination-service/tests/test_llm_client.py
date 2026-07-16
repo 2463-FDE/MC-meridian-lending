@@ -472,6 +472,25 @@ def test_leak_guard_blocks_escaped_pii_in_structured_output(plain, escape):
         client.summarize_application("{}")
 
 
+def test_schema_error_message_never_embeds_unguarded_model_values():
+    """Regression (tracing review sweep): validate_schema's enum-mismatch message
+    embeds the raw model value ({node!r}), and ValidationFailed messages
+    propagate to logs and the LangSmith error field. The decoded-object re-guard
+    must run BEFORE schema validation, so escaped PII planted in an enum field
+    trips the generic leak-guard message instead of surfacing unescaped inside
+    the schema error."""
+    escaped = _json_uescape("maria@example.com", "@")
+    # Invalid enum value AND escaped PII in the same field.
+    leaky = (
+        '{"summary": "ok", "risk_flags": [], "recommended_next_step": "%s"}' % escaped
+    )
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response=leaky))
+    with pytest.raises(ValidationFailed) as exc_info:
+        client.summarize_application("{}")
+    assert "maria@example.com" not in str(exc_info.value)
+    assert "leak guard" in str(exc_info.value)
+
+
 @pytest.mark.parametrize(
     "summary",
     [

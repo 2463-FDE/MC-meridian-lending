@@ -10,6 +10,7 @@ array / string / enum / required / additionalProperties) — enough for the loan
 prompts without pulling in `jsonschema`. Widen it, or swap in a real validator,
 if prompts start needing more.
 """
+
 from __future__ import annotations
 
 import json
@@ -78,7 +79,9 @@ def _check(node, schema, path: str) -> None:
             raise ValidationFailed(f"{path or 'root'}: expected object")
         for key in schema.get("required", []):
             if key not in node:
-                raise ValidationFailed(f"{path or 'root'}: missing required key {key!r}")
+                raise ValidationFailed(
+                    f"{path or 'root'}: missing required key {key!r}"
+                )
         props = schema.get("properties", {})
         if schema.get("additionalProperties") is False:
             extra = [k for k in node if k not in props]
@@ -108,7 +111,9 @@ def _check(node, schema, path: str) -> None:
             raise ValidationFailed(f"{path}: expected boolean")
 
     if "enum" in schema and node not in schema["enum"]:
-        raise ValidationFailed(f"{path}: {node!r} not in allowed values {schema['enum']}")
+        raise ValidationFailed(
+            f"{path}: {node!r} not in allowed values {schema['enum']}"
+        )
 
 
 def validate_schema(obj: dict, schema: dict) -> None:
@@ -130,13 +135,19 @@ def guard_output(text: str, *, max_chars: int = _MAX_OUTPUT_CHARS) -> None:
     if not text or not text.strip():
         raise ValidationFailed("model output is empty")
     if len(text) > max_chars:
-        raise ValidationFailed(f"model output too long ({len(text)} > {max_chars} chars)")
+        raise ValidationFailed(
+            f"model output too long ({len(text)} > {max_chars} chars)"
+        )
     if PiiRedactor.redact(text) != text:
         raise ValidationFailed("model output contains PII (leak guard tripped)")
     if _STREET_ADDRESS.search(text):
-        raise ValidationFailed("model output contains a street address (identity guard)")
+        raise ValidationFailed(
+            "model output contains a street address (identity guard)"
+        )
     if _LABELED_NAME.search(text):
-        raise ValidationFailed("model output contains a labeled personal name (identity guard)")
+        raise ValidationFailed(
+            "model output contains a labeled personal name (identity guard)"
+        )
 
 
 def validate_structured(text: str, schema: dict) -> dict:
@@ -153,9 +164,13 @@ def validate_structured(text: str, schema: dict) -> dict:
     """
     guard_output(text)
     obj = parse_json(text)
-    validate_schema(obj, schema)
-    # Re-guard the decoded values: escapes that hid PII from the raw guard are
-    # now unescaped. ensure_ascii=False keeps decoded chars (@, non-ASCII) intact
-    # so the redactor can see them; a re-escaped dump would reintroduce the hole.
+    # Re-guard the decoded values BEFORE schema validation: escapes that hid PII
+    # from the raw guard are now unescaped, and schema-failure messages embed raw
+    # model values (enum mismatch, unexpected keys) that propagate to logs and
+    # trace sinks via the raised ValidationFailed. Guarding first means those
+    # messages can only ever contain content the leak guard already passed.
+    # ensure_ascii=False keeps decoded chars (@, non-ASCII) intact so the
+    # redactor can see them; a re-escaped dump would reintroduce the hole.
     guard_output(json.dumps(obj, ensure_ascii=False))
+    validate_schema(obj, schema)
     return obj
