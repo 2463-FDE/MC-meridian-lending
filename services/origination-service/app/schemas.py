@@ -20,7 +20,10 @@ class ApplicationIn(BaseModel):
     term_months: int = Field(default=36, ge=12, le=60)
     purpose: Optional[str] = None
     income: Optional[float] = Field(default=None, ge=0)
-    monthly_debt: Optional[float] = Field(default=None, ge=0)
+    # Required underwriting input: the model scores debt-to-income from it, so a
+    # missing value must be rejected at the API boundary rather than silently scored
+    # as zero debt (over-approval risk, PR #7 review). Explicit 0 is allowed.
+    monthly_debt: float = Field(ge=0)
     employer: Optional[str] = None
     job_title: Optional[str] = None
     employment_years: Optional[float] = Field(default=None, ge=0)

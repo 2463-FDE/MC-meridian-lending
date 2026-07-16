@@ -195,9 +195,13 @@ def decision_request_payload(app_id: int) -> dict:
         "requested_amount": r.get("amount"),
         "term_months": r.get("term_months"),
         "annual_income": r.get("income") or 0,
-        # Real captured inputs (PR #7 review): no longer a fabricated 0. Legacy rows
-        # predating the monthly_debt column fall back to 0.
-        "monthly_debt": r.get("monthly_debt") or 0,
+        # monthly_debt is required at intake, so a NEW row always has a real value
+        # (explicit 0 stays 0). Only legacy rows predating the column are NULL — those,
+        # and only those, fall back to 0 (PR #7 review: distinguish explicit 0 from
+        # missing rather than a blanket `or 0`).
+        "monthly_debt": (
+            r.get("monthly_debt") if r.get("monthly_debt") is not None else 0
+        ),
         "employment_years": r.get("employment_years") or 0,
         "credit_score": None,  # pulled downstream by decision-service
     }

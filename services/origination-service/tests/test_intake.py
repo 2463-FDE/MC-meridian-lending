@@ -6,7 +6,10 @@ stubbed (no live Postgres in unit tests; the column + end-to-end write are exerc
 the smoke test against the compose stack).
 """
 
+from fastapi.testclient import TestClient
+
 from app import intake
+from app.main import app
 from app.routers import applications
 
 
@@ -71,3 +74,18 @@ def test_decision_request_payload_falls_back_for_legacy_rows(monkeypatch):
     assert payload["monthly_debt"] == 0
     assert payload["employment_years"] == 0
     assert payload["annual_income"] == 0
+
+
+def test_api_rejects_missing_monthly_debt():
+    # PR #7 review: omitting monthly_debt must be rejected at the API boundary (422)
+    # before any intake/decisioning runs — not silently persisted as NULL and scored
+    # as zero debt. FastAPI validates the body before the handler, so no downstream
+    # stubbing is needed (the handler never executes).
+    resp = TestClient(app).post(
+        "/applications",
+        json={"name": "Test Borrower", "amount": 10000, "term_months": 36},
+    )
+    assert resp.status_code == 422
+    # explicit 0 is accepted (would proceed past validation into the handler)
+    body = resp.json()
+    assert any("monthly_debt" in str(err.get("loc", "")) for err in body["detail"])
