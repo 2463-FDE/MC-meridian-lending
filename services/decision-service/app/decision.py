@@ -15,6 +15,8 @@ success (ADR 0009 §4).
 import json
 
 import httpx
+from psycopg2 import errors as pg_errors
+
 from . import config
 from . import model_vendor
 from . import reasons
@@ -111,6 +113,31 @@ def _validate_record(
         )
 
 
+_EVENT_COLUMNS = (
+    "outcome, principal_reasons, drivers, policy_band, decided_by, request_id"
+)
+
+
+def _result_from_event(row: dict) -> dict:
+    """Rebuild the decide() response from a persisted event row (idempotent replay)."""
+    drivers = row.get("drivers") or {}
+    return {
+        "score": drivers.get("model_score"),
+        "decision": row["outcome"],
+        "policy_band": row.get("policy_band"),
+        "principal_reasons": row.get("principal_reasons") or [],
+        "decided_by": row.get("decided_by"),
+    }
+
+
+def _find_event_by_request(request_id: str):
+    rows = db.query(
+        f"SELECT {_EVENT_COLUMNS} FROM decision_events WHERE request_id = %s",
+        (request_id,),
+    )
+    return rows[0] if rows else None
+
+
 def _persist_event(
     app_id: int,
     outcome: str,
@@ -119,16 +146,23 @@ def _persist_event(
     band: str,
     inputs: dict,
     decided_by: str,
-) -> None:
+    request_id: str | None,
+) -> dict | None:
     """Append the decision event and update the current-state pointer in ONE atomic
     statement. Persistence failure refuses the decision (fail closed) — the record IS
-    the deliverable, not a best-effort side effect."""
+    the deliverable, not a best-effort side effect.
+
+    Returns None on a fresh insert. When a request_id collides with an already-
+    persisted event (a concurrent retry losing the race), returns that existing row —
+    the caller replays it instead of failing, so one officer action can never yield
+    two regulated events."""
     try:
         db.query(
             "WITH ev AS ("
             "  INSERT INTO decision_events"
-            "    (app_id, outcome, principal_reasons, drivers, policy_band, inputs, decided_by)"
-            "  VALUES (%s, %s, %s::jsonb, %s::jsonb, %s, %s::jsonb, %s)"
+            "    (app_id, outcome, principal_reasons, drivers, policy_band, inputs,"
+            "     decided_by, request_id)"
+            "  VALUES (%s, %s, %s::jsonb, %s::jsonb, %s, %s::jsonb, %s, %s)"
             "  RETURNING app_id, outcome"
             ") "
             "INSERT INTO decisions (app_id, outcome) SELECT app_id, outcome FROM ev "
@@ -141,7 +175,23 @@ def _persist_event(
                 band,
                 json.dumps(inputs),
                 decided_by,
+                request_id,
             ),
+        )
+        return None
+    except pg_errors.UniqueViolation:
+        # Concurrent duplicate of the same request: the first writer won; serve its
+        # record (idempotent), never a second event.
+        existing = _find_event_by_request(request_id) if request_id else None
+        if existing is not None:
+            log.info(
+                "duplicate decision request replayed app_id=%s request_id=%s",
+                app_id,
+                request_id,
+            )
+            return existing
+        raise DecisionRecordError(
+            "decision refused: duplicate event conflict without a retrievable record"
         )
     except Exception as e:
         log.error(
@@ -157,7 +207,22 @@ def decide(application: dict) -> dict:
 
     Persists an append-only decision_events row (inputs, model outputs, reason codes)
     atomically with the outcome, or refuses the decision.
+
+    Idempotency (PR #7 review): when the caller supplies a request_id and an event
+    with that id already exists, the recorded decision is replayed — no bureau pull,
+    no new event. A request WITHOUT a request_id is an explicit re-decision.
     """
+    request_id = application.get("request_id") or None
+    if request_id:
+        existing = _find_event_by_request(request_id)
+        if existing is not None:
+            log.info(
+                "decision replayed from record app_id=%s request_id=%s",
+                application.get("app_id"),
+                request_id,
+            )
+            return _result_from_event(existing)
+
     bureau_score = _pull_credit(application.get("ssn", ""))
 
     # Identifier-free model inputs (ADR 0007 rule 1) — this dict is persisted verbatim.
@@ -192,9 +257,18 @@ def decide(application: dict) -> dict:
     _validate_record(outcome, band, principal_reasons, drivers, decided_by)
 
     app_id = application.get("app_id")
-    _persist_event(
-        app_id, outcome, principal_reasons, drivers, band, inputs, decided_by
+    raced = _persist_event(
+        app_id,
+        outcome,
+        principal_reasons,
+        drivers,
+        band,
+        inputs,
+        decided_by,
+        request_id,
     )
+    if raced is not None:
+        return _result_from_event(raced)
 
     log.info(
         "decision recorded app_id=%s model_score=%s outcome=%s band=%s reasons=%s",

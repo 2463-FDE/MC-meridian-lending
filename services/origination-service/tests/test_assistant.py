@@ -323,6 +323,35 @@ def test_explain_never_decisioned_raises_not_found(monkeypatch):
         assistant.run(7, client, task="explain")
 
 
+def test_request_id_forwarded_to_decision_service(monkeypatch):
+    # PR #7 review: the officer request's idempotency key must reach decision-service
+    # so a retried request replays the recorded decision instead of re-decisioning.
+    captured = {}
+    monkeypatch.setattr(
+        assistant, "decision_request_payload", lambda app_id: {"application_id": app_id}
+    )
+
+    def _post(base, path, payload):
+        captured.update(payload)
+        return {
+            "outcome": "deny",
+            "score": 518,
+            "policy_band": "deny",
+            "principal_reasons": [
+                {"code": "R02", "reason": "x", "feature": "payment_burden"}
+            ],
+        }
+
+    monkeypatch.setattr(assistant.clients, "post", _post)
+    result = assistant._score_application(42, "officer-req-1")
+    assert captured["request_id"] == "officer-req-1"
+    assert result["outcome"] == "deny"
+    # And without a key, none is sent (explicit re-decision path).
+    captured.clear()
+    assistant._score_application(42)
+    assert "request_id" not in captured
+
+
 def test_empty_summary_falls_back_to_record_summary(tools):
     # L1: matching facts but no narration — officer still gets a summary, from the record.
     final_no_summary = json.dumps(

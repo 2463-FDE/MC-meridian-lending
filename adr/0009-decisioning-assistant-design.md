@@ -140,6 +140,12 @@ the field contract itself is honored verbatim):
   (prevents recurrence of the #6012 class).
 - Legacy rows (#6012, #6013) are unrecoverable; the assistant must answer
   "no record (legacy)" — distinct from "not found" — never invent reasons.
+- *(Amendment, 2026-07-16, PR #7 review)*: `decision_events.request_id` is an optional
+  caller-supplied idempotency key (unique when present). A retry with the same key
+  replays the recorded decision — no second bureau pull, no duplicate event — including
+  under a concurrent race (unique-violation → serve the first writer's record). A
+  request WITHOUT a key is an explicit re-decision; that path (UI button, audit
+  history) is unchanged.
 
 ### 5. Agent architecture: regulated write inside the score tool
 

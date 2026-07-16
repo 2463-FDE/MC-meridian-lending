@@ -96,14 +96,21 @@ def health():
 
 
 @app.post("/assistant/decisions/{app_id}")
-def assistant_decide(app_id: int, client: ClaudeClient = Depends(get_llm_client)):
+def assistant_decide(
+    app_id: int,
+    request_id: str | None = None,
+    client: ClaudeClient = Depends(get_llm_client),
+):
     """Decision an application through the officer assistant (ADR 0009 §5).
 
     The agent's score tool performs the regulated decision + record write in
     decision-service; the response below is validated against that persisted record
     (recorded facts win over narration). Gated by LLM_ENABLED like all LLM routes.
+
+    Optional ?request_id= is the idempotency key: a retry with the same key replays
+    the recorded decision instead of appending a second regulated event.
     """
-    return _run_assistant(app_id, client, "decision")
+    return _run_assistant(app_id, client, "decision", request_id)
 
 
 @app.get("/assistant/decisions/{app_id}")
@@ -117,9 +124,11 @@ def assistant_explain(app_id: int, client: ClaudeClient = Depends(get_llm_client
     return _run_assistant(app_id, client, "explain")
 
 
-def _run_assistant(app_id: int, client: ClaudeClient, task: str):
+def _run_assistant(
+    app_id: int, client: ClaudeClient, task: str, request_id: str | None = None
+):
     try:
-        return assistant.run(app_id, client, task)
+        return assistant.run(app_id, client, task, request_id)
     except assistant.ApplicationNotFound:
         raise HTTPException(status_code=404, detail="application not found")
     except assistant.AssistantError as exc:

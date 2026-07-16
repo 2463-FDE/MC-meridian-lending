@@ -17,6 +17,9 @@ class DecisionIn(BaseModel):
     employment_years: float = Field(default=0, ge=0)
     # When the bureau provides a score it flows through the synchronous chain instead.
     credit_score: Optional[int] = None
+    # Optional idempotency key: a retry with the same id replays the recorded
+    # decision (no second bureau pull / event). Absent = explicit re-decision.
+    request_id: Optional[str] = Field(default=None, max_length=64)
 
 
 class DecisionOut(BaseModel):

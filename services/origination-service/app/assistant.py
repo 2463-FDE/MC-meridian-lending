@@ -37,13 +37,19 @@ class ApplicationNotFound(AssistantError):
     """The application id does not exist in the LOS."""
 
 
-def _score_application(app_id: int) -> dict:
+def _score_application(app_id: int, request_id: str | None = None) -> dict:
     """Score tool: decision-service decisions the app and persists the Reg B record
     atomically (fail closed there). Returns the identifier-free result the model may
-    see: enums and numbers only."""
+    see: enums and numbers only.
+
+    request_id (optional) is forwarded as the decision-service idempotency key so a
+    retried officer request replays the recorded decision instead of appending a
+    second regulated event (PR #7 review)."""
     payload = decision_request_payload(app_id)
     if payload is None:
         raise ApplicationNotFound(f"application {app_id} not found")
+    if request_id:
+        payload["request_id"] = request_id
     resp = clients.post(clients.DECISION_URL, "/decisions", payload)
     return {
         "status": "recorded",
@@ -153,13 +159,22 @@ def _validated_final(action: dict, app_id: int, task: str) -> dict:
     }
 
 
-def run(application_id: int, client, task: str = "decision") -> dict:
+def run(
+    application_id: int,
+    client,
+    task: str = "decision",
+    request_id: str | None = None,
+) -> dict:
     """Run the agent for one officer request and return the record-backed result.
 
     task="decision": decision the application (the score tool performs the regulated
     decision + record write). task="explain": read-only — report the existing decision
     from the record; NEVER scores, so asking about an application cannot trigger a
     fresh credit pull.
+
+    request_id (optional): idempotency key forwarded to decision-service — an officer
+    request retried with the same key replays the recorded decision rather than
+    appending a second regulated event (PR #7 review).
 
     `client` is a ClaudeClient (injected so tests pass a FakeAdapter-backed one).
     Raises AssistantError when the agent cannot produce a record-backed answer, and
@@ -189,7 +204,11 @@ def run(application_id: int, client, task: str = "decision") -> dict:
                     # the officer never asked for. Serve the record instead.
                     result = _TOOLS["get_decision_record"](application_id)
                 elif score_result is None:
-                    score_result = tool(application_id)
+                    score_result = (
+                        tool(application_id, request_id)
+                        if request_id
+                        else tool(application_id)
+                    )
                     result = score_result
                 else:
                     # Repeat request returns the cached result — the model cannot

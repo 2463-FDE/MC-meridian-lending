@@ -61,6 +61,7 @@ def run_decision(body: DecisionIn):
         "term_months": payload.get("term_months") or 36,
         "monthly_debt": payload.get("monthly_debt") or 0,
         "employment_years": payload.get("employment_years") or 0,
+        "request_id": payload.get("request_id"),
     }
     try:
         result = decision.decide(application)

@@ -61,7 +61,17 @@ def test_approve_persists_event_with_drivers_and_empty_reasons(
     result = decision.decide(STRONG_APP)
     assert result["decision"] == "approve"
     (params,) = captured_events
-    app_id, outcome, reasons_json, drivers_json, band, inputs_json, decided_by = params
+    (
+        app_id,
+        outcome,
+        reasons_json,
+        drivers_json,
+        band,
+        inputs_json,
+        decided_by,
+        request_id,
+    ) = params
+    assert request_id is None  # no key supplied -> explicit decision, no replay key
     assert (app_id, outcome, band) == (11, "approve", "approve")
     assert json.loads(reasons_json) == []
     drivers = json.loads(drivers_json)
@@ -242,6 +252,75 @@ def test_approve_path_validates_model_vocabulary(
     with pytest.raises(reasons_mod.UnmappedFeatureError):
         decision.decide(STRONG_APP)  # approve-band applicant
     assert captured_events == []  # nothing persisted
+
+
+# --- Idempotency (PR #7 review): retries must not duplicate regulated events --------
+
+
+EXISTING_EVENT_ROW = {
+    "outcome": "deny",
+    "principal_reasons": [
+        {
+            "code": "R02",
+            "reason": "Excessive obligations in relation to income",
+            "feature": "payment_burden",
+        }
+    ],
+    "drivers": {"model_score": 518, "model_id": "meridian-risk-stub"},
+    "policy_band": "deny",
+    "decided_by": "meridian-risk-stub:v1",
+    "request_id": "req-abc",
+}
+
+
+def test_same_request_id_replays_without_bureau_pull_or_new_event(monkeypatch):
+    calls = {"sql": []}
+
+    def _db(sql, params=None):
+        calls["sql"].append(sql.strip().split()[0])  # SELECT / WITH
+        assert sql.strip().startswith("SELECT"), "replay must not reach the insert"
+        return [dict(EXISTING_EVENT_ROW)]
+
+    monkeypatch.setattr(decision.db, "query", _db)
+
+    def _no_pull(ssn):
+        raise AssertionError("replay must not pull credit again")
+
+    monkeypatch.setattr(decision, "_pull_credit", _no_pull)
+    result = decision.decide(dict(WEAK_APP, request_id="req-abc"))
+    assert result["decision"] == "deny"
+    assert result["score"] == 518
+    assert result["principal_reasons"][0]["code"] == "R02"
+    assert calls["sql"] == ["SELECT"]  # one lookup, nothing else
+
+
+def test_concurrent_duplicate_request_serves_first_writers_record(
+    synthetic_mode, monkeypatch
+):
+    # Pre-check misses (empty), insert loses the race (UniqueViolation), the
+    # existing record is served — one officer action can never yield two events.
+    state = {"n": 0}
+
+    def _db(sql, params=None):
+        state["n"] += 1
+        if state["n"] == 1:  # pre-check: nothing yet
+            return []
+        if state["n"] == 2:  # insert: concurrent retry won the race
+            raise decision.pg_errors.UniqueViolation("duplicate key")
+        return [dict(EXISTING_EVENT_ROW)]  # post-conflict lookup
+
+    monkeypatch.setattr(decision.db, "query", _db)
+    result = decision.decide(dict(WEAK_APP, request_id="req-abc"))
+    assert result["decision"] == "deny"
+    assert result["score"] == 518
+    assert state["n"] == 3
+
+
+def test_absent_request_id_is_an_explicit_redecision(synthetic_mode, captured_events):
+    # No key -> no replay lookup; a fresh event is appended (the audit-history path).
+    decision.decide(WEAK_APP)
+    decision.decide(WEAK_APP)
+    assert len(captured_events) == 2
 
 
 def test_unmapped_feature_returns_typed_503(synthetic_mode, monkeypatch):
