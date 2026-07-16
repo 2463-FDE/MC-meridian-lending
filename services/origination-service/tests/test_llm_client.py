@@ -538,6 +538,41 @@ def test_schema_error_message_never_embeds_unguarded_model_values():
     assert "leak guard" in str(exc_info.value)
 
 
+def test_schema_enum_error_omits_nonpii_loan_facts():
+    """PR review: a malformed enum value can carry NON-PII loan facts (amount, income,
+    employer, purpose) that pass the leak/identity guards, so they are not caught by the
+    re-guard and reach schema validation. The enum-mismatch message must NOT embed the
+    model value ({node!r}) — otherwise those facts cross into the LangSmith error field
+    when @traceable complete() re-raises. Only the path and schema-defined allowed enum
+    may appear."""
+    facts = "approve loan of 42000 income 87000 at Acme Corp for debt_consolidation"
+    bad = '{"summary": "ok", "risk_flags": [], "recommended_next_step": "%s"}' % facts
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response=bad))
+    with pytest.raises(ValidationFailed) as exc_info:
+        client.summarize_application("{}")
+    msg = str(exc_info.value)
+    # The traced error field derives from this exception message, so a content-free
+    # message is what keeps application content out of the trace sink under failure.
+    for fact in ("42000", "87000", "Acme Corp", "debt_consolidation"):
+        assert fact not in msg
+    assert "recommended_next_step" in msg  # path is fine (schema-derived, no content)
+
+
+def test_schema_unexpected_key_error_omits_model_key_names():
+    """PR review: the additionalProperties:False path must not echo model-controlled
+    extra key names, which can carry application content into the error/trace field."""
+    bad = (
+        '{"summary": "ok", "risk_flags": [], "recommended_next_step": "request_docs", '
+        '"loan_amount_42000_income_87000": "x"}'
+    )
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response=bad))
+    with pytest.raises(ValidationFailed) as exc_info:
+        client.summarize_application("{}")
+    msg = str(exc_info.value)
+    assert "42000" not in msg and "87000" not in msg
+    assert "unexpected key" in msg  # generic count + schema-allowed keys only
+
+
 @pytest.mark.parametrize(
     "summary",
     [

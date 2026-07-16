@@ -86,7 +86,14 @@ def _check(node, schema, path: str) -> None:
         if schema.get("additionalProperties") is False:
             extra = [k for k in node if k not in props]
             if extra:
-                raise ValidationFailed(f"{path or 'root'}: unexpected keys {extra}")
+                # Report only the COUNT and the schema-defined allowed keys — never the
+                # model-controlled extra key names, which can carry application content
+                # into the raised message and thence the LangSmith error field
+                # (PR review). Allowed keys come from our schema, not the model.
+                raise ValidationFailed(
+                    f"{path or 'root'}: {len(extra)} unexpected key(s); "
+                    f"allowed: {sorted(props)}"
+                )
         for key, sub in props.items():
             if key in node:
                 _check(node[key], sub, f"{path}.{key}" if path else key)
@@ -111,9 +118,12 @@ def _check(node, schema, path: str) -> None:
             raise ValidationFailed(f"{path}: expected boolean")
 
     if "enum" in schema and node not in schema["enum"]:
-        raise ValidationFailed(
-            f"{path}: {node!r} not in allowed values {schema['enum']}"
-        )
+        # Do NOT interpolate `node` (the model-controlled value): a malformed enum can
+        # carry non-PII application content (loan amount, income, employer, purpose) that
+        # passes the leak guard but would otherwise reach the raised message and the
+        # LangSmith error field (PR review). Report only the path and the schema's own
+        # allowed values.
+        raise ValidationFailed(f"{path}: value not in allowed enum {schema['enum']}")
 
 
 def validate_schema(obj: dict, schema: dict) -> None:
