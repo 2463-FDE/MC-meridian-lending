@@ -17,6 +17,7 @@ from ..schemas import (
     DecisionOut,
     Disclosure,
     KycOut,
+    MonthlyDebtIn,
     Page,
 )
 
@@ -169,6 +170,30 @@ def get_application(app_id: int, session: Session = Depends(get_session)):
         if offer
         else None,
     )
+
+
+@router.patch("/{app_id}/monthly-debt")
+def capture_monthly_debt(app_id: int, body: MonthlyDebtIn):
+    """Capture monthly_debt for an existing application.
+
+    Remediation path for the decisioning quarantine: a legacy/seeded row with NULL
+    monthly_debt is rejected with 422 at decisioning; this records the value so the
+    application becomes decisionable, rather than leaving manual SQL as the only fix.
+
+    Scope note (accepted, consistent with the rest of this router): the gateway does
+    not enforce role authz on money actions (CLAUDE.md), and monthly_debt is a single
+    mutable column with no change-audit — same known debt as every other write here.
+    A borrower lowering their own debt to influence a decision is the same authz gap
+    that already exists on submit; closing it is a gateway-level concern, not scoped
+    to this endpoint.
+    """
+    rows = db.query(
+        "UPDATE applications SET monthly_debt = %s WHERE id = %s RETURNING id",
+        (body.monthly_debt, app_id),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="application not found")
+    return {"app_id": app_id, "monthly_debt": body.monthly_debt}
 
 
 def decision_request_payload(app_id: int) -> dict:

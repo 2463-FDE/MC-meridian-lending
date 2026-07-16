@@ -29,6 +29,14 @@ class ApplicationIn(BaseModel):
     employment_years: Optional[float] = Field(default=None, ge=0)
 
 
+class MonthlyDebtIn(BaseModel):
+    # Remediation capture for a quarantined row: a legacy/seeded application with
+    # NULL monthly_debt is rejected at decisioning (422) with "must be captured
+    # before a decision can be made"; this is the path that captures it. Same
+    # ge=0 rule as ApplicationIn.monthly_debt (explicit 0 allowed).
+    monthly_debt: float = Field(ge=0)
+
+
 class KycOut(BaseModel):
     name_verified: bool
     dob_verified: bool

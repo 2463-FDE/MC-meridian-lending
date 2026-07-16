@@ -136,3 +136,75 @@ def test_officer_decision_route_422s_on_persisted_null_debt(monkeypatch):
     monkeypatch.setattr(applications.clients, "post", _must_not_call)
     resp = TestClient(app).post("/applications/1/decision")
     assert resp.status_code == 422
+
+
+def _stateful_db(row):
+    """Fake db.query backed by a mutable row: SELECT returns the current row,
+    UPDATE ... monthly_debt mutates it and returns the RETURNING id (or [] if the
+    app_id does not match). Models the capture-then-decision remediation cycle."""
+
+    def _query(sql, params=None):
+        if sql.strip().upper().startswith("UPDATE"):
+            new_debt, app_id = params
+            if app_id != row["id"]:
+                return []  # no such application
+            row["monthly_debt"] = new_debt
+            return [{"id": row["id"]}]
+        return [row]  # SELECT in decision_request_payload
+
+    return _query
+
+
+def test_capture_monthly_debt_unblocks_officer_decision(monkeypatch):
+    # Remediation-path regression: a legacy row with NULL monthly_debt is quarantined
+    # (422) at decisioning; after PATCH /monthly-debt captures the value, the same
+    # officer route decisions normally. This is the intended recovery from quarantine.
+    row = {
+        "id": 1,
+        "applicant_id": 9,
+        "amount": 15000,
+        "term_months": 36,
+        "income": 50000,
+        "monthly_debt": None,  # legacy row: quarantined
+        "employment_years": 3,
+        "name": "Legacy",
+        "ssn": "123456789",
+    }
+    monkeypatch.setattr(applications.db, "query", _stateful_db(row))
+    monkeypatch.setattr(
+        applications.clients,
+        "post",
+        lambda *a, **k: {"outcome": "approve", "score": 700, "reason": None},
+    )
+    client = TestClient(app)
+
+    # Before capture: quarantined.
+    assert client.post("/applications/1/decision").status_code == 422
+
+    # Capture the missing value.
+    patched = client.patch("/applications/1/monthly-debt", json={"monthly_debt": 450})
+    assert patched.status_code == 200
+    assert patched.json()["monthly_debt"] == 450
+
+    # After capture: decisionable.
+    decided = client.post("/applications/1/decision")
+    assert decided.status_code == 200
+    assert decided.json()["decision"] == "approve"
+
+
+def test_capture_monthly_debt_rejects_negative():
+    # Same ge=0 rule as the submit boundary — a negative debt is a 422, not persisted.
+    resp = TestClient(app).patch(
+        "/applications/1/monthly-debt", json={"monthly_debt": -1}
+    )
+    assert resp.status_code == 422
+
+
+def test_capture_monthly_debt_404_when_missing(monkeypatch):
+    # UPDATE ... RETURNING yields no row for an unknown app_id -> 404, not a silent 200.
+    row = {"id": 1, "monthly_debt": None}
+    monkeypatch.setattr(applications.db, "query", _stateful_db(row))
+    resp = TestClient(app).patch(
+        "/applications/999/monthly-debt", json={"monthly_debt": 100}
+    )
+    assert resp.status_code == 404
