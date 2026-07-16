@@ -157,7 +157,7 @@ def _stateful_db(row):
 
 def test_capture_monthly_debt_unblocks_officer_decision(monkeypatch):
     # Remediation-path regression: a legacy row with NULL monthly_debt is quarantined
-    # (422) at decisioning; after PATCH /monthly-debt captures the value, the same
+    # (422) at decisioning; after POST /monthly-debt captures the value, the same
     # officer route decisions normally. This is the intended recovery from quarantine.
     row = {
         "id": 1,
@@ -182,7 +182,7 @@ def test_capture_monthly_debt_unblocks_officer_decision(monkeypatch):
     assert client.post("/applications/1/decision").status_code == 422
 
     # Capture the missing value.
-    patched = client.patch("/applications/1/monthly-debt", json={"monthly_debt": 450})
+    patched = client.post("/applications/1/monthly-debt", json={"monthly_debt": 450})
     assert patched.status_code == 200
     assert patched.json()["monthly_debt"] == 450
 
@@ -194,7 +194,7 @@ def test_capture_monthly_debt_unblocks_officer_decision(monkeypatch):
 
 def test_capture_monthly_debt_rejects_negative():
     # Same ge=0 rule as the submit boundary — a negative debt is a 422, not persisted.
-    resp = TestClient(app).patch(
+    resp = TestClient(app).post(
         "/applications/1/monthly-debt", json={"monthly_debt": -1}
     )
     assert resp.status_code == 422
@@ -204,7 +204,7 @@ def test_capture_monthly_debt_404_when_missing(monkeypatch):
     # UPDATE ... RETURNING yields no row for an unknown app_id -> 404, not a silent 200.
     row = {"id": 1, "monthly_debt": None}
     monkeypatch.setattr(applications.db, "query", _stateful_db(row))
-    resp = TestClient(app).patch(
+    resp = TestClient(app).post(
         "/applications/999/monthly-debt", json={"monthly_debt": 100}
     )
     assert resp.status_code == 404

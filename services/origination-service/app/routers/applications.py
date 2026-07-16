@@ -172,13 +172,19 @@ def get_application(app_id: int, session: Session = Depends(get_session)):
     )
 
 
-@router.patch("/{app_id}/monthly-debt")
+@router.post("/{app_id}/monthly-debt")
 def capture_monthly_debt(app_id: int, body: MonthlyDebtIn):
     """Capture monthly_debt for an existing application.
 
     Remediation path for the decisioning quarantine: a legacy/seeded row with NULL
     monthly_debt is rejected with 422 at decisioning; this records the value so the
     application becomes decisionable, rather than leaving manual SQL as the only fix.
+
+    POST (not PATCH) on purpose: the gateway `/los` proxy only forwards GET and POST
+    (services/gateway/app/main.py), so a PATCH here would be a 405 through the product
+    front door — the remediation must be reachable the same way as every other LOS call.
+    Widening the shared gateway proxy for one endpoint is the speculative surface the
+    repo's YAGNI rule warns against.
 
     Scope note (accepted, consistent with the rest of this router): the gateway does
     not enforce role authz on money actions (CLAUDE.md), and monthly_debt is a single
