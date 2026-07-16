@@ -49,6 +49,20 @@ def _trace_complete_inputs(inputs: dict) -> dict:
     }
 
 
+def _trace_complete_outputs(output: Any) -> dict:
+    """Strip the validated response body from the LangSmith root span.
+
+    `complete()` returns the validated summary/decision (a dict or guarded
+    string) — that body carries customer lending content (loan amounts, income,
+    risk facts), so exporting it would ship application data to a third-party
+    telemetry vendor (PR review). Trace only a non-content shape marker; token
+    cost/usage already lives on the child `llm.transport` span. If content-level
+    trace debugging is ever needed, gate it behind an explicit non-production
+    flag with its own policy controls — never on by default.
+    """
+    return {"result_type": type(output).__name__}
+
+
 def _default_adapter(config: LLMConfig) -> ModelAdapter:
     """Pick the adapter for `config.provider`. No adapter was injected."""
     if config.provider == "bedrock":
@@ -66,7 +80,11 @@ class ClaudeClient:
         self.adapter = adapter if adapter is not None else _default_adapter(config)
         self.log = get_llm_logger()
 
-    @traceable(name="llm.complete", process_inputs=_trace_complete_inputs)
+    @traceable(
+        name="llm.complete",
+        process_inputs=_trace_complete_inputs,
+        process_outputs=_trace_complete_outputs,
+    )
     def complete(
         self,
         prompt_name: str,

@@ -26,7 +26,12 @@ from app.llm import (
 from app.llm.adapter import CompletionRequest
 from app.llm.errors import LLMError, LLMHTTPError, LLMTimeoutError
 from app.llm.request_builder import build_request, estimate_tokens, redact_json
-from app.llm.transport import _trace_transport_outputs, call_with_retry
+from app.llm.client import _trace_complete_outputs
+from app.llm.transport import (
+    _trace_transport_inputs,
+    _trace_transport_outputs,
+    call_with_retry,
+)
 from app.llm.validator import parse_json
 from app.prompts import get_prompt
 from app.redactor import PiiRedactor
@@ -266,6 +271,48 @@ def test_transport_trace_never_exports_raw_model_text():
     assert traced["usage_metadata"]["total_tokens"] == (
         out.input_tokens + out.output_tokens
     )
+
+
+def test_transport_trace_omits_prompt_content():
+    # PR review: enabling LangSmith must not export customer lending content.
+    # build_request keeps business facts (amount/income/employment) in the prompt
+    # body, so the transport input trace must carry NO system/messages — only
+    # non-content metadata (model, sizing, timeout, retry budget, request id).
+    req = _req(
+        system="You are an underwriting assistant. Applicant income is 87000.",
+        messages=[
+            {
+                "role": "user",
+                "content": '{"requested_amount": 42000, "annual_income": 87000, '
+                '"employment_years": 9, "monthly_debt": 1500}',
+            }
+        ],
+        idempotency_key="req-xyz",
+    )
+    traced = _trace_transport_inputs({"req": req, "max_retries": 2})
+    assert "system" not in traced and "messages" not in traced
+    blob = json.dumps(traced)
+    for financial in ("42000", "87000", "1500", "employment_years"):
+        assert financial not in blob
+    # operational metadata still present for cost/latency/retry accounting
+    assert traced["model"] == "m"
+    assert traced["idempotency_key"] == "req-xyz"
+    assert traced["max_retries"] == 2
+
+
+def test_complete_output_trace_omits_validated_body():
+    # PR review: the parent llm.complete span must not export the validated
+    # response body, which carries loan amounts / income / risk facts.
+    validated = {
+        "summary": "Applicant requests $42,000; annual income 87000; 9 years employed.",
+        "risk_flags": ["high dti"],
+        "recommended_next_step": "request_docs",
+    }
+    traced = _trace_complete_outputs(validated)
+    blob = json.dumps(traced)
+    for financial in ("42,000", "42000", "87000", "high dti", "summary"):
+        assert financial not in blob
+    assert traced == {"result_type": "dict"}
 
 
 def test_429_is_retried():

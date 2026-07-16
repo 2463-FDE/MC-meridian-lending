@@ -47,19 +47,21 @@ def _canonical_model(model: str) -> str:
 
 
 def _trace_transport_inputs(inputs: dict) -> dict:
-    """Export only the provider-bound request to LangSmith.
+    """Export only NON-CONTENT request metadata to LangSmith.
 
-    `req` was produced by `build_request`, which already redacted PII — this is
-    exactly the payload the provider sees, so tracing it adds no new exposure.
-    Drops the adapter object and injected callables (not serializable, not
-    interesting).
+    `build_request` redacts identity PII but deliberately keeps the business
+    facts the model needs (loan amount, income, employment tenure, purpose,
+    history). Serializing `system`/`messages` would therefore ship customer
+    lending content to a separate telemetry vendor — a privacy/compliance
+    exposure, not just token/cost metadata (PR review). So the prompt body is
+    NEVER traced by default: only model, sizing/sampling params, timeout, retry
+    budget, and the request id (idempotency_key) — none of which carry
+    application content. Drops the adapter object and injected callables too.
     """
     req = inputs.get("req")
     if req is None:
         return {}
     return {
-        "system": req.system,
-        "messages": req.messages,
         "model": req.model,
         "max_tokens": req.max_tokens,
         "temperature": req.temperature,
@@ -76,9 +78,9 @@ def _trace_transport_outputs(completion: Completion) -> dict:
     unvalidated — `validate_structured`/`guard_output` run in the client AFTER
     `call_with_retry` returns, so tracing the text here would ship output the
     client may reject (echoed/injected PII, overlong or malformed responses) to
-    the third-party sink. Validated output is traced on the parent
-    `llm.complete` span via its return value; this span carries only token
-    usage, stop reason, and model metadata.
+    the third-party sink. The parent `llm.complete` span likewise traces only
+    non-content metadata about its result, not the validated body (PR review);
+    this span carries only token usage, stop reason, and model metadata.
 
     `usage_metadata` is the shape LangSmith's cost engine reads; without it the
     span shows latency but no tokens and no cost. Values come from the
