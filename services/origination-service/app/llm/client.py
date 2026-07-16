@@ -21,6 +21,7 @@ from time import perf_counter
 from typing import Any, Iterator
 
 from langsmith import traceable
+from langsmith.run_helpers import get_current_run_tree
 
 from ..prompts import get_prompt
 from .adapter import BedrockAdapter, ClaudeAdapter, ModelAdapter
@@ -167,6 +168,19 @@ class ClaudeClient:
                 request_id,
             )
             if fallback is not _UNSET:
+                # A served fallback must NOT read as a healthy call in LangSmith:
+                # _trace_complete_outputs only sees the returned value, so without a
+                # marker the root span records the fallback as a normal success and
+                # repeated rejection (prompt injection, schema drift, provider
+                # regression) shows green — hiding it from detection/rollback (PR
+                # review). Mark the current span content-free: the exception CLASS
+                # only (never str(exc), which can echo rejected model content), same
+                # run-tree posture as llm.transport's ls_model_name.
+                run_tree = get_current_run_tree()
+                if run_tree is not None:
+                    run_tree.metadata["validation_failed"] = True
+                    run_tree.metadata["fallback_used"] = True
+                    run_tree.metadata["rejection_error"] = type(exc).__name__
                 return fallback
             raise
 

@@ -489,6 +489,47 @@ def test_fallback_on_bad_output():
     assert out == {"summary": "unavailable"}
 
 
+class _FakeRunTree:
+    def __init__(self):
+        self.metadata = {}
+
+
+def test_traced_fallback_marks_run_tree_without_model_content(monkeypatch):
+    # PR review: a served fallback must not read as a healthy call in LangSmith.
+    # complete() marks the current run tree content-free before returning the
+    # fallback so repeated rejection (injection, schema drift, provider regression)
+    # is visible for detection/rollback instead of showing green.
+    from app.llm import client as client_mod
+
+    run_tree = _FakeRunTree()
+    monkeypatch.setattr(client_mod, "get_current_run_tree", lambda: run_tree)
+
+    # Distinctive rejected model content that must NOT leak into the trace metadata.
+    bad = "garbage 123-45-6789 income 87000"
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response=bad))
+    out = client.summarize_application("{}", fallback={"summary": "unavailable"})
+
+    assert out == {"summary": "unavailable"}
+    assert run_tree.metadata["validation_failed"] is True
+    assert run_tree.metadata["fallback_used"] is True
+    # Exception CLASS only — never str(exc), which can echo rejected model content.
+    assert run_tree.metadata["rejection_error"] == "ValidationFailed"
+    blob = json.dumps(run_tree.metadata)
+    for content in ("garbage", "123-45-6789", "87000"):
+        assert content not in blob
+
+
+def test_traced_fallback_tolerates_no_active_run_tree(monkeypatch):
+    # Tracing disabled (no active run): get_current_run_tree() returns None and the
+    # fallback must still be served, not crash on a None metadata write.
+    from app.llm import client as client_mod
+
+    monkeypatch.setattr(client_mod, "get_current_run_tree", lambda: None)
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response="garbage"))
+    out = client.summarize_application("{}", fallback={"summary": "unavailable"})
+    assert out == {"summary": "unavailable"}
+
+
 def test_leak_guard_blocks_pii_in_output():
     leaky = (
         '{"summary": "SSN 412-55-9981 on file", "risk_flags": [], '
