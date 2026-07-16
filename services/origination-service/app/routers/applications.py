@@ -187,6 +187,21 @@ def decision_request_payload(app_id: int) -> dict:
     if not rows:
         return None
     r = rows[0]
+    if r.get("monthly_debt") is None:
+        # Fail closed (PR #7 review): a persisted application with no recorded
+        # monthly_debt must NOT be decisioned as if the applicant were debt-free — that
+        # silently reintroduces the over-approval risk and persists monthly_debt: 0 into
+        # the append-only decision event, making the bad input look intentional. New API
+        # rows always carry it (ApplicationIn requires it); legacy / seeded / non-API
+        # rows with NULL are quarantined here until the value is captured, never
+        # defaulted to 0.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "monthly_debt is not recorded for this application; it must be "
+                "captured before a decision can be made"
+            ),
+        )
     return {
         "application_id": app_id,
         "applicant_id": r.get("applicant_id"),
@@ -195,13 +210,7 @@ def decision_request_payload(app_id: int) -> dict:
         "requested_amount": r.get("amount"),
         "term_months": r.get("term_months"),
         "annual_income": r.get("income") or 0,
-        # monthly_debt is required at intake, so a NEW row always has a real value
-        # (explicit 0 stays 0). Only legacy rows predating the column are NULL — those,
-        # and only those, fall back to 0 (PR #7 review: distinguish explicit 0 from
-        # missing rather than a blanket `or 0`).
-        "monthly_debt": (
-            r.get("monthly_debt") if r.get("monthly_debt") is not None else 0
-        ),
+        "monthly_debt": r.get("monthly_debt"),  # guaranteed non-NULL by the guard above
         "employment_years": r.get("employment_years") or 0,
         "credit_score": None,  # pulled downstream by decision-service
     }

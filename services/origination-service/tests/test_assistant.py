@@ -476,6 +476,39 @@ def test_structurally_valid_final_with_lying_summary_is_not_passed_through(tools
     assert "deny" in result["summary"] and "R02" in result["summary"]
 
 
+def test_assistant_route_422s_on_persisted_null_debt(monkeypatch):
+    # PR #7 review regression: the assistant score tool builds the same decision payload,
+    # so a persisted NULL monthly_debt must quarantine here too — surfacing as 422, not a
+    # zero-debt decision (and not a 500 from the global handler).
+    from fastapi.testclient import TestClient
+
+    from app import main
+    from app.main import app as fastapi_app
+    from app.routers import applications as apps_router
+
+    null_row = {
+        "applicant_id": 9,
+        "amount": 15000,
+        "term_months": 36,
+        "income": 50000,
+        "monthly_debt": None,
+        "employment_years": 3,
+        "name": "Legacy",
+        "ssn": "123456789",
+    }
+    monkeypatch.setattr(apps_router.db, "query", lambda sql, params=None: [null_row])
+    fastapi_app.dependency_overrides[main.get_llm_client] = lambda: _client(
+        TOOL_CALL, FINAL_DENY
+    )[0]
+    try:
+        resp = TestClient(fastapi_app, raise_server_exceptions=False).post(
+            "/assistant/decisions/1"
+        )
+        assert resp.status_code == 422
+    finally:
+        fastapi_app.dependency_overrides.clear()
+
+
 def test_empty_summary_falls_back_to_record_summary(tools):
     # L1: matching facts but no narration — officer still gets a summary, from the record.
     final_no_summary = json.dumps(
