@@ -22,13 +22,16 @@ FROM generate_series(100, 399) g;
 SELECT setval('applicants_id_seq', 399);
 
 -- 300 applications (ids 7000..7299), applicant_id = 100 + (id - 7000)
-INSERT INTO applications (id, applicant_id, amount, term_months, purpose, income, employer, job_title, employment_years, status)
+INSERT INTO applications (id, applicant_id, amount, term_months, purpose, income, monthly_debt, employer, job_title, employment_years, status)
 SELECT g,
   100 + (g - 7000),
   (1000 + ((g * 263) % 49000))::double precision,
   (ARRAY[12,24,36,48,60])[1 + ((g * 3) % 5)],
   (ARRAY['debt_consolidation','home_improvement','auto','medical','personal','other'])[1 + ((g * 7) % 6)],
   (24000 + ((g * 311) % 180000))::double precision,
+  -- monthly_debt: real value so bulk apps are decisionable (not quarantined by the
+  -- NULL-debt guard); deterministic ~200..2000 range.
+  (200 + ((g * 53) % 1800))::double precision,
   (ARRAY['Acme Corp','Globex','Initech','Umbrella Co','Hooli','Stark Industries','Wayne Enterprises','Soylent Inc'])[1 + ((g * 5) % 8)],
   (ARRAY['Analyst','Manager','Technician','Clerk','Engineer','Driver','Nurse','Teacher'])[1 + ((g * 11) % 8)],
   ((g % 15) + 1)::double precision,
