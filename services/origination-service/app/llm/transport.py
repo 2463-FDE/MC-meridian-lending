@@ -54,9 +54,18 @@ def _trace_transport_inputs(inputs: dict) -> dict:
     history). Serializing `system`/`messages` would therefore ship customer
     lending content to a separate telemetry vendor — a privacy/compliance
     exposure, not just token/cost metadata (PR review). So the prompt body is
-    NEVER traced by default: only model, sizing/sampling params, timeout, retry
-    budget, and the request id (idempotency_key) — none of which carry
-    application content. Drops the adapter object and injected callables too.
+    NEVER traced by default: only model, sizing/sampling params, timeout, and
+    retry budget — none of which carry application content. Drops the adapter
+    object and injected callables too.
+
+    idempotency_key is NOT traced (review finding): complete() accepts it verbatim
+    from callers, so an upstream caller keying on an application number, customer
+    reference, or email-derived value would ship that identifier to a third-party
+    telemetry vendor and make traces linkable to customer records. Omitted here
+    (and on the parent llm.complete span) rather than hashed, because no service
+    -owned secret exists to key an HMAC and an unkeyed hash of a low-entropy id is
+    reversible. LangSmith's own run ids provide trace correlation; if request-id
+    correlation is ever needed, export a keyed HMAC with a provisioned secret.
     """
     req = inputs.get("req")
     if req is None:
@@ -66,7 +75,6 @@ def _trace_transport_inputs(inputs: dict) -> dict:
         "max_tokens": req.max_tokens,
         "temperature": req.temperature,
         "timeout": req.timeout,
-        "idempotency_key": req.idempotency_key,
         "max_retries": inputs.get("max_retries"),
     }
 

@@ -26,7 +26,7 @@ from app.llm import (
 from app.llm.adapter import CompletionRequest
 from app.llm.errors import LLMError, LLMHTTPError, LLMTimeoutError
 from app.llm.request_builder import build_request, estimate_tokens, redact_json
-from app.llm.client import _trace_complete_outputs
+from app.llm.client import _trace_complete_inputs, _trace_complete_outputs
 from app.llm.transport import (
     _trace_transport_inputs,
     _trace_transport_outputs,
@@ -296,8 +296,32 @@ def test_transport_trace_omits_prompt_content():
         assert financial not in blob
     # operational metadata still present for cost/latency/retry accounting
     assert traced["model"] == "m"
-    assert traced["idempotency_key"] == "req-xyz"
     assert traced["max_retries"] == 2
+    # idempotency_key is caller-supplied and unvalidated — never traced (review finding)
+    assert "idempotency_key" not in traced
+
+
+def test_trace_payloads_never_export_caller_idempotency_key():
+    # Review finding: complete() accepts idempotency_key verbatim from callers, so a
+    # caller keying on an application number / customer reference / email must not leak
+    # that identifier to LangSmith. Assert it is absent from BOTH the root
+    # (llm.complete) and child (llm.transport) trace payloads.
+    customer_key = "APP-2026-0042|maria.gomez@example.com"
+
+    root = _trace_complete_inputs(
+        {"prompt_name": "loan_summary", "idempotency_key": customer_key}
+    )
+    assert customer_key not in json.dumps(root)
+    assert "idempotency_key" not in root
+
+    req = _req(
+        system="s",
+        messages=[{"role": "user", "content": "{}"}],
+        idempotency_key=customer_key,
+    )
+    transport = _trace_transport_inputs({"req": req, "max_retries": 1})
+    assert customer_key not in json.dumps(transport)
+    assert "idempotency_key" not in transport
 
 
 def test_complete_output_trace_omits_validated_body():

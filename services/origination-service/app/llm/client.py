@@ -42,11 +42,14 @@ def _trace_complete_inputs(inputs: dict) -> dict:
     party (same posture as the provider itself, ADR 0005). The traced payload
     lives on the child transport span, which only ever sees the post-redaction
     request.
+
+    idempotency_key is NOT traced (review finding): it is caller-supplied and
+    unvalidated, so a caller keying on an application number / customer reference /
+    email-derived value would leak that identifier to the telemetry vendor. Omitted
+    on both this span and llm.transport — see _trace_transport_inputs for the
+    omit-vs-hash rationale.
     """
-    return {
-        "prompt_name": inputs.get("prompt_name"),
-        "idempotency_key": inputs.get("idempotency_key"),
-    }
+    return {"prompt_name": inputs.get("prompt_name")}
 
 
 def _trace_complete_outputs(output: Any) -> dict:
