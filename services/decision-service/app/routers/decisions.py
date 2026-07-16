@@ -32,7 +32,7 @@ def get_decision_record(
     request_id, so falling back to app-latest would return an unrelated event."""
     if request_id is not None:
         events = db.query(
-            "SELECT outcome, principal_reasons, drivers, policy_band, inputs, "
+            "SELECT outcome, principal_reasons, drivers, policy_band, "
             "decided_by, decided_at FROM decision_events "
             "WHERE app_id = %s AND request_id = %s ORDER BY id DESC LIMIT 1",
             (app_id, request_id),
@@ -43,7 +43,7 @@ def get_decision_record(
             )
     else:
         events = db.query(
-            "SELECT outcome, principal_reasons, drivers, policy_band, inputs, "
+            "SELECT outcome, principal_reasons, drivers, policy_band, "
             "decided_by, decided_at FROM decision_events "
             "WHERE app_id = %s ORDER BY id DESC LIMIT 1",
             (app_id,),
@@ -57,7 +57,6 @@ def get_decision_record(
             principal_reasons=e["principal_reasons"],
             drivers=e["drivers"],
             policy_band=e["policy_band"],
-            inputs=e["inputs"],
             decided_by=e["decided_by"],
             decided_at=e["decided_at"].isoformat() if e["decided_at"] else None,
         )

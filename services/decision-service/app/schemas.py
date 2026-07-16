@@ -48,6 +48,12 @@ class DecisionRecordOut(BaseModel):
     principal_reasons: list = []
     drivers: dict = {}
     policy_band: Optional[str] = None
-    inputs: dict = {}
+    # NOTE: the persisted decision_events row also stores `inputs` (income/debt/amount)
+    # as the append-only audit trail, but this projection deliberately does NOT return
+    # them. The only caller (the officer assistant's memory tool, origination
+    # assistant.py) reads outcome/policy_band/score/reason_codes and never the raw
+    # financials, and the endpoint is reachable anonymously through the gateway
+    # `/decision/*` proxy with enumerable app ids — so projecting the applicant's
+    # financial inputs here would be a needless data leak (PR review).
     decided_by: Optional[str] = None
     decided_at: Optional[str] = None

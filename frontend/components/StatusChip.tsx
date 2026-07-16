@@ -8,11 +8,13 @@
 
 const TONE: Record<string, string> = {
   current: "chip-green",
+  approve: "chip-green", // decision-service outcome enum
   approved: "chip-green",
   active: "chip-green",
   delinquent: "chip-red",
   past_due: "chip-red",
   default_: "chip-red",
+  decline: "chip-red-muted", // decision-service outcome enum
   denied: "chip-red-muted",
   declined: "chip-red-muted",
   paid_off: "chip-gray",

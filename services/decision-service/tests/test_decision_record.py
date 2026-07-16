@@ -180,6 +180,10 @@ def test_record_endpoint_returns_recorded_event(monkeypatch):
     assert body["status"] == "recorded"
     assert body["principal_reasons"][0]["code"] == "R02"
     assert body["decided_at"].startswith("2026-07-15")
+    # PR review: the projection must NOT leak the applicant's raw financial inputs.
+    # The endpoint is reachable anonymously through the gateway /decision/* proxy with
+    # enumerable app ids, and the only real caller (officer assistant) never reads them.
+    assert "inputs" not in body
 
 
 def test_record_endpoint_distinguishes_legacy_no_record(monkeypatch):

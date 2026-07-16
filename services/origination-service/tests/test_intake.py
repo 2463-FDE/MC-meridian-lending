@@ -139,9 +139,10 @@ def test_officer_decision_route_422s_on_persisted_null_debt(monkeypatch):
 
 
 def _stateful_db(row):
-    """Fake db.query backed by a mutable row: SELECT returns the current row,
-    UPDATE ... monthly_debt mutates it and returns the RETURNING id (or [] if the
-    app_id does not match). Models the capture-then-decision remediation cycle."""
+    """Fake db.query backed by a mutable row: a SELECT for the matching app_id returns
+    the current row (else [] for an unknown app_id), UPDATE ... monthly_debt mutates it.
+    Models the capture-then-decision remediation cycle. Both the capture endpoint's
+    existence check and decision_request_payload look the app up by id as params[0]."""
 
     def _query(sql, params=None):
         if sql.strip().upper().startswith("UPDATE"):
@@ -150,7 +151,9 @@ def _stateful_db(row):
                 return []  # no such application
             row["monthly_debt"] = new_debt
             return [{"id": row["id"]}]
-        return [row]  # SELECT in decision_request_payload
+        if params and params[0] != row["id"]:
+            return []  # SELECT for an unknown app_id
+        return [row]  # SELECT (capture existence check / decision_request_payload)
 
     return _query
 
@@ -201,7 +204,7 @@ def test_capture_monthly_debt_rejects_negative():
 
 
 def test_capture_monthly_debt_404_when_missing(monkeypatch):
-    # UPDATE ... RETURNING yields no row for an unknown app_id -> 404, not a silent 200.
+    # Existence check finds no row for an unknown app_id -> 404, not a silent 200.
     row = {"id": 1, "monthly_debt": None}
     monkeypatch.setattr(applications.db, "query", _stateful_db(row))
     resp = TestClient(app).post(

@@ -186,19 +186,35 @@ def capture_monthly_debt(app_id: int, body: MonthlyDebtIn):
     Widening the shared gateway proxy for one endpoint is the speculative surface the
     repo's YAGNI rule warns against.
 
+    Capture-only, never overwrite (PR review): the UPDATE is guarded by
+    `monthly_debt IS NULL`, matching this endpoint's stated purpose as a NULL-row
+    quarantine escape hatch. An application whose monthly_debt is already recorded is
+    frozen — 409, not a silent overwrite — so a caller who knows an app id cannot lower
+    an already-submitted/decisioned application's debt to force a more favorable
+    re-decision. Distinguishing 404 (no such app) from 409 (already captured) needs a
+    prior existence check because the guarded UPDATE returns no rows in either case.
+
     Scope note (accepted, consistent with the rest of this router): the gateway does
     not enforce role authz on money actions (CLAUDE.md), and monthly_debt is a single
     mutable column with no change-audit — same known debt as every other write here.
-    A borrower lowering their own debt to influence a decision is the same authz gap
-    that already exists on submit; closing it is a gateway-level concern, not scoped
-    to this endpoint.
+    Adding underwriter-only role enforcement or an immutable audit event is a
+    platform-wide gateway concern, not scoped to this endpoint; the NULL-only guard
+    above closes the concrete re-decision attack without it.
     """
-    rows = db.query(
-        "UPDATE applications SET monthly_debt = %s WHERE id = %s RETURNING id",
+    existing = db.query(
+        "SELECT monthly_debt FROM applications WHERE id = %s", (app_id,)
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="application not found")
+    if existing[0]["monthly_debt"] is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="monthly_debt is already recorded for this application",
+        )
+    db.query(
+        "UPDATE applications SET monthly_debt = %s WHERE id = %s AND monthly_debt IS NULL",
         (body.monthly_debt, app_id),
     )
-    if not rows:
-        raise HTTPException(status_code=404, detail="application not found")
     return {"app_id": app_id, "monthly_debt": body.monthly_debt}
 
 

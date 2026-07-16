@@ -241,7 +241,9 @@ export default function ApplyPage() {
     }
   }
 
-  const decisionApproved = (decision?.decision || "").toLowerCase() === "approved";
+  // decision-service emits the outcome enum "approve" (not "approved"): match it, or
+  // the "View your offer" CTA never renders for an approved borrower (PR review).
+  const decisionApproved = (decision?.decision || "").toLowerCase() === "approve";
 
   return (
     <main className="wrap">
