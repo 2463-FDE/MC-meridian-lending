@@ -72,12 +72,19 @@ def _trace_transport_inputs(inputs: dict) -> dict:
 def _trace_transport_outputs(completion: Completion) -> dict:
     """Shape the traced output so LangSmith computes token cost.
 
+    NEVER exports `completion.text`: at this layer the model output is raw and
+    unvalidated — `validate_structured`/`guard_output` run in the client AFTER
+    `call_with_retry` returns, so tracing the text here would ship output the
+    client may reject (echoed/injected PII, overlong or malformed responses) to
+    the third-party sink. Validated output is traced on the parent
+    `llm.complete` span via its return value; this span carries only token
+    usage, stop reason, and model metadata.
+
     `usage_metadata` is the shape LangSmith's cost engine reads; without it the
-    span shows latency/text but no tokens and no cost. Values come from the
+    span shows latency but no tokens and no cost. Values come from the
     Completion the adapter already fills.
     """
     return {
-        "text": completion.text,
         "stop_reason": completion.stop_reason,
         "usage_metadata": {
             "input_tokens": completion.input_tokens,
