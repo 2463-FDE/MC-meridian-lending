@@ -9,7 +9,7 @@ import os
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -98,7 +98,7 @@ def health():
 @app.post("/assistant/decisions/{app_id}")
 def assistant_decide(
     app_id: int,
-    request_id: str | None = None,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     client: ClaudeClient = Depends(get_llm_client),
 ):
     """Decision an application through the officer assistant (ADR 0009 §5).
@@ -107,10 +107,15 @@ def assistant_decide(
     decision-service; the response below is validated against that persisted record
     (recorded facts win over narration). Gated by LLM_ENABLED like all LLM routes.
 
-    Optional ?request_id= is the idempotency key: a retry with the same key replays
-    the recorded decision instead of appending a second regulated event.
+    Optional Idempotency-Key header (same contract as /applications/{app_id}/decision):
+    a retry with the same key replays the recorded decision instead of re-pulling credit
+    and appending a second regulated event. Absent = explicit re-decision.
     """
-    return _run_assistant(app_id, client, "decision", request_id)
+    if idempotency_key is not None and len(idempotency_key) > 64:
+        raise HTTPException(
+            status_code=400, detail="Idempotency-Key must be at most 64 characters"
+        )
+    return _run_assistant(app_id, client, "decision", idempotency_key or None)
 
 
 @app.get("/assistant/decisions/{app_id}")

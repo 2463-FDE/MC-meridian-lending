@@ -214,6 +214,70 @@ def test_endpoint_returns_503_when_llm_disabled(monkeypatch):
         assert tc.get("/assistant/decisions/42").status_code == 503
 
 
+def test_endpoint_forwards_idempotency_key_header_as_request_id(monkeypatch):
+    # PR #7 review: the assistant decision endpoint must honour the standard
+    # Idempotency-Key header (not only a query param), so a retry with the same header
+    # forwards the same request_id to decision-service instead of a fresh UUID that
+    # would re-pull credit and append a second regulated event.
+    from fastapi.testclient import TestClient
+
+    from app import main
+    from app.main import app
+
+    forwarded = []
+
+    def _post(base, path, payload):
+        forwarded.append(payload.get("request_id"))
+        return {
+            "outcome": "deny",
+            "score": 518,
+            "policy_band": "deny",
+            "principal_reasons": [
+                {"code": "R02", "reason": "x", "feature": "payment_burden"},
+                {"code": "R03", "reason": "y", "feature": "income_sufficiency"},
+            ],
+        }
+
+    monkeypatch.setattr(assistant.clients, "post", _post)
+    monkeypatch.setattr(
+        assistant.clients, "get", lambda base, path: _FakeRecordResponse()
+    )
+    monkeypatch.setattr(
+        assistant, "decision_request_payload", lambda app_id: {"application_id": app_id}
+    )
+    # A fresh scripted client per request (each run consumes tool-call + final).
+    app.dependency_overrides[main.get_llm_client] = lambda: _client(
+        TOOL_CALL, FINAL_DENY
+    )[0]
+    try:
+        tc = TestClient(app)
+        headers = {"Idempotency-Key": "officer-key-1"}
+        assert tc.post("/assistant/decisions/42", headers=headers).status_code == 200
+        assert tc.post("/assistant/decisions/42", headers=headers).status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
+    # Both retries forwarded the SAME caller-supplied key — not two fresh UUIDs.
+    assert forwarded == ["officer-key-1", "officer-key-1"]
+
+
+def test_endpoint_rejects_overlong_idempotency_key(monkeypatch):
+    # Same 64-char limit as /applications/{app_id}/decision: a clean 400, not a
+    # confusing downstream 503.
+    from fastapi.testclient import TestClient
+
+    from app import main
+    from app.main import app
+
+    app.dependency_overrides[main.get_llm_client] = lambda: _client(FINAL_DENY)[0]
+    try:
+        tc = TestClient(app)
+        resp = tc.post("/assistant/decisions/42", headers={"Idempotency-Key": "x" * 65})
+        assert resp.status_code == 400
+    finally:
+        app.dependency_overrides.clear()
+
+
 # --- Adversarial-review fixes (teeth 2026-07-15) ------------------------------------
 
 
