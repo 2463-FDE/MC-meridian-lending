@@ -414,28 +414,56 @@ def accept_offer(app_id: int):
     # must not board a second loan + balance for the same application. Return the existing
     # loan if one is already boarded, and rely on the uq_loans_app unique index to settle
     # the concurrent race — the loser catches UniqueViolation and replays the winner's
-    # loan (mirrors the decision_events idempotency pattern). status is not a sufficient
-    # guard on its own (two concurrent requests both read pre-funded), so the DB index is
-    # the authority.
+    # loan. The DB unique index is the AUTHORITATIVE guarantee that duplicates cannot be
+    # boarded; the graceful UniqueViolation->replay is best-effort, because db.py shares a
+    # single non-thread-safe autocommit connection (CLAUDE.md raw-psycopg2 seam) so a truly
+    # concurrent loser may surface a connection-level error (500) instead — a retry then
+    # heals via the existing-loan path, and no duplicate loan is ever created either way.
     existing = db.query(
-        "SELECT id FROM loans WHERE app_id = %s ORDER BY id LIMIT 1", (app_id,)
+        "SELECT id, principal FROM loans WHERE app_id = %s ORDER BY id LIMIT 1",
+        (app_id,),
     )
     if existing:
-        return {"loan_id": existing[0]["id"]}
-    try:
-        loan_id = intake.board_to_servicing(
-            app_id, r.get("name") or "Borrower", r["amount"], r["apr"], r["term_months"]
-        )
-    except pg_errors.UniqueViolation:
-        # A concurrent acceptance won the race and boarded first; serve its loan instead
-        # of a second one (one loan per app_id, enforced by uq_loans_app).
-        won = db.query(
-            "SELECT id FROM loans WHERE app_id = %s ORDER BY id LIMIT 1", (app_id,)
-        )
-        if won:
-            return {"loan_id": won[0]["id"]}
-        raise HTTPException(
-            status_code=409, detail="boarding conflict without a retrievable loan"
-        )
+        loan_id = existing[0]["id"]
+        principal = existing[0]["principal"]
+    else:
+        try:
+            loan_id = intake.board_to_servicing(
+                app_id,
+                r.get("name") or "Borrower",
+                r["amount"],
+                r["apr"],
+                r["term_months"],
+            )
+            principal = r["amount"]  # what we just boarded with
+        except pg_errors.UniqueViolation:
+            # A concurrent acceptance won the race and boarded first; serve its loan
+            # instead of a second one (one loan per app_id, enforced by uq_loans_app).
+            won = db.query(
+                "SELECT id, principal FROM loans WHERE app_id = %s ORDER BY id LIMIT 1",
+                (app_id,),
+            )
+            if not won:
+                raise HTTPException(
+                    status_code=409,
+                    detail="boarding conflict without a retrievable loan",
+                )
+            loan_id = won[0]["id"]
+            principal = won[0]["principal"]
+    # Reconcile servicing + LOS state on EVERY path, including replays (PR review). The
+    # loan insert, balance insert, and status update are three separate autocommitted
+    # statements (shared-connection psycopg2 seam, CLAUDE.md), so a first attempt could
+    # board the loan then crash before the balance or the funded update — leaving a
+    # durable loan with stale LOS state that a bare replay ("return existing") would never
+    # heal. Both writes are idempotent (ON CONFLICT / set-to-funded), so re-running them
+    # here self-heals that window on the next accept. The balance is reconciled from the
+    # BOARDED loan's own principal (never the request/application amount) so a
+    # missing-balance heal can never write a value that diverges from the loan. (Full
+    # one-transaction atomicity is bounded by that raw-psycopg2 money-write seam — debt.)
+    db.query(
+        "INSERT INTO balances (loan_id, balance) VALUES (%s, %s) "
+        "ON CONFLICT (loan_id) DO NOTHING",
+        (loan_id, float(principal)),
+    )
     db.query("UPDATE applications SET status = 'funded' WHERE id = %s", (app_id,))
     return {"loan_id": loan_id}

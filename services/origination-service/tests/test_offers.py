@@ -117,7 +117,11 @@ def _accept_db(joined_row, existing_loan=None):
         if s.startswith("UPDATE"):
             return []
         if "FROM LOANS" in s:
-            return [{"id": existing_loan}] if existing_loan is not None else []
+            return (
+                [{"id": existing_loan, "principal": 5000.0}]
+                if existing_loan is not None
+                else []
+            )
         return [joined_row] if joined_row else []
 
     return _q
@@ -159,7 +163,9 @@ def test_accept_concurrent_race_replays_winners_loan(monkeypatch):
         if "FROM LOANS" in s:
             state["loans_calls"] += 1
             # first check misses (pre-insert); post-conflict lookup finds the winner
-            return [] if state["loans_calls"] == 1 else [{"id": 777}]
+            return (
+                [] if state["loans_calls"] == 1 else [{"id": 777, "principal": 5000.0}]
+            )
         return [_APPROVED_WITH_OFFER]
 
     monkeypatch.setattr(applications.db, "query", _q)
@@ -171,6 +177,48 @@ def test_accept_concurrent_race_replays_winners_loan(monkeypatch):
     resp = TestClient(app).post("/applications/1/accept")
     assert resp.status_code == 200
     assert resp.json()["loan_id"] == 777  # the winner's loan, not a second board
+
+
+def test_accept_replay_reconciles_funded_status_and_balance(monkeypatch):
+    # PR review: a first attempt may board the loan then crash before funding the app (or
+    # creating the balance). A replay that finds the existing loan must NOT return early —
+    # it must still run the (idempotent) balance insert and funded update to self-heal the
+    # partial-failure window, not report success while the LOS state stays stale.
+    sql_log = []
+    balance_params = {}
+
+    def _q(sql, params=None):
+        sql_log.append(" ".join(sql.split()))
+        s = sql.strip().upper()
+        if s.startswith("UPDATE"):
+            return []
+        if "INSERT INTO BALANCES" in s:
+            balance_params["params"] = params
+            return []
+        if "FROM LOANS" in s:
+            # loan boarded by the crashed first attempt; its principal (4800) DIFFERS
+            # from the current application amount (5000) to prove the reconcile uses the
+            # loan's own principal, not the request/application amount (teeth fix).
+            return [{"id": 555, "principal": 4800.0}]
+        return [_APPROVED_WITH_OFFER]
+
+    monkeypatch.setattr(applications.db, "query", _q)
+
+    def _no_reboard(*a, **k):
+        raise AssertionError("replay must not board again")
+
+    monkeypatch.setattr(applications.intake, "board_to_servicing", _no_reboard)
+    resp = TestClient(app).post("/applications/1/accept")
+    assert resp.status_code == 200
+    assert resp.json()["loan_id"] == 555
+    # the reconcile ran on the existing-loan replay path, not skipped
+    assert any(
+        s.startswith("UPDATE applications SET status = 'funded'") for s in sql_log
+    )
+    assert any("INSERT INTO balances" in s for s in sql_log)
+    # a missing-balance heal uses the BOARDED loan's principal (4800), never the
+    # divergent application amount (5000)
+    assert balance_params["params"][1] == 4800.0
 
 
 def test_accept_409_when_not_approved(monkeypatch):
