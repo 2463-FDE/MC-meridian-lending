@@ -8,7 +8,7 @@ over HTTP and maps its response into the OfferOut shape the frontend already exp
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
-from .. import authz, clients, db
+from .. import authz, clients, db, kyc_gate
 from ..schemas import Disclosure, OfferOut, ScheduleRow
 
 router = APIRouter(tags=["offers"])
@@ -53,6 +53,9 @@ def make_offer(
     authz.require_officer_or_owner(
         body.app_id, x_user_role, x_user_id, x_application_token
     )
+    # ADR 0011: require a passing KYC before generating/persisting a TILA offer (defense in
+    # depth alongside the decision gate).
+    kyc_gate.require_kyc_passed(body.app_id)
     # Bind the disclosure inputs to the STORED application, never the caller (PR review):
     # /los/offer is reachable anonymously through the gateway, and origination forwards the
     # internal-service token to disclosure-service, so accepting caller-supplied

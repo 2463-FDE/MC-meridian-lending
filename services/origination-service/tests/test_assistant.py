@@ -15,6 +15,14 @@ from app.llm import ClaudeClient, FakeAdapter, LLMConfig
 from app.llm.request_builder import redact_json
 
 
+@pytest.fixture(autouse=True)
+def _kyc_passes(monkeypatch):
+    # The assistant tests exercise the agent loop / idempotency forwarding, not the ADR
+    # 0011 KYC gate on the score tool (covered in test_kyc_gate.py). Let KYC pass so its
+    # DB lookup / 409 doesn't interfere.
+    monkeypatch.setattr(assistant.kyc_gate, "require_kyc_passed", lambda app_id: None)
+
+
 def _client(*responses):
     cfg = LLMConfig(
         api_key="test-key", max_retries=0, token_budget=20_000, max_tokens=256

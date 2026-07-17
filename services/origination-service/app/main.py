@@ -183,6 +183,13 @@ def board(
     arbitrary loan. No product caller invokes it (the real flow is /applications/{id}/
     accept); it is retained only as an ops/seam hatch, so it now requires the shared
     internal-service secret, which the gateway strips from external requests.
+
+    ADR 0011 KYC gate NOT applied here (deliberate, parity with the ADR 0010 decision-state
+    guard exemption): /board is an internal-only ops hatch with FULLY caller-supplied
+    inputs and no LOS lookup, invoked by no product caller. The product boarding path
+    (/applications/{id}/accept) IS KYC-gated. Gating this hatch on KYC would presume an LOS
+    application it does not read; an operator using it takes explicit responsibility. Noted,
+    not missed.
     """
     applications._require_internal_caller(x_internal_service)
     loan_id = intake.board_to_servicing(

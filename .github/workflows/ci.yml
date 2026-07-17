@@ -177,6 +177,25 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_authz.py -q
 
+  kyc-enforcement-gate:
+    # ADR 0011 is a compliance control: a regulated decision, an offer, and loan boarding
+    # must not proceed on an application whose identity check failed or never ran. The
+    # tests in test_kyc_gate.py prove decision/offer/accept 409 on a declined or absent
+    # KYC. They also run in the `backend` job under continue-on-error/|| true, so a
+    # reopened gap would stay green. This job MUST block -- no continue-on-error, no
+    # `|| true`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: origination-service KYC enforcement tests
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_kyc_gate.py -q
+
   db-readiness-gate:
     # DB readiness is a security control: a passwordless / placeholder / stale
     # DATABASE_URL must report unhealthy, not connect unauthenticated or fail

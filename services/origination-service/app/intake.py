@@ -5,14 +5,16 @@ A funded loan is boarded to servicing by a DIRECT INSERT into the servicing tabl
 no contract. (brownfield seam #1 — see docs/architecture.md, ADR 0002)
 """
 
+import secrets
+
 from .logging_config import get_logger
 from . import db
 
 log = get_logger("intake")
 
 
-def create_application(payload: dict) -> int:
-    """Insert applicant + application.
+def create_application(payload: dict) -> tuple[int, str]:
+    """Insert applicant + application; return (app_id, continuation_token).
 
     Logs an ALLOWLIST of non-PII, non-free-text fields only (amount / term /
     entity flag) — never the raw payload. Dumping the whole request dict put
@@ -20,6 +22,12 @@ def create_application(payload: dict) -> int:
     PAN could hide behind separators the whole-line redactor can't fully catch.
     Not logging free text at all removes that entire class (closes D5 on this
     path); the redactor stays a backstop for anything that still reaches a log.
+
+    The ADR 0010 continuation token is generated here and persisted in the SAME
+    application INSERT (PR review): a logged-out applicant's only credential must be
+    durable with the row it authorizes. A separate best-effort UPDATE could leave a
+    committed application with a NULL token and no recovery path, so if the INSERT fails
+    the whole submit fails — never a persisted application without a usable token.
     """
     log.info(
         "POST /applications intake amount=%s term_months=%s is_entity=%s",
@@ -40,11 +48,12 @@ def create_application(payload: dict) -> int:
         ),
     )
     applicant_id = applicant[0]["id"]
+    continuation_token = secrets.token_urlsafe(32)
     app_row = db.query(
         "INSERT INTO applications "
         "(applicant_id, amount, term_months, purpose, income, monthly_debt, "
-        "employment_years) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        "employment_years, continuation_token) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
         (
             applicant_id,
             payload.get("amount"),
@@ -53,9 +62,10 @@ def create_application(payload: dict) -> int:
             payload.get("income"),
             payload.get("monthly_debt"),
             payload.get("employment_years"),
+            continuation_token,
         ),
     )
-    return app_row[0]["id"]
+    return app_row[0]["id"], continuation_token
 
 
 def board_to_servicing(

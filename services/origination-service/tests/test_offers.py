@@ -9,10 +9,20 @@ The remaining anonymous-trigger authorization (WHOSE application this is) is the
 officer-OR-owner check deferred to ADR 0010.
 """
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.routers import applications, offers
+
+
+@pytest.fixture(autouse=True)
+def _kyc_passes(monkeypatch):
+    # These tests exercise the offer/accept authorization + decision-state + idempotency
+    # guards, not the ADR 0011 KYC gate (covered in test_kyc_gate.py). Let KYC pass so a
+    # 409 from the gate doesn't mask the behavior under test. offers.kyc_gate and
+    # applications.kyc_gate are the same module object, so one patch covers both routes.
+    monkeypatch.setattr(offers.kyc_gate, "require_kyc_passed", lambda app_id: None)
 
 
 def _disclosure_resp():

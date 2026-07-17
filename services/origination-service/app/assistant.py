@@ -21,7 +21,7 @@ import json
 import uuid
 from urllib.parse import quote
 
-from . import clients
+from . import clients, kyc_gate
 from .logging_config import get_logger
 from .routers.applications import decision_request_payload
 
@@ -49,6 +49,10 @@ def _score_application(app_id: int, request_id: str | None = None) -> dict:
     payload = decision_request_payload(app_id)
     if payload is None:
         raise ApplicationNotFound(f"application {app_id} not found")
+    # ADR 0011 parity: the manual officer route (run_decision) is KYC-gated, so the
+    # assistant's score tool must be too -- otherwise "use the assistant" is a KYC bypass
+    # for the same regulated credit pull. Fails closed on a declined/absent check.
+    kyc_gate.require_kyc_passed(app_id)
     if request_id:
         payload["request_id"] = request_id
     resp = clients.post(clients.DECISION_URL, "/decisions", payload)

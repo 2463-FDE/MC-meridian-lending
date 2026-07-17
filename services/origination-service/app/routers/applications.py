@@ -1,7 +1,6 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
 
 import hmac
-import secrets
 
 import httpx
 from psycopg2 import errors as pg_errors
@@ -9,7 +8,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import authz, clients, config, db, intake, models
+from .. import authz, clients, config, db, intake, kyc_gate, models
 from ..database import get_session
 from ..logging_config import get_logger
 from ..schemas import (
@@ -54,28 +53,13 @@ def _require_internal_caller(x_internal_service: str | None) -> None:
 @router.post("", response_model=ApplicationCreated)
 def submit_application(body: ApplicationIn):
     payload = body.model_dump()
-    app_id = intake.create_application(
-        payload
-    )  # creates applicant+application rows; logs operational fields only (no PII)
-    # ADR 0010 Phase B: issue an unguessable per-application continuation token so the
-    # anonymous applicant can complete decision/offer/accept on THIS application without a
-    # login (see authz.require_officer_or_owner). Persisted here and returned once below;
-    # the frontend carries it as X-Application-Token. Best-effort: a failure to persist the
-    # token must not 500 intake (the officer path still works via role), so it degrades to
-    # "no token" (officer/owner-only) rather than losing the application.
-    continuation_token = secrets.token_urlsafe(32)
-    try:
-        db.query(
-            "UPDATE applications SET continuation_token = %s WHERE id = %s",
-            (continuation_token, app_id),
-        )
-    except Exception as e:  # noqa
-        log.error(
-            "could not persist continuation token for app_id=%s: %s",
-            app_id,
-            type(e).__name__,
-        )
-        continuation_token = None
+    # ADR 0010 Phase B: create_application persists the applicant+application AND its
+    # continuation token in one INSERT and returns both (PR review). The token is the
+    # anonymous applicant's only credential to complete decision/offer/accept, so it is
+    # atomic with the application row -- if the write fails, submit fails, never a durable
+    # application with a NULL token and no recovery path. Returned once below; the frontend
+    # carries it as X-Application-Token.
+    app_id, continuation_token = intake.create_application(payload)
     # Resolve applicant_id the same way the old in-process path did.
     applicant_id = None
     try:
@@ -389,6 +373,10 @@ def run_decision(
     # officer, the owning borrower, or the applicant holding this application's
     # continuation token may trigger it -- never an anonymous caller who guessed the id.
     authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
+    # ADR 0011: a credit pull is a regulated action -- require a passing KYC first (fails
+    # closed on a declined or never-run check), so a failed/absent identity check can never
+    # reach decisioning or, transitively, funding.
+    kyc_gate.require_kyc_passed(app_id)
     # Optional Idempotency-Key header is forwarded as the decision-service request_id:
     # a retry after a timeout on this officer path replays the recorded decision instead
     # of re-pulling credit and appending a second regulated event (PR #7 review).
@@ -439,6 +427,10 @@ def accept_offer(
     # holding this application's continuation token may accept -- never an anonymous caller
     # who guessed an approved application id.
     authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
+    # ADR 0011: boarding is the money action -- require a passing KYC (defense in depth;
+    # decisioning is already gated, but never board a funded loan on an unverified identity
+    # even if an approved decision somehow predates the gate).
+    kyc_gate.require_kyc_passed(app_id)
     # Decision-state guard (PR review, ADR 0010 alt 3 defense-in-depth): boarding creates
     # a real loan (loans + balances, status=funded), so require the application to have an
     # APPROVED decision AND a generated offer before boarding — never rely on the UI to

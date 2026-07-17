@@ -15,6 +15,16 @@ from app.main import app
 from app.routers import applications
 
 
+@pytest.fixture(autouse=True)
+def _kyc_passes(monkeypatch):
+    # The decision-route tests here predate the ADR 0011 KYC gate (covered in
+    # test_kyc_gate.py); let KYC pass so its 409 doesn't mask the quarantine/remediation
+    # behavior. Submit tests don't call the gate, so this is a no-op for them.
+    monkeypatch.setattr(
+        applications.kyc_gate, "require_kyc_passed", lambda app_id: None
+    )
+
+
 def test_create_application_persists_model_inputs(monkeypatch):
     captured = []
 
@@ -35,8 +45,13 @@ def test_create_application_persists_model_inputs(monkeypatch):
         }
     )
     app_insert = next(c for c in captured if "INSERT INTO applications" in c[0])
-    # (applicant_id, amount, term_months, purpose, income, monthly_debt, employment_years)
-    assert app_insert[1] == (1, 15000, 36, "debt_consolidation", 65000, 500, 3)
+    # (applicant_id, amount, term_months, purpose, income, monthly_debt,
+    #  employment_years, continuation_token)
+    assert app_insert[1][:7] == (1, 15000, 36, "debt_consolidation", 65000, 500, 3)
+    # the continuation token is persisted in the SAME INSERT (PR review), not a separate
+    # best-effort UPDATE
+    assert isinstance(app_insert[1][7], str) and app_insert[1][7]
+    assert "continuation_token" in app_insert[0]
 
 
 def test_decision_request_payload_uses_captured_inputs(monkeypatch):
@@ -119,7 +134,9 @@ def test_kyc_transport_failure_is_observable_not_silent(monkeypatch):
     # token -> 403) must NOT masquerade as an ordinary all-false verification. Intake
     # resilience is kept (still 200/submitted), but the failure is made observable:
     # kyc_checked=False in the response AND an audit_logs row.
-    monkeypatch.setattr(applications.intake, "create_application", lambda payload: 1)
+    monkeypatch.setattr(
+        applications.intake, "create_application", lambda payload: (1, "tok-test")
+    )
     audit = []
     monkeypatch.setattr(applications.db, "query", _kyc_test_db(audit))
 
@@ -146,7 +163,9 @@ def test_kyc_transport_failure_is_observable_not_silent(monkeypatch):
 def test_kyc_success_sets_kyc_checked_true(monkeypatch):
     # Contrast: when KYC actually runs, kyc_checked is True and a genuine decline is a
     # 200 with cip_passed False (no audit row) — distinct from the failure path above.
-    monkeypatch.setattr(applications.intake, "create_application", lambda payload: 1)
+    monkeypatch.setattr(
+        applications.intake, "create_application", lambda payload: (1, "tok-test")
+    )
     audit = []
     monkeypatch.setattr(applications.db, "query", _kyc_test_db(audit))
     monkeypatch.setattr(

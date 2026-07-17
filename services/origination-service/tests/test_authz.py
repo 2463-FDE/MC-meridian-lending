@@ -232,18 +232,22 @@ def test_anonymous_list_denied_through_route():
 # --- end-to-end: the public (logged-out) apply flow works via the token --------
 
 
+_E2E_TOKEN = "e2e-continuation-token"
+
+
 def _apply_flow_db(state):
-    """Stateful db.query for the public apply flow: submit's UPDATE captures the issued
-    token; the authz lookup returns it back; decision_request_payload returns a decisionable
-    row. Models an owner-less (anonymous) application authorized purely by its token."""
+    """Stateful db.query for the public apply flow: the authz lookup returns the token that
+    create_application issued (the token is now persisted in the application INSERT, which
+    is stubbed, so the lookup returns the known fixed token); decision_request_payload
+    returns a decisionable row. Models an owner-less (anonymous) application authorized
+    purely by its token."""
 
     def _q(sql, params=None):
         s = sql.strip().upper()
-        if s.startswith("UPDATE APPLICATIONS SET CONTINUATION_TOKEN"):
-            state["token"] = params[0]
-            return []
         if "CONTINUATION_TOKEN FROM APPLICATIONS" in s:  # authz lookup
-            return [{"applicant_id": None, "continuation_token": state["token"]}]
+            return [{"applicant_id": None, "continuation_token": _E2E_TOKEN}]
+        if "LEFT JOIN KYC_CHECKS" in s:  # ADR 0011 KYC gate -> passing
+            return [{"name_verified": True, "address_verified": True}]
         if s.startswith("SELECT APPLICANT_ID FROM APPLICATIONS"):  # submit resolve
             return [{"applicant_id": None}]
         if "LEFT JOIN APPLICANTS" in s:  # decision_request_payload
@@ -279,7 +283,9 @@ def test_public_apply_flow_completes_with_continuation_token(monkeypatch):
     # decision with NO token is denied 404. Proves anonymous apply still works end to end
     # without a login, and only with the scoped capability.
     state = {"token": None}
-    monkeypatch.setattr(applications.intake, "create_application", lambda payload: 1)
+    monkeypatch.setattr(
+        applications.intake, "create_application", lambda payload: (1, _E2E_TOKEN)
+    )
     monkeypatch.setattr(applications.db, "query", _apply_flow_db(state))
     monkeypatch.setattr(applications.clients, "post", _apply_flow_clients_post)
     client = TestClient(app)
@@ -290,7 +296,7 @@ def test_public_apply_flow_completes_with_continuation_token(monkeypatch):
     )
     assert submitted.status_code == 200
     token = submitted.json()["continuation_token"]
-    assert token and state["token"] == token  # issued and persisted
+    assert token == _E2E_TOKEN  # issued at submit and returned once
 
     # No token -> denied (anonymous, no capability).
     denied = client.post("/applications/1/decision")
