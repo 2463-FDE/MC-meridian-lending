@@ -46,6 +46,16 @@ def _canonical_model(model: str) -> str:
     return _CANONICAL_MODEL.get(model, model)
 
 
+# LangSmith matches a price on (ls_provider, ls_model_name); ls_model_name alone
+# yields token-only spans with blank cost (PR review). This platform calls only
+# Anthropic Claude models — directly or via a Bedrock inference profile
+# (us.anthropic.*) — and _canonical_model already normalizes the Bedrock id to the
+# Anthropic model name, so LangSmith prices both routes under the "anthropic"
+# provider. Tagging the Bedrock route as a distinct provider would leave the
+# canonical Anthropic model unpriced, so both paths report "anthropic".
+_LS_PROVIDER = "anthropic"
+
+
 def _trace_transport_inputs(inputs: dict) -> dict:
     """Export only NON-CONTENT request metadata to LangSmith.
 
@@ -130,10 +140,13 @@ def call_with_retry(
     Total attempts = 1 + `max_retries`. Raises the last error if retries are
     exhausted, or immediately on a non-retryable error.
     """
-    # Tag the LLM run with a priceable model name so LangSmith can cost it.
-    # req.model is known up front; canonicalize the Bedrock profile id.
+    # Tag the LLM run so LangSmith can cost it: BOTH the priceable (canonical) model
+    # name AND the provider are required — with only the model name the span shows
+    # tokens but no cost (PR review). req.model is known up front; canonicalize the
+    # Bedrock profile id.
     run_tree = get_current_run_tree()
     if run_tree is not None:
+        run_tree.metadata["ls_provider"] = _LS_PROVIDER
         run_tree.metadata["ls_model_name"] = _canonical_model(req.model)
 
     attempt = 0

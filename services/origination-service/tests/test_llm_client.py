@@ -254,6 +254,49 @@ def test_retries_5xx_then_succeeds():
     assert len(adapter.calls) == 2  # one failure + one success
 
 
+@pytest.mark.parametrize(
+    "model, expected_name",
+    [
+        # Direct Anthropic API path: model is already a priceable name.
+        ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+        # Bedrock inference-profile path: canonicalized to the Anthropic name.
+        ("us.anthropic.claude-haiku-4-5-20251001-v1:0", "claude-haiku-4-5"),
+    ],
+)
+def test_transport_trace_sets_ls_provider_and_model(monkeypatch, model, expected_name):
+    # PR review: LangSmith prices a run on (ls_provider, ls_model_name). Both must be
+    # on the LLM run for BOTH the direct-Anthropic and Bedrock paths, or the span
+    # shows tokens with blank cost.
+    from app.llm import transport as transport_mod
+
+    run_tree = _FakeRunTree()
+    monkeypatch.setattr(transport_mod, "get_current_run_tree", lambda: run_tree)
+    call_with_retry(
+        FakeAdapter(response=GOOD_SUMMARY),
+        _req(model=model),
+        max_retries=0,
+        sleep=lambda _: None,
+        rng=lambda: 0.0,
+    )
+    assert run_tree.metadata["ls_provider"] == "anthropic"
+    assert run_tree.metadata["ls_model_name"] == expected_name
+
+
+def test_transport_trace_tolerates_no_active_run_tree(monkeypatch):
+    # Tracing disabled: get_current_run_tree() is None; the call must still succeed.
+    from app.llm import transport as transport_mod
+
+    monkeypatch.setattr(transport_mod, "get_current_run_tree", lambda: None)
+    out = call_with_retry(
+        FakeAdapter(response=GOOD_SUMMARY),
+        _req(),
+        max_retries=0,
+        sleep=lambda _: None,
+        rng=lambda: 0.0,
+    )
+    assert out.text == GOOD_SUMMARY
+
+
 def test_transport_trace_never_exports_raw_model_text():
     # PR review: the transport span serializes as soon as the adapter returns,
     # BEFORE the client's validate_structured/guard_output run — raw provider
