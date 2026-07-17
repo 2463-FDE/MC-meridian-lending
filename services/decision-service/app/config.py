@@ -241,6 +241,18 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             )
             if cur.fetchone() is None:
                 return False, "schema_not_ready:uq_decision_events_request"
+            # Append-only guarantee (PR review): decision_events is the Reg B system of
+            # record (ADR 0009), kept immutable by DB triggers that block UPDATE/DELETE
+            # and TRUNCATE. A hand-applied migration that created the table but not its
+            # triggers would leave the regulated record silently mutable while /health
+            # read healthy. Require BOTH triggers so that state reports unhealthy.
+            for trigger in (
+                "trg_decision_events_append_only",
+                "trg_decision_events_no_truncate",
+            ):
+                cur.execute("SELECT 1 FROM pg_trigger WHERE tgname = %s", (trigger,))
+                if cur.fetchone() is None:
+                    return False, "schema_not_ready:decision_events_append_only_trigger"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__

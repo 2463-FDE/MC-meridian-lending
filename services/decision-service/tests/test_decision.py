@@ -370,6 +370,51 @@ def test_database_url_probe_fails_when_idempotency_index_missing(monkeypatch):
     assert err == "schema_not_ready:uq_decision_events_request"
 
 
+class _TriggerMissingCursor:
+    """Column and unique index present, but the append-only triggers absent — a
+    hand-applied migration that created decision_events without its immutability guard,
+    leaving the Reg B record silently mutable (PR review)."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        # information_schema (column) and pg_indexes (index) pass; pg_trigger fails.
+        return None if "pg_trigger" in self._last else (1,)
+
+
+class _TriggerMissingConn:
+    def cursor(self):
+        return _TriggerMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_database_url_probe_fails_when_append_only_trigger_missing(monkeypatch):
+    # PR review sweep: decision_events is append-only by DB trigger (ADR 0009). A table
+    # created without its triggers is silently mutable while /health looks fine.
+    # Readiness must fail on that state, naming the missing immutability guard.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _TriggerMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:decision_events_append_only_trigger"
+
+
 def test_database_url_probe_fails_on_wrong_password_without_postgres_password(
     monkeypatch,
 ):
