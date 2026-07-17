@@ -1,17 +1,21 @@
 # ADR 0010: Application Ownership Authorization — Bind the Apply Flow to Identity, Deprecate Anonymous Apply
 
-- **Status:** **Accepted (Phase A) / Proposed (Phase B).**
-  - **Phase A — officer-OR-owner enforcement — BUILT and accepted.** The four
-    orchestration routes (plus the application list and the offer read) now authorize as
-    officer-OR-owner in origination, closing the anonymous IDOR. This needed **no schema
-    change and no product decision**: ownership is derived from data that already exists
-    (see Decision §1), so it shipped in the Week-3 review.
-  - **Phase B — deprecate anonymous apply + borrower self-registration — still proposed.**
-    Requiring a login to *apply* (so every new application binds to an owner) and the
-    signup/frontend work that implies is a product decision (the anonymous-apply
-    deprecation) and remains pending product + compliance sign-off. Phase A does **not**
-    depend on it.
-- **Date:** 2026-07-16 (Phase A accepted 2026-07-17)
+- **Status:** **Accepted (Phase A + Phase B, both BUILT).**
+  - **Phase A — officer-OR-owner enforcement — BUILT.** The four orchestration routes
+    (plus the application list and the offer read) authorize as officer-OR-owner in
+    origination, closing the anonymous IDOR. No schema change, no product decision:
+    ownership derives from data that already exists (see Decision §1).
+  - **Phase B — anonymous applicant self-service — BUILT via the continuation-token
+    variant (Alternative 1), NOT via deprecating anonymous apply.** A review round showed
+    Phase A alone broke the public apply flow (a logged-out applicant could submit but then
+    got 404 on their own decision/offer/accept). Rather than force a login (deprecate
+    anonymous apply + build borrower signup — a product decision with no signup flow in
+    existence), `POST /applications` now issues an **unguessable per-application
+    continuation token**, and the application-scoped routes authorize on officer OR owner
+    OR a valid token for that application. This preserves anonymous apply, closes the
+    serial-id IDOR (the token, not the guessable id, is the authorization), and needs no
+    product/compliance sign-off. See Decision §3 and Alternative 1 (now the chosen path).
+- **Date:** 2026-07-16 (Phase A + Phase B accepted 2026-07-17)
 - **Author:** Claude Code
 - **Related:** ADR 0002 (single shared DB), ADR 0004 (service decomposition), ADR 0009
   (decisioning assistant), the round 2–4 internal-service auth work
@@ -93,23 +97,33 @@ across the whole book). Anonymous callers (no session → no `X-User-Id`) are re
 non-officer, non-owner is denied as **404, not 403** — no existence oracle, so serial-id
 enumeration cannot even confirm which application ids are real.
 
-### 3. Anonymous apply is deprecated — Phase B, NOT built
+### 3. Anonymous apply is PRESERVED via a scoped continuation token (Phase B, built)
 
-Requiring a login to *apply* (so every new application binds to an owner via the caller's
-`applicant_id`) is deferred. `POST /applications` remains anonymous for now. Consequence
-of shipping Phase A without Phase B: an application created anonymously has an
-`applicant_id` that no user login owns, so **only an officer** can decision/offer/accept
-it — a logged-in borrower (e.g. `maria`) self-serves their own application, but a brand-new
-anonymous applicant cannot self-serve past submit until an officer acts or Phase B lands.
-That is the intended "deny anonymous callers" behavior, not a regression. Phase B (login
-before apply + borrower self-registration + the frontend changes) is a product decision
-and its own PR.
+Anonymous apply is kept, not deprecated. `POST /applications`
+(`routers/applications.py`) issues an unguessable per-application continuation token
+(`secrets.token_urlsafe(32)`), persists it to `applications.continuation_token`, and
+returns it once in the submit response. `authz.require_officer_or_owner` accepts it as a
+third authorization path: officer OR owner OR `hmac.compare_digest(X-Application-Token,
+stored)` for THAT application. The token is a capability scoped to one application id (a
+token minted for app A cannot authorize app B), so the logged-out applicant completes
+their own decision/offer/accept while serial-id enumeration stays closed — the gateway
+forwards `X-Application-Token` (it is the applicant's own capability, unlike the spoofable
+`X-User-*` it strips). A NULL token (officer-created/legacy row) has no token path, so
+those stay officer-OR-owner only. The frontend apply page carries the returned token on
+its three POSTs; no login, no signup.
 
-### 4. Reuse, don't reinvent
+Why this over deprecating anonymous apply: forcing a login would need a borrower
+self-registration flow that does not exist and a product decision to drop "apply without
+an account" (CLAUDE.md). The token closes the IDOR without either. If applicant accounts
+later become the direction, the owner path (§2) already exists and the token path can be
+retired.
 
-No new auth artifact (capability token, per-app secret) is introduced. The check rides
-the existing session → `X-User-Id`/`X-User-Role` path that round 2 already hardened, so
-officers and borrowers share one authorization model.
+### 4. Reuse where it fits; one small new artifact where it does not
+
+The officer/owner check rides the existing session → `X-User-Id`/`X-User-Role` path that
+round 2 hardened. The one new artifact is the continuation token (§3) — justified because
+the borrower has no session to key on during anonymous apply, which is exactly the case
+the existing identity path cannot cover.
 
 ## Consequences
 
@@ -153,9 +167,13 @@ stepping stone toward it, not throwaway.
 
 ### Migration
 
-- **No migration for Phase A** — ownership is derived from the existing
-  `users.applicant_id` ↔ `applications.applicant_id` link, so there is no new column to
-  add and no legacy backfill.
+- **Phase A: no migration** — ownership derives from the existing `users.applicant_id` ↔
+  `applications.applicant_id` link, so there is no new column and no backfill.
+- **Phase B: migration 0008** adds the nullable `applications.continuation_token` column
+  (`ADD COLUMN IF NOT EXISTS`, non-destructive; the origination readiness probe reports
+  `schema_not_ready:applications.continuation_token` on a volume that predates it, so an
+  unmigrated deploy fails `/health` loud instead of 500-ing submit). Legacy rows keep a
+  NULL token and stay officer-OR-owner only.
 - The "NULL-owner legacy row" concern reduces to a **behavior note**, not a data task:
   an application whose `applicant_id` is owned by no user login (anonymously created, or a
   seeded/legacy row) is **officer-only** — no borrower's `applicant_id` can match it. This
@@ -167,10 +185,11 @@ stepping stone toward it, not throwaway.
 ## Alternatives considered
 
 1. **Per-application capability token** — mint an unguessable token at submit, return it,
-   require it on `/decision`/`/accept`/`GET`. Preserves truly anonymous apply. Rejected
-   *if* applicant accounts are the direction: it is throwaway scaffolding duplicating an
-   identity mechanism that already exists. It remains the right choice only if anonymous,
-   no-login apply must be kept.
+   require it on `/decision`/`/accept`/`GET`. Preserves truly anonymous apply. **CHOSEN for
+   Phase B** (see Decision §3): anonymous, no-login apply is a product feature with no
+   signup flow to replace it, so the token — a capability scoped to one application — is
+   the fitting closure, not throwaway. The officer/owner paths (§1–§2) still stand for
+   authenticated callers; the token only covers the logged-out applicant.
 2. **Full borrower account system** — the ownership model here is the minimal slice of
    this; a broader accounts feature (profiles, saved applications) is a superset, deferred.
 3. **State-machine / one-shot guards** (decision once, accept only after approved offer) —
@@ -184,7 +203,7 @@ stepping stone toward it, not throwaway.
 
 | Owner (role) | Status |
 |--------------|--------|
-| Engineering | **Accepted (Phase A)** — officer-OR-owner check on the orchestration/read routes, derived from `users.applicant_id`; shipped in the Week-3 review with a blocking authz test gate |
-| Product | **Pending (Phase B only)** — the anonymous-apply deprecation (§3) + borrower self-registration is a product decision; Phase A does not need it |
-| Compliance / Legal | **Pending (Phase B only)** — confirm the treatment of anonymously-created (owner-less) applications now that they are officer-only |
-| Data owner | **N/A for Phase A** — no schema change; ownership is derived from existing columns |
+| Engineering | **Accepted (Phase A + B)** — officer-OR-owner check + anonymous continuation token; shipped in the Week-3 review with a blocking authz test gate + a live-stack smoke |
+| Product | **Not required** — anonymous apply is preserved (§3), so the deprecation decision that was pending is moot; the token needs no product sign-off |
+| Compliance / Legal | **Informational** — anonymously-created applications remain reachable only by an officer, the owning borrower, or the token-holder; no owner-less PII exposure |
+| Data owner | **Accepted** — migration 0008 adds the nullable `continuation_token` column (non-destructive, readiness-gated) |

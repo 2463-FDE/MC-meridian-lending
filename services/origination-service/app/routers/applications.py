@@ -1,6 +1,7 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
 
 import hmac
+import secrets
 
 import httpx
 from psycopg2 import errors as pg_errors
@@ -56,6 +57,25 @@ def submit_application(body: ApplicationIn):
     app_id = intake.create_application(
         payload
     )  # creates applicant+application rows; logs operational fields only (no PII)
+    # ADR 0010 Phase B: issue an unguessable per-application continuation token so the
+    # anonymous applicant can complete decision/offer/accept on THIS application without a
+    # login (see authz.require_officer_or_owner). Persisted here and returned once below;
+    # the frontend carries it as X-Application-Token. Best-effort: a failure to persist the
+    # token must not 500 intake (the officer path still works via role), so it degrades to
+    # "no token" (officer/owner-only) rather than losing the application.
+    continuation_token = secrets.token_urlsafe(32)
+    try:
+        db.query(
+            "UPDATE applications SET continuation_token = %s WHERE id = %s",
+            (continuation_token, app_id),
+        )
+    except Exception as e:  # noqa
+        log.error(
+            "could not persist continuation token for app_id=%s: %s",
+            app_id,
+            type(e).__name__,
+        )
+        continuation_token = None
     # Resolve applicant_id the same way the old in-process path did.
     applicant_id = None
     try:
@@ -134,6 +154,7 @@ def submit_application(body: ApplicationIn):
         "status": "submitted",
         "kyc": KycOut(**cip),
         "kyc_checked": kyc_checked,
+        "continuation_token": continuation_token,
     }
 
 
@@ -181,11 +202,13 @@ def get_application(
     session: Session = Depends(get_session),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    x_application_token: str | None = Header(default=None, alias="X-Application-Token"),
 ):
     # ADR 0010: the detail view exposes applicant PII (name, SSN-bearing applicant row,
-    # decision, offer), so only an officer or the owning borrower may read it. Closes the
-    # anonymous serial-id PII enumeration the /los proxy otherwise allows.
-    authz.require_officer_or_owner(app_id, x_user_role, x_user_id)
+    # decision, offer), so only an officer, the owning borrower, or the applicant holding
+    # this application's continuation token may read it. Closes the anonymous serial-id PII
+    # enumeration the /los proxy otherwise allows.
+    authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
     a = session.get(models.Application, app_id)
     if not a:
         raise HTTPException(status_code=404, detail="application not found")
@@ -360,11 +383,12 @@ def run_decision(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    x_application_token: str | None = Header(default=None, alias="X-Application-Token"),
 ):
     # ADR 0010: decisioning pulls credit and appends a regulated decision event, so only an
-    # officer or the owning borrower may trigger it -- never an anonymous /los caller who
-    # guessed the id.
-    authz.require_officer_or_owner(app_id, x_user_role, x_user_id)
+    # officer, the owning borrower, or the applicant holding this application's
+    # continuation token may trigger it -- never an anonymous caller who guessed the id.
+    authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
     # Optional Idempotency-Key header is forwarded as the decision-service request_id:
     # a retry after a timeout on this officer path replays the recorded decision instead
     # of re-pulling credit and appending a second regulated event (PR #7 review).
@@ -408,11 +432,13 @@ def accept_offer(
     app_id: int,
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    x_application_token: str | None = Header(default=None, alias="X-Application-Token"),
 ):
     # ADR 0010: acceptance boards a real loan (loans + balances, status=funded), the
-    # money-moving action, so only an officer or the owning borrower may accept -- never an
-    # anonymous /los caller who guessed an approved application id.
-    authz.require_officer_or_owner(app_id, x_user_role, x_user_id)
+    # money-moving action, so only an officer, the owning borrower, or the applicant
+    # holding this application's continuation token may accept -- never an anonymous caller
+    # who guessed an approved application id.
+    authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
     # Decision-state guard (PR review, ADR 0010 alt 3 defense-in-depth): boarding creates
     # a real loan (loans + balances, status=funded), so require the application to have an
     # APPROVED decision AND a generated offer before boarding — never rely on the UI to

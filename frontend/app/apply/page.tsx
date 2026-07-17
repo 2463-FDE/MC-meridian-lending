@@ -54,6 +54,10 @@ interface AppResult {
   app_id: string | number;
   status?: string;
   kyc?: Kyc;
+  // ADR 0010: unguessable per-application continuation token issued at submit. The
+  // logged-out applicant sends it as X-Application-Token to authorize their own
+  // decision/offer/accept on this application (officer/owner are authorized otherwise).
+  continuation_token?: string | null;
 }
 
 interface DecisionResult {
@@ -190,6 +194,15 @@ export default function ApplyPage() {
     }
   }
 
+  // ADR 0010: authorize the logged-out applicant's own decision/offer/accept with the
+  // continuation token returned at submit. Officers/owners are authorized by session, so
+  // the header is simply absent for them.
+  function appTokenHeader(): Record<string, string> {
+    return app?.continuation_token
+      ? { "X-Application-Token": app.continuation_token }
+      : {};
+  }
+
   async function getDecision() {
     if (!app) return;
     setBusy(true);
@@ -198,10 +211,13 @@ export default function ApplyPage() {
       const res = (await apiPost(
         `/los/applications/${app.app_id}/decision`,
         undefined,
-        // Stable per-application idempotency key: a timeout retry or a second click
-        // replays the recorded decision instead of re-pulling credit and appending
-        // another regulated decision event (PR review).
-        { "Idempotency-Key": `los-decision-${app.app_id}` }
+        {
+          // Stable per-application idempotency key: a timeout retry or a second click
+          // replays the recorded decision instead of re-pulling credit and appending
+          // another regulated decision event (PR review).
+          "Idempotency-Key": `los-decision-${app.app_id}`,
+          ...appTokenHeader(),
+        }
       )) as DecisionResult;
       setDecision(res);
     } catch (err) {
@@ -216,12 +232,16 @@ export default function ApplyPage() {
     setBusy(true);
     setApiError(null);
     try {
-      const res = (await apiPost("/los/offer", {
-        app_id: app.app_id,
-        principal: form.amount,
-        annual_rate_pct: OFFER_RATE_PCT,
-        term_months: parseInt(form.term_months, 10),
-      })) as { app_id: string | number; disclosure: Disclosure };
+      const res = (await apiPost(
+        "/los/offer",
+        {
+          app_id: app.app_id,
+          principal: form.amount,
+          annual_rate_pct: OFFER_RATE_PCT,
+          term_months: parseInt(form.term_months, 10),
+        },
+        appTokenHeader()
+      )) as { app_id: string | number; disclosure: Disclosure };
       setDisclosure(res.disclosure);
     } catch (err) {
       setApiError(errMsg(err, "Could not generate your offer."));
@@ -236,7 +256,9 @@ export default function ApplyPage() {
     setApiError(null);
     try {
       const res = (await apiPost(
-        `/los/applications/${app.app_id}/accept`
+        `/los/applications/${app.app_id}/accept`,
+        undefined,
+        appTokenHeader()
       )) as { loan_id: string | number };
       setAcceptedLoanId(res.loan_id);
     } catch (err) {

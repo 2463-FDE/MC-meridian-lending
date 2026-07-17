@@ -1,0 +1,13 @@
+-- ADR 0010 Phase B (continuation-token variant): let an anonymous applicant complete
+-- their own decision/offer/accept flow without a login, while the officer-OR-owner gate
+-- keeps serial-id IDOR closed.
+--
+-- POST /applications issues an unguessable per-application continuation token and returns
+-- it to the applicant. The application-scoped routes (decision, accept, offer, detail,
+-- offer read) authorize on officer OR owner OR a valid continuation token for THAT
+-- application id -- so the token is a capability scoped to one application, not a session.
+--
+-- Nullable: officer-created and pre-migration/legacy rows have no token and remain
+-- officer-OR-owner only (no anonymous token path), which is the safe default. A fresh
+-- db/init volume and the seed have no legacy rows, so this applies cleanly.
+ALTER TABLE applications ADD COLUMN IF NOT EXISTS continuation_token TEXT;

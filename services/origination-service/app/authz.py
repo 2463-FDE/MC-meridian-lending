@@ -17,6 +17,8 @@ the IDOR being closed is anonymous serial-id enumeration of applications, so the
 must not let a caller tell a real application id from a missing one.
 """
 
+import hmac
+
 from fastapi import HTTPException
 
 from . import db
@@ -42,24 +44,54 @@ def require_officer(x_user_role: str | None) -> None:
 
 
 def require_officer_or_owner(
-    app_id: int, x_user_role: str | None, x_user_id: str | None
+    app_id: int,
+    x_user_role: str | None,
+    x_user_id: str | None,
+    x_application_token: str | None = None,
 ) -> None:
-    """Authorize an application-scoped action for an officer or the owning borrower."""
+    """Authorize an application-scoped action for an officer, the owning borrower, or an
+    anonymous applicant holding this application's continuation token (ADR 0010 Phase B).
+
+    The continuation token is the scoped capability issued at submit: it authorizes the
+    logged-out applicant to complete decision/offer/accept on THIS application only, so
+    anonymous apply keeps working without a login while serial-id enumeration stays closed
+    (the token, not the guessable id, is the authorization).
+    """
     if _is_officer(x_user_role):
         return  # officers act on any application; the route handles a genuine 404
-    # Non-officer: allowed only if the caller is the authenticated owner of THIS
-    # application. Resolve the caller's applicant_id (borrower logins carry it; anonymous
-    # callers have no X-User-Id) and require it to match the application's applicant_id.
-    caller_applicant_id = None
+    # Non-officer: allowed only as the owning borrower OR with this application's token.
+    # A pure anonymous caller with neither a session nor a token is denied without any DB
+    # lookup (no existence oracle) -- preserving the round-A short-circuit.
     user_id = _as_int(x_user_id)
-    if user_id is not None:
-        user_rows = db.query("SELECT applicant_id FROM users WHERE id = %s", (user_id,))
-        caller_applicant_id = user_rows[0]["applicant_id"] if user_rows else None
-    if caller_applicant_id is not None:
-        app_rows = db.query(
-            "SELECT applicant_id FROM applications WHERE id = %s", (app_id,)
-        )
-        if app_rows and app_rows[0]["applicant_id"] == caller_applicant_id:
-            return  # the owning borrower
-    # Anonymous, non-owner, or unknown caller: deny without revealing existence.
+    if user_id is None and not x_application_token:
+        raise HTTPException(status_code=404, detail="application not found")
+    app_rows = db.query(
+        "SELECT applicant_id, continuation_token FROM applications WHERE id = %s",
+        (app_id,),
+    )
+    app_row = app_rows[0] if app_rows else None
+    if app_row is not None:
+        # Owner: the caller's users.applicant_id matches the application's applicant_id.
+        if user_id is not None:
+            user_rows = db.query(
+                "SELECT applicant_id FROM users WHERE id = %s", (user_id,)
+            )
+            caller_applicant_id = user_rows[0]["applicant_id"] if user_rows else None
+            if (
+                caller_applicant_id is not None
+                and app_row["applicant_id"] == caller_applicant_id
+            ):
+                return
+        # Continuation token: constant-time match against THIS application's stored token
+        # (scoped to one app_id, so a token for app A cannot authorize app B). A legacy
+        # row with a NULL token has no token path.
+        stored = app_row["continuation_token"]
+        if (
+            x_application_token
+            and stored
+            and hmac.compare_digest(x_application_token, stored)
+        ):
+            return
+    # Non-owner, wrong/absent token, or unknown application: deny without revealing
+    # existence.
     raise HTTPException(status_code=404, detail="application not found")

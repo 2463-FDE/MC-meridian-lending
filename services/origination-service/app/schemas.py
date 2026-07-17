@@ -53,6 +53,11 @@ class ApplicationCreated(BaseModel):
     # verified" from "verification could not be performed" (PR review). Default True so
     # the field is backward-compatible for existing consumers.
     kyc_checked: bool = True
+    # ADR 0010 Phase B: unguessable per-application continuation token (see authz.py). The
+    # anonymous applicant must send it as X-Application-Token to complete decision/offer/
+    # accept on this application. None for officer-created flows (the officer is already
+    # authorized by role). Bearer capability — the client holds it like a magic link.
+    continuation_token: str | None = None
 
 
 class ApplicantOut(BaseModel):

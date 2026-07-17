@@ -113,6 +113,21 @@ def test_los_proxy_forwards_idempotency_key(monkeypatch):
     assert captured["headers"].get("idempotency-key") == "los-decision-1"
 
 
+def test_los_proxy_forwards_application_continuation_token(monkeypatch):
+    # PR review (front-door reachability): ADR 0010's anonymous apply flow authorizes on
+    # the X-Application-Token issued at submit. Unlike X-User-*/X-Internal-Service (which
+    # the gateway strips as spoofable identity), this token is the applicant's own
+    # capability and MUST be forwarded -- a stripped token would 404 every logged-out
+    # decision/offer/accept and break public apply.
+    captured = _capture_forwarded_headers(monkeypatch)
+    resp = client.post(
+        "/los/applications/1/decision",
+        headers={"X-Application-Token": "tok-xyz"},
+    )
+    assert resp.status_code == 200
+    assert captured["headers"].get("x-application-token") == "tok-xyz"
+
+
 def test_anonymous_post_to_offer_cannot_carry_internal_token(monkeypatch):
     # PR review: /los/offer makes origination call disclosure-service with the internal
     # token (a confused-deputy write). A client-supplied X-Internal-Service must be

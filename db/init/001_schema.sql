@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS applications (
     job_title         TEXT,
     employment_years  DOUBLE PRECISION,
     status            TEXT DEFAULT 'submitted',
+    -- ADR 0010 Phase B: unguessable per-application continuation token issued at submit.
+    -- Authorizes the anonymous applicant to complete decision/offer/accept on THIS
+    -- application only (a scoped capability), so anonymous apply keeps working without a
+    -- login while serial-id IDOR stays closed. NULL for officer-created/legacy rows.
+    continuation_token TEXT,
     created_at        TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);

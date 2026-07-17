@@ -165,6 +165,18 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             cur.execute("SELECT 1 FROM pg_indexes WHERE indexname = 'uq_loans_app'")
             if cur.fetchone() is None:
                 return False, "schema_not_ready:uq_loans_app"
+            # ADR 0010 Phase B: the anonymous apply flow authorizes decision/offer/accept
+            # by the applications.continuation_token issued at submit. A volume predating
+            # 0008 has no column, so submit's UPDATE would 500 and no token could be issued
+            # -- silently breaking anonymous apply. Fail readiness loud, naming the column,
+            # same as the monthly_debt / uq_loans_app rungs.
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'applications' "
+                "AND column_name = 'continuation_token'"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:applications.continuation_token"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__

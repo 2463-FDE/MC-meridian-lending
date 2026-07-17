@@ -248,6 +248,51 @@ def test_probe_fails_when_loans_unique_index_missing(monkeypatch):
     assert err == "schema_not_ready:uq_loans_app"
 
 
+class _ContinuationTokenMissingCursor:
+    """monthly_debt column + uq_loans_app index present, but the ADR 0010 Phase B
+    continuation_token column absent -- a volume predating migration 0008, on which submit
+    could not issue a token and anonymous apply would silently break."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "continuation_token" in self._last:
+            return None
+        return (1,)
+
+
+class _ContinuationTokenMissingConn:
+    def cursor(self):
+        return _ContinuationTokenMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_continuation_token_column_missing(monkeypatch):
+    # PR review: the public apply flow authorizes on applications.continuation_token; a
+    # volume without the column must report unhealthy, naming it, not 500 submit silently.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _ContinuationTokenMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:applications.continuation_token"
+
+
 def test_probe_false_when_database_url_unset(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", "")
     ok, err = config.database_reachable()

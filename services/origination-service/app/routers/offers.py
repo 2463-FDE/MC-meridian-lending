@@ -44,11 +44,15 @@ def make_offer(
     body: OfferIn,
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    x_application_token: str | None = Header(default=None, alias="X-Application-Token"),
 ):
     # ADR 0010: generating a TILA offer persists a disclosure for the application, so only
-    # an officer or the owning borrower may do it -- never an anonymous /los caller who
-    # guessed the id (the confused-deputy write this closes).
-    authz.require_officer_or_owner(body.app_id, x_user_role, x_user_id)
+    # an officer, the owning borrower, or the applicant holding this application's
+    # continuation token may do it -- never an anonymous caller who guessed the id (the
+    # confused-deputy write this closes).
+    authz.require_officer_or_owner(
+        body.app_id, x_user_role, x_user_id, x_application_token
+    )
     # Bind the disclosure inputs to the STORED application, never the caller (PR review):
     # /los/offer is reachable anonymously through the gateway, and origination forwards the
     # internal-service token to disclosure-service, so accepting caller-supplied
@@ -97,9 +101,10 @@ def get_offer(
     app_id: int,
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    x_application_token: str | None = Header(default=None, alias="X-Application-Token"),
 ):
-    # ADR 0010: the offer discloses APR/terms for the application -- officer or owner only.
-    authz.require_officer_or_owner(app_id, x_user_role, x_user_id)
+    # ADR 0010: the offer discloses APR/terms -- officer, owner, or token-holder only.
+    authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
     resp = clients.get(clients.DISCLOSURE_URL, f"/applications/{app_id}/offer")
     if resp.status_code == 404:
         raise HTTPException(status_code=404, detail="no offer for this application")
