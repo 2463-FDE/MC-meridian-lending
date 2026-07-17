@@ -9,6 +9,7 @@ authorization on money-moving servicing actions — that is left to the downstre
 servicing-service, which also doesn't check. Any authenticated user can adjust balances
 or waive fees. (weak authz — kept on purpose)
 """
+
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,7 +33,7 @@ app = FastAPI(title="Meridian Gateway (BFF)", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # wide-open CORS (brownfield)
+    allow_origins=["*"],  # wide-open CORS (brownfield)
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -44,13 +45,21 @@ def health():
     if missing:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "service": "gateway", "missing_secrets": missing},
+            content={
+                "status": "unhealthy",
+                "service": "gateway",
+                "missing_secrets": missing,
+            },
         )
     ok, db_error = config.database_reachable()
     if not ok:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "service": "gateway", "database_error": db_error},
+            content={
+                "status": "unhealthy",
+                "service": "gateway",
+                "database_error": db_error,
+            },
         )
     # Auth/session flows live in Redis, so a Redis outage must fail readiness too —
     # otherwise the load balancer keeps sending login/session traffic to an instance
@@ -59,12 +68,17 @@ def health():
     if not redis_ok:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "service": "gateway", "redis_error": redis_error},
+            content={
+                "status": "unhealthy",
+                "service": "gateway",
+                "redis_error": redis_error,
+            },
         )
     return {"status": "ok", "service": "gateway"}
 
 
 # --------------------------------------------------------------------------- auth
+
 
 class LoginIn(BaseModel):
     username: str
@@ -100,19 +114,37 @@ def me(authorization: str | None = Header(None)):
 
 # -------------------------------------------------------------------------- proxy
 
+
 async def _proxy(base: str, path: str, request: Request, user: dict | None):
     method = request.method
     body = await request.body()
     headers = {
-        k: v for k, v in request.headers.items()
-        if k.lower() not in ("host", "content-length", "authorization")
+        k: v
+        for k, v in request.headers.items()
+        # Strip trust headers a client might send: downstream services trust
+        # X-User-* / X-Internal-Service as identity, so an external caller must never
+        # be able to inject them through the proxy. The gateway is their only source —
+        # X-User-* set below from the session, X-Internal-Service only on internal
+        # service-to-service calls (never here). (PR review)
+        if k.lower()
+        not in (
+            "host",
+            "content-length",
+            "authorization",
+            "x-user-id",
+            "x-user-role",
+            "x-internal-service",
+        )
     }
     if user:
         headers["X-User-Id"] = str(user.get("id", ""))
         headers["X-User-Role"] = str(user.get("role", ""))
     async with httpx.AsyncClient(timeout=35) as client:
         resp = await client.request(
-            method, f"{base}{path}", content=body, headers=headers,
+            method,
+            f"{base}{path}",
+            content=body,
+            headers=headers,
             params=request.query_params,
         )
     try:
@@ -149,6 +181,7 @@ async def lss(path: str, request: Request, authorization: str | None = Header(No
 # Like /los/*, the underwriting-flow services forward a session if one is present
 # but do not require it (an applicant can apply without an account).
 
+
 @app.api_route("/kyc/{path:path}", methods=["GET", "POST"])
 async def kyc(path: str, request: Request, authorization: str | None = Header(None)):
     user = auth.get_session(auth.bearer_token(authorization))
@@ -156,19 +189,25 @@ async def kyc(path: str, request: Request, authorization: str | None = Header(No
 
 
 @app.api_route("/decision/{path:path}", methods=["GET", "POST"])
-async def decision(path: str, request: Request, authorization: str | None = Header(None)):
+async def decision(
+    path: str, request: Request, authorization: str | None = Header(None)
+):
     user = auth.get_session(auth.bearer_token(authorization))
     return await _proxy(DECISION_URL, f"/{path}", request, user)
 
 
 @app.api_route("/disclosure/{path:path}", methods=["GET", "POST"])
-async def disclosure(path: str, request: Request, authorization: str | None = Header(None)):
+async def disclosure(
+    path: str, request: Request, authorization: str | None = Header(None)
+):
     user = auth.get_session(auth.bearer_token(authorization))
     return await _proxy(DISCLOSURE_URL, f"/{path}", request, user)
 
 
 @app.api_route("/payments/{path:path}", methods=["GET", "POST"])
-async def payments(path: str, request: Request, authorization: str | None = Header(None)):
+async def payments(
+    path: str, request: Request, authorization: str | None = Header(None)
+):
     # Taking a payment is a money-moving action: authenticated, but (brownfield)
     # the gateway still does NOT enforce a specific role — same gap as /lss.
     user = _require_user(authorization)

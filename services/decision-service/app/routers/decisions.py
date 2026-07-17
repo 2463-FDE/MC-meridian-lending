@@ -5,9 +5,11 @@ ADR 0009 §6) and persists an append-only decision_events record atomically with
 outcome — or refuses the decision (fail closed, ADR 0009 §4).
 """
 
-from fastapi import APIRouter, HTTPException, Query
+import hmac
 
-from .. import db, decision
+from fastapi import APIRouter, Header, HTTPException, Query
+
+from .. import config, db, decision
 from ..logging_config import get_logger
 from ..reasons import UnmappedFeatureError
 from ..schemas import DecisionIn, DecisionOut, DecisionRecordOut
@@ -16,20 +18,55 @@ log = get_logger("decisions")
 router = APIRouter(prefix="/decisions", tags=["decisions"])
 
 
+def _require_internal_caller(x_internal_service: str | None) -> None:
+    """Gate a route to internal service-to-service callers (PR review).
+
+    The record endpoint returns credit-decision data (outcome, reason codes,
+    model score, policy band, decider) and is reachable through the gateway's
+    anonymous /decision proxy, so without this an attacker could enumerate app
+    ids and read decisions. Its only legitimate caller is origination's assistant,
+    which calls decision-service directly (bypassing the gateway) and carries this
+    shared secret; the gateway strips any client-supplied X-Internal-Service header
+    so an external request can never forge it.
+
+    Fail closed: an unconfigured token denies all (503), never opens the route.
+    Constant-time compare so the token cannot be recovered byte-by-byte by timing.
+    """
+    expected = config.INTERNAL_SERVICE_TOKEN
+    if not expected:
+        log.error("INTERNAL_SERVICE_TOKEN not configured; refusing internal route")
+        raise HTTPException(status_code=503, detail="internal auth not configured")
+    # Compare as bytes: hmac.compare_digest rejects non-ASCII str inputs with a
+    # TypeError (which would surface as a 500), so encode both sides — still
+    # constant-time, but robust to any token value an operator configures.
+    if not x_internal_service or not hmac.compare_digest(
+        x_internal_service.encode("utf-8"), expected.encode("utf-8")
+    ):
+        raise HTTPException(
+            status_code=403, detail="internal service identity required"
+        )
+
+
 @router.get("/{app_id}/record", response_model=DecisionRecordOut)
 def get_decision_record(
     app_id: int,
     request_id: str | None = Query(default=None, max_length=64),
+    x_internal_service: str | None = Header(default=None, alias="X-Internal-Service"),
 ):
     """Decision event for an application — the identifier-free projection the officer
     assistant's memory tool reads (ADR 0009 §5). Legacy outcomes whose reasons were
     never captured answer status=no_record_legacy, distinct from 404.
+
+    Internal-only: requires the X-Internal-Service shared secret (PR review). This is
+    a service-to-service memory-tool lookup, never a public read, so it is refused
+    (403) for callers arriving through the anonymous gateway proxy.
 
     When request_id is supplied the lookup is scoped to that exact event (the one the
     caller's own decision created) instead of the app's latest, so a concurrent
     re-decision landing between scoring and validation cannot swap the record out from
     under the request (PR #7 review). A scoped miss is a 404 — legacy rows carry no
     request_id, so falling back to app-latest would return an unrelated event."""
+    _require_internal_caller(x_internal_service)
     if request_id is not None:
         events = db.query(
             "SELECT outcome, principal_reasons, drivers, policy_band, "

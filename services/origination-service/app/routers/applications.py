@@ -1,11 +1,13 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
 
+import hmac
+
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import clients, db, intake, models
+from .. import clients, config, db, intake, models
 from ..database import get_session
 from ..logging_config import get_logger
 from ..schemas import (
@@ -23,6 +25,28 @@ from ..schemas import (
 
 log = get_logger("applications")
 router = APIRouter(prefix="/applications", tags=["applications"])
+
+
+def _require_internal_caller(x_internal_service: str | None) -> None:
+    """Gate a route to internal service-to-service callers (PR review).
+
+    Mirrors decision-service's guard: the gateway strips any client-supplied
+    X-Internal-Service header, so only a caller reaching this service directly with
+    the shared secret is accepted. Fails closed when the token is unconfigured (503,
+    never open); constant-time compare so the token can't be timed out byte-by-byte.
+    """
+    expected = config.INTERNAL_SERVICE_TOKEN
+    if not expected:
+        log.error("INTERNAL_SERVICE_TOKEN not configured; refusing internal route")
+        raise HTTPException(status_code=503, detail="internal auth not configured")
+    # Compare as bytes (see decision-service guard): avoids a TypeError-to-500 on a
+    # non-ASCII token while staying constant-time.
+    if not x_internal_service or not hmac.compare_digest(
+        x_internal_service.encode("utf-8"), expected.encode("utf-8")
+    ):
+        raise HTTPException(
+            status_code=403, detail="internal service identity required"
+        )
 
 
 @router.post("", response_model=ApplicationCreated)
@@ -173,34 +197,36 @@ def get_application(app_id: int, session: Session = Depends(get_session)):
 
 
 @router.post("/{app_id}/monthly-debt")
-def capture_monthly_debt(app_id: int, body: MonthlyDebtIn):
+def capture_monthly_debt(
+    app_id: int,
+    body: MonthlyDebtIn,
+    x_internal_service: str | None = Header(default=None, alias="X-Internal-Service"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
     """Capture monthly_debt for an existing application.
 
     Remediation path for the decisioning quarantine: a legacy/seeded row with NULL
     monthly_debt is rejected with 422 at decisioning; this records the value so the
     application becomes decisionable, rather than leaving manual SQL as the only fix.
 
-    POST (not PATCH) on purpose: the gateway `/los` proxy only forwards GET and POST
-    (services/gateway/app/main.py), so a PATCH here would be a 405 through the product
-    front door — the remediation must be reachable the same way as every other LOS call.
-    Widening the shared gateway proxy for one endpoint is the speculative surface the
-    repo's YAGNI rule warns against.
+    Internal-only (PR review): monthly_debt feeds the model, and the endpoint is
+    otherwise reachable through the gateway's anonymous /los proxy, so an external
+    caller who knows a legacy/NULL app id could inject the underwriting input. It now
+    requires the X-Internal-Service shared secret — which the gateway strips from
+    external requests — so only a server-side/ops caller holding the token can amend a
+    row. There is no automated caller; this is a deliberate operator escape hatch.
 
-    Capture-only, never overwrite (PR review): the UPDATE is guarded by
-    `monthly_debt IS NULL`, matching this endpoint's stated purpose as a NULL-row
-    quarantine escape hatch. An application whose monthly_debt is already recorded is
-    frozen — 409, not a silent overwrite — so a caller who knows an app id cannot lower
-    an already-submitted/decisioned application's debt to force a more favorable
-    re-decision. Distinguishing 404 (no such app) from 409 (already captured) needs a
-    prior existence check because the guarded UPDATE returns no rows in either case.
+    Capture-only, never overwrite: the UPDATE is guarded by `monthly_debt IS NULL`,
+    matching this endpoint's purpose as a NULL-row quarantine escape hatch. An already
+    recorded value is frozen — 409, not a silent overwrite. The UPDATE uses RETURNING
+    and a zero-row result is a 409 too: it means a concurrent capture set the value
+    between our existence check and the write (the race PR review flagged), so we must
+    NOT return the unpersisted value as success.
 
-    Scope note (accepted, consistent with the rest of this router): the gateway does
-    not enforce role authz on money actions (CLAUDE.md), and monthly_debt is a single
-    mutable column with no change-audit — same known debt as every other write here.
-    Adding underwriter-only role enforcement or an immutable audit event is a
-    platform-wide gateway concern, not scoped to this endpoint; the NULL-only guard
-    above closes the concrete re-decision attack without it.
+    Every capture writes an audit_logs row (actor from X-User-Id when the caller
+    supplies it, else the service identity) so the amendment is attributable.
     """
+    _require_internal_caller(x_internal_service)
     existing = db.query(
         "SELECT monthly_debt FROM applications WHERE id = %s", (app_id,)
     )
@@ -211,9 +237,26 @@ def capture_monthly_debt(app_id: int, body: MonthlyDebtIn):
             status_code=409,
             detail="monthly_debt is already recorded for this application",
         )
-    db.query(
-        "UPDATE applications SET monthly_debt = %s WHERE id = %s AND monthly_debt IS NULL",
+    updated = db.query(
+        "UPDATE applications SET monthly_debt = %s WHERE id = %s AND monthly_debt IS NULL "
+        "RETURNING id",
         (body.monthly_debt, app_id),
+    )
+    if not updated:
+        # Lost the race: a concurrent capture set monthly_debt between the check above
+        # and this write. Report the conflict, never a 200 with a value we did not
+        # persist (PR review).
+        raise HTTPException(
+            status_code=409,
+            detail="monthly_debt is already recorded for this application",
+        )
+    db.query(
+        "INSERT INTO audit_logs (actor, action, detail) VALUES (%s, %s, %s)",
+        (
+            x_user_id or "internal-service",
+            "capture_monthly_debt",
+            f"app_id={app_id} monthly_debt={body.monthly_debt}",
+        ),
     )
     return {"app_id": app_id, "monthly_debt": body.monthly_debt}
 

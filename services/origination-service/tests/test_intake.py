@@ -179,13 +179,20 @@ def test_capture_monthly_debt_unblocks_officer_decision(monkeypatch):
         "post",
         lambda *a, **k: {"outcome": "approve", "score": 700, "reason": None},
     )
+    # The remediation endpoint is internal-only: configure the token and send the
+    # X-Internal-Service header (PR review).
+    monkeypatch.setattr(applications.config, "INTERNAL_SERVICE_TOKEN", "tok")
     client = TestClient(app)
 
     # Before capture: quarantined.
     assert client.post("/applications/1/decision").status_code == 422
 
     # Capture the missing value.
-    patched = client.post("/applications/1/monthly-debt", json={"monthly_debt": 450})
+    patched = client.post(
+        "/applications/1/monthly-debt",
+        json={"monthly_debt": 450},
+        headers={"X-Internal-Service": "tok"},
+    )
     assert patched.status_code == 200
     assert patched.json()["monthly_debt"] == 450
 
@@ -207,7 +214,10 @@ def test_capture_monthly_debt_404_when_missing(monkeypatch):
     # Existence check finds no row for an unknown app_id -> 404, not a silent 200.
     row = {"id": 1, "monthly_debt": None}
     monkeypatch.setattr(applications.db, "query", _stateful_db(row))
+    monkeypatch.setattr(applications.config, "INTERNAL_SERVICE_TOKEN", "tok")
     resp = TestClient(app).post(
-        "/applications/999/monthly-debt", json={"monthly_debt": 100}
+        "/applications/999/monthly-debt",
+        json={"monthly_debt": 100},
+        headers={"X-Internal-Service": "tok"},
     )
     assert resp.status_code == 404

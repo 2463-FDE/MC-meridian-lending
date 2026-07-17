@@ -142,18 +142,32 @@ def test_human_override_contradicting_band_is_allowed():
 # --- GET /decisions/{app_id}/record (memory-tool projection, ADR 0009 §5) ----------
 
 
+INTERNAL_TOKEN = "test-internal-token"
+
+
 def _record_client(monkeypatch, responses):
-    """TestClient with routers.decisions.db.query returning canned rows per call."""
+    """TestClient with routers.decisions.db.query returning canned rows per call.
+
+    The record endpoint is internal-only: it requires the X-Internal-Service secret
+    (PR review). The helper configures a token and sends the header by default so the
+    existing behavioural tests exercise the record logic, not the auth gate; the auth
+    gate has its own dedicated tests below.
+    """
     from fastapi.testclient import TestClient
 
     from app.main import app
     from app.routers import decisions as decisions_router
 
+    monkeypatch.setattr(
+        decisions_router.config, "INTERNAL_SERVICE_TOKEN", INTERNAL_TOKEN
+    )
     calls = iter(responses)
     monkeypatch.setattr(
         decisions_router.db, "query", lambda sql, params=None: next(calls)
     )
-    return TestClient(app)
+    client = TestClient(app)
+    client.headers["X-Internal-Service"] = INTERNAL_TOKEN
+    return client
 
 
 def test_record_endpoint_returns_recorded_event(monkeypatch):
@@ -232,8 +246,14 @@ def test_record_endpoint_scopes_fetch_to_request_id(monkeypatch):
         captured["params"] = params
         return [event_row]
 
+    monkeypatch.setattr(
+        decisions_router.config, "INTERNAL_SERVICE_TOKEN", INTERNAL_TOKEN
+    )
     monkeypatch.setattr(decisions_router.db, "query", _capture)
-    resp = TestClient(app).get("/decisions/12/record?request_id=req-abc")
+    resp = TestClient(app).get(
+        "/decisions/12/record?request_id=req-abc",
+        headers={"X-Internal-Service": INTERNAL_TOKEN},
+    )
     assert resp.status_code == 200
     assert "request_id = %s" in captured["sql"]  # scoped, not app-latest
     assert captured["params"] == (12, "req-abc")
@@ -247,6 +267,62 @@ def test_record_endpoint_scoped_miss_is_404_not_legacy(monkeypatch):
         "/decisions/6012/record?request_id=no-such-key"
     )
     assert resp.status_code == 404
+
+
+# --- Record endpoint authorization gate (PR review) ---------------------------------
+
+
+def _record_app(monkeypatch, token):
+    """App + client with a configured token but NO default auth header, so each test
+    controls exactly what identity (if any) it sends. db.query is stubbed to a row so a
+    403/503 proves the gate ran BEFORE any data was read, not that the app was missing."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from app.routers import decisions as decisions_router
+
+    monkeypatch.setattr(decisions_router.config, "INTERNAL_SERVICE_TOKEN", token)
+    full_event = {
+        "outcome": "deny",
+        "principal_reasons": [],
+        "drivers": {},
+        "policy_band": "deny",
+        "decided_by": "meridian-risk-stub:v1",
+        "decided_at": None,
+    }
+    monkeypatch.setattr(
+        decisions_router.db, "query", lambda sql, params=None: [full_event]
+    )
+    return TestClient(app)
+
+
+def test_record_endpoint_403_without_internal_header(monkeypatch):
+    # An external caller through the anonymous gateway proxy carries no secret.
+    resp = _record_app(monkeypatch, INTERNAL_TOKEN).get("/decisions/12/record")
+    assert resp.status_code == 403
+
+
+def test_record_endpoint_403_with_wrong_internal_header(monkeypatch):
+    resp = _record_app(monkeypatch, INTERNAL_TOKEN).get(
+        "/decisions/12/record", headers={"X-Internal-Service": "wrong-token"}
+    )
+    assert resp.status_code == 403
+
+
+def test_record_endpoint_fails_closed_when_token_unconfigured(monkeypatch):
+    # Unconfigured token must DENY (503), never treat an empty secret as "open" and
+    # match an empty/absent header.
+    resp = _record_app(monkeypatch, "").get(
+        "/decisions/12/record", headers={"X-Internal-Service": ""}
+    )
+    assert resp.status_code == 503
+
+
+def test_record_endpoint_allows_correct_internal_header(monkeypatch):
+    resp = _record_app(monkeypatch, INTERNAL_TOKEN).get(
+        "/decisions/12/record", headers={"X-Internal-Service": INTERNAL_TOKEN}
+    )
+    assert resp.status_code == 200
 
 
 # --- Adversarial-review fixes (teeth 2026-07-15) ------------------------------------

@@ -5,6 +5,7 @@ Bureau/DB credentials are now read from the environment only — no secret defau
 in source (was: inline "so the demo just works"). Inject via the host env /
 secret manager; see docs/security-remediation-2026-07.md.
 """
+
 import os
 import threading
 import time
@@ -15,7 +16,15 @@ import psycopg2
 # --- Credit bureau (Experian) — env only; no committed default. Rotate the key
 # that was previously hardcoded/committed. ---
 EXPERIAN_KEY = os.getenv("EXPERIAN_KEY", "")
-EXPERIAN_BASE_URL = os.getenv("EXPERIAN_BASE_URL", "https://api.experian.example.com/v2")
+EXPERIAN_BASE_URL = os.getenv(
+    "EXPERIAN_BASE_URL", "https://api.experian.example.com/v2"
+)
+
+# Shared secret proving a request is an internal service-to-service call (origination's
+# assistant reading the decision record), NOT an external caller coming through the
+# anonymous gateway /decision proxy. Env only, no committed default (same posture as the
+# bureau key). When unset the guard fails CLOSED — an unconfigured token never means open.
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 
 # Deployment environment. Synthetic credit is gated on this being exactly
 # "development", so no production config can enable it — not even by mistake.
@@ -26,7 +35,10 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "production").strip().lower()
 # without a live bureau. Guarded by TWO independent conditions (see
 # synthetic_credit_enabled): the explicit opt-in flag AND ENVIRONMENT=development.
 ALLOW_SYNTHETIC_CREDIT = os.getenv("ALLOW_SYNTHETIC_CREDIT", "").strip().lower() in (
-    "1", "true", "yes", "on",
+    "1",
+    "true",
+    "yes",
+    "on",
 )
 
 
@@ -80,7 +92,10 @@ def database_url_configured() -> bool:
     # stale/rotated DSN is caught by the POSTGRES_PASSWORD consistency check below.
     if password.lower() in {
         "replace_with_postgres_password",
-        "changeme", "change_me", "password", "postgres",
+        "changeme",
+        "change_me",
+        "password",
+        "postgres",
     }:
         return False
     # When POSTGRES_PASSWORD is the source of truth (compose ${VAR:?}), the DSN
@@ -182,6 +197,7 @@ def missing_required_secrets() -> list:
     if not database_url_configured():
         missing.append("DATABASE_URL")
     return missing
+
 
 # Core banking key — env only; no committed default.
 CORE_BANKING_API_KEY = os.getenv("CORE_BANKING_API_KEY", "")
