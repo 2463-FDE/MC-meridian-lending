@@ -48,6 +48,11 @@ class ApplicationCreated(BaseModel):
     app_id: int
     status: str
     kyc: KycOut
+    # False when the KYC service call did not complete (outage/timeout/auth failure) —
+    # distinct from a KYC that ran and returned all-false. Lets a caller tell "not
+    # verified" from "verification could not be performed" (PR review). Default True so
+    # the field is backward-compatible for existing consumers.
+    kyc_checked: bool = True
 
 
 class ApplicantOut(BaseModel):

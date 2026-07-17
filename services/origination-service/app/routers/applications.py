@@ -74,6 +74,7 @@ def submit_application(body: ApplicationIn):
         "ssn_verified": False,
     }
     is_entity = bool(payload.get("is_entity"))
+    kyc_checked = True
     try:
         resp = clients.post(
             clients.KYC_URL,
@@ -99,8 +100,40 @@ def submit_application(body: ApplicationIn):
             "ssn_verified": passed and not is_entity,
         }
     except Exception as e:  # noqa
-        log.warning("kyc-service call failed: %s", e)
-    return {"app_id": app_id, "status": "submitted", "kyc": KycOut(**cip)}
+        # A transport/auth failure (outage, timeout, or a missing/rotated internal token
+        # -> 403) is NOT a KYC "not verified" result — the check never ran. A genuine
+        # decline comes back 200 with cip_passed False, so only an exception reaches
+        # here. Keep the deliberate intake resilience (a KYC hiccup must not 500 the
+        # applicant), but do NOT let the failure masquerade as an ordinary all-false
+        # verification (PR review): raise the log to error, record an audit_logs row so
+        # an application created while KYC was down is queryable, and flag
+        # kyc_checked=False so a caller can tell it apart from a real decline. Whether
+        # such an application may proceed to decisioning is a separate policy decision
+        # (KYC-gating ADR follow-up); this only stops the failure from being silent.
+        kyc_checked = False
+        log.error("kyc-service call failed for app_id=%s: %s", app_id, type(e).__name__)
+        try:
+            db.query(
+                "INSERT INTO audit_logs (actor, action, detail) VALUES (%s, %s, %s)",
+                (
+                    "origination-service",
+                    "kyc_unavailable",
+                    f"app_id={app_id} error={type(e).__name__}",
+                ),
+            )
+        except Exception as audit_err:  # noqa
+            # Audit write is best-effort — never 500 intake on it, but make the miss loud.
+            log.error(
+                "failed to record kyc_unavailable audit for app_id=%s: %s",
+                app_id,
+                type(audit_err).__name__,
+            )
+    return {
+        "app_id": app_id,
+        "status": "submitted",
+        "kyc": KycOut(**cip),
+        "kyc_checked": kyc_checked,
+    }
 
 
 @router.get("", response_model=Page[ApplicationListItem])

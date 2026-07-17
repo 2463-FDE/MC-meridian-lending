@@ -6,6 +6,7 @@ stubbed (no live Postgres in unit tests; the column + end-to-end write are exerc
 the smoke test against the compose stack).
 """
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -98,6 +99,68 @@ def test_null_income_and_employment_still_fall_back(monkeypatch):
     assert payload["monthly_debt"] == 500
     assert payload["annual_income"] == 0
     assert payload["employment_years"] == 0
+
+
+def _kyc_test_db(audit_sink):
+    """db.query fake for submit_application: answers the applicant_id SELECT and records
+    any audit_logs INSERT into audit_sink."""
+
+    def _query(sql, params=None):
+        if "audit_logs" in sql:
+            audit_sink.append(params)
+            return []
+        return [{"applicant_id": 9}]  # SELECT applicant_id FROM applications
+
+    return _query
+
+
+def test_kyc_transport_failure_is_observable_not_silent(monkeypatch):
+    # PR review: a KYC transport/auth failure (outage, timeout, or a mis/rotated internal
+    # token -> 403) must NOT masquerade as an ordinary all-false verification. Intake
+    # resilience is kept (still 200/submitted), but the failure is made observable:
+    # kyc_checked=False in the response AND an audit_logs row.
+    monkeypatch.setattr(applications.intake, "create_application", lambda payload: 1)
+    audit = []
+    monkeypatch.setattr(applications.db, "query", _kyc_test_db(audit))
+
+    def _kyc_down(*a, **k):
+        raise httpx.ConnectError("kyc-service unreachable")
+
+    monkeypatch.setattr(applications.clients, "post", _kyc_down)
+    resp = TestClient(app).post(
+        "/applications",
+        json={"name": "Test Borrower", "amount": 10000, "monthly_debt": 500},
+    )
+    assert resp.status_code == 200  # resilience kept — intake not 500'd by a KYC hiccup
+    body = resp.json()
+    assert body["status"] == "submitted"
+    assert body["kyc_checked"] is False  # observable: the check did not run
+    assert all(v is False for v in body["kyc"].values())
+    assert len(audit) == 1  # a kyc_unavailable audit row was recorded
+    actor, action, detail = audit[0]
+    assert action == "kyc_unavailable"
+    assert "app_id=1" in detail
+    assert "ConnectError" in detail  # error class only — no PII
+
+
+def test_kyc_success_sets_kyc_checked_true(monkeypatch):
+    # Contrast: when KYC actually runs, kyc_checked is True and a genuine decline is a
+    # 200 with cip_passed False (no audit row) — distinct from the failure path above.
+    monkeypatch.setattr(applications.intake, "create_application", lambda payload: 1)
+    audit = []
+    monkeypatch.setattr(applications.db, "query", _kyc_test_db(audit))
+    monkeypatch.setattr(
+        applications.clients, "post", lambda *a, **k: {"cip_passed": True}
+    )
+    resp = TestClient(app).post(
+        "/applications",
+        json={"name": "Test Borrower", "amount": 10000, "monthly_debt": 500},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["kyc_checked"] is True
+    assert body["kyc"]["name_verified"] is True
+    assert audit == []  # no failure audit row on the success path
 
 
 def test_api_rejects_missing_monthly_debt():
