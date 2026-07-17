@@ -13,11 +13,15 @@ The client never logs the API key or raw request/response content (which carries
 customer PII). It logs metrics only, and every log line additionally passes
 through the service's redacting formatter as defense in depth.
 """
+
 from __future__ import annotations
 
 import uuid
 from time import perf_counter
 from typing import Any, Iterator
+
+from langsmith import traceable
+from langsmith.run_helpers import get_current_run_tree
 
 from ..prompts import get_prompt
 from .adapter import BedrockAdapter, ClaudeAdapter, ModelAdapter
@@ -29,6 +33,38 @@ from .transport import call_with_retry
 from .validator import guard_output, validate_structured
 
 _UNSET = object()
+
+
+def _trace_complete_inputs(inputs: dict) -> dict:
+    """Strip prompt variables/history from the LangSmith root span.
+
+    `complete()` receives RAW variables — redaction happens later, inside
+    `build_request` — so exporting them would ship unredacted PII to a third
+    party (same posture as the provider itself, ADR 0005). The traced payload
+    lives on the child transport span, which only ever sees the post-redaction
+    request.
+
+    idempotency_key is NOT traced (review finding): it is caller-supplied and
+    unvalidated, so a caller keying on an application number / customer reference /
+    email-derived value would leak that identifier to the telemetry vendor. Omitted
+    on both this span and llm.transport — see _trace_transport_inputs for the
+    omit-vs-hash rationale.
+    """
+    return {"prompt_name": inputs.get("prompt_name")}
+
+
+def _trace_complete_outputs(output: Any) -> dict:
+    """Strip the validated response body from the LangSmith root span.
+
+    `complete()` returns the validated summary/decision (a dict or guarded
+    string) — that body carries customer lending content (loan amounts, income,
+    risk facts), so exporting it would ship application data to a third-party
+    telemetry vendor (PR review). Trace only a non-content shape marker; token
+    cost/usage already lives on the child `llm.transport` span. If content-level
+    trace debugging is ever needed, gate it behind an explicit non-production
+    flag with its own policy controls — never on by default.
+    """
+    return {"result_type": type(output).__name__}
 
 
 def _default_adapter(config: LLMConfig) -> ModelAdapter:
@@ -48,6 +84,11 @@ class ClaudeClient:
         self.adapter = adapter if adapter is not None else _default_adapter(config)
         self.log = get_llm_logger()
 
+    @traceable(
+        name="llm.complete",
+        process_inputs=_trace_complete_inputs,
+        process_outputs=_trace_complete_outputs,
+    )
     def complete(
         self,
         prompt_name: str,
@@ -89,7 +130,10 @@ class ClaudeClient:
             retries["n"] = attempt
             self.log.warning(
                 "llm retry attempt=%d delay=%.2fs reason=%s request_id=%s",
-                attempt, delay, type(exc).__name__, request_id,
+                attempt,
+                delay,
+                type(exc).__name__,
+                request_id,
             )
 
         t0 = perf_counter()
@@ -103,7 +147,9 @@ class ClaudeClient:
         except LLMError as exc:
             self.log.error(
                 "llm call failed error=%s request_id=%s retries=%d",
-                type(exc).__name__, request_id, retries["n"],
+                type(exc).__name__,
+                request_id,
+                retries["n"],
             )
             raise
         latency_ms = (perf_counter() - t0) * 1000
@@ -117,9 +163,24 @@ class ClaudeClient:
                 result = completion.text
         except ValidationFailed as exc:
             self.log.warning(
-                "llm output rejected error=%s request_id=%s", exc, request_id,
+                "llm output rejected error=%s request_id=%s",
+                exc,
+                request_id,
             )
             if fallback is not _UNSET:
+                # A served fallback must NOT read as a healthy call in LangSmith:
+                # _trace_complete_outputs only sees the returned value, so without a
+                # marker the root span records the fallback as a normal success and
+                # repeated rejection (prompt injection, schema drift, provider
+                # regression) shows green — hiding it from detection/rollback (PR
+                # review). Mark the current span content-free: the exception CLASS
+                # only (never str(exc), which can echo rejected model content), same
+                # run-tree posture as llm.transport's ls_model_name.
+                run_tree = get_current_run_tree()
+                if run_tree is not None:
+                    run_tree.metadata["validation_failed"] = True
+                    run_tree.metadata["fallback_used"] = True
+                    run_tree.metadata["rejection_error"] = type(exc).__name__
                 return fallback
             raise
 
@@ -128,9 +189,16 @@ class ClaudeClient:
             "llm ok request_id=%s prompt=%s v=%s model=%s latency_ms=%.0f "
             "input_tokens=%d output_tokens=%d est_input_tokens=%d "
             "trimmed_history=%d retries=%d",
-            request_id, template.name, template.version, completion.model,
-            latency_ms, completion.input_tokens, completion.output_tokens,
-            built.estimated_input_tokens, built.trimmed_history_turns, retries["n"],
+            request_id,
+            template.name,
+            template.version,
+            completion.model,
+            latency_ms,
+            completion.input_tokens,
+            completion.output_tokens,
+            built.estimated_input_tokens,
+            built.trimmed_history_turns,
+            retries["n"],
         )
         return result
 
@@ -153,8 +221,9 @@ class ClaudeClient:
             **kwargs,
         )
 
-    def stream(self, prompt_name: str, *, idempotency_key: str | None = None,
-               **variables) -> Iterator[str]:
+    def stream(
+        self, prompt_name: str, *, idempotency_key: str | None = None, **variables
+    ) -> Iterator[str]:
         """Stream text chunks (concern 5). DEFERRED to Week 2 — intentionally gated.
 
         The adapter interface implements streaming, but the client does not yet

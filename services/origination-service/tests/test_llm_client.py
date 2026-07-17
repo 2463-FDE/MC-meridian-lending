@@ -5,6 +5,7 @@ SDK required. Covers the unhappy paths the review checklist calls out: config
 failure, timeout, 429/5xx retry, 4xx no-retry, token budget, malformed output,
 leak guard — plus a check that no PII reaches the logs.
 """
+
 import io
 import json
 import logging
@@ -22,10 +23,15 @@ from app.llm import (
     ValidationFailed,
     load_llm_config,
 )
-from app.llm.adapter import Completion, CompletionRequest
+from app.llm.adapter import CompletionRequest
 from app.llm.errors import LLMError, LLMHTTPError, LLMTimeoutError
 from app.llm.request_builder import build_request, estimate_tokens, redact_json
-from app.llm.transport import call_with_retry
+from app.llm.client import _trace_complete_inputs, _trace_complete_outputs
+from app.llm.transport import (
+    _trace_transport_inputs,
+    _trace_transport_outputs,
+    call_with_retry,
+)
 from app.llm.validator import parse_json
 from app.prompts import get_prompt
 from app.redactor import PiiRedactor
@@ -46,14 +52,19 @@ def _config(**over):
 
 def _req(**over):
     base = dict(
-        system="s", messages=[{"role": "user", "content": "hi"}],
-        model="m", max_tokens=10, temperature=0.0, timeout=1.0,
+        system="s",
+        messages=[{"role": "user", "content": "hi"}],
+        model="m",
+        max_tokens=10,
+        temperature=0.0,
+        timeout=1.0,
     )
     base.update(over)
     return CompletionRequest(**base)
 
 
 # --- Concern 1: config, fail loud at boot ---------------------------------
+
 
 def test_config_missing_key_raises(monkeypatch):
     monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
@@ -85,25 +96,29 @@ def test_key_not_logged_on_call_or_error(caplog):
     cfg = _config(api_key=secret)
     buf = io.StringIO()
     from app.logging_config import RedactingFormatter
+
     handler = logging.StreamHandler(buf)
     handler.setFormatter(RedactingFormatter("%(message)s"))
     llm_log = logging.getLogger("llm")
     llm_log.addHandler(handler)
     try:
         # success path
-        ClaudeClient(cfg, adapter=FakeAdapter(response=GOOD_SUMMARY)) \
-            .summarize_application('{"amount": 1}')
+        ClaudeClient(
+            cfg, adapter=FakeAdapter(response=GOOD_SUMMARY)
+        ).summarize_application('{"amount": 1}')
         # error path (transport failure gets logged)
         with pytest.raises(LLMHTTPError):
-            ClaudeClient(cfg, adapter=FakeAdapter(
-                raises=[LLMHTTPError("bad", 400, retryable=False)])) \
-                .summarize_application('{"amount": 1}')
+            ClaudeClient(
+                cfg,
+                adapter=FakeAdapter(raises=[LLMHTTPError("bad", 400, retryable=False)]),
+            ).summarize_application('{"amount": 1}')
     finally:
         llm_log.removeHandler(handler)
     assert secret not in buf.getvalue()
 
 
 # --- Provider selection (anthropic vs. bedrock) ---------------------------
+
 
 def test_default_provider_is_anthropic(monkeypatch):
     monkeypatch.setenv("CLAUDE_API_KEY", "k")
@@ -133,17 +148,18 @@ def test_unknown_provider_rejected(monkeypatch):
 
 # --- Concern 1: numeric range validation (fail loud at boot) --------------
 
+
 @pytest.mark.parametrize(
     "env, value",
     [
-        ("CLAUDE_TIMEOUT", "0"),        # non-positive timeout
+        ("CLAUDE_TIMEOUT", "0"),  # non-positive timeout
         ("CLAUDE_TIMEOUT", "-1"),
-        ("CLAUDE_MAX_RETRIES", "-1"),   # negative retries
-        ("CLAUDE_MAX_TOKENS", "0"),     # non-positive answer cap
+        ("CLAUDE_MAX_RETRIES", "-1"),  # negative retries
+        ("CLAUDE_MAX_TOKENS", "0"),  # non-positive answer cap
         ("CLAUDE_MAX_TOKENS", "-5"),
         ("CLAUDE_TEMPERATURE", "-0.1"),  # outside [0, 1]
         ("CLAUDE_TEMPERATURE", "1.5"),
-        ("CLAUDE_TOKEN_BUDGET", "0"),   # below max_tokens -> refuses every request
+        ("CLAUDE_TOKEN_BUDGET", "0"),  # below max_tokens -> refuses every request
     ],
 )
 def test_config_rejects_out_of_range_numeric(monkeypatch, env, value):
@@ -225,61 +241,206 @@ def test_bedrock_missing_boto3_extra_raises_typed_error(monkeypatch):
 
 # --- Concern 4: transport (timeout / retry) -------------------------------
 
+
 def test_retries_5xx_then_succeeds():
     adapter = FakeAdapter(
         response=GOOD_SUMMARY,
         raises=[LLMHTTPError("boom", 503, retryable=True)],
     )
-    out = call_with_retry(adapter, _req(), max_retries=2,
-                          sleep=lambda _: None, rng=lambda: 0.0)
+    out = call_with_retry(
+        adapter, _req(), max_retries=2, sleep=lambda _: None, rng=lambda: 0.0
+    )
     assert out.text == GOOD_SUMMARY
     assert len(adapter.calls) == 2  # one failure + one success
 
 
+@pytest.mark.parametrize(
+    "model, expected_name",
+    [
+        # Direct Anthropic API path: model is already a priceable name.
+        ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+        # Bedrock inference-profile path: canonicalized to the Anthropic name.
+        ("us.anthropic.claude-haiku-4-5-20251001-v1:0", "claude-haiku-4-5"),
+    ],
+)
+def test_transport_trace_sets_ls_provider_and_model(monkeypatch, model, expected_name):
+    # PR review: LangSmith prices a run on (ls_provider, ls_model_name). Both must be
+    # on the LLM run for BOTH the direct-Anthropic and Bedrock paths, or the span
+    # shows tokens with blank cost.
+    from app.llm import transport as transport_mod
+
+    run_tree = _FakeRunTree()
+    monkeypatch.setattr(transport_mod, "get_current_run_tree", lambda: run_tree)
+    call_with_retry(
+        FakeAdapter(response=GOOD_SUMMARY),
+        _req(model=model),
+        max_retries=0,
+        sleep=lambda _: None,
+        rng=lambda: 0.0,
+    )
+    assert run_tree.metadata["ls_provider"] == "anthropic"
+    assert run_tree.metadata["ls_model_name"] == expected_name
+
+
+def test_transport_trace_tolerates_no_active_run_tree(monkeypatch):
+    # Tracing disabled: get_current_run_tree() is None; the call must still succeed.
+    from app.llm import transport as transport_mod
+
+    monkeypatch.setattr(transport_mod, "get_current_run_tree", lambda: None)
+    out = call_with_retry(
+        FakeAdapter(response=GOOD_SUMMARY),
+        _req(),
+        max_retries=0,
+        sleep=lambda _: None,
+        rng=lambda: 0.0,
+    )
+    assert out.text == GOOD_SUMMARY
+
+
+def test_transport_trace_never_exports_raw_model_text():
+    # PR review: the transport span serializes as soon as the adapter returns,
+    # BEFORE the client's validate_structured/guard_output run — raw provider
+    # text (echoed PII, injection payloads, overlong output) must never reach
+    # the LangSmith sink from this layer. Only usage/stop-reason metadata may.
+    leaky = "Applicant SSN is 123-45-6789, card 4111 1111 1111 1111"
+    adapter = FakeAdapter(response=leaky)
+    out = call_with_retry(
+        adapter, _req(), max_retries=0, sleep=lambda _: None, rng=lambda: 0.0
+    )
+    traced = _trace_transport_outputs(out)
+    assert "text" not in traced
+    assert leaky not in json.dumps(traced)
+    # cost accounting stays intact without the text
+    assert traced["usage_metadata"]["total_tokens"] == (
+        out.input_tokens + out.output_tokens
+    )
+
+
+def test_transport_trace_omits_prompt_content():
+    # PR review: enabling LangSmith must not export customer lending content.
+    # build_request keeps business facts (amount/income/employment) in the prompt
+    # body, so the transport input trace must carry NO system/messages — only
+    # non-content metadata (model, sizing, timeout, retry budget, request id).
+    req = _req(
+        system="You are an underwriting assistant. Applicant income is 87000.",
+        messages=[
+            {
+                "role": "user",
+                "content": '{"requested_amount": 42000, "annual_income": 87000, '
+                '"employment_years": 9, "monthly_debt": 1500}',
+            }
+        ],
+        idempotency_key="req-xyz",
+    )
+    traced = _trace_transport_inputs({"req": req, "max_retries": 2})
+    assert "system" not in traced and "messages" not in traced
+    blob = json.dumps(traced)
+    for financial in ("42000", "87000", "1500", "employment_years"):
+        assert financial not in blob
+    # operational metadata still present for cost/latency/retry accounting
+    assert traced["model"] == "m"
+    assert traced["max_retries"] == 2
+    # idempotency_key is caller-supplied and unvalidated — never traced (review finding)
+    assert "idempotency_key" not in traced
+
+
+def test_trace_payloads_never_export_caller_idempotency_key():
+    # Review finding: complete() accepts idempotency_key verbatim from callers, so a
+    # caller keying on an application number / customer reference / email must not leak
+    # that identifier to LangSmith. Assert it is absent from BOTH the root
+    # (llm.complete) and child (llm.transport) trace payloads.
+    customer_key = "APP-2026-0042|maria.gomez@example.com"
+
+    root = _trace_complete_inputs(
+        {"prompt_name": "loan_summary", "idempotency_key": customer_key}
+    )
+    assert customer_key not in json.dumps(root)
+    assert "idempotency_key" not in root
+
+    req = _req(
+        system="s",
+        messages=[{"role": "user", "content": "{}"}],
+        idempotency_key=customer_key,
+    )
+    transport = _trace_transport_inputs({"req": req, "max_retries": 1})
+    assert customer_key not in json.dumps(transport)
+    assert "idempotency_key" not in transport
+
+
+def test_complete_output_trace_omits_validated_body():
+    # PR review: the parent llm.complete span must not export the validated
+    # response body, which carries loan amounts / income / risk facts.
+    validated = {
+        "summary": "Applicant requests $42,000; annual income 87000; 9 years employed.",
+        "risk_flags": ["high dti"],
+        "recommended_next_step": "request_docs",
+    }
+    traced = _trace_complete_outputs(validated)
+    blob = json.dumps(traced)
+    for financial in ("42,000", "42000", "87000", "high dti", "summary"):
+        assert financial not in blob
+    assert traced == {"result_type": "dict"}
+
+
 def test_429_is_retried():
-    adapter = FakeAdapter(response="ok",
-                          raises=[LLMHTTPError("rate", 429, retryable=True)])
-    call_with_retry(adapter, _req(), max_retries=1, sleep=lambda _: None,
-                    rng=lambda: 0.0)
+    adapter = FakeAdapter(
+        response="ok", raises=[LLMHTTPError("rate", 429, retryable=True)]
+    )
+    call_with_retry(
+        adapter, _req(), max_retries=1, sleep=lambda _: None, rng=lambda: 0.0
+    )
     assert len(adapter.calls) == 2
 
 
 def test_4xx_not_retried():
     adapter = FakeAdapter(raises=[LLMHTTPError("bad", 400, retryable=False)])
     with pytest.raises(LLMHTTPError):
-        call_with_retry(adapter, _req(), max_retries=3, sleep=lambda _: None,
-                        rng=lambda: 0.0)
+        call_with_retry(
+            adapter, _req(), max_retries=3, sleep=lambda _: None, rng=lambda: 0.0
+        )
     assert len(adapter.calls) == 1  # no retry
 
 
 def test_retries_exhausted_raises():
-    adapter = FakeAdapter(raises=[
-        LLMHTTPError("x", 500, retryable=True),
-        LLMHTTPError("x", 500, retryable=True),
-        LLMHTTPError("x", 500, retryable=True),
-    ])
+    adapter = FakeAdapter(
+        raises=[
+            LLMHTTPError("x", 500, retryable=True),
+            LLMHTTPError("x", 500, retryable=True),
+            LLMHTTPError("x", 500, retryable=True),
+        ]
+    )
     with pytest.raises(LLMHTTPError):
-        call_with_retry(adapter, _req(), max_retries=2, sleep=lambda _: None,
-                        rng=lambda: 0.0)
+        call_with_retry(
+            adapter, _req(), max_retries=2, sleep=lambda _: None, rng=lambda: 0.0
+        )
     assert len(adapter.calls) == 3  # 1 + 2 retries
 
 
 def test_timeout_not_retried():
     adapter = FakeAdapter(raises=[LLMTimeoutError("slow")])
     with pytest.raises(LLMTimeoutError):
-        call_with_retry(adapter, _req(), max_retries=3, sleep=lambda _: None,
-                        rng=lambda: 0.0)
+        call_with_retry(
+            adapter, _req(), max_retries=3, sleep=lambda _: None, rng=lambda: 0.0
+        )
     assert len(adapter.calls) == 1
 
 
 def test_backoff_grows_with_jitter():
     delays = []
-    adapter = FakeAdapter(response="ok", raises=[
-        LLMHTTPError("x", 500, retryable=True),
-        LLMHTTPError("x", 500, retryable=True),
-    ])
-    call_with_retry(adapter, _req(), max_retries=3,
-                    sleep=lambda d: delays.append(d), rng=lambda: 1.0)
+    adapter = FakeAdapter(
+        response="ok",
+        raises=[
+            LLMHTTPError("x", 500, retryable=True),
+            LLMHTTPError("x", 500, retryable=True),
+        ],
+    )
+    call_with_retry(
+        adapter,
+        _req(),
+        max_retries=3,
+        sleep=lambda d: delays.append(d),
+        rng=lambda: 1.0,
+    )
     # rng=1.0 => equal-jitter max: 2**attempt (1, 2)
     assert delays == [1.0, 2.0]
 
@@ -306,6 +467,7 @@ def test_client_recovers_from_retryable_failure():
 
 # --- Concern 3: request builder / cost guard ------------------------------
 
+
 def test_token_budget_refused_preflight():
     cfg = _config(token_budget=5)  # absurdly small
     client = ClaudeClient(cfg, adapter=FakeAdapter(response=GOOD_SUMMARY))
@@ -320,8 +482,13 @@ def test_history_trimmed_to_fit():
     # so only surviving content (numbers) can make a turn large enough to trim.
     long_turn = {"role": "user", "content": '{"n": [' + "1," * 1999 + "1]}"}
     built = build_request(
-        tmpl, model="m", max_tokens=256, temperature=0.0, timeout=1.0,
-        token_budget=1200, history=[long_turn, long_turn, long_turn],
+        tmpl,
+        model="m",
+        max_tokens=256,
+        temperature=0.0,
+        timeout=1.0,
+        token_budget=1200,
+        history=[long_turn, long_turn, long_turn],
         application_json="{}",
     )
     assert built.trimmed_history_turns >= 1  # oldest dropped to fit
@@ -334,6 +501,7 @@ def test_estimate_tokens_ceil():
 
 
 # --- Concern 6: validation / guardrails -----------------------------------
+
 
 def test_summarize_returns_validated_dict():
     client = ClaudeClient(_config(), adapter=FakeAdapter(response=GOOD_SUMMARY))
@@ -349,8 +517,10 @@ def test_malformed_output_raises():
 
 
 def test_bad_enum_rejected():
-    bad = ('{"summary": "s", "risk_flags": [], '
-           '"recommended_next_step": "fund_immediately"}')
+    bad = (
+        '{"summary": "s", "risk_flags": [], '
+        '"recommended_next_step": "fund_immediately"}'
+    )
     client = ClaudeClient(_config(), adapter=FakeAdapter(response=bad))
     with pytest.raises(ValidationFailed):
         client.summarize_application("{}")
@@ -362,9 +532,52 @@ def test_fallback_on_bad_output():
     assert out == {"summary": "unavailable"}
 
 
+class _FakeRunTree:
+    def __init__(self):
+        self.metadata = {}
+
+
+def test_traced_fallback_marks_run_tree_without_model_content(monkeypatch):
+    # PR review: a served fallback must not read as a healthy call in LangSmith.
+    # complete() marks the current run tree content-free before returning the
+    # fallback so repeated rejection (injection, schema drift, provider regression)
+    # is visible for detection/rollback instead of showing green.
+    from app.llm import client as client_mod
+
+    run_tree = _FakeRunTree()
+    monkeypatch.setattr(client_mod, "get_current_run_tree", lambda: run_tree)
+
+    # Distinctive rejected model content that must NOT leak into the trace metadata.
+    bad = "garbage 123-45-6789 income 87000"
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response=bad))
+    out = client.summarize_application("{}", fallback={"summary": "unavailable"})
+
+    assert out == {"summary": "unavailable"}
+    assert run_tree.metadata["validation_failed"] is True
+    assert run_tree.metadata["fallback_used"] is True
+    # Exception CLASS only — never str(exc), which can echo rejected model content.
+    assert run_tree.metadata["rejection_error"] == "ValidationFailed"
+    blob = json.dumps(run_tree.metadata)
+    for content in ("garbage", "123-45-6789", "87000"):
+        assert content not in blob
+
+
+def test_traced_fallback_tolerates_no_active_run_tree(monkeypatch):
+    # Tracing disabled (no active run): get_current_run_tree() returns None and the
+    # fallback must still be served, not crash on a None metadata write.
+    from app.llm import client as client_mod
+
+    monkeypatch.setattr(client_mod, "get_current_run_tree", lambda: None)
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response="garbage"))
+    out = client.summarize_application("{}", fallback={"summary": "unavailable"})
+    assert out == {"summary": "unavailable"}
+
+
 def test_leak_guard_blocks_pii_in_output():
-    leaky = ('{"summary": "SSN 412-55-9981 on file", "risk_flags": [], '
-             '"recommended_next_step": "request_docs"}')
+    leaky = (
+        '{"summary": "SSN 412-55-9981 on file", "risk_flags": [], '
+        '"recommended_next_step": "request_docs"}'
+    )
     client = ClaudeClient(_config(), adapter=FakeAdapter(response=leaky))
     with pytest.raises(ValidationFailed):
         client.summarize_application("{}")
@@ -377,16 +590,17 @@ def _json_uescape(text, chars):
     escaped form is invisible to the raw leak guard's regexes, but json.loads
     decodes it straight back to real PII."""
     backslash = chr(92)
-    return "".join(
-        (backslash + "u%04x" % ord(c)) if c in chars else c for c in text
-    )
+    return "".join((backslash + "u%04x" % ord(c)) if c in chars else c for c in text)
 
 
-@pytest.mark.parametrize("plain, escape", [
-    ("contact maria@example.com", "@"),   # escaped '@' -> no email in raw text
-    ("SSN 412-55-9981 on file", "-"),     # escaped '-' -> no dashed SSN in raw text
-    ("card 4111-1111-1111-1111", "-"),    # escaped '-' -> no 13+ digit PAN run in raw
-])
+@pytest.mark.parametrize(
+    "plain, escape",
+    [
+        ("contact maria@example.com", "@"),  # escaped '@' -> no email in raw text
+        ("SSN 412-55-9981 on file", "-"),  # escaped '-' -> no dashed SSN in raw text
+        ("card 4111-1111-1111-1111", "-"),  # escaped '-' -> no 13+ digit PAN run in raw
+    ],
+)
 def test_leak_guard_blocks_escaped_pii_in_structured_output(plain, escape):
     """Regression (Codex): a model can JSON-escape PII so the raw leak guard's
     regexes never fire — an escaped '@' hides an email, an escaped '-' hides a
@@ -394,12 +608,14 @@ def test_leak_guard_blocks_escaped_pii_in_structured_output(plain, escape):
     PII. validate_structured re-guards the DECODED, re-serialized object, so the
     escaped output is rejected instead of handed back to the caller."""
     escaped = _json_uescape(plain, escape)
-    leaky = ('{"summary": "%s", "risk_flags": [], '
-             '"recommended_next_step": "request_docs"}') % escaped
+    leaky = (
+        '{"summary": "%s", "risk_flags": [], "recommended_next_step": "request_docs"}'
+    ) % escaped
 
     # Sanity 1: the RAW guard does NOT catch it — the leak is real, not masked
     # upstream. If this raised, the test would pass for the wrong reason.
     from app.llm.validator import guard_output
+
     guard_output(leaky)  # must not raise while the PII is still escaped
     # Sanity 2: decoding really does reconstitute the PII (guards against a typo
     # in the escape making the payload harmless).
@@ -411,13 +627,70 @@ def test_leak_guard_blocks_escaped_pii_in_structured_output(plain, escape):
         client.summarize_application("{}")
 
 
-@pytest.mark.parametrize("summary", [
-    "Applicant Jane Smith lives at 123 Main Street",  # name + address
-    "Borrower: Jane Smith requested funds",            # labeled name only
-    "Borrower Jane Q Public verified",                 # name w/ middle initial
-    "applicant John Smith has good credit",            # lowercase label, Title-Case name
-    "Property at 456 Oak Avenue on file",              # street address only
-])
+def test_schema_error_message_never_embeds_unguarded_model_values():
+    """Regression (tracing review sweep): validate_schema's enum-mismatch message
+    embeds the raw model value ({node!r}), and ValidationFailed messages
+    propagate to logs and the LangSmith error field. The decoded-object re-guard
+    must run BEFORE schema validation, so escaped PII planted in an enum field
+    trips the generic leak-guard message instead of surfacing unescaped inside
+    the schema error."""
+    escaped = _json_uescape("maria@example.com", "@")
+    # Invalid enum value AND escaped PII in the same field.
+    leaky = (
+        '{"summary": "ok", "risk_flags": [], "recommended_next_step": "%s"}' % escaped
+    )
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response=leaky))
+    with pytest.raises(ValidationFailed) as exc_info:
+        client.summarize_application("{}")
+    assert "maria@example.com" not in str(exc_info.value)
+    assert "leak guard" in str(exc_info.value)
+
+
+def test_schema_enum_error_omits_nonpii_loan_facts():
+    """PR review: a malformed enum value can carry NON-PII loan facts (amount, income,
+    employer, purpose) that pass the leak/identity guards, so they are not caught by the
+    re-guard and reach schema validation. The enum-mismatch message must NOT embed the
+    model value ({node!r}) — otherwise those facts cross into the LangSmith error field
+    when @traceable complete() re-raises. Only the path and schema-defined allowed enum
+    may appear."""
+    facts = "approve loan of 42000 income 87000 at Acme Corp for debt_consolidation"
+    bad = '{"summary": "ok", "risk_flags": [], "recommended_next_step": "%s"}' % facts
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response=bad))
+    with pytest.raises(ValidationFailed) as exc_info:
+        client.summarize_application("{}")
+    msg = str(exc_info.value)
+    # The traced error field derives from this exception message, so a content-free
+    # message is what keeps application content out of the trace sink under failure.
+    for fact in ("42000", "87000", "Acme Corp", "debt_consolidation"):
+        assert fact not in msg
+    assert "recommended_next_step" in msg  # path is fine (schema-derived, no content)
+
+
+def test_schema_unexpected_key_error_omits_model_key_names():
+    """PR review: the additionalProperties:False path must not echo model-controlled
+    extra key names, which can carry application content into the error/trace field."""
+    bad = (
+        '{"summary": "ok", "risk_flags": [], "recommended_next_step": "request_docs", '
+        '"loan_amount_42000_income_87000": "x"}'
+    )
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response=bad))
+    with pytest.raises(ValidationFailed) as exc_info:
+        client.summarize_application("{}")
+    msg = str(exc_info.value)
+    assert "42000" not in msg and "87000" not in msg
+    assert "unexpected key" in msg  # generic count + schema-allowed keys only
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "Applicant Jane Smith lives at 123 Main Street",  # name + address
+        "Borrower: Jane Smith requested funds",  # labeled name only
+        "Borrower Jane Q Public verified",  # name w/ middle initial
+        "applicant John Smith has good credit",  # lowercase label, Title-Case name
+        "Property at 456 Oak Avenue on file",  # street address only
+    ],
+)
 def test_identity_guard_blocks_label_only_identity_in_structured_output(summary):
     """Regression: the leak guard delegates to PiiRedactor, which is shape/
     financial-label based (PAN/SSN/email/phone) and cannot see a person name or a
@@ -434,12 +707,14 @@ def test_identity_guard_blocks_label_only_identity_in_structured_output(summary)
 def test_identity_guard_allows_legitimate_non_identity_summary():
     """The identity guard anchors on Title Case, so ordinary lowercase loan prose
     ("applicant requests ...", "36 months") is not falsely rejected."""
-    out = ClaudeClient(_config(), adapter=FakeAdapter(response=GOOD_SUMMARY)) \
-        .summarize_application("{}")
+    out = ClaudeClient(
+        _config(), adapter=FakeAdapter(response=GOOD_SUMMARY)
+    ).summarize_application("{}")
     assert out["summary"] == "Applicant requests $10,000 over 36 months."
 
 
 # --- Concern 2: adapter is thin / injectable ------------------------------
+
 
 def test_adapter_receives_built_request():
     adapter = FakeAdapter(response=GOOD_SUMMARY)
@@ -452,10 +727,12 @@ def test_adapter_receives_built_request():
 
 # --- Acceptance: no PII in logs -------------------------------------------
 
+
 def test_no_pii_in_logs():
     """Feed PII in the input; assert none reaches the (redacted) log stream."""
     buf = io.StringIO()
     from app.logging_config import RedactingFormatter
+
     handler = logging.StreamHandler(buf)
     handler.setFormatter(RedactingFormatter("%(message)s"))
     llm_log = logging.getLogger("llm")
@@ -476,6 +753,7 @@ def test_no_pii_in_logs():
 
 
 # --- Adversarial fixes (A / C / D / E / B) --------------------------------
+
 
 def test_pii_redacted_before_sent_to_provider():
     """Fix A: customer PII must be redacted before the request leaves to the
@@ -506,13 +784,16 @@ def test_history_pii_redacted_before_send():
     assert "9981" not in sent  # provider export strips the last-4 fragment
 
 
-@pytest.mark.parametrize("role", [
-    "Jane Smith",   # PII smuggled as a role
-    "system",       # privilege escalation attempt
-    "",             # empty
-    "User",         # wrong case — chat API expects lowercase
-    None,           # non-string
-])
+@pytest.mark.parametrize(
+    "role",
+    [
+        "Jane Smith",  # PII smuggled as a role
+        "system",  # privilege escalation attempt
+        "",  # empty
+        "User",  # wrong case — chat API expects lowercase
+        None,  # non-string
+    ],
+)
 def test_history_invalid_role_rejected_before_provider(role):
     """Regression: the role on a history turn is copied straight onto the provider
     message and is NOT redacted. An unrecognized/PII role must fail closed during
@@ -555,7 +836,7 @@ def test_free_text_purpose_field_does_not_leak_identity():
     sent = "".join(m["content"] for m in adapter.calls[0].messages)
     for leaked in ("Jane Smith", "DOB 1970-01-01", "10 Main St"):
         assert leaked not in sent, f"identity leaked via purpose: {leaked!r}"
-    assert "1000" in sent        # structured triage fields survive
+    assert "1000" in sent  # structured triage fields survive
     assert "24" in sent
 
 
@@ -575,7 +856,9 @@ def test_lowercase_token_under_non_identity_key_masked():
             '{"purpose": "%s", "amount": 5000}' % value
         )
         sent = "".join(m["content"] for m in adapter.calls[0].messages)
-        assert value not in sent, f"string value leaked under non-identity key: {value!r}"
+        assert value not in sent, (
+            f"string value leaked under non-identity key: {value!r}"
+        )
         assert "5000" in sent  # numeric triage field survives
 
 
@@ -587,8 +870,13 @@ def test_safe_categorical_purpose_value_survives():
     stuffed into the same unvalidated field does not (covered by
     test_free_text_purpose_field_does_not_leak_identity /
     test_lowercase_token_under_non_identity_key_masked)."""
-    for code in ("auto", "debt_consolidation", "home_improvement",
-                 "personal", "working_capital"):
+    for code in (
+        "auto",
+        "debt_consolidation",
+        "home_improvement",
+        "personal",
+        "working_capital",
+    ):
         adapter = FakeAdapter(response=GOOD_SUMMARY)
         ClaudeClient(_config(), adapter=adapter).summarize_application(
             '{"purpose": "%s", "amount": 18000}' % code
@@ -613,8 +901,9 @@ def test_history_lowercase_token_under_non_identity_key_masked():
         ClaudeClient(_config(), adapter=adapter).complete(
             "loan_application_summary",
             application_json="{}",
-            history=[{"role": "user", "content":
-                      '{"note": "%s", "amount": 5000}' % value}],
+            history=[
+                {"role": "user", "content": '{"note": "%s", "amount": 5000}' % value}
+            ],
         )
         sent = "".join(m["content"] for m in adapter.calls[0].messages)
         assert value not in sent, f"string value leaked via history: {value!r}"
@@ -635,7 +924,9 @@ def test_no_whitespace_free_text_still_masked():
             '{"purpose": "%s", "amount": 1000}' % leaked
         )
         sent = "".join(m["content"] for m in adapter.calls[0].messages)
-        assert leaked not in sent, f"identity leaked via no-whitespace purpose: {leaked!r}"
+        assert leaked not in sent, (
+            f"identity leaked via no-whitespace purpose: {leaked!r}"
+        )
         assert "1000" in sent  # numeric triage field still survives
 
 
@@ -661,8 +952,12 @@ def test_history_free_text_field_value_redacted():
     ClaudeClient(_config(), adapter=adapter).complete(
         "loan_application_summary",
         application_json="{}",
-        history=[{"role": "user", "content":
-                  '{"note": "prior borrower Jane Smith DOB 1970-01-01 at 10 Main St"}'}],
+        history=[
+            {
+                "role": "user",
+                "content": '{"note": "prior borrower Jane Smith DOB 1970-01-01 at 10 Main St"}',
+            }
+        ],
     )
     sent = "".join(m["content"] for m in adapter.calls[0].messages)
     for leaked in ("Jane Smith", "1970-01-01", "10 Main St"):
@@ -681,23 +976,33 @@ def test_history_identity_fields_not_sent_to_provider():
         "loan_application_summary",
         application_json="{}",
         history=[
-            {"role": "user", "content": (
-                '{"name": "Jane Smith", "dob": "1980-01-02", '
-                '"address": "1 Main St", "employer": "Acme Corp", '
-                '"ssn": "412-55-9981", "amount": 18000}'
-            )},
-            {"role": "user", "content": (
-                '{"full_name": "Bob Roe", "date_of_birth": "1975-05-05"}'
-            )},
+            {
+                "role": "user",
+                "content": (
+                    '{"name": "Jane Smith", "dob": "1980-01-02", '
+                    '"address": "1 Main St", "employer": "Acme Corp", '
+                    '"ssn": "412-55-9981", "amount": 18000}'
+                ),
+            },
+            {
+                "role": "user",
+                "content": ('{"full_name": "Bob Roe", "date_of_birth": "1975-05-05"}'),
+            },
         ],
     )
     sent = "".join(m["content"] for m in adapter.calls[0].messages)
-    for leaked in ("Jane Smith", "1980-01-02", "1 Main St", "Acme Corp",
-                   "Bob Roe", "1975-05-05"):
+    for leaked in (
+        "Jane Smith",
+        "1980-01-02",
+        "1 Main St",
+        "Acme Corp",
+        "Bob Roe",
+        "1975-05-05",
+    ):
         assert leaked not in sent, f"identity value leaked via history: {leaked!r}"
-    assert "412-55-9981" not in sent      # shaped SSN masked...
-    assert "9981" not in sent             # ...and last-4 stripped for provider
-    assert "18000" in sent                # triage-relevant field survives
+    assert "412-55-9981" not in sent  # shaped SSN masked...
+    assert "9981" not in sent  # ...and last-4 stripped for provider
+    assert "18000" in sent  # triage-relevant field survives
 
 
 def test_free_prose_history_is_rejected(monkeypatch):
@@ -711,10 +1016,15 @@ def test_free_prose_history_is_rejected(monkeypatch):
         client.complete(
             "loan_application_summary",
             application_json="{}",
-            history=[{"role": "user", "content": (
-                "Prior borrower Jane Smith, DOB 1970-01-01, address 10 Main St, "
-                "employer Acme Corp."
-            )}],
+            history=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Prior borrower Jane Smith, DOB 1970-01-01, address 10 Main St, "
+                        "employer Acme Corp."
+                    ),
+                }
+            ],
         )
     assert adapter.calls == []  # refused before the network
 
@@ -733,11 +1043,14 @@ def test_malformed_application_json_is_rejected(monkeypatch):
     assert adapter.calls == []  # refused before the network
 
 
-@pytest.mark.parametrize("payload", [
-    '"Jane Smith DOB 1970-01-01 address 10 Main St"',  # bare JSON string
-    '["Jane Smith", "1970-01-01"]',                     # JSON array
-    '42',                                               # bare JSON number
-])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '"Jane Smith DOB 1970-01-01 address 10 Main St"',  # bare JSON string
+        '["Jane Smith", "1970-01-01"]',  # JSON array
+        "42",  # bare JSON number
+    ],
+)
 def test_bare_json_scalar_or_array_application_json_rejected(payload):
     """Adversarial: prose wrapped in quotes/brackets is valid JSON but has no
     keys to mask, so it would ship identity raw. A declared JSON var must be an
@@ -763,10 +1076,13 @@ def test_dict_application_json_is_masked_not_stringified(monkeypatch):
     assert "100" in sent  # triage field survives
 
 
-@pytest.mark.parametrize("content", [
-    '"Prior borrower Jane Smith, DOB 1970-01-01, 10 Main St"',  # bare JSON string
-    '["Jane Smith", "1970-01-01"]',                             # JSON array
-])
+@pytest.mark.parametrize(
+    "content",
+    [
+        '"Prior borrower Jane Smith, DOB 1970-01-01, 10 Main St"',  # bare JSON string
+        '["Jane Smith", "1970-01-01"]',  # JSON array
+    ],
+)
 def test_bare_json_scalar_or_array_history_rejected(content):
     """Adversarial: the same quotes/brackets-as-prose bypass on history. A turn
     must be a JSON object, not a bare scalar/array, or it fails closed."""
@@ -799,8 +1115,14 @@ def test_malformed_history_raises_typed_error():
     tmpl = get_prompt("loan_application_summary")
     with pytest.raises(LLMError):
         build_request(
-            tmpl, model="m", max_tokens=10, temperature=0.0, timeout=1.0,
-            token_budget=20_000, history=[{"role": "user"}], application_json="{}",
+            tmpl,
+            model="m",
+            max_tokens=10,
+            temperature=0.0,
+            timeout=1.0,
+            token_budget=20_000,
+            history=[{"role": "user"}],
+            application_json="{}",
         )
 
 
@@ -842,10 +1164,10 @@ def test_account_and_routing_numbers_not_sent_to_provider():
         '"amount": 18000}'
     )
     sent = "".join(m["content"] for m in adapter.calls[0].messages)
-    assert "5551234567" not in sent          # account number masked
-    assert "123456789" not in sent           # routing number masked
+    assert "5551234567" not in sent  # account number masked
+    assert "123456789" not in sent  # routing number masked
     assert "GB82WEST12345698765432" not in sent  # IBAN masked
-    assert "18000" in sent                    # non-PII amount preserved
+    assert "18000" in sent  # non-PII amount preserved
 
 
 def test_identity_fields_not_sent_to_provider():
@@ -862,13 +1184,13 @@ def test_identity_fields_not_sent_to_provider():
         '"annual_income": 42000, "amount": 18000, "purpose": "auto"}'
     )
     sent = "".join(m["content"] for m in adapter.calls[0].messages)
-    assert "Jane Doe" not in sent          # name generalized
-    assert "1970-01-01" not in sent        # DOB dropped
-    assert "10 Main St" not in sent        # address dropped
-    assert "12-3456789" not in sent        # EIN dropped
-    assert "Acme Corp" not in sent         # employer dropped
-    assert "42000" in sent                 # income kept (triage-relevant)
-    assert "18000" in sent                 # amount kept
+    assert "Jane Doe" not in sent  # name generalized
+    assert "1970-01-01" not in sent  # DOB dropped
+    assert "10 Main St" not in sent  # address dropped
+    assert "12-3456789" not in sent  # EIN dropped
+    assert "Acme Corp" not in sent  # employer dropped
+    assert "42000" in sent  # income kept (triage-relevant)
+    assert "18000" in sent  # amount kept
     # (purpose-string masking is covered by test_lowercase_token_under_non_identity_key_masked)
 
 
@@ -891,7 +1213,7 @@ def test_identity_masking_enforced_in_public_complete_path():
     assert "1970-01-01" not in sent
     assert "12-3456789" not in sent
     assert "Acme Corp" not in sent
-    assert "42000" in sent                 # triage-relevant fields survive
+    assert "42000" in sent  # triage-relevant fields survive
     assert "18000" in sent
 
 
@@ -925,8 +1247,16 @@ def test_identity_key_variant_spellings_not_sent_to_provider():
         '"job_title": "Chief Widget Officer", "employer": "Acme", "amount": 18000}'
     )
     sent = "".join(m["content"] for m in adapter.calls[0].messages)
-    for leaked in ("Jane", "Roe", "Quinn", "1970-01-01", "98-7654321",
-                   "10 Main St", "Chief Widget Officer", "Acme"):
+    for leaked in (
+        "Jane",
+        "Roe",
+        "Quinn",
+        "1970-01-01",
+        "98-7654321",
+        "10 Main St",
+        "Chief Widget Officer",
+        "Acme",
+    ):
         assert leaked not in sent, f"identity value leaked: {leaked!r}"
     assert "18000" in sent  # operational field preserved
 
@@ -934,11 +1264,31 @@ def test_identity_key_variant_spellings_not_sent_to_provider():
 def test_is_identity_key_does_not_over_match_operational_fields():
     """The hardened matcher must not mask triage-relevant operational fields."""
     from app.llm.request_builder import _is_identity_key
-    for k in ("amount", "income", "term_months", "purpose",
-              "employment_years", "is_entity", "loan_id", "apr", "status"):
+
+    for k in (
+        "amount",
+        "income",
+        "term_months",
+        "purpose",
+        "employment_years",
+        "is_entity",
+        "loan_id",
+        "apr",
+        "status",
+    ):
         assert not _is_identity_key(k), f"over-masked operational field {k!r}"
-    for k in ("firstname", "surname", "fullname", "federal_ein",
-              "street1", "job_title", "name", "dob", "ein", "address"):
+    for k in (
+        "firstname",
+        "surname",
+        "fullname",
+        "federal_ein",
+        "street1",
+        "job_title",
+        "name",
+        "dob",
+        "ein",
+        "address",
+    ):
         assert _is_identity_key(k), f"missed identity field {k!r}"
 
 
@@ -975,10 +1325,19 @@ def test_is_field_name_accepts_labels_rejects_data():
     """Unit: the key gate accepts schema field names and rejects keys that carry
     data (whitespace / leading digit / symbol)."""
     from app.llm.request_builder import _is_field_name as f
+
     for k in ("name", "first_name", "annualIncome", "term-months", "_private", "dob"):
         assert f(k), f"rejected valid field name {k!r}"
-    for k in ("Jane Smith", "dob 1970-01-01", "10 Main St", "1970-01-01",
-              "contact@ex.com", "", "  ", "a.b"):
+    for k in (
+        "Jane Smith",
+        "dob 1970-01-01",
+        "10 Main St",
+        "1970-01-01",
+        "contact@ex.com",
+        "",
+        "  ",
+        "a.b",
+    ):
         assert not f(k), f"accepted data-bearing key {k!r}"
 
 
@@ -990,9 +1349,9 @@ def test_labeled_number_variants_redacted_before_send():
         '{"ssn_number": 412559981, "phone_number": 5551234567, "loan_number": 87654321}'
     )
     sent = "".join(m["content"] for m in adapter.calls[0].messages)
-    assert "412559981" not in sent   # ssn_number masked
+    assert "412559981" not in sent  # ssn_number masked
     assert "5551234567" not in sent  # phone_number masked
-    assert "87654321" in sent        # unrelated labeled number left intact
+    assert "87654321" in sent  # unrelated labeled number left intact
 
 
 def test_leading_zero_ssn_coerced_to_int_masked():
@@ -1000,9 +1359,18 @@ def test_leading_zero_ssn_coerced_to_int_masked():
     coercion (012-34-5678 -> 12345678) is 8 digits and not a valid date, so the
     structural heuristic and the label-gated pattern pass both miss it. Key-aware
     masking under an SSN/TIN label catches it before it reaches the provider."""
-    for key in ("ssn", "tin", "social_security_number", "social_security_no",
-                "applicant_ssn", "taxpayer_id", "tax_id_number", "national_id",
-                "itin", "sin"):
+    for key in (
+        "ssn",
+        "tin",
+        "social_security_number",
+        "social_security_no",
+        "applicant_ssn",
+        "taxpayer_id",
+        "tax_id_number",
+        "national_id",
+        "itin",
+        "sin",
+    ):
         adapter = FakeAdapter(response=GOOD_SUMMARY)
         ClaudeClient(_config(), adapter=adapter).summarize_application(
             '{"%s": 12345678, "amount": 1000}' % key
@@ -1017,12 +1385,34 @@ def test_is_numeric_identity_key_variants_and_false_positives():
     variants without over-matching operational numeric fields whose normalized
     form embeds a short token (routing_number contains 'tin')."""
     from app.llm.request_builder import _is_numeric_identity_key as f
-    for k in ("ssn", "ssn_number", "applicant_ssn", "tin", "tin_number", "itin",
-              "social_security", "social_security_no", "social_security_number",
-              "taxpayer_id", "tax_id", "tax_id_number", "national_id", "sin"):
+
+    for k in (
+        "ssn",
+        "ssn_number",
+        "applicant_ssn",
+        "tin",
+        "tin_number",
+        "itin",
+        "social_security",
+        "social_security_no",
+        "social_security_number",
+        "taxpayer_id",
+        "tax_id",
+        "tax_id_number",
+        "national_id",
+        "sin",
+    ):
         assert f(k), f"missed SSN/TIN label {k!r}"
-    for k in ("routing_number", "loan_number", "loan_id", "amount",
-              "account_number", "term_months", "cross_number", "is_entity"):
+    for k in (
+        "routing_number",
+        "loan_number",
+        "loan_id",
+        "amount",
+        "account_number",
+        "term_months",
+        "cross_number",
+        "is_entity",
+    ):
         assert not f(k), f"over-matched operational field {k!r}"
 
 
@@ -1052,28 +1442,29 @@ def test_numeric_identity_under_non_identity_key_masked():
         '"annual_income": 42000, "term_months": 48, "loan_number": 87654321}'
     )
     sent = "".join(m["content"] for m in adapter.calls[0].messages)
-    assert "19700101" not in sent    # DOB (YYYYMMDD) masked
-    assert "412559981" not in sent   # 9-digit SSN masked
+    assert "19700101" not in sent  # DOB (YYYYMMDD) masked
+    assert "412559981" not in sent  # 9-digit SSN masked
     assert "4125559981" not in sent  # 10-digit NANP phone masked
-    assert "18000" in sent           # triage figures survive
+    assert "18000" in sent  # triage figures survive
     assert "42000" in sent
     assert "48" in sent
-    assert "87654321" in sent        # 8-digit non-date (year 8765) not over-masked
+    assert "87654321" in sent  # 8-digit non-date (year 8765) not over-masked
 
 
 def test_looks_like_numeric_identity_boundaries():
     """Unit: the structural matcher masks SSN/DOB/phone shapes without eating
     triage figures or booleans."""
     from app.llm.request_builder import _looks_like_numeric_identity as f
-    assert f(412559981)     # 9-digit SSN
-    assert f(19700101)      # valid YYYYMMDD DOB
-    assert f(4125559981)    # 10-digit NANP phone (area 412, exchange 555)
+
+    assert f(412559981)  # 9-digit SSN
+    assert f(19700101)  # valid YYYYMMDD DOB
+    assert f(4125559981)  # 10-digit NANP phone (area 412, exchange 555)
     assert not f(87654321)  # 8 digits but year 8765 -> not a date
     assert not f(1000000000)  # 10 digits but leads with 1 -> not NANP
-    assert not f(18000)     # amount
-    assert not f(42000)     # income
-    assert not f(48)        # term
-    assert not f(True)      # bool is not identity
+    assert not f(18000)  # amount
+    assert not f(42000)  # income
+    assert not f(48)  # term
+    assert not f(True)  # bool is not identity
     assert not f(1970.0101)  # float (money-shaped), never an ID
 
 
@@ -1086,6 +1477,7 @@ def test_redact_json_strips_last4_for_provider_and_falls_back_on_bad_json():
     assert redact_json("SSN 412-55-9981") == PiiRedactor.redact("SSN 412-55-9981")
     # A PII-shaped KEY must not corrupt the JSON or leak the value.
     import json as _json
+
     out = redact_json('{"contact@ex.com": "4111111111111111"}')
     parsed = _json.loads(out)  # still valid JSON
     assert "4111111111111111" not in out  # value redacted
