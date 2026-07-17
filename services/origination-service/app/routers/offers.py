@@ -55,6 +55,22 @@ def make_offer(body: OfferIn):
     if not rows:
         raise HTTPException(status_code=404, detail="application not found")
     app_row = rows[0]
+    # Decision-state guard (PR review, ADR 0010 alt 3 defense-in-depth): a TILA offer is
+    # only meaningful for an APPROVED application, so gate on the latest decision — an
+    # offer must not be generated/persisted for a denied/referred/undecided app. This
+    # matches the UI, which only shows the offer CTA on approve, and limits the blast
+    # radius of the anonymous trigger. (Authorization — WHOSE application this is — is the
+    # separate officer-OR-owner check deferred to ADR 0010.)
+    decision_rows = db.query(
+        "SELECT outcome FROM decisions WHERE app_id = %s", (body.app_id,)
+    )
+    if (
+        not decision_rows
+        or (decision_rows[0].get("outcome") or "").lower() != "approve"
+    ):
+        raise HTTPException(
+            status_code=409, detail="offer requires an approved decision"
+        )
     resp = clients.post(
         clients.DISCLOSURE_URL,
         "/offers",

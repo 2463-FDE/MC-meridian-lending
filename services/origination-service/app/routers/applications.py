@@ -384,18 +384,33 @@ def run_decision(
 
 @router.post("/{app_id}/accept")
 def accept_offer(app_id: int):
+    # Decision-state guard (PR review, ADR 0010 alt 3 defense-in-depth): boarding creates
+    # a real loan (loans + balances, status=funded), so require the application to have an
+    # APPROVED decision AND a generated offer before boarding — never rely on the UI to
+    # gate it, and never board at a default rate when no offer exists. (Authorization —
+    # whose application this is — is the separate officer-OR-owner check in ADR 0010.)
     rows = db.query(
-        "SELECT a.amount, a.term_months, ap.name, o.apr "
-        "FROM applications a LEFT JOIN applicants ap ON ap.id = a.applicant_id "
-        "LEFT JOIN offers o ON o.app_id = a.id WHERE a.id = %s ORDER BY o.id DESC",
+        "SELECT a.amount, a.term_months, ap.name, o.apr, d.outcome "
+        "FROM applications a "
+        "LEFT JOIN applicants ap ON ap.id = a.applicant_id "
+        "LEFT JOIN decisions d ON d.app_id = a.id "
+        "LEFT JOIN offers o ON o.app_id = a.id "
+        "WHERE a.id = %s ORDER BY o.id DESC",
         (app_id,),
     )
     if not rows:
         raise HTTPException(status_code=404, detail="application not found")
     r = rows[0]
-    rate = r.get("apr") or 7.99
+    if (r.get("outcome") or "").lower() != "approve":
+        raise HTTPException(
+            status_code=409, detail="application is not approved for boarding"
+        )
+    if r.get("apr") is None:
+        raise HTTPException(
+            status_code=409, detail="no offer to accept for this application"
+        )
     loan_id = intake.board_to_servicing(
-        app_id, r.get("name") or "Borrower", r["amount"], rate, r["term_months"]
+        app_id, r.get("name") or "Borrower", r["amount"], r["apr"], r["term_months"]
     )
     db.query("UPDATE applications SET status = 'funded' WHERE id = %s", (app_id,))
     return {"loan_id": loan_id}

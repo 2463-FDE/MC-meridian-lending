@@ -136,6 +136,27 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_decision_record.py -q
 
+  offer-guard-gate:
+    # Offer generation and loan boarding are state-changing money operations reachable
+    # through the anonymous /los proxy. The guards -- offer inputs bound to the stored
+    # application, offer requires an approved decision, boarding requires an approved
+    # decision AND an existing offer -- limit an anonymous trigger to at most a no-op on
+    # an approved application (never a forged offer or a loan boarded on a not-approved
+    # app). The tests live in test_offers.py, which the `backend` job runs under
+    # continue-on-error/|| true, so a reopened gap would stay green. This job MUST block.
+    # (The remaining anonymous-trigger authorization is deferred to ADR 0010.)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: origination-service offer/accept guard regression tests
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_offers.py -q
+
   db-readiness-gate:
     # DB readiness is a security control: a passwordless / placeholder / stale
     # DATABASE_URL must report unhealthy, not connect unauthenticated or fail
