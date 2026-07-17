@@ -18,6 +18,13 @@
 # secret-manager (left blank there so it fails closed). All four internal services get
 # the SAME value: origination forwards it, the others compare against it.
 x-demo-internal-token: &demo_internal_token "dev-internal-token-not-for-production"
+# DEMO pepper for the SSN idempotency fingerprint. Set here (not in .env / .env.example)
+# for the same reason as the token above: committing a usable pepper in the production
+# template would make the persisted SSN fingerprints brute-forceable back to SSNs. Safe
+# here ONLY because this override is local-demo-explicit and runs ENVIRONMENT=development
+# over synthetic SSNs; a real deploy sets a secret pepper from a secret-manager, and a
+# blank/placeholder pepper reports unhealthy outside development.
+x-demo-fingerprint-pepper: &demo_fingerprint_pepper "dev-fingerprint-pepper-not-for-production"
 services:
   origination-service:
     environment:
@@ -33,3 +40,4 @@ services:
       ENVIRONMENT: development
       ALLOW_SYNTHETIC_CREDIT: "1"
       INTERNAL_SERVICE_TOKEN: *demo_internal_token
+      DECISION_FINGERPRINT_PEPPER: *demo_fingerprint_pepper

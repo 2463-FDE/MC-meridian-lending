@@ -466,3 +466,78 @@ def test_missing_internal_service_token_is_flagged(monkeypatch):
     assert "INTERNAL_SERVICE_TOKEN" in config.missing_required_secrets()
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "tok")
     assert "INTERNAL_SERVICE_TOKEN" not in config.missing_required_secrets()
+
+
+# --- SSN-fingerprint pepper: a public/placeholder pepper is reversible PII (PR review) --
+
+
+def test_fingerprint_pepper_rejects_blank_and_placeholders(monkeypatch):
+    # A blank or known-placeholder pepper must be treated as NO pepper, so a copied
+    # .env.example never keys a reversible HMAC of the SSN.
+    for placeholder in [
+        "",
+        "   ",
+        "demo-decision-fingerprint-pepper-change-me",
+        "DEMO-DECISION-FINGERPRINT-PEPPER-CHANGE-ME",  # case-insensitive
+        "replace_with_fingerprint_pepper",
+        "changeme",
+        "placeholder",
+    ]:
+        monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", placeholder)
+        assert config.fingerprint_pepper() is None, placeholder
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", "a-real-secret-pepper")
+    assert config.fingerprint_pepper() == "a-real-secret-pepper"
+
+
+def test_placeholder_pepper_persists_no_fingerprint(monkeypatch):
+    # Even with the env var non-empty, a placeholder must not produce a fingerprint —
+    # otherwise a reversible digest lands in decision_events.inputs.
+    from app import decision
+
+    monkeypatch.setattr(
+        config,
+        "DECISION_FINGERPRINT_PEPPER",
+        "demo-decision-fingerprint-pepper-change-me",
+    )
+    assert decision._ssn_fingerprint("123456789") is None
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", "a-real-secret-pepper")
+    assert decision._ssn_fingerprint("123456789") is not None
+
+
+def test_health_flags_placeholder_pepper_outside_development(monkeypatch):
+    # Outside development, a blank/placeholder pepper reports unhealthy rather than
+    # silently keying a reversible fingerprint (or dropping the check).
+    monkeypatch.setattr(config, "ENVIRONMENT", "production")
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", "")
+    assert "DECISION_FINGERPRINT_PEPPER" in config.missing_required_secrets()
+    monkeypatch.setattr(
+        config,
+        "DECISION_FINGERPRINT_PEPPER",
+        "demo-decision-fingerprint-pepper-change-me",
+    )
+    assert "DECISION_FINGERPRINT_PEPPER" in config.missing_required_secrets()
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", "a-real-secret-pepper")
+    assert "DECISION_FINGERPRINT_PEPPER" not in config.missing_required_secrets()
+
+
+def test_health_allows_missing_pepper_in_development(monkeypatch):
+    # Development may run without a pepper (SSN-change detection simply off); the demo
+    # override supplies a dev value, but its absence must not make the dev stack unhealthy.
+    monkeypatch.setattr(config, "ENVIRONMENT", "development")
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", "")
+    assert "DECISION_FINGERPRINT_PEPPER" not in config.missing_required_secrets()
+
+
+def test_env_example_ships_no_usable_pepper():
+    # Regression (PR review): the committed template must NOT carry a usable pepper — a
+    # public pepper makes every persisted SSN fingerprint brute-forceable. Blank or a
+    # rejected placeholder only, so a copied .env.example can never key a reversible
+    # digest and reports unhealthy outside development.
+    pairs = _parse_env_example()
+    values = [v for k, v in pairs if k == "DECISION_FINGERPRINT_PEPPER"]
+    assert len(values) <= 1, f"expected at most one pepper line, got {values}"
+    if values:
+        assert values[0].strip().lower() in config._PLACEHOLDER_PEPPERS, (
+            "committed .env.example pepper must be blank or a rejected placeholder, "
+            f"got {values[0]!r}"
+        )

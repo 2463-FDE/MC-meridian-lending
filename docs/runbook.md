@@ -88,13 +88,23 @@ own on retryable requests. A key reused with DIFFERENT decision inputs (amount, 
 term, monthly_debt, employment_years, or SSN) returns **409** rather than a stale replay.
 
 - **`DECISION_FINGERPRINT_PEPPER` (decision-service, env only).** SSN drives the bureau
-  pull, so the SSN is part of that conflict check — but only via a non-reversible keyed
-  HMAC (the raw SSN is never persisted). This pepper is the HMAC key. `.env.example`
-  ships a demo value so the local stack has the check ON; **set a real secret in prod**
-  (host-env/secret-manager). Left blank, SSN-change detection is OFF and only the
-  financial fields are compared (the service still runs). Rotating it invalidates
-  in-flight fingerprints, so a retry mid-rotation may 409 (fails safe — never a stale
-  decision).
+  pull, so the SSN is part of that conflict check — but only via a keyed HMAC (the raw
+  SSN is never persisted). This pepper is the HMAC key and **must be a real secret**: the
+  digest is only non-reversible while the pepper is secret, and an SSN is a 9-digit space,
+  so a public/placeholder pepper lets anyone with `decision_events` access brute-force the
+  fingerprints back to SSNs. So:
+  - `.env.example` ships it **blank** (no committed value — same posture as
+    `INTERNAL_SERVICE_TOKEN` / `EXPERIAN_KEY`). Set a real secret from a secret-manager in
+    any non-dev deploy.
+  - A blank or known-placeholder value is treated as **no pepper**: no fingerprint is
+    persisted, and **outside development `/health` reports unhealthy** (it is in
+    `missing_required_secrets`). SSN-change detection then degrades to the financial-input
+    fields only.
+  - The **local demo** supplies a dev-only value via `docker-compose.demo.yml`
+    (`ENVIRONMENT=development`, synthetic SSNs), so the check runs in the demo without a
+    committed production secret.
+  - Rotating it invalidates in-flight fingerprints, so a retry mid-rotation may 409 (fails
+    safe — never a stale decision).
 
 ## Known operational pain (unresolved)
 

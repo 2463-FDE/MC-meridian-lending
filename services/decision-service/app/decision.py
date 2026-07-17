@@ -136,7 +136,7 @@ def _ssn_fingerprint(ssn: str) -> str | None:
     brute-forceable, so we key an HMAC-SHA256 with a configured pepper. Returns None
     when no pepper is configured or the SSN is empty — SSN-change detection is then
     disabled and only the financial-input conflict check runs."""
-    pepper = config.DECISION_FINGERPRINT_PEPPER
+    pepper = config.fingerprint_pepper()
     if not pepper or not ssn:
         return None
     return hmac.new(

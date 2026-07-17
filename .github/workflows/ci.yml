@@ -114,7 +114,7 @@ jobs:
         run: |
           cd services/decision-service
           pip install -r requirements.txt pytest
-          python -m pytest tests/test_decision.py::test_env_example_gate_stays_closed_by_parsing_the_template -q
+          python -m pytest tests/test_decision.py -k "env_example or pepper" -q
 
   decision-idempotency-gate:
     # Decision idempotency is a regulatory control: a reused Idempotency-Key must
