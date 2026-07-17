@@ -215,6 +215,18 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
+            # Schema readiness (PR review): the decision write path unconditionally
+            # inserts decision_events(request_id). Migrations are hand-applied and lag
+            # the init DDL (CLAUDE.md / ADR 0002), so a DB volume that predates
+            # 0004-0006 is reachable but would 500/503 EVERY decision. Fail readiness
+            # loud here, naming the missing object, so an unmigrated deployment is
+            # visible at /health rather than a silent underwriting outage.
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'decision_events' AND column_name = 'request_id'"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:decision_events.request_id"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__

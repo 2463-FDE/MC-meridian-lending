@@ -146,6 +146,17 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
+            # Schema readiness (PR review): decisioning reads applications.monthly_debt
+            # (decision_request_payload). Migrations are hand-applied and lag the init
+            # DDL (CLAUDE.md / ADR 0002), so a DB volume that predates 0006 is reachable
+            # but the SELECT would 500 the decision path. Fail readiness loud here,
+            # naming the missing column, so an unmigrated deployment shows at /health.
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'applications' AND column_name = 'monthly_debt'"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:applications.monthly_debt"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__

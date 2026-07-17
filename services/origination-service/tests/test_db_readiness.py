@@ -5,6 +5,7 @@ misconfigured so /health can report unhealthy instead of connecting
 unauthenticated or failing auth at first query. Covers the passwordless DSN
 (meridian:@postgres) the secret purge left behind and the shipped placeholder.
 """
+
 import threading
 import time
 
@@ -56,7 +57,9 @@ def test_stale_password_rejected_against_postgres_password(monkeypatch):
     # without a DB round trip.
     monkeypatch.setenv("POSTGRES_PASSWORD", "the_real_pw")
     monkeypatch.setattr(
-        config, "DATABASE_URL", "postgresql://meridian:stale_old_pw@postgres:5432/meridian"
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:stale_old_pw@postgres:5432/meridian",
     )
     assert config.database_url_configured() is False
     assert "DATABASE_URL" in config.missing_required_secrets()
@@ -65,7 +68,9 @@ def test_stale_password_rejected_against_postgres_password(monkeypatch):
 def test_password_matching_postgres_password_is_ok(monkeypatch):
     monkeypatch.setenv("POSTGRES_PASSWORD", "the_real_pw")
     monkeypatch.setattr(
-        config, "DATABASE_URL", "postgresql://meridian:the_real_pw@postgres:5432/meridian"
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:the_real_pw@postgres:5432/meridian",
     )
     assert config.database_url_configured() is True
     assert "DATABASE_URL" not in config.missing_required_secrets()
@@ -154,6 +159,49 @@ def test_probe_fails_on_wrong_password_without_postgres_password(monkeypatch):
     ok, err = config.database_reachable()
     assert ok is False
     assert err == "OperationalError"  # class name only — no DSN/password leak
+
+
+class _SchemaMissingCursor:
+    """Connects and answers SELECT 1, but reports the required schema absent — the
+    unmigrated-volume case (applications.monthly_debt not yet applied)."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        return None if "information_schema" in self._last else (1,)
+
+
+class _SchemaMissingConn:
+    def cursor(self):
+        return _SchemaMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_schema_not_migrated(monkeypatch):
+    # PR review: a reachable DB whose volume predates 0006 would 500 the decision path
+    # on the monthly_debt SELECT. The probe must report readiness FALSE, naming the
+    # missing column, so /health shows unhealthy instead of a silent decisioning break.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _SchemaMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:applications.monthly_debt"
 
 
 def test_probe_false_when_database_url_unset(monkeypatch):

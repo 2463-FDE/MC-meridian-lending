@@ -283,6 +283,49 @@ def test_database_url_probe_ok_when_connection_succeeds(monkeypatch):
     assert err is None
 
 
+class _SchemaMissingCursor:
+    """Connects and answers SELECT 1, but reports the required schema absent — the
+    unmigrated-volume case (decision_events.request_id not yet applied)."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        return None if "information_schema" in self._last else (1,)
+
+
+class _SchemaMissingConn:
+    def cursor(self):
+        return _SchemaMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_database_url_probe_fails_when_schema_not_migrated(monkeypatch):
+    # PR review: a reachable DB whose volume predates 0004-0006 would 500/503 every
+    # decision. The probe must report readiness FALSE, naming the missing object, so
+    # /health shows unhealthy instead of a silent underwriting outage.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _SchemaMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:decision_events.request_id"
+
+
 def test_database_url_probe_fails_on_wrong_password_without_postgres_password(
     monkeypatch,
 ):
