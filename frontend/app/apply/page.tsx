@@ -196,7 +196,12 @@ export default function ApplyPage() {
     setApiError(null);
     try {
       const res = (await apiPost(
-        `/los/applications/${app.app_id}/decision`
+        `/los/applications/${app.app_id}/decision`,
+        undefined,
+        // Stable per-application idempotency key: a timeout retry or a second click
+        // replays the recorded decision instead of re-pulling credit and appending
+        // another regulated decision event (PR review).
+        { "Idempotency-Key": `los-decision-${app.app_id}` }
       )) as DecisionResult;
       setDecision(res);
     } catch (err) {

@@ -26,6 +26,16 @@ EXPERIAN_BASE_URL = os.getenv(
 # bureau key). When unset the guard fails CLOSED — an unconfigured token never means open.
 INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 
+# Keyed pepper for the SSN idempotency fingerprint (see decision._ssn_fingerprint).
+# SSN drives the bureau pull, so a reused request_id arriving with a DIFFERENT SSN must
+# not replay the recorded decision (PR review). We persist only a non-reversible
+# HMAC-SHA256 of the SSN (never the SSN itself — identifier-free record, ADR 0007) and
+# compare it on replay; an unsalted hash of a 9-digit SSN is brute-forceable, so the
+# pepper is required to keep the digest non-reversible. Env only. When unset, SSN-change
+# detection is disabled (the financial-input conflict check still runs). NOT in
+# missing_required_secrets: absence degrades one check, it does not break the runtime.
+DECISION_FINGERPRINT_PEPPER = os.getenv("DECISION_FINGERPRINT_PEPPER", "")
+
 # Deployment environment. Synthetic credit is gated on this being exactly
 # "development", so no production config can enable it — not even by mistake.
 ENVIRONMENT = os.getenv("ENVIRONMENT", "production").strip().lower()

@@ -12,6 +12,8 @@ is refused (fail closed), because an unprovable decision is a Reg B liability, n
 success (ADR 0009 §4).
 """
 
+import hashlib
+import hmac
 import json
 
 import httpx
@@ -125,27 +127,65 @@ _EVENT_COLUMNS = (
 )
 
 
+def _ssn_fingerprint(ssn: str) -> str | None:
+    """Non-reversible keyed digest of the SSN, for idempotency-conflict detection only.
+
+    SSN drives the bureau pull, so a reused request_id arriving with a DIFFERENT SSN
+    must NOT replay the recorded decision (PR review). We cannot persist the raw SSN
+    (identifier-free record, ADR 0007), and an unsalted hash of a 9-digit SSN is
+    brute-forceable, so we key an HMAC-SHA256 with a configured pepper. Returns None
+    when no pepper is configured or the SSN is empty — SSN-change detection is then
+    disabled and only the financial-input conflict check runs."""
+    pepper = config.DECISION_FINGERPRINT_PEPPER
+    if not pepper or not ssn:
+        return None
+    return hmac.new(
+        pepper.encode("utf-8"), ssn.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
 def _request_inputs(application: dict) -> dict:
     """The request-supplied decision inputs, built with the SAME defaults as the
     persisted inputs dict so a faithful replay compares equal. Excludes bureau_score (a
-    pull result, not a request field) and SSN (never persisted — identifier-free)."""
-    return {
+    pull result, not a request field). SSN is never stored raw; a non-reversible keyed
+    fingerprint of it IS included (when a pepper is configured) so a reused request_id
+    with a changed SSN is caught as a conflict rather than replayed."""
+    inputs = {
         "annual_income": application.get("income", 0),
         "requested_amount": application.get("amount", 0),
         "term_months": application.get("term_months", 36),
         "monthly_debt": application.get("monthly_debt", 0),
         "employment_years": application.get("employment_years", 0),
     }
+    fingerprint = _ssn_fingerprint(application.get("ssn", ""))
+    if fingerprint is not None:
+        inputs["ssn_fingerprint"] = fingerprint
+    return inputs
 
 
 def _inputs_conflict(stored: dict | None, current: dict) -> bool:
     """True when a reused request_id arrives with decision inputs that differ from the
-    recorded request. Money is float throughout this system, so compare as floats.
+    recorded request. Money is float throughout this system, so financial fields compare
+    as floats; the SSN fingerprint is an opaque string and compares by equality.
     Absent stored inputs (theoretical: request_id and inputs were co-added, so any keyed
     event has them) skip the check rather than false-reject a legitimate replay."""
     if not stored:
         return False
-    return any(float(stored.get(k) or 0) != float(current[k] or 0) for k in current)
+    for k, cur in current.items():
+        if k == "ssn_fingerprint":
+            # Compare only when BOTH sides carry a fingerprint (pepper configured at
+            # both record and replay time). A missing side means SSN-change detection
+            # is unavailable for this event, not that the SSNs match — skip rather than
+            # false-reject a legitimate replay.
+            stored_fp = stored.get(k)
+            if stored_fp is None or cur is None:
+                continue
+            if stored_fp != cur:
+                return True
+            continue
+        if float(stored.get(k) or 0) != float(cur or 0):
+            return True
+    return False
 
 
 def _result_from_event(row: dict) -> dict:
@@ -271,6 +311,8 @@ def decide(application: dict) -> dict:
     bureau_score = _pull_credit(application.get("ssn", ""))
 
     # Identifier-free model inputs (ADR 0007 rule 1) — this dict is persisted verbatim.
+    # ssn_fingerprint is a non-reversible keyed digest (never the raw SSN), stored so a
+    # reused request_id with a changed SSN is caught on replay (PR review).
     inputs = {
         "bureau_score": bureau_score,
         "annual_income": application.get("income", 0),
@@ -279,6 +321,9 @@ def decide(application: dict) -> dict:
         "monthly_debt": application.get("monthly_debt", 0),
         "employment_years": application.get("employment_years", 0),
     }
+    ssn_fingerprint = _ssn_fingerprint(application.get("ssn", ""))
+    if ssn_fingerprint is not None:
+        inputs["ssn_fingerprint"] = ssn_fingerprint
     model_out = model_vendor.score_application(inputs)
     band = model_vendor.policy_band(model_out["score"])
     outcome = band  # system decisions follow the band; overrides are human-only

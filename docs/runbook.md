@@ -78,6 +78,24 @@ orchestrates the LOS flow and calls them over HTTP.
 - **Look at the portfolio:** `GET /lss/loans?limit=25&offset=0&status=current` (requires auth).
 - **Reconciliation eyeball:** `GET /lss/reconciliation/peek` (ledger vs settlement totals).
 
+### Idempotent decisions
+
+`POST /los/applications/{id}/decision` accepts an `Idempotency-Key` header (forwarded to
+`decision-service` as `request_id`). A retry with the SAME key replays the recorded
+decision — no second bureau pull, no second `decision_events` row. The borrower portal
+sends a stable per-application key automatically; officer/ops callers should send their
+own on retryable requests. A key reused with DIFFERENT decision inputs (amount, income,
+term, monthly_debt, employment_years, or SSN) returns **409** rather than a stale replay.
+
+- **`DECISION_FINGERPRINT_PEPPER` (decision-service, env only).** SSN drives the bureau
+  pull, so the SSN is part of that conflict check — but only via a non-reversible keyed
+  HMAC (the raw SSN is never persisted). This pepper is the HMAC key. `.env.example`
+  ships a demo value so the local stack has the check ON; **set a real secret in prod**
+  (host-env/secret-manager). Left blank, SSN-change detection is OFF and only the
+  financial fields are compared (the service still runs). Rotating it invalidates
+  in-flight fingerprints, so a retry mid-rotation may 409 (fails safe — never a stale
+  decision).
+
 ## Known operational pain (unresolved)
 
 - **Payment retries.** The processor occasionally times out; clients retry. `payment-service`

@@ -584,6 +584,72 @@ def test_reused_key_changed_inputs_returns_409(monkeypatch):
     assert resp.status_code == 409
 
 
+_FP_PEPPER = "test-fingerprint-pepper"
+
+
+def _event_with_ssn(ssn):
+    """A recorded event whose persisted inputs carry the SSN fingerprint under the
+    test pepper (mirrors what decide() now stores)."""
+    row = dict(EXISTING_EVENT_ROW)
+    inputs = dict(row["inputs"])
+    inputs["ssn_fingerprint"] = decision._ssn_fingerprint(ssn)
+    row["inputs"] = inputs
+    return row
+
+
+def test_reused_request_id_with_changed_ssn_conflicts(monkeypatch):
+    # PR review: SSN drives the bureau pull but was excluded from the conflict check,
+    # so a reused key with a corrected/different SSN replayed a STALE decision. With a
+    # pepper configured, the fingerprint mismatch is caught before any pull.
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", _FP_PEPPER)
+    recorded = _event_with_ssn("111111111")
+    monkeypatch.setattr(decision.db, "query", lambda sql, params=None: [dict(recorded)])
+    monkeypatch.setattr(
+        decision, "_pull_credit", lambda ssn: (_ for _ in ()).throw(AssertionError())
+    )
+    with pytest.raises(decision.DecisionInputMismatch):
+        # WEAK_APP.ssn is 123456781 — different from the recorded 111111111.
+        decision.decide(dict(WEAK_APP, request_id="req-abc"))
+
+
+def test_reused_request_id_same_ssn_still_replays(monkeypatch):
+    # Same SSN + same financials on the same key: legitimate retry — replay, no conflict.
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", _FP_PEPPER)
+    recorded = _event_with_ssn(WEAK_APP["ssn"])
+    monkeypatch.setattr(decision.db, "query", lambda sql, params=None: [dict(recorded)])
+    monkeypatch.setattr(
+        decision, "_pull_credit", lambda ssn: (_ for _ in ()).throw(AssertionError())
+    )
+    result = decision.decide(dict(WEAK_APP, request_id="req-abc"))
+    assert result["decision"] == "deny"
+
+
+def test_changed_ssn_replays_when_pepper_unset(monkeypatch):
+    # No pepper -> SSN-change detection is disabled by design; the event carries no
+    # fingerprint, so a changed SSN replays (financial-input check still governs). This
+    # documents the degraded mode, not a regression.
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", "")
+    monkeypatch.setattr(
+        decision.db, "query", lambda sql, params=None: [dict(EXISTING_EVENT_ROW)]
+    )
+    monkeypatch.setattr(
+        decision, "_pull_credit", lambda ssn: (_ for _ in ()).throw(AssertionError())
+    )
+    result = decision.decide(dict(WEAK_APP, request_id="req-abc", ssn="999999999"))
+    assert result["decision"] == "deny"  # replayed, no conflict
+
+
+def test_fingerprint_is_not_the_raw_ssn(monkeypatch):
+    # The persisted digest must be non-reversible: never the raw SSN, and pepper-keyed.
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", _FP_PEPPER)
+    fp = decision._ssn_fingerprint("123456781")
+    assert fp is not None
+    assert "123456781" not in fp
+    assert fp != decision._ssn_fingerprint("123456782")  # SSN-sensitive
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", "other-pepper")
+    assert decision._ssn_fingerprint("123456781") != fp  # pepper-keyed
+
+
 def test_absent_request_id_is_an_explicit_redecision(synthetic_mode, captured_events):
     # No key -> no replay lookup; a fresh event is appended (the audit-history path).
     decision.decide(WEAK_APP)
