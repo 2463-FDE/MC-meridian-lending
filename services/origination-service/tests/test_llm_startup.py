@@ -8,6 +8,7 @@ import/health smoke and non-summary deployments start clean).
 TestClient used as a context manager runs the app lifespan, so entering the
 context is what triggers — or fails — startup validation.
 """
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -57,6 +58,9 @@ def test_startup_skips_llm_when_disabled(monkeypatch):
     monkeypatch.setattr(
         config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
     )
+    # /health now also requires the internal-service token (PR review); set it so this
+    # asserts the LLM-off path, not the token gate.
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "tok")
     monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: _FakeConn())
     config.reset_database_probe_cache()
     with TestClient(app) as client:

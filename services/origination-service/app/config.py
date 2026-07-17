@@ -164,6 +164,13 @@ def missing_required_secrets() -> list:
     missing = []
     if not database_url_configured():
         missing.append("DATABASE_URL")
+    # Fail loud on a missing internal-service token (PR review): without it every
+    # internal-only route (monthly-debt, /board) fails closed AND origination's calls to
+    # kyc/decision/disclosure carry no secret — the kyc call is caught in submit's
+    # try/except and silently degrades CIP to all-false, so a misconfig would otherwise
+    # look healthy while quietly breaking verification. Surface it at /health instead.
+    if not INTERNAL_SERVICE_TOKEN:
+        missing.append("INTERNAL_SERVICE_TOKEN")
     return missing
 
 

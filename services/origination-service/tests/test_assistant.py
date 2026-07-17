@@ -252,7 +252,9 @@ def test_endpoint_forwards_idempotency_key_header_as_request_id(monkeypatch):
     )[0]
     try:
         tc = TestClient(app)
-        headers = {"Idempotency-Key": "officer-key-1"}
+        # X-User-Role: the assistant is officer-only (PR review); the gateway forwards
+        # the session role and origination requires it.
+        headers = {"Idempotency-Key": "officer-key-1", "X-User-Role": "underwriter"}
         assert tc.post("/assistant/decisions/42", headers=headers).status_code == 200
         assert tc.post("/assistant/decisions/42", headers=headers).status_code == 200
     finally:
@@ -273,8 +275,36 @@ def test_endpoint_rejects_overlong_idempotency_key(monkeypatch):
     app.dependency_overrides[main.get_llm_client] = lambda: _client(FINAL_DENY)[0]
     try:
         tc = TestClient(app)
-        resp = tc.post("/assistant/decisions/42", headers={"Idempotency-Key": "x" * 65})
+        resp = tc.post(
+            "/assistant/decisions/42",
+            headers={"Idempotency-Key": "x" * 65, "X-User-Role": "underwriter"},
+        )
         assert resp.status_code == 400
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_assistant_requires_officer_role(monkeypatch):
+    # PR review: the assistant is officer-only and must not be triggerable anonymously
+    # through the /los proxy. No X-User-Role (or a non-officer role) -> 403, before any
+    # scoring. LLM is enabled via the override so the 403 is the role gate, not the
+    # LLM-disabled 503.
+    from fastapi.testclient import TestClient
+
+    from app import main
+    from app.main import app
+
+    app.dependency_overrides[main.get_llm_client] = lambda: _client(FINAL_DENY)[0]
+    try:
+        tc = TestClient(app, raise_server_exceptions=False)
+        assert tc.post("/assistant/decisions/42").status_code == 403
+        assert tc.get("/assistant/decisions/42").status_code == 403
+        assert (
+            tc.post(
+                "/assistant/decisions/42", headers={"X-User-Role": "borrower"}
+            ).status_code
+            == 403
+        )
     finally:
         app.dependency_overrides.clear()
 
@@ -502,7 +532,7 @@ def test_assistant_route_422s_on_persisted_null_debt(monkeypatch):
     )[0]
     try:
         resp = TestClient(fastapi_app, raise_server_exceptions=False).post(
-            "/assistant/decisions/1"
+            "/assistant/decisions/1", headers={"X-User-Role": "underwriter"}
         )
         assert resp.status_code == 422
     finally:

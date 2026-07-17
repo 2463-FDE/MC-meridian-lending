@@ -95,10 +95,27 @@ def health():
     return {"status": "ok", "service": "origination"}
 
 
+_OFFICER_ROLES = {"underwriter", "admin"}
+
+
+def _require_officer(x_user_role: str | None) -> None:
+    """Restrict a route to authenticated officer roles (PR review).
+
+    The gateway resolves the session and forwards the role as X-User-Role (and strips
+    any client-supplied copy, round-2 fix), so origination can trust it. Unlike the
+    borrower self-service apply routes (/applications/{id}/decision, /accept), the
+    assistant is an officer-only tool with no borrower caller, so it must not be
+    triggerable anonymously through the /los proxy. Missing/other role -> 403.
+    """
+    if (x_user_role or "").strip().lower() not in _OFFICER_ROLES:
+        raise HTTPException(status_code=403, detail="officer role required")
+
+
 @app.post("/assistant/decisions/{app_id}")
 def assistant_decide(
     app_id: int,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
     client: ClaudeClient = Depends(get_llm_client),
 ):
     """Decision an application through the officer assistant (ADR 0009 §5).
@@ -111,6 +128,7 @@ def assistant_decide(
     a retry with the same key replays the recorded decision instead of re-pulling credit
     and appending a second regulated event. Absent = explicit re-decision.
     """
+    _require_officer(x_user_role)
     if idempotency_key is not None and len(idempotency_key) > 64:
         raise HTTPException(
             status_code=400, detail="Idempotency-Key must be at most 64 characters"
@@ -119,13 +137,18 @@ def assistant_decide(
 
 
 @app.get("/assistant/decisions/{app_id}")
-def assistant_explain(app_id: int, client: ClaudeClient = Depends(get_llm_client)):
+def assistant_explain(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    client: ClaudeClient = Depends(get_llm_client),
+):
     """Explain an EXISTING decision from the persisted record (ADR 0009 §5 amendment).
 
     Read-only: never scores, so asking about an application cannot trigger a fresh
     credit pull. Legacy outcomes (pre-record, e.g. #6012) are answered honestly as
     unrecoverable, distinct from 404 never-decisioned.
     """
+    _require_officer(x_user_role)
     return _run_assistant(app_id, client, "explain")
 
 
