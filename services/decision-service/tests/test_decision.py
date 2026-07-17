@@ -326,6 +326,50 @@ def test_database_url_probe_fails_when_schema_not_migrated(monkeypatch):
     assert err == "schema_not_ready:decision_events.request_id"
 
 
+class _IndexMissingCursor:
+    """Connects, answers SELECT 1, reports the request_id COLUMN present but the partial
+    unique index absent — the partially-applied-migration case that would silently lose
+    the idempotency concurrency guarantee (PR review)."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        # Column check (information_schema) passes; index check (pg_indexes) fails.
+        return None if "pg_indexes" in self._last else (1,)
+
+
+class _IndexMissingConn:
+    def cursor(self):
+        return _IndexMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_database_url_probe_fails_when_idempotency_index_missing(monkeypatch):
+    # PR review: the request_id column alone is insufficient — a partially-applied
+    # migration with the column but no uq_decision_events_request index would let two
+    # concurrent same-key requests both insert, duplicating regulated decision events.
+    # Readiness must fail on that state too, naming the missing index.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: _IndexMissingConn())
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:uq_decision_events_request"
+
+
 def test_database_url_probe_fails_on_wrong_password_without_postgres_password(
     monkeypatch,
 ):

@@ -227,6 +227,20 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             )
             if cur.fetchone() is None:
                 return False, "schema_not_ready:decision_events.request_id"
+            # The column alone is not enough (PR review): idempotency correctness under
+            # concurrency relies on the PARTIAL UNIQUE index uq_decision_events_request
+            # (app_id, request_id) WHERE request_id IS NOT NULL. It is what turns a
+            # concurrent same-key retry into the UniqueViolation that _persist_event
+            # catches and replays. A partially-applied migration where the column exists
+            # but the index does not would let two concurrent requests both miss the
+            # pre-check, both insert, and append DUPLICATE regulated decision events
+            # (with duplicate bureau pulls). Require the index too, so that state reports
+            # unhealthy instead of silently losing the concurrency guarantee.
+            cur.execute(
+                "SELECT 1 FROM pg_indexes WHERE indexname = 'uq_decision_events_request'"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:uq_decision_events_request"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__
