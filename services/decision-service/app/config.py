@@ -196,6 +196,11 @@ def missing_required_secrets() -> list:
         missing.append("EXPERIAN_KEY")
     if not database_url_configured():
         missing.append("DATABASE_URL")
+    # Fail loud on a missing internal-service token (PR review): without it the
+    # internal-only routes (POST /decisions, GET record) fail closed, so a misconfig
+    # would look healthy while every officer/assistant decision 503s. Surface at /health.
+    if not INTERNAL_SERVICE_TOKEN:
+        missing.append("INTERNAL_SERVICE_TOKEN")
     return missing
 
 

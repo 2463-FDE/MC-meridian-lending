@@ -41,14 +41,19 @@ All seeded with password `password`:
 
 ## Health checks
 
+The backend services (8001–8006) are NOT host-published — the gateway (:8000) is the sole
+external entry (PR review: a direct host port would let a caller forge X-User-Role and
+bypass the officer gate). Reach a service's /health from inside the network via
+`docker compose exec`:
+
 ```bash
-curl localhost:8000/health     # gateway
-curl localhost:8001/health     # origination (LOS, intake + boarding orchestrator)
-curl localhost:8002/health     # servicing (LSS)
-curl localhost:8003/health     # kyc-service
-curl localhost:8004/health     # decision-service
-curl localhost:8005/health     # disclosure-service
-curl localhost:8006/health     # payment-service
+curl localhost:8000/health                                        # gateway (published)
+docker compose exec origination-service curl -s localhost:8001/health   # LOS
+docker compose exec servicing-service   curl -s localhost:8002/health   # LSS
+docker compose exec kyc-service          curl -s localhost:8003/health
+docker compose exec decision-service     curl -s localhost:8004/health
+docker compose exec disclosure-service   curl -s localhost:8005/health
+docker compose exec payment-service      curl -s localhost:8006/health
 ```
 
 Ports 8003–8006 are the four services extracted from the old origination monolith

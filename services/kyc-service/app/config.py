@@ -162,6 +162,12 @@ def missing_required_secrets() -> list:
     missing = []
     if not database_url_configured():
         missing.append("DATABASE_URL")
+    # Fail loud on a missing internal-service token (PR review): without it POST
+    # /kyc/check fails closed (503), and origination's intake call catches that and
+    # returns a submitted application with all CIP booleans false — a silent degrade.
+    # Surface it at /health so a misconfig fails readiness instead.
+    if not INTERNAL_SERVICE_TOKEN:
+        missing.append("INTERNAL_SERVICE_TOKEN")
     return missing
 
 

@@ -10,8 +10,26 @@
 #
 # This override is NOT auto-loaded — you must pass it explicitly, so it can never
 # silently apply to a production `docker compose up`.
+#
+# It also supplies a DEMO INTERNAL_SERVICE_TOKEN so the internal service-to-service
+# routes (POST /decisions, /kyc/check, /offers, monthly-debt, /board) actually work and
+# /health reports ready. The value is a fixed non-secret dev string — safe to commit
+# ONLY because this file is the explicit local-demo override; a real deploy uses .env /
+# secret-manager (left blank there so it fails closed). All four internal services get
+# the SAME value: origination forwards it, the others compare against it.
+x-demo-internal-token: &demo_internal_token "dev-internal-token-not-for-production"
 services:
+  origination-service:
+    environment:
+      INTERNAL_SERVICE_TOKEN: *demo_internal_token
+  kyc-service:
+    environment:
+      INTERNAL_SERVICE_TOKEN: *demo_internal_token
+  disclosure-service:
+    environment:
+      INTERNAL_SERVICE_TOKEN: *demo_internal_token
   decision-service:
     environment:
       ENVIRONMENT: development
       ALLOW_SYNTHETIC_CREDIT: "1"
+      INTERNAL_SERVICE_TOKEN: *demo_internal_token

@@ -152,7 +152,7 @@ jobs:
         run: |
           cd services/decision-service
           pip install -r requirements.txt pytest
-          python -m pytest tests/test_decision.py -k database_url -q
+          python -m pytest tests/test_decision.py -k "database_url or internal_service_token" -q
 
   rag-eval-gate:
     # The RAG eval hygiene gate (refuses contaminated kb_dump: ssn/pan/ein) and

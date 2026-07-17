@@ -133,6 +133,9 @@ def test_health_ok_in_synthetic_mode(synthetic_mode, monkeypatch):
     # the config-readiness path (a real run reaches the compose Postgres). _FakeConn
     # is defined below at module scope, so it resolves at call time.
     monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: _FakeConn())
+    # Internal-service token is now a required secret (PR review); set it so this
+    # exercises the DB-readiness path, not the token gate.
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "tok")
 
     from fastapi.testclient import TestClient
     from app.main import app
@@ -363,6 +366,7 @@ def test_health_flags_unreachable_database_url(monkeypatch):
     monkeypatch.setattr(
         config, "DATABASE_URL", "postgresql://meridian:wrong_pw@postgres:5432/meridian"
     )
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "tok")
     assert config.missing_required_secrets() == []
 
     def _auth_fail(*a, **k):
@@ -452,3 +456,13 @@ def test_env_example_gate_stays_closed_by_parsing_the_template():
     assert env_values[-1].strip().lower() != "development"
     # The synthetic escape hatch must not be defaulted on in the template.
     assert not any(k == "ALLOW_SYNTHETIC_CREDIT" for k, _ in pairs)
+
+
+def test_missing_internal_service_token_is_flagged(monkeypatch):
+    # PR review: an unset INTERNAL_SERVICE_TOKEN must surface at /health, else the
+    # internal-only routes fail closed while readiness looks OK (and origination's
+    # intake silently degrades on the kyc call).
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "")
+    assert "INTERNAL_SERVICE_TOKEN" in config.missing_required_secrets()
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "tok")
+    assert "INTERNAL_SERVICE_TOKEN" not in config.missing_required_secrets()

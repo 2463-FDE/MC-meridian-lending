@@ -149,6 +149,11 @@ def missing_required_secrets() -> list:
     missing = []
     if not database_url_configured():
         missing.append("DATABASE_URL")
+    # Fail loud on a missing internal-service token (PR review): without it POST /offers
+    # fails closed, so a misconfig would look healthy while every offer write 503s.
+    # Surface at /health so readiness catches it.
+    if not INTERNAL_SERVICE_TOKEN:
+        missing.append("INTERNAL_SERVICE_TOKEN")
     return missing
 
 

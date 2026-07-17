@@ -50,8 +50,13 @@ services:
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-2463-FDE}
-    ports:
-      - "8001:8001"
+    # Internal-only (PR review): NOT host-published. The gateway (:8000) is the sole
+    # trust boundary — downstream services trust the forwarded X-User-Role/X-User-Id,
+    # so a direct host hit on this port would let a caller forge officer identity and
+    # bypass the assistant's officer gate. Reachable service-to-service by name on the
+    # compose network; `expose` documents the container port without publishing it.
+    expose:
+      - "8001"
     depends_on:
       postgres:
         condition: service_healthy
@@ -70,8 +75,9 @@ services:
   servicing-service:
     build: ./services/servicing-service
     env_file: .env
-    ports:
-      - "8002:8002"
+    # Internal-only — gateway is the sole trust boundary (see origination-service).
+    expose:
+      - "8002"
     depends_on:
       postgres:
         condition: service_healthy
@@ -89,8 +95,9 @@ services:
   kyc-service:
     build: ./services/kyc-service
     env_file: .env
-    ports:
-      - "8003:8003"
+    # Internal-only — gateway is the sole trust boundary (see origination-service).
+    expose:
+      - "8003"
     depends_on:
       postgres:
         condition: service_healthy
@@ -107,8 +114,9 @@ services:
   decision-service:
     build: ./services/decision-service
     env_file: .env
-    ports:
-      - "8004:8004"
+    # Internal-only — gateway is the sole trust boundary (see origination-service).
+    expose:
+      - "8004"
     depends_on:
       postgres:
         condition: service_healthy
@@ -125,8 +133,9 @@ services:
   disclosure-service:
     build: ./services/disclosure-service
     env_file: .env
-    ports:
-      - "8005:8005"
+    # Internal-only — gateway is the sole trust boundary (see origination-service).
+    expose:
+      - "8005"
     depends_on:
       postgres:
         condition: service_healthy
@@ -144,8 +153,9 @@ services:
   payment-service:
     build: ./services/payment-service
     env_file: .env
-    ports:
-      - "8006:8006"
+    # Internal-only — gateway is the sole trust boundary (see origination-service).
+    expose:
+      - "8006"
     depends_on:
       postgres:
         condition: service_healthy

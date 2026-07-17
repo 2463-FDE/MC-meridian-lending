@@ -230,3 +230,13 @@ def test_probe_single_flight_under_concurrent_misses(monkeypatch):
 
     assert calls["n"] == 1  # exactly one probe despite 8 concurrent misses
     assert results == [(True, None)] * 8
+
+
+def test_missing_internal_service_token_is_flagged(monkeypatch):
+    # PR review: an unset INTERNAL_SERVICE_TOKEN must surface at /health, else the
+    # internal-only routes fail closed while readiness looks OK (and origination's
+    # intake silently degrades on the kyc call).
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "")
+    assert "INTERNAL_SERVICE_TOKEN" in config.missing_required_secrets()
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "tok")
+    assert "INTERNAL_SERVICE_TOKEN" not in config.missing_required_secrets()
