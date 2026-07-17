@@ -221,3 +221,32 @@ def test_capture_monthly_debt_404_when_missing(monkeypatch):
         headers={"X-Internal-Service": "tok"},
     )
     assert resp.status_code == 404
+
+
+def test_board_endpoint_is_internal_only(monkeypatch):
+    # PR review: the legacy /board endpoint creates a loan + balance from fully
+    # caller-supplied inputs and is reachable via the anonymous /los proxy. An
+    # anonymous caller must be refused before board_to_servicing runs.
+    monkeypatch.setattr(applications.config, "INTERNAL_SERVICE_TOKEN", "tok")
+
+    def _explode(*a, **k):
+        raise AssertionError(
+            "board_to_servicing must not run for an unauthorized /board"
+        )
+
+    monkeypatch.setattr(intake, "board_to_servicing", _explode)
+    body = {
+        "app_id": 1,
+        "applicant_name": "Anon",
+        "principal": 15000,
+        "annual_rate_pct": 7.99,
+        "term_months": 48,
+    }
+    client = TestClient(app, raise_server_exceptions=False)
+    assert client.post("/board", json=body).status_code == 403
+    assert (
+        client.post(
+            "/board", json=body, headers={"X-Internal-Service": "wrong"}
+        ).status_code
+        == 403
+    )

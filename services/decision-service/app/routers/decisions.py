@@ -108,7 +108,20 @@ def get_decision_record(
 
 
 @router.post("", response_model=DecisionOut)
-def run_decision(body: DecisionIn):
+def run_decision(
+    body: DecisionIn,
+    x_internal_service: str | None = Header(default=None, alias="X-Internal-Service"),
+):
+    # Internal-only (PR review): this POST appends a regulated decision_events record
+    # and updates the mutable decisions pointer from CALLER-SUPPLIED inputs
+    # (application_id/ssn/income/debt/amount). Reachable through the gateway's anonymous
+    # /decision proxy, so without this an external caller could fabricate underwriting
+    # inputs against a guessed app id and forge/alter a regulated decision, bypassing the
+    # LOS lookup that binds inputs to the real application. The only legitimate caller is
+    # origination (officer route + assistant score tool), which builds inputs from the
+    # LOS database and forwards the shared secret; the gateway strips any client-supplied
+    # X-Internal-Service so it cannot be forged from outside.
+    _require_internal_caller(x_internal_service)
     payload = body.model_dump()
     application = {
         "app_id": payload["application_id"],

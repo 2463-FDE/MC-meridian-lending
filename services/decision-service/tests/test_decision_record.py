@@ -325,6 +325,40 @@ def test_record_endpoint_allows_correct_internal_header(monkeypatch):
     assert resp.status_code == 200
 
 
+def test_post_decisions_blocked_without_internal_header(monkeypatch):
+    # PR review: POST /decisions appends a regulated decision_events record from
+    # caller-supplied inputs and is reachable through the anonymous /decision proxy.
+    # An anonymous caller must be refused (403) BEFORE decision.decide() runs, so no
+    # event is persisted. db.query is wired to explode to prove decide() is never hit.
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from app.routers import decisions as decisions_router
+
+    monkeypatch.setattr(
+        decisions_router.config, "INTERNAL_SERVICE_TOKEN", INTERNAL_TOKEN
+    )
+
+    def _explode(*a, **k):
+        raise AssertionError("decision.decide() must not run for an unauthorized POST")
+
+    monkeypatch.setattr(decisions_router.decision, "decide", _explode)
+    resp = TestClient(app, raise_server_exceptions=False).post(
+        "/decisions",
+        json={
+            "application_id": 12,
+            "applicant_id": 12,
+            "name": "Test Applicant",
+            "ssn": "123456781",
+            "requested_amount": 15000,
+            "term_months": 36,
+            "annual_income": 0,
+            "monthly_debt": 0,
+        },
+    )
+    assert resp.status_code == 403
+
+
 # --- Adversarial-review fixes (teeth 2026-07-15) ------------------------------------
 
 
@@ -525,12 +559,16 @@ def test_reused_key_changed_inputs_returns_409(monkeypatch):
     from app.routers import decisions as decisions_router
 
     monkeypatch.setattr(
+        decisions_router.config, "INTERNAL_SERVICE_TOKEN", INTERNAL_TOKEN
+    )
+    monkeypatch.setattr(
         decisions_router.decision.db,
         "query",
         lambda sql, params=None: [dict(EXISTING_EVENT_ROW)],
     )
     resp = TestClient(app, raise_server_exceptions=False).post(
         "/decisions",
+        headers={"X-Internal-Service": INTERNAL_TOKEN},
         json={
             "application_id": 12,
             "applicant_id": 12,
@@ -559,10 +597,15 @@ def test_unmapped_feature_returns_typed_503(synthetic_mode, monkeypatch):
 
     from app import reasons as reasons_mod
     from app.main import app
+    from app.routers import decisions as decisions_router
 
+    monkeypatch.setattr(
+        decisions_router.config, "INTERNAL_SERVICE_TOKEN", INTERNAL_TOKEN
+    )
     monkeypatch.setattr(reasons_mod, "REASON_MAP", {})
     resp = TestClient(app, raise_server_exceptions=False).post(
         "/decisions",
+        headers={"X-Internal-Service": INTERNAL_TOKEN},
         json={
             "application_id": 9,
             "applicant_id": 9,

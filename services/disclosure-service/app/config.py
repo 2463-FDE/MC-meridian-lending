@@ -1,4 +1,5 @@
 """Disclosure service configuration."""
+
 import os
 import threading
 import time
@@ -50,7 +51,10 @@ def database_url_configured() -> bool:
     # stale/rotated DSN is caught by the POSTGRES_PASSWORD consistency check below.
     if password.lower() in {
         "replace_with_postgres_password",
-        "changeme", "change_me", "password", "postgres",
+        "changeme",
+        "change_me",
+        "password",
+        "postgres",
     }:
         return False
     # When POSTGRES_PASSWORD is the source of truth (compose ${VAR:?}), the DSN
@@ -146,5 +150,11 @@ def missing_required_secrets() -> list:
     if not database_url_configured():
         missing.append("DATABASE_URL")
     return missing
+
+
+# Shared secret identifying an internal service-to-service call. Required by the
+# offer-write route, which only origination calls (offer flow) with the secret
+# forwarded. Env only, no committed default; unset makes the route fail closed.
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

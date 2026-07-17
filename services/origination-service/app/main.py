@@ -164,8 +164,20 @@ class BoardIn(BaseModel):
 
 
 @app.post("/board")
-def board(body: BoardIn):
-    """Legacy direct-boarding endpoint (the LOS->LSS seam). See docs/architecture.md."""
+def board(
+    body: BoardIn,
+    x_internal_service: str | None = Header(default=None, alias="X-Internal-Service"),
+):
+    """Legacy direct-boarding endpoint (the LOS->LSS seam). See docs/architecture.md.
+
+    Internal-only (PR review): this creates a loan + balance in servicing from FULLY
+    caller-supplied inputs (principal, term, name) with no LOS lookup, and is reachable
+    through the gateway's anonymous /los proxy — an external caller could board an
+    arbitrary loan. No product caller invokes it (the real flow is /applications/{id}/
+    accept); it is retained only as an ops/seam hatch, so it now requires the shared
+    internal-service secret, which the gateway strips from external requests.
+    """
+    applications._require_internal_caller(x_internal_service)
     loan_id = intake.board_to_servicing(
         body.app_id,
         body.applicant_name,

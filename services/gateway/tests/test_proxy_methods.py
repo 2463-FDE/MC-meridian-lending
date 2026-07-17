@@ -84,6 +84,21 @@ def test_anonymous_client_cannot_inject_trust_headers(monkeypatch):
     assert "x-internal-service" not in fwd
 
 
+def test_anonymous_post_to_decision_cannot_carry_internal_token(monkeypatch):
+    # PR review: POST /decisions is internal-only in decision-service. A client that
+    # POSTs to /decision/decisions with a guessed X-Internal-Service must have it
+    # stripped, so the forwarded request reaches decision-service unauthenticated and
+    # is refused there (403) — no regulated decision event can be forged via the proxy.
+    captured = _capture_forwarded_headers(monkeypatch)
+    resp = client.post(
+        "/decision/decisions",
+        json={"application_id": 12, "annual_income": 0},
+        headers={"X-Internal-Service": "guessed-secret"},
+    )
+    assert resp.status_code == 200  # proxy itself forwards; auth is enforced downstream
+    assert "x-internal-service" not in captured["headers"]
+
+
 def test_session_role_overrides_client_supplied_role(monkeypatch):
     # An authenticated caller who ALSO sends X-User-Role: admin must be forwarded with
     # the role from their session, never the value they injected.
