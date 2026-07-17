@@ -31,18 +31,18 @@ def captured_payload(monkeypatch):
 
 
 def test_idempotency_key_forwarded_as_request_id(captured_payload):
-    applications.run_decision(42, idempotency_key="officer-key-1")
+    applications.run_decision(42, idempotency_key="officer-key-1", x_user_role="underwriter")
     assert captured_payload["request_id"] == "officer-key-1"
 
 
 def test_absent_idempotency_key_is_an_explicit_redecision(captured_payload):
-    applications.run_decision(42, idempotency_key=None)
+    applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
     assert "request_id" not in captured_payload  # no key -> no replay, fresh decision
 
 
 def test_overlong_idempotency_key_rejected_before_downstream(captured_payload):
     with pytest.raises(HTTPException) as exc:
-        applications.run_decision(42, idempotency_key="x" * 65)
+        applications.run_decision(42, idempotency_key="x" * 65, x_user_role="underwriter")
     assert exc.value.status_code == 400
     assert captured_payload == {}  # rejected before any downstream decision call
 
@@ -64,7 +64,7 @@ def test_downstream_refusal_maps_to_503_not_500(monkeypatch):
 
     monkeypatch.setattr(applications.clients, "post", _post_503)
     with pytest.raises(HTTPException) as exc:
-        applications.run_decision(42, idempotency_key=None)
+        applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
     assert exc.value.status_code == 503
     assert exc.value.detail == "decisioning unavailable"
 
@@ -85,5 +85,5 @@ def test_downstream_conflict_maps_to_409_not_503(monkeypatch):
 
     monkeypatch.setattr(applications.clients, "post", _post_409)
     with pytest.raises(HTTPException) as exc:
-        applications.run_decision(42, idempotency_key="reused-key")
+        applications.run_decision(42, idempotency_key="reused-key", x_user_role="underwriter")
     assert exc.value.status_code == 409

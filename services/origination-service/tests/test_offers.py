@@ -59,6 +59,7 @@ def test_offer_binds_to_stored_application_ignores_caller_money_fields(monkeypat
             "annual_rate_pct": 0.01,  # attacker-chosen — must be ignored
             "term_months": 60,  # attacker-chosen — must be ignored
         },
+        headers={"X-User-Role": "underwriter"},
     )
     assert resp.status_code == 200
     fwd = capture["payload"]
@@ -76,7 +77,9 @@ def test_offer_404_when_application_missing(monkeypatch):
         raise AssertionError("disclosure-service must not be called for a missing app")
 
     monkeypatch.setattr(offers.clients, "post", _must_not_post)
-    resp = TestClient(app).post("/offer", json={"app_id": 999})
+    resp = TestClient(app).post(
+        "/offer", json={"app_id": 999}, headers={"X-User-Role": "underwriter"}
+    )
     assert resp.status_code == 404
 
 
@@ -92,7 +95,9 @@ def test_offer_409_when_not_approved(monkeypatch):
         )
 
     monkeypatch.setattr(offers.clients, "post", _must_not_post)
-    resp = TestClient(app).post("/offer", json={"app_id": 1})
+    resp = TestClient(app).post(
+        "/offer", json={"app_id": 1}, headers={"X-User-Role": "underwriter"}
+    )
     assert resp.status_code == 409
 
 
@@ -130,7 +135,9 @@ def _accept_db(joined_row, existing_loan=None):
 def test_accept_boards_when_approved_with_offer(monkeypatch):
     monkeypatch.setattr(applications.db, "query", _accept_db(_APPROVED_WITH_OFFER))
     monkeypatch.setattr(applications.intake, "board_to_servicing", lambda *a, **k: 111)
-    resp = TestClient(app).post("/applications/1/accept")
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
     assert resp.status_code == 200
     assert resp.json()["loan_id"] == 111
 
@@ -146,7 +153,9 @@ def test_accept_is_idempotent_on_retry(monkeypatch):
         raise AssertionError("retry must not board a second loan")
 
     monkeypatch.setattr(applications.intake, "board_to_servicing", _must_not_board)
-    resp = TestClient(app).post("/applications/1/accept")
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
     assert resp.status_code == 200
     assert resp.json()["loan_id"] == 555  # the already-boarded loan, replayed
 
@@ -174,7 +183,9 @@ def test_accept_concurrent_race_replays_winners_loan(monkeypatch):
         raise applications.pg_errors.UniqueViolation("duplicate key uq_loans_app")
 
     monkeypatch.setattr(applications.intake, "board_to_servicing", _lost_race)
-    resp = TestClient(app).post("/applications/1/accept")
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
     assert resp.status_code == 200
     assert resp.json()["loan_id"] == 777  # the winner's loan, not a second board
 
@@ -208,7 +219,9 @@ def test_accept_replay_reconciles_funded_status_and_balance(monkeypatch):
         raise AssertionError("replay must not board again")
 
     monkeypatch.setattr(applications.intake, "board_to_servicing", _no_reboard)
-    resp = TestClient(app).post("/applications/1/accept")
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
     assert resp.status_code == 200
     assert resp.json()["loan_id"] == 555
     # the reconcile ran on the existing-loan replay path, not skipped
@@ -240,7 +253,9 @@ def test_accept_409_when_not_approved(monkeypatch):
         raise AssertionError("must not board a non-approved application")
 
     monkeypatch.setattr(applications.intake, "board_to_servicing", _must_not_board)
-    resp = TestClient(app).post("/applications/1/accept")
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
     assert resp.status_code == 409
 
 
@@ -264,5 +279,7 @@ def test_accept_409_when_no_offer(monkeypatch):
         raise AssertionError("must not board without an existing offer")
 
     monkeypatch.setattr(applications.intake, "board_to_servicing", _must_not_board)
-    resp = TestClient(app).post("/applications/1/accept")
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
     assert resp.status_code == 409

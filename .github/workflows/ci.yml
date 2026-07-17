@@ -157,6 +157,26 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_offers.py -q
 
+  adr-0010-authz-gate:
+    # ADR 0010 authorization is a security control: the application-scoped orchestration
+    # routes (GET /applications/{id}, /decision, /accept, /offer, offer read) and the PII
+    # roster (GET /applications) are reachable through the anonymous /los proxy, so they
+    # must authorize as officer-OR-owner and deny anonymous callers. The tests live in
+    # test_authz.py, which the `backend` job runs under continue-on-error/|| true, so a
+    # reopened IDOR would stay green. This job MUST block -- no continue-on-error, no
+    # `|| true`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: origination-service officer-OR-owner authorization tests
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_authz.py -q
+
   db-readiness-gate:
     # DB readiness is a security control: a passwordless / placeholder / stale
     # DATABASE_URL must report unhealthy, not connect unauthenticated or fail

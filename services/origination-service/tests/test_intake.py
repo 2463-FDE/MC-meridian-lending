@@ -197,7 +197,9 @@ def test_officer_decision_route_422s_on_persisted_null_debt(monkeypatch):
         raise AssertionError("decision-service must not be called for a NULL-debt row")
 
     monkeypatch.setattr(applications.clients, "post", _must_not_call)
-    resp = TestClient(app).post("/applications/1/decision")
+    resp = TestClient(app).post(
+        "/applications/1/decision", headers={"X-User-Role": "underwriter"}
+    )
     assert resp.status_code == 422
 
 
@@ -248,7 +250,8 @@ def test_capture_monthly_debt_unblocks_officer_decision(monkeypatch):
     client = TestClient(app)
 
     # Before capture: quarantined.
-    assert client.post("/applications/1/decision").status_code == 422
+    officer = {"X-User-Role": "underwriter"}
+    assert client.post("/applications/1/decision", headers=officer).status_code == 422
 
     # Capture the missing value.
     patched = client.post(
@@ -260,7 +263,7 @@ def test_capture_monthly_debt_unblocks_officer_decision(monkeypatch):
     assert patched.json()["monthly_debt"] == 450
 
     # After capture: decisionable.
-    decided = client.post("/applications/1/decision")
+    decided = client.post("/applications/1/decision", headers=officer)
     assert decided.status_code == 200
     assert decided.json()["decision"] == "approve"
 

@@ -1,9 +1,17 @@
 # ADR 0010: Application Ownership Authorization — Bind the Apply Flow to Identity, Deprecate Anonymous Apply
 
-- **Status:** **Proposed** — not yet accepted. Records the design for closing the
-  deferred IDOR on the borrower apply flow; needs product sign-off (the anonymous-apply
-  deprecation is a product decision) and compliance review before build.
-- **Date:** 2026-07-16
+- **Status:** **Accepted (Phase A) / Proposed (Phase B).**
+  - **Phase A — officer-OR-owner enforcement — BUILT and accepted.** The four
+    orchestration routes (plus the application list and the offer read) now authorize as
+    officer-OR-owner in origination, closing the anonymous IDOR. This needed **no schema
+    change and no product decision**: ownership is derived from data that already exists
+    (see Decision §1), so it shipped in the Week-3 review.
+  - **Phase B — deprecate anonymous apply + borrower self-registration — still proposed.**
+    Requiring a login to *apply* (so every new application binds to an owner) and the
+    signup/frontend work that implies is a product decision (the anonymous-apply
+    deprecation) and remains pending product + compliance sign-off. Phase A does **not**
+    depend on it.
+- **Date:** 2026-07-16 (Phase A accepted 2026-07-17)
 - **Author:** Claude Code
 - **Related:** ADR 0002 (single shared DB), ADR 0004 (service decomposition), ADR 0009
   (decisioning assistant), the round 2–4 internal-service auth work
@@ -60,29 +68,42 @@ Two facts make this tractable now rather than a greenfield build:
 **Bind each application to the authenticated borrower's identity at creation, and
 authorize the orchestration routes as officer-OR-owner. Deprecate anonymous apply.**
 
-### 1. Ownership column
+### 1. Ownership is derived from existing data — no new column (Phase A, built)
 
-Add `applications.owner_user_id TEXT` (nullable; see migration). On `POST /applications`
-(submit), stamp it with the caller's `X-User-Id`. Submit therefore requires an
-authenticated borrower session.
+The design originally proposed a new `applications.owner_user_id` column. Implementation
+found the ownership relation **already exists** and needs no schema change: a borrower
+login carries `users.applicant_id`, and an application carries
+`applications.applicant_id`, so the user who owns an application is the one whose
+`users.applicant_id` equals it. The check resolves the caller's `applicant_id` from
+`users` by the forwarded `X-User-Id`. (Seeded demo borrower `maria` → `applicant_id = 1`;
+officers carry `applicant_id = NULL`.) No `owner_user_id` column, no migration.
 
-### 2. Officer-OR-owner check on the sensitive routes
+### 2. Officer-OR-owner check on the sensitive routes (Phase A, built)
 
 `GET /applications/{id}`, `POST /applications/{id}/decision`,
-`POST /applications/{id}/accept`, and `POST /offer` authorize as:
+`POST /applications/{id}/accept`, `POST /offer`, and `GET /applications/{id}/offer`
+authorize as (`services/origination-service/app/authz.py::require_officer_or_owner`):
 
 - **officer** — `X-User-Role ∈ {underwriter, admin}` may act on any application (their
-  job; reuses the round-4 `_require_officer` predicate), **OR**
-- **owner** — `owner_user_id == X-User-Id`, **else 403**.
+  job), **OR**
+- **owner** — the caller's `users.applicant_id` equals the application's `applicant_id`.
 
-Anonymous callers (no session → no `X-User-Id`) are rejected. This single check covers
-both the PII-read enumeration and the write triggers.
+The application *list* (`GET /applications`) is officer-only (it dumps applicant PII
+across the whole book). Anonymous callers (no session → no `X-User-Id`) are rejected. A
+non-officer, non-owner is denied as **404, not 403** — no existence oracle, so serial-id
+enumeration cannot even confirm which application ids are real.
 
-### 3. Anonymous apply is removed
+### 3. Anonymous apply is deprecated — Phase B, NOT built
 
-A borrower must authenticate to apply. "Apply without an account" (CLAUDE.md) is
-explicitly deprecated by this ADR; a guest, if retained, may browse marketing/eligibility
-but cannot submit, decision, or accept.
+Requiring a login to *apply* (so every new application binds to an owner via the caller's
+`applicant_id`) is deferred. `POST /applications` remains anonymous for now. Consequence
+of shipping Phase A without Phase B: an application created anonymously has an
+`applicant_id` that no user login owns, so **only an officer** can decision/offer/accept
+it — a logged-in borrower (e.g. `maria`) self-serves their own application, but a brand-new
+anonymous applicant cannot self-serve past submit until an officer acts or Phase B lands.
+That is the intended "deny anonymous callers" behavior, not a regression. Phase B (login
+before apply + borrower self-registration + the frontend changes) is a product decision
+and its own PR.
 
 ### 4. Reuse, don't reinvent
 
@@ -132,11 +153,16 @@ stepping stone toward it, not throwaway.
 
 ### Migration
 
-- `owner_user_id` is **nullable**. Existing rows created anonymously get `NULL`.
-- NULL-owner rows are **officer-only** (no borrower can match a NULL owner), grandfathering
-  legacy data without exposing it to arbitrary borrowers. New rows always bind an owner.
-- Serial ids can remain (ownership, not obscurity, is the control); optionally move to
-  non-sequential ids later as defense-in-depth, out of scope here.
+- **No migration for Phase A** — ownership is derived from the existing
+  `users.applicant_id` ↔ `applications.applicant_id` link, so there is no new column to
+  add and no legacy backfill.
+- The "NULL-owner legacy row" concern reduces to a **behavior note**, not a data task:
+  an application whose `applicant_id` is owned by no user login (anonymously created, or a
+  seeded/legacy row) is **officer-only** — no borrower's `applicant_id` can match it. This
+  grandfathers legacy data without exposing it to arbitrary borrowers.
+- Serial ids can remain (ownership, not obscurity, is the control; the 404-not-403 denial
+  removes the enumeration oracle anyway); optionally move to non-sequential ids later as
+  defense-in-depth, out of scope here.
 
 ## Alternatives considered
 
@@ -158,7 +184,7 @@ stepping stone toward it, not throwaway.
 
 | Owner (role) | Status |
 |--------------|--------|
-| Product | **Pending** — the anonymous-apply deprecation (§3) is a product decision |
-| Engineering | **Proposed** — this ADR (ownership binding + officer-OR-owner check) |
-| Compliance / Legal | **Pending** — confirm the retention/authorization treatment of NULL-owner legacy rows |
-| Data owner | **Pending** — `owner_user_id` column + migration on the shared DB (ADR 0002) |
+| Engineering | **Accepted (Phase A)** — officer-OR-owner check on the orchestration/read routes, derived from `users.applicant_id`; shipped in the Week-3 review with a blocking authz test gate |
+| Product | **Pending (Phase B only)** — the anonymous-apply deprecation (§3) + borrower self-registration is a product decision; Phase A does not need it |
+| Compliance / Legal | **Pending (Phase B only)** — confirm the treatment of anonymously-created (owner-less) applications now that they are officer-only |
+| Data owner | **N/A for Phase A** — no schema change; ownership is derived from existing columns |

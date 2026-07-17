@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import clients, config, db, intake, models
+from .. import authz, clients, config, db, intake, models
 from ..database import get_session
 from ..logging_config import get_logger
 from ..schemas import (
@@ -143,7 +143,12 @@ def list_applications(
     status: str | None = Query(default=None),
     limit: int = Query(default=25, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
 ):
+    # ADR 0010: the list dumps applicant PII across every application, so it is an
+    # officer-only view -- a borrower reads their own application by id, never the roster,
+    # and an anonymous /los caller must not enumerate the book of business.
+    authz.require_officer(x_user_role)
     stmt = select(models.Application, models.Applicant.name).join(
         models.Applicant,
         models.Application.applicant_id == models.Applicant.id,
@@ -171,7 +176,16 @@ def list_applications(
 
 
 @router.get("/{app_id}", response_model=ApplicationDetail)
-def get_application(app_id: int, session: Session = Depends(get_session)):
+def get_application(
+    app_id: int,
+    session: Session = Depends(get_session),
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
+    # ADR 0010: the detail view exposes applicant PII (name, SSN-bearing applicant row,
+    # decision, offer), so only an officer or the owning borrower may read it. Closes the
+    # anonymous serial-id PII enumeration the /los proxy otherwise allows.
+    authz.require_officer_or_owner(app_id, x_user_role, x_user_id)
     a = session.get(models.Application, app_id)
     if not a:
         raise HTTPException(status_code=404, detail="application not found")
@@ -344,7 +358,13 @@ def decision_request_payload(app_id: int) -> dict:
 def run_decision(
     app_id: int,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ):
+    # ADR 0010: decisioning pulls credit and appends a regulated decision event, so only an
+    # officer or the owning borrower may trigger it -- never an anonymous /los caller who
+    # guessed the id.
+    authz.require_officer_or_owner(app_id, x_user_role, x_user_id)
     # Optional Idempotency-Key header is forwarded as the decision-service request_id:
     # a retry after a timeout on this officer path replays the recorded decision instead
     # of re-pulling credit and appending a second regulated event (PR #7 review).
@@ -384,7 +404,15 @@ def run_decision(
 
 
 @router.post("/{app_id}/accept")
-def accept_offer(app_id: int):
+def accept_offer(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
+    # ADR 0010: acceptance boards a real loan (loans + balances, status=funded), the
+    # money-moving action, so only an officer or the owning borrower may accept -- never an
+    # anonymous /los caller who guessed an approved application id.
+    authz.require_officer_or_owner(app_id, x_user_role, x_user_id)
     # Decision-state guard (PR review, ADR 0010 alt 3 defense-in-depth): boarding creates
     # a real loan (loans + balances, status=funded), so require the application to have an
     # APPROVED decision AND a generated offer before boarding — never rely on the UI to

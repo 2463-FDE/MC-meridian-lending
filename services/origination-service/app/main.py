@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import assistant, config, intake
+from . import assistant, authz, config, intake
 from .llm import ClaudeClient, load_llm_config
 from .llm.errors import LLMError
 from .logging_config import get_logger
@@ -95,22 +95,6 @@ def health():
     return {"status": "ok", "service": "origination"}
 
 
-_OFFICER_ROLES = {"underwriter", "admin"}
-
-
-def _require_officer(x_user_role: str | None) -> None:
-    """Restrict a route to authenticated officer roles (PR review).
-
-    The gateway resolves the session and forwards the role as X-User-Role (and strips
-    any client-supplied copy, round-2 fix), so origination can trust it. Unlike the
-    borrower self-service apply routes (/applications/{id}/decision, /accept), the
-    assistant is an officer-only tool with no borrower caller, so it must not be
-    triggerable anonymously through the /los proxy. Missing/other role -> 403.
-    """
-    if (x_user_role or "").strip().lower() not in _OFFICER_ROLES:
-        raise HTTPException(status_code=403, detail="officer role required")
-
-
 @app.post("/assistant/decisions/{app_id}")
 def assistant_decide(
     app_id: int,
@@ -128,7 +112,7 @@ def assistant_decide(
     a retry with the same key replays the recorded decision instead of re-pulling credit
     and appending a second regulated event. Absent = explicit re-decision.
     """
-    _require_officer(x_user_role)
+    authz.require_officer(x_user_role)
     if idempotency_key is not None and len(idempotency_key) > 64:
         raise HTTPException(
             status_code=400, detail="Idempotency-Key must be at most 64 characters"
@@ -148,7 +132,7 @@ def assistant_explain(
     credit pull. Legacy outcomes (pre-record, e.g. #6012) are answered honestly as
     unrecoverable, distinct from 404 never-decisioned.
     """
-    _require_officer(x_user_role)
+    authz.require_officer(x_user_role)
     return _run_assistant(app_id, client, "explain")
 
 

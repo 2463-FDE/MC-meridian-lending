@@ -5,10 +5,10 @@ disclosure-service. This router is now a thin pass-through: it calls disclosure-
 over HTTP and maps its response into the OfferOut shape the frontend already expects.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
-from .. import clients, db
+from .. import authz, clients, db
 from ..schemas import Disclosure, OfferOut, ScheduleRow
 
 router = APIRouter(tags=["offers"])
@@ -40,7 +40,15 @@ def _to_offer_out(app_id: int, resp: dict) -> OfferOut:
 
 
 @router.post("/offer", response_model=OfferOut)
-def make_offer(body: OfferIn):
+def make_offer(
+    body: OfferIn,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
+    # ADR 0010: generating a TILA offer persists a disclosure for the application, so only
+    # an officer or the owning borrower may do it -- never an anonymous /los caller who
+    # guessed the id (the confused-deputy write this closes).
+    authz.require_officer_or_owner(body.app_id, x_user_role, x_user_id)
     # Bind the disclosure inputs to the STORED application, never the caller (PR review):
     # /los/offer is reachable anonymously through the gateway, and origination forwards the
     # internal-service token to disclosure-service, so accepting caller-supplied
@@ -85,7 +93,13 @@ def make_offer(body: OfferIn):
 
 
 @router.get("/applications/{app_id}/offer", response_model=OfferOut)
-def get_offer(app_id: int):
+def get_offer(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
+    # ADR 0010: the offer discloses APR/terms for the application -- officer or owner only.
+    authz.require_officer_or_owner(app_id, x_user_role, x_user_id)
     resp = clients.get(clients.DISCLOSURE_URL, f"/applications/{app_id}/offer")
     if resp.status_code == 404:
         raise HTTPException(status_code=404, detail="no offer for this application")
