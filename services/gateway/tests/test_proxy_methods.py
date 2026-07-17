@@ -99,6 +99,20 @@ def test_anonymous_post_to_decision_cannot_carry_internal_token(monkeypatch):
     assert "x-internal-service" not in captured["headers"]
 
 
+def test_los_proxy_forwards_idempotency_key(monkeypatch):
+    # PR review (front-door reachability): the decision idempotency guarantee only works
+    # if the client's Idempotency-Key survives the proxy. The gateway strips trust
+    # headers but must FORWARD benign ones — a stripped Idempotency-Key would silently
+    # turn every borrower/officer retry into a fresh bureau pull + duplicate event.
+    captured = _capture_forwarded_headers(monkeypatch)
+    resp = client.post(
+        "/los/applications/1/decision",
+        headers={"Idempotency-Key": "los-decision-1"},
+    )
+    assert resp.status_code == 200
+    assert captured["headers"].get("idempotency-key") == "los-decision-1"
+
+
 def test_session_role_overrides_client_supplied_role(monkeypatch):
     # An authenticated caller who ALSO sends X-User-Role: admin must be forwarded with
     # the role from their session, never the value they injected.

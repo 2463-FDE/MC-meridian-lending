@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import StatusChip from "../../../components/StatusChip";
 import { apiGet, apiPost } from "../../../lib/api";
 import { usd, pct, shortDate } from "../../../lib/format";
@@ -110,14 +110,25 @@ export default function UnderwritingDetailPage() {
     load();
   }, [load]);
 
+  // Idempotency key for the officer decision action. Generated once per page mount
+  // and reused across retries (a timeout retry or second click replays the recorded
+  // decision instead of re-pulling credit and appending a second regulated event —
+  // parity with the borrower path, PR review). Not derived from appId: an officer may
+  // deliberately re-decide in a fresh session (page reload = new key = new decision),
+  // whereas a borrower's post-submit inputs never change, so their key is stable.
+  const decisionKeyRef = useRef<string | null>(null);
+
   async function runDecision() {
     if (!appId) return;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
+    if (!decisionKeyRef.current) decisionKeyRef.current = crypto.randomUUID();
     try {
       const res = (await apiPost(
-        `/los/applications/${appId}/decision`
+        `/los/applications/${appId}/decision`,
+        undefined,
+        { "Idempotency-Key": decisionKeyRef.current }
       )) as DecisionResult;
       setDecision(res);
       setApp((prev) => (prev ? { ...prev, decision: res.decision } : prev));

@@ -116,6 +116,26 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_decision.py::test_env_example_gate_stays_closed_by_parsing_the_template -q
 
+  decision-idempotency-gate:
+    # Decision idempotency is a regulatory control: a reused Idempotency-Key must
+    # replay the recorded decision (no second bureau pull / no second append-only
+    # decision_events row), and a key reused with CHANGED decision inputs — including
+    # the SSN that drives the credit pull — must 409, never serve a stale outcome as
+    # the regulated record. The tests live in test_decision_record.py, which the
+    # `backend` job runs under continue-on-error/|| true, so a reopened gap would stay
+    # green. This job MUST block — no continue-on-error, no `|| true`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: decision-service idempotency + append-only record regression tests
+        run: |
+          cd services/decision-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_decision_record.py -q
+
   db-readiness-gate:
     # DB readiness is a security control: a passwordless / placeholder / stale
     # DATABASE_URL must report unhealthy, not connect unauthenticated or fail
