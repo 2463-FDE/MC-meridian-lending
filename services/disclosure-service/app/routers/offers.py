@@ -87,7 +87,18 @@ def create_offer(
 
 
 @router.get("/applications/{application_id}/offer", response_model=OfferResponse)
-def get_offer(application_id: int, session: Session = Depends(get_session)):
+def get_offer(
+    application_id: int,
+    session: Session = Depends(get_session),
+    x_internal_service: str | None = Header(default=None, alias="X-Internal-Service"),
+):
+    # Internal-only (PR review): this read discloses APR/finance charge/payment/schedule
+    # for an enumerable app id and is reachable through the gateway's anonymous /disclosure
+    # proxy. Without this an external caller could enumerate persisted TILA offers for any
+    # app id, bypassing the origination /los/applications/{id}/offer owner/officer/token
+    # gate. Only origination calls it (offer read), forwarding the shared secret; the
+    # gateway strips any client-supplied copy.
+    _require_internal_caller(x_internal_service)
     offer = session.scalar(
         select(models.Offer)
         .where(models.Offer.app_id == application_id)

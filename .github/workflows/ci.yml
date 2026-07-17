@@ -145,6 +145,12 @@ jobs:
     # app). The tests live in test_offers.py, which the `backend` job runs under
     # continue-on-error/|| true, so a reopened gap would stay green. This job MUST block.
     # (The remaining anonymous-trigger authorization is deferred to ADR 0010.)
+    #
+    # The disclosure-service offer routes (POST /offers write, GET /applications/{id}/offer
+    # read) are the same offer surface, reachable directly through the anonymous /disclosure
+    # proxy. Both are internal-only (X-Internal-Service); a caller must go through the
+    # origination offer routes that enforce officer-OR-owner. test_auth_gate.py proves that
+    # gate and also runs under the continue-on-error backend job, so it blocks here too.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -156,6 +162,11 @@ jobs:
           cd services/origination-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_offers.py -q
+      - name: disclosure-service offer internal-only gate tests
+        run: |
+          cd services/disclosure-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_auth_gate.py -q
 
   adr-0010-authz-gate:
     # ADR 0010 authorization is a security control: the application-scoped orchestration
