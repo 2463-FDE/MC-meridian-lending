@@ -204,6 +204,50 @@ def test_probe_fails_when_schema_not_migrated(monkeypatch):
     assert err == "schema_not_ready:applications.monthly_debt"
 
 
+class _LoansIndexMissingCursor:
+    """Column present but the uq_loans_app unique index absent — a partially-applied
+    migration that would let concurrent accepts board duplicate loans (PR review)."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        # information_schema (monthly_debt column) passes; pg_indexes (index) fails.
+        return None if "pg_indexes" in self._last else (1,)
+
+
+class _LoansIndexMissingConn:
+    def cursor(self):
+        return _LoansIndexMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_loans_unique_index_missing(monkeypatch):
+    # PR review: idempotent boarding relies on uq_loans_app; a partially-applied
+    # migration with the loans table but no index would let concurrent accepts board
+    # duplicate loans. Readiness must fail on that state, naming the missing index.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _LoansIndexMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:uq_loans_app"
+
+
 def test_probe_false_when_database_url_unset(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", "")
     ok, err = config.database_reachable()

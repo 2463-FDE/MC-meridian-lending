@@ -3,6 +3,7 @@
 import hmac
 
 import httpx
+from psycopg2 import errors as pg_errors
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -409,8 +410,32 @@ def accept_offer(app_id: int):
         raise HTTPException(
             status_code=409, detail="no offer to accept for this application"
         )
-    loan_id = intake.board_to_servicing(
-        app_id, r.get("name") or "Borrower", r["amount"], r["apr"], r["term_months"]
+    # Idempotent boarding (PR review): a double-click / timeout-retry / concurrent POST
+    # must not board a second loan + balance for the same application. Return the existing
+    # loan if one is already boarded, and rely on the uq_loans_app unique index to settle
+    # the concurrent race — the loser catches UniqueViolation and replays the winner's
+    # loan (mirrors the decision_events idempotency pattern). status is not a sufficient
+    # guard on its own (two concurrent requests both read pre-funded), so the DB index is
+    # the authority.
+    existing = db.query(
+        "SELECT id FROM loans WHERE app_id = %s ORDER BY id LIMIT 1", (app_id,)
     )
+    if existing:
+        return {"loan_id": existing[0]["id"]}
+    try:
+        loan_id = intake.board_to_servicing(
+            app_id, r.get("name") or "Borrower", r["amount"], r["apr"], r["term_months"]
+        )
+    except pg_errors.UniqueViolation:
+        # A concurrent acceptance won the race and boarded first; serve its loan instead
+        # of a second one (one loan per app_id, enforced by uq_loans_app).
+        won = db.query(
+            "SELECT id FROM loans WHERE app_id = %s ORDER BY id LIMIT 1", (app_id,)
+        )
+        if won:
+            return {"loan_id": won[0]["id"]}
+        raise HTTPException(
+            status_code=409, detail="boarding conflict without a retrievable loan"
+        )
     db.query("UPDATE applications SET status = 'funded' WHERE id = %s", (app_id,))
     return {"loan_id": loan_id}

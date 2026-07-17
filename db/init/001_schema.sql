@@ -84,6 +84,11 @@ CREATE TABLE IF NOT EXISTS loans (
     status          TEXT DEFAULT 'current',
     opened_at       TIMESTAMPTZ DEFAULT now()
 );
+-- One boarded loan per application: makes offer acceptance idempotent under retries and
+-- concurrency (a double-click / timeout-retry / concurrent POST cannot board a second
+-- loan for the same app; the loser gets a UniqueViolation and replays the first loan).
+-- Partial so any legacy app_id-less loan row is unaffected.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_loans_app ON loans (app_id) WHERE app_id IS NOT NULL;
 
 -- Mutable balance: one column, overwritten in place. No ledger, no transaction history.
 CREATE TABLE IF NOT EXISTS balances (

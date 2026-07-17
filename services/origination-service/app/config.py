@@ -157,6 +157,14 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             )
             if cur.fetchone() is None:
                 return False, "schema_not_ready:applications.monthly_debt"
+            # Idempotent boarding depends on the uq_loans_app unique index (PR review):
+            # it is what turns a concurrent duplicate acceptance into the UniqueViolation
+            # accept_offer catches and replays. A partially-applied migration with the
+            # loans table but no index would let concurrent accepts board duplicate loans
+            # while /health reads healthy — same class as the decision idempotency index.
+            cur.execute("SELECT 1 FROM pg_indexes WHERE indexname = 'uq_loans_app'")
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:uq_loans_app"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__
