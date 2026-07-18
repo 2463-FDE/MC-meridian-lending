@@ -215,6 +215,13 @@ def missing_required_secrets() -> list:
     # look healthy while quietly breaking verification. Surface it at /health instead.
     if not INTERNAL_SERVICE_TOKEN:
         missing.append("INTERNAL_SERVICE_TOKEN")
+    # PR #7 review: the dedicated continuation-token pepper is required outside development.
+    # Without it authz would fall back to hashing resume tokens with INTERNAL_SERVICE_TOKEN,
+    # re-coupling them to the service-auth secret (rotating that secret would then invalidate
+    # every live anonymous resume session). Surface it at /health so a production deploy that
+    # forgot the pepper reads unhealthy instead of issuing service-token-coupled tokens.
+    if ENVIRONMENT != "development" and not continuation_token_keys():
+        missing.append("CONTINUATION_TOKEN_KEYS")
     return missing
 
 
@@ -243,6 +250,33 @@ INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 # stable "legacy" version (the old coupling; set this env to decouple resume tokens from
 # service-auth rotation). Host-env/secret-manager only.
 CONTINUATION_TOKEN_KEYS = os.getenv("CONTINUATION_TOKEN_KEYS", "")
+
+# Deployment environment. "development" is the ONLY value that relaxes the dedicated-pepper
+# requirement below (mirrors decision-service's synthetic-credit / fingerprint-pepper gates):
+# outside development a missing CONTINUATION_TOKEN_KEYS is reported unhealthy and hash_token
+# refuses to issue, so a real deploy can never silently couple resume tokens to the service
+# secret. Defaults to production so a config that forgets to set it fails closed.
+ENVIRONMENT = os.getenv("ENVIRONMENT", "production").strip().lower()
+
+
+def continuation_token_keys() -> list:
+    """Parsed (version, secret) pairs from CONTINUATION_TOKEN_KEYS, newest first.
+
+    Empty when unset/malformed -- callers decide what that means: authz.hash_token refuses to
+    issue a NEW token outside development (never falls back to INTERNAL_SERVICE_TOKEN for a new
+    hash), and missing_required_secrets() reports it missing so /health is unhealthy in
+    production. Verifying a pre-existing legacy row is handled separately (authz._verify_keys),
+    which keeps a service-token fallback for OLD rows only."""
+    keys = []
+    for part in CONTINUATION_TOKEN_KEYS.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        ver, sep, secret = part.partition(":")
+        if sep and ver.strip() and secret:
+            keys.append((ver.strip(), secret))
+    return keys
+
 
 # Lifetime of an anonymous continuation token (ADR 0010 Phase B, PR #7 review). The token
 # is a bearer capability for money-moving routes, so it is not valid forever: authz rejects

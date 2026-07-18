@@ -21,6 +21,9 @@ from app.routers import applications
 _FUTURE = datetime.now(timezone.utc) + timedelta(days=1)
 _PAST = datetime.now(timezone.utc) - timedelta(days=1)
 
+# A healthy CONTINUATION_TOKEN_KEYS is set for the whole suite by tests/conftest.py; the
+# rotation / fallback / refusal tests below monkeypatch it again to model other configs.
+
 
 def _authz_db(
     user_row, app_applicant_id, app_token=None, app_exists=None, expires_at=_FUTURE
@@ -228,17 +231,50 @@ def test_token_survives_pepper_rotation_until_old_key_dropped(monkeypatch):
     assert authz.verify_token("tok", stored) is False
 
 
-def test_legacy_fallback_is_service_token_coupled(monkeypatch):
-    # Unset dedicated pepper -> falls back to INTERNAL_SERVICE_TOKEN under "legacy" (the OLD
-    # coupling, documented). Prove it verifies pre-rotation and breaks post -- exactly why the
-    # dedicated pepper exists; operators set CONTINUATION_TOKEN_KEYS to decouple.
+def test_hash_token_refuses_without_pepper_in_production(monkeypatch):
+    # PR #7 review: a NEW token is NEVER hashed with the service secret. Outside development,
+    # no dedicated pepper -> hash_token refuses (a production deploy is caught by
+    # missing_required_secrets / RuntimeError, not silently coupled to INTERNAL_SERVICE_TOKEN).
     monkeypatch.setattr(config, "CONTINUATION_TOKEN_KEYS", "")
+    monkeypatch.setattr(config, "ENVIRONMENT", "production")
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "svc-A")
+    with pytest.raises(RuntimeError):
+        authz.hash_token("tok")
+    # and /health reports it missing
+    assert "CONTINUATION_TOKEN_KEYS" in config.missing_required_secrets()
+
+
+def test_hash_token_dev_fallback_is_service_token_coupled(monkeypatch):
+    # Development-only convenience: no dedicated pepper -> hash under INTERNAL_SERVICE_TOKEN so
+    # the local demo runs. Prove it is still service-token-coupled (breaks on service rotation)
+    # -- exactly why production must set CONTINUATION_TOKEN_KEYS. In dev this is NOT reported
+    # missing (the relaxation), but a rotated service token breaks the dev token.
+    monkeypatch.setattr(config, "CONTINUATION_TOKEN_KEYS", "")
+    monkeypatch.setattr(config, "ENVIRONMENT", "development")
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "svc-A")
     stored = authz.hash_token("tok")
     assert stored.startswith("legacy:")
     assert authz.verify_token("tok", stored) is True
+    assert "CONTINUATION_TOKEN_KEYS" not in config.missing_required_secrets()
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "svc-B")
     assert authz.verify_token("tok", stored) is False
+
+
+def test_verify_accepts_preexisting_legacy_row_after_pepper_set(monkeypatch):
+    # verify-only fallback: a row hashed under the old service-token coupling ("legacy:...")
+    # must STILL verify once a dedicated pepper is configured, so rotating IN the pepper does
+    # not strand pre-existing tokens. New tokens hash under the pepper; old rows verify via the
+    # service-token legacy key until they expire.
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "svc-A")
+    monkeypatch.setattr(config, "ENVIRONMENT", "development")
+    monkeypatch.setattr(config, "CONTINUATION_TOKEN_KEYS", "")
+    legacy_stored = authz.hash_token("tok")  # hashed under svc-A as "legacy:"
+    assert legacy_stored.startswith("legacy:")
+    # Operator now decouples: sets a dedicated pepper. New tokens use it...
+    monkeypatch.setattr(config, "CONTINUATION_TOKEN_KEYS", "v1:pepper")
+    assert authz.hash_token("tok2").startswith("v1:")
+    # ...and the pre-existing legacy row still verifies (service token still configured).
+    assert authz.verify_token("tok", legacy_stored) is True
 
 
 def test_abandon_requires_internal_token(monkeypatch):
@@ -249,31 +285,112 @@ def test_abandon_requires_internal_token(monkeypatch):
     assert resp.status_code == 403
 
 
+class _FakeTxCursor:
+    """Records executes from the abandon transaction; returns "no other applications" from the
+    applicant-reference probe so the applicant (and its dependent rows) are deleted."""
+
+    def __init__(self, other_apps=False):
+        self.executed = []
+        self._other_apps = other_apps
+        self._last = None
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql.strip(), params))
+        if "SELECT 1 FROM applications WHERE applicant_id" in sql:
+            self._last = [object()] if self._other_apps else []
+        else:
+            self._last = None
+
+    def fetchone(self):
+        return self._last[0] if self._last else None
+
+    def deletes(self):
+        return [
+            (
+                sql.split()[2].lower(),
+                params,
+            )  # ("applications"/"kyc_checks"/"applicants", params)
+            for sql, params in self.executed
+            if sql.upper().startswith("DELETE FROM")
+        ]
+
+
+def _fake_transaction_factory(cur):
+    class _CM:
+        def __enter__(self):
+            return cur
+
+        def __exit__(self, *exc):
+            return False
+
+    return lambda: _CM()
+
+
 def test_abandon_deletes_inert_application(monkeypatch):
     monkeypatch.setattr(applications.config, "INTERNAL_SERVICE_TOKEN", "sekret")
-    deleted = []
 
     def _q(sql, params=None):
-        s = sql.strip().upper()
-        if s.startswith("SELECT A.APPLICANT_ID"):  # inertness probe
+        if sql.strip().upper().startswith("SELECT A.APPLICANT_ID"):  # inertness probe
             return [{"applicant_id": 42, "n_decisions": 0, "n_offers": 0, "n_loans": 0}]
-        if s.startswith("DELETE FROM APPLICATIONS"):
-            deleted.append(("app", params))
-            return []
-        if "SELECT 1 FROM APPLICATIONS WHERE APPLICANT_ID" in s:
-            return []  # applicant has no other applications
-        if s.startswith("DELETE FROM APPLICANTS"):
-            deleted.append(("applicant", params))
-            return []
         raise AssertionError(f"unexpected query: {sql}")
 
+    cur = _FakeTxCursor(other_apps=False)
     monkeypatch.setattr(applications.db, "query", _q)
+    monkeypatch.setattr(applications.db, "transaction", _fake_transaction_factory(cur))
     resp = TestClient(app).post(
         "/applications/5/abandon", headers={"X-Internal-Service": "sekret"}
     )
     assert resp.status_code == 200
-    assert ("app", (5,)) in deleted
-    assert ("applicant", (42,)) in deleted
+    deletes = cur.deletes()
+    assert ("applications", (5,)) in deletes
+    assert ("applicants", (42,)) in deletes
+
+
+def test_abandon_deletes_dependent_kyc_rows_before_applicant(monkeypatch):
+    # PR #7 review regression: submit runs KYC before the resume session is stored, so an
+    # abandoned application usually has a kyc_checks row keyed to applicant_id. Its FK has no
+    # cascade, so the compensation MUST delete kyc_checks before the applicant -- else the
+    # applicant delete FK-fails and the applicant + KYC/PII are stranded. Assert the order.
+    monkeypatch.setattr(applications.config, "INTERNAL_SERVICE_TOKEN", "sekret")
+
+    def _q(sql, params=None):
+        if sql.strip().upper().startswith("SELECT A.APPLICANT_ID"):
+            return [{"applicant_id": 42, "n_decisions": 0, "n_offers": 0, "n_loans": 0}]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    cur = _FakeTxCursor(other_apps=False)
+    monkeypatch.setattr(applications.db, "query", _q)
+    monkeypatch.setattr(applications.db, "transaction", _fake_transaction_factory(cur))
+    resp = TestClient(app).post(
+        "/applications/5/abandon", headers={"X-Internal-Service": "sekret"}
+    )
+    assert resp.status_code == 200
+    deletes = cur.deletes()
+    tables = [t for t, _ in deletes]
+    assert ("kyc_checks", (42,)) in deletes
+    # kyc_checks (child) must be deleted before applicants (parent).
+    assert tables.index("kyc_checks") < tables.index("applicants")
+
+
+def test_abandon_keeps_applicant_with_other_applications(monkeypatch):
+    # If another application references the applicant, only the application is deleted -- the
+    # shared applicant (and its KYC rows) stay. Guards against deleting a still-referenced row.
+    monkeypatch.setattr(applications.config, "INTERNAL_SERVICE_TOKEN", "sekret")
+
+    def _q(sql, params=None):
+        if sql.strip().upper().startswith("SELECT A.APPLICANT_ID"):
+            return [{"applicant_id": 42, "n_decisions": 0, "n_offers": 0, "n_loans": 0}]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    cur = _FakeTxCursor(other_apps=True)
+    monkeypatch.setattr(applications.db, "query", _q)
+    monkeypatch.setattr(applications.db, "transaction", _fake_transaction_factory(cur))
+    resp = TestClient(app).post(
+        "/applications/5/abandon", headers={"X-Internal-Service": "sekret"}
+    )
+    assert resp.status_code == 200
+    tables = [t for t, _ in cur.deletes()]
+    assert tables == ["applications"]  # applicant + kyc_checks untouched
 
 
 def test_abandon_refuses_non_inert_application(monkeypatch):

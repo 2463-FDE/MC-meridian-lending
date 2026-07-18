@@ -39,22 +39,16 @@ def _expired(expires_at: datetime | None) -> bool:
     return datetime.now(timezone.utc) >= expires_at
 
 
-def _token_keys() -> list[tuple[str, str]]:
-    """Ordered (version, secret) pairs for continuation-token hashing (PR #7 review).
+def _verify_keys() -> list[tuple[str, str]]:
+    """(version, secret) pairs accepted when VERIFYING a presented token (PR #7 review).
 
-    First = the CURRENT key (used to hash new tokens); the rest are still accepted on verify,
-    so a key rotation keeps pre-rotation resume tokens working until they expire. Parsed from
-    CONTINUATION_TOKEN_KEYS ("version:secret,version:secret", newest first). Unset -> falls
-    back to INTERNAL_SERVICE_TOKEN under a stable "legacy" version (the old coupling)."""
-    keys: list[tuple[str, str]] = []
-    for part in config.CONTINUATION_TOKEN_KEYS.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        ver, sep, secret = part.partition(":")
-        if sep and ver.strip() and secret:
-            keys.append((ver.strip(), secret))
-    if not keys:
+    The dedicated peppers from CONTINUATION_TOKEN_KEYS (newest first), PLUS a legacy fallback
+    (INTERNAL_SERVICE_TOKEN under a stable "legacy" version) so tokens hashed BEFORE the
+    dedicated pepper existed still verify until they expire. This fallback is verify-only:
+    hash_token never issues a new token under the service secret (see hash_token), so this
+    reads pre-existing rows, it does not perpetuate the coupling for new tokens."""
+    keys = list(config.continuation_token_keys())
+    if config.INTERNAL_SERVICE_TOKEN:
         keys.append(("legacy", config.INTERNAL_SERVICE_TOKEN))
     return keys
 
@@ -71,9 +65,25 @@ def hash_token(raw: str) -> str:
     The token is a bearer credential for money-moving routes, so it is never stored in the
     clear: applications.continuation_token holds this digest, not the raw token, which is
     returned to the applicant exactly once at submit. A DB read / backup / logged row then
-    yields only a non-replayable digest. Hashed with the CURRENT dedicated pepper (see
-    _token_keys); the version prefix lets verify_token pick the right key after a rotation."""
-    ver, secret = _token_keys()[0]
+    yields only a non-replayable digest.
+
+    Hashed with the CURRENT dedicated pepper (config.continuation_token_keys()[0]); the version
+    prefix lets verify_token pick the right key after a rotation. NEW tokens are NEVER hashed
+    with INTERNAL_SERVICE_TOKEN (PR #7 review): if no dedicated pepper is configured this
+    refuses to issue outside development, so a production deploy cannot silently couple resume
+    tokens to the service-auth secret. In development only, it falls back to the service token
+    for local-demo convenience (missing_required_secrets already reports the missing pepper)."""
+    keys = config.continuation_token_keys()
+    if not keys:
+        if config.ENVIRONMENT == "development" and config.INTERNAL_SERVICE_TOKEN:
+            keys = [("legacy", config.INTERNAL_SERVICE_TOKEN)]
+        else:
+            raise RuntimeError(
+                "CONTINUATION_TOKEN_KEYS is not configured; refusing to issue a continuation "
+                "token hashed with the service-auth secret (PR #7 review). Set a dedicated "
+                "pepper (version:secret) -- /health already reports this missing."
+            )
+    ver, secret = keys[0]
     return f"{ver}:{_digest(raw, secret)}"
 
 
@@ -82,16 +92,17 @@ def verify_token(raw: str, stored: str) -> bool:
 
     Selects the key matching the stored version, so a rotation (new current key, old key kept
     configured) still verifies pre-rotation tokens until they expire. A legacy digest with no
-    version prefix (pre-versioning) is tried against every configured key."""
+    version prefix (pre-versioning) is tried against every accepted key. The accepted set
+    (_verify_keys) includes the service-token legacy fallback so pre-pepper rows still verify."""
     if not raw or not stored:
         return False
     ver, sep, digest = stored.partition(":")
     if sep:
-        candidates = [s for v, s in _token_keys() if v == ver]
+        candidates = [s for v, s in _verify_keys() if v == ver]
         target = digest
     else:
-        # Unversioned legacy digest: try all keys.
-        candidates = [s for _, s in _token_keys()]
+        # Unversioned legacy digest: try all accepted keys.
+        candidates = [s for _, s in _verify_keys()]
         target = stored
     for secret in candidates:
         if hmac.compare_digest(

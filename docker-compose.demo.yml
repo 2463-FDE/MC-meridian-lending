@@ -28,6 +28,11 @@ x-demo-fingerprint-pepper: &demo_fingerprint_pepper "dev-fingerprint-pepper-not-
 services:
   origination-service:
     environment:
+      # Local demo only: development relaxes the dedicated-pepper requirement (PR #7 review),
+      # so anonymous apply issues resume tokens without CONTINUATION_TOKEN_KEYS set (falls back
+      # to the demo INTERNAL_SERVICE_TOKEN). Production must set CONTINUATION_TOKEN_KEYS or
+      # /health is unhealthy and submit refuses.
+      ENVIRONMENT: development
       INTERNAL_SERVICE_TOKEN: *demo_internal_token
   kyc-service:
     environment:

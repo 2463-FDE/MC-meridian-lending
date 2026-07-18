@@ -137,8 +137,13 @@ the Redis resume session above) is also not stored or lived unbounded:
   rotating the service-auth secret does not invalidate live resume tokens. Keys are versioned:
   `authz.verify_token` picks the key matching the stored version, so a pepper rotation keeps
   pre-rotation tokens verifiable until they expire (keep the old key configured ≥
-  `CONTINUATION_TOKEN_TTL_DAYS`, then drop it). Unset falls back to `INTERNAL_SERVICE_TOKEN`
-  under a `legacy` version (the prior coupling; documented so operators decouple).
+  `CONTINUATION_TOKEN_TTL_DAYS`, then drop it). `CONTINUATION_TOKEN_KEYS` is **required outside
+  development** (PR #7 review): unset, `missing_required_secrets` reports it so `/health` is
+  unhealthy and `authz.hash_token` **refuses to issue** a new token rather than silently
+  hashing it with `INTERNAL_SERVICE_TOKEN`. The service-token fallback survives on the
+  **verify** path only — pre-existing rows hashed under the old coupling (a `legacy`-versioned
+  digest) still verify until they expire, so decoupling never strands live sessions. In
+  development the fallback also applies to hashing, for local-demo convenience only.
 - **Expiry.** `continuation_token_expires_at` (migration 0009) time-boxes the token
   (`CONTINUATION_TOKEN_TTL_DAYS`, default 7); authz rejects a token past — or with a NULL —
   expiry, so it fails closed.
@@ -201,7 +206,13 @@ the existing identity path cannot cover.
   retry, the gateway issues a **compensating rollback** — an internal-only
   `POST /applications/{id}/abandon` that deletes the just-committed application (guarded to
   INERT rows only: no decision/offer/loan is ever deletable) — so the applicant's retry
-  creates one clean application, not a duplicate plus a stranded PII-bearing orphan.
+  creates one clean application, not a duplicate plus a stranded PII-bearing orphan. The
+  delete is **transactional and cascades PII** (PR #7 review): submit runs KYC before the
+  session write, so the inert application usually already has a `kyc_checks` row keyed to its
+  `applicant_id`; that FK has no `ON DELETE CASCADE`, so `abandon` deletes the application, its
+  `kyc_checks` rows, and its applicant in one transaction (children before parent) — otherwise
+  the applicant delete would FK-fail after the application delete committed under psycopg2
+  per-statement autocommit, re-stranding the very PII the rollback exists to remove.
   **Residual:** the compensation is best-effort; if origination is *also* unreachable at
   that moment (or `INTERNAL_SERVICE_TOKEN` is unset), the inert application is left for
   officer reconciliation (logged). A fully transactional submit would need submit
