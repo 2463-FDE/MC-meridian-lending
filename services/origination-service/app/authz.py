@@ -84,12 +84,17 @@ def require_officer_or_owner(
                 return
         # Continuation token: constant-time match against THIS application's stored token
         # (scoped to one app_id, so a token for app A cannot authorize app B). A legacy
-        # row with a NULL token has no token path.
+        # row with a NULL token has no token path. Compare as UTF-8 bytes (mirrors the
+        # internal-service guards): hmac.compare_digest raises TypeError on a non-ASCII str,
+        # which on an existing token-bearing row would 500 while a missing/NULL row 404s --
+        # an existence oracle that breaks the no-enumeration invariant. Bytes never raise.
         stored = app_row["continuation_token"]
         if (
             x_application_token
             and stored
-            and hmac.compare_digest(x_application_token, stored)
+            and hmac.compare_digest(
+                x_application_token.encode("utf-8"), stored.encode("utf-8")
+            )
         ):
             return
     # Non-owner, wrong/absent token, or unknown application: deny without revealing

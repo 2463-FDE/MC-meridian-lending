@@ -146,6 +146,18 @@ def test_wrong_continuation_token_denied(monkeypatch):
     assert exc.value.status_code == 404
 
 
+def test_non_ascii_token_denied_404_not_500(monkeypatch):
+    # A non-ASCII X-Application-Token against an existing token-bearing row must deny 404,
+    # not 500: hmac.compare_digest raises TypeError on a non-ASCII str, and a 500-vs-404
+    # split would leak which app_ids are real token-bearing applications (existence oracle).
+    monkeypatch.setattr(
+        authz.db, "query", _authz_db(None, app_applicant_id=None, app_token="tok-real")
+    )
+    with pytest.raises(HTTPException) as exc:
+        authz.require_officer_or_owner(1, None, None, x_application_token="tökén-🔑")
+    assert exc.value.status_code == 404
+
+
 def test_token_is_scoped_to_its_application(monkeypatch):
     # A token minted for application 1 must not authorize application 2: each application's
     # stored token is compared, so a token-for-1 fails the compare against app 2's token.
