@@ -6,15 +6,20 @@ no contract. (brownfield seam #1 — see docs/architecture.md, ADR 0002)
 """
 
 import secrets
+from datetime import datetime, timedelta, timezone
 
 from .logging_config import get_logger
-from . import db
+from . import authz, config, db
 
 log = get_logger("intake")
 
 
 def create_application(payload: dict) -> tuple[int, str]:
-    """Insert applicant + application; return (app_id, continuation_token).
+    """Insert applicant + application; return (app_id, RAW continuation_token).
+
+    The RAW token is returned to the applicant exactly once (here); only its keyed hash is
+    persisted, and it is stamped with an expiry (PR #7 review) so authz can time-box the
+    bearer capability. See authz.hash_token / authz.require_officer_or_owner.
 
     Logs an ALLOWLIST of non-PII, non-free-text fields only (amount / term /
     entity flag) — never the raw payload. Dumping the whole request dict put
@@ -48,12 +53,15 @@ def create_application(payload: dict) -> tuple[int, str]:
         ),
     )
     applicant_id = applicant[0]["id"]
-    continuation_token = secrets.token_urlsafe(32)
+    continuation_token = secrets.token_urlsafe(32)  # 256-bit; returned raw once, below
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        days=config.CONTINUATION_TOKEN_TTL_DAYS
+    )
     app_row = db.query(
         "INSERT INTO applications "
         "(applicant_id, amount, term_months, purpose, income, monthly_debt, "
-        "employment_years, continuation_token) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        "employment_years, continuation_token, continuation_token_expires_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
         (
             applicant_id,
             payload.get("amount"),
@@ -62,9 +70,12 @@ def create_application(payload: dict) -> tuple[int, str]:
             payload.get("income"),
             payload.get("monthly_debt"),
             payload.get("employment_years"),
-            continuation_token,
+            authz.hash_token(continuation_token),  # store the keyed hash, never the raw
+            expires_at,
         ),
     )
+    # Return the RAW token to the caller (the only time it exists outside the applicant's
+    # possession); the DB holds only its hash.
     return app_row[0]["id"], continuation_token
 
 

@@ -177,6 +177,19 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             )
             if cur.fetchone() is None:
                 return False, "schema_not_ready:applications.continuation_token"
+            # PR #7 review: authz SELECTs continuation_token_expires_at on every token check
+            # and intake INSERTs it at submit. A volume with continuation_token but not this
+            # column (predating migration 0009) would 500 on submit and on every token
+            # authorization while /health looked fine -- fail readiness loud, naming it.
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'applications' "
+                "AND column_name = 'continuation_token_expires_at'"
+            )
+            if cur.fetchone() is None:
+                return False, (
+                    "schema_not_ready:applications.continuation_token_expires_at"
+                )
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__
@@ -218,5 +231,12 @@ DISCLOSURE_URL = os.getenv("DISCLOSURE_URL", "http://disclosure-service:8005")
 # service's own internal-only remediation route. Env only, no committed default; an
 # unset token makes the internal routes fail closed. See docs/security-remediation.
 INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+
+# Lifetime of an anonymous continuation token (ADR 0010 Phase B, PR #7 review). The token
+# is a bearer capability for money-moving routes, so it is not valid forever: authz rejects
+# it once past this window, bounding the exposure of a token left in browser storage /
+# shared-device residue / a stale link. The apply flow is a short single-session or
+# same-week resume, so a few days is ample.
+CONTINUATION_TOKEN_TTL_DAYS = int(os.getenv("CONTINUATION_TOKEN_TTL_DAYS", "7"))
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

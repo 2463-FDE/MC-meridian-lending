@@ -43,7 +43,13 @@ CREATE TABLE IF NOT EXISTS applications (
     -- Authorizes the anonymous applicant to complete decision/offer/accept on THIS
     -- application only (a scoped capability), so anonymous apply keeps working without a
     -- login while serial-id IDOR stays closed. NULL for officer-created/legacy rows.
+    -- Stores a KEYED HASH of the token, never the raw token (PR #7 review): the raw token
+    -- is returned to the applicant once at submit; a DB read yields only the digest.
+    -- Cleared to NULL when the application is funded (single-use at the money action).
     continuation_token TEXT,
+    -- Expiry of the continuation token (PR #7 review): authz rejects it past this instant,
+    -- so the bearer capability is time-boxed. NULL for officer/legacy rows (no token path).
+    continuation_token_expires_at TIMESTAMPTZ,
     created_at        TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);

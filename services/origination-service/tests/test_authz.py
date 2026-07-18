@@ -7,6 +7,8 @@ including an anonymous caller with no X-User-Id -- is denied. A non-owner is den
 404, never 403-on-exists, so a caller cannot enumerate which application ids are real.
 """
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -16,24 +18,38 @@ from app.database import get_session
 from app.main import app
 from app.routers import applications
 
+_FUTURE = datetime.now(timezone.utc) + timedelta(days=1)
+_PAST = datetime.now(timezone.utc) - timedelta(days=1)
 
-def _authz_db(user_row, app_applicant_id, app_token=None, app_exists=None):
+
+def _authz_db(
+    user_row, app_applicant_id, app_token=None, app_exists=None, expires_at=_FUTURE
+):
     """Stub authz.db.query: the users lookup returns user_row ([] = no such user); the
-    applications lookup returns the app's applicant_id + continuation_token ([] = no such
-    application). app_exists defaults to "the app row is present iff it has an applicant_id
-    or a token"; pass it explicitly to model an owner-less, token-less row that still
-    exists."""
+    applications lookup returns the app's applicant_id + stored token digest + token expiry
+    ([] = no such application). app_token is the RAW token; the stub stores its keyed hash
+    (mirroring intake), so a test that presents the same raw token authorizes. app_exists
+    defaults to "the app row is present iff it has an applicant_id or a token"; pass it
+    explicitly to model an owner-less, token-less row that still exists. expires_at defaults
+    to a future instant; pass _PAST to model an expired token."""
 
     exists = app_exists
     if exists is None:
         exists = app_applicant_id is not None or app_token is not None
+    stored = authz.hash_token(app_token) if app_token is not None else None
 
     def _q(sql, params=None):
         if "FROM users" in sql:
             return [user_row] if user_row is not None else []
         if "FROM applications" in sql:
             return (
-                [{"applicant_id": app_applicant_id, "continuation_token": app_token}]
+                [
+                    {
+                        "applicant_id": app_applicant_id,
+                        "continuation_token": stored,
+                        "continuation_token_expires_at": expires_at,
+                    }
+                ]
                 if exists
                 else []
             )
@@ -164,7 +180,13 @@ def test_token_is_scoped_to_its_application(monkeypatch):
     def _q(sql, params=None):
         if "FROM applications" in sql:
             app_id = params[0]
-            return [{"applicant_id": None, "continuation_token": f"token-for-{app_id}"}]
+            return [
+                {
+                    "applicant_id": None,
+                    "continuation_token": authz.hash_token(f"token-for-{app_id}"),
+                    "continuation_token_expires_at": _FUTURE,
+                }
+            ]
         return []
 
     monkeypatch.setattr(authz.db, "query", _q)
@@ -185,6 +207,106 @@ def test_token_against_null_token_row_denied(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         authz.require_officer_or_owner(1, None, None, x_application_token="anything")
     assert exc.value.status_code == 404
+
+
+# --- token hardening (PR #7 review): hash-at-rest, expiry, single-use-at-funding ----
+
+
+def test_token_stored_as_hash_not_raw(monkeypatch):
+    # hash-at-rest: authz compares hash(presented) against the stored digest, so a DB that
+    # leaked the STORED value cannot be replayed. Model a (pre-hardening) row that stored the
+    # RAW token: presenting that exact raw value must NOT authorize, because authz hashes it
+    # first and the hash != the stored raw string.
+    raw = "leaked-raw-token"
+
+    def _q(sql, params=None):
+        if "FROM applications" in sql:
+            return [
+                {
+                    "applicant_id": None,
+                    "continuation_token": raw,  # stored in the clear (leaked/legacy)
+                    "continuation_token_expires_at": _FUTURE,
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(authz.db, "query", _q)
+    with pytest.raises(HTTPException) as exc:
+        authz.require_officer_or_owner(1, None, None, x_application_token=raw)
+    assert exc.value.status_code == 404
+    # sanity: the SAME raw token DOES authorize a row that stored its hash (the real path).
+    monkeypatch.setattr(
+        authz.db, "query", _authz_db(None, app_applicant_id=None, app_token=raw)
+    )
+    authz.require_officer_or_owner(1, None, None, x_application_token=raw)  # no raise
+
+
+def test_expired_token_denied(monkeypatch):
+    # A valid token past its expiry is no longer a capability -> 404 (same as wrong token,
+    # no existence oracle).
+    monkeypatch.setattr(
+        authz.db,
+        "query",
+        _authz_db(None, app_applicant_id=None, app_token="tok-abc", expires_at=_PAST),
+    )
+    with pytest.raises(HTTPException) as exc:
+        authz.require_officer_or_owner(1, None, None, x_application_token="tok-abc")
+    assert exc.value.status_code == 404
+
+
+def test_null_expiry_token_denied(monkeypatch):
+    # A token row with a NULL expiry (a pre-hardening row, or one never stamped) fails
+    # closed on the token path -- only a freshly issued, unexpired token authorizes.
+    monkeypatch.setattr(
+        authz.db,
+        "query",
+        _authz_db(None, app_applicant_id=None, app_token="tok-abc", expires_at=None),
+    )
+    with pytest.raises(HTTPException) as exc:
+        authz.require_officer_or_owner(1, None, None, x_application_token="tok-abc")
+    assert exc.value.status_code == 404
+
+
+def test_accept_clears_continuation_token_on_funding(monkeypatch):
+    # single-use at the money action: boarding a loan must retire the bearer token so it
+    # cannot re-drive a funded application. Assert the funded UPDATE nulls the token.
+    captured = []
+
+    def _q(sql, params=None):
+        s = sql.strip().upper()
+        captured.append(s)
+        if "LEFT JOIN KYC_CHECKS" in s:  # kyc gate -> passing natural person
+            return [
+                {
+                    "is_entity": False,
+                    "name_verified": True,
+                    "dob_verified": True,
+                    "address_verified": True,
+                    "ssn_verified": True,
+                }
+            ]
+        if "FROM APPLICATIONS A" in s:  # approve + offer row
+            return [
+                {
+                    "amount": 15000,
+                    "term_months": 36,
+                    "name": "Jane",
+                    "apr": 12.5,
+                    "outcome": "approve",
+                }
+            ]
+        if "FROM LOANS WHERE APP_ID" in s:  # already boarded -> skip board_to_servicing
+            return [{"id": 77, "principal": 15000}]
+        return []
+
+    monkeypatch.setattr(applications.db, "query", _q)
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 200
+    funded = next(s for s in captured if s.startswith("UPDATE APPLICATIONS SET STATUS"))
+    assert "CONTINUATION_TOKEN = NULL" in funded
+    assert "CONTINUATION_TOKEN_EXPIRES_AT = NULL" in funded
 
 
 def test_owner_still_allowed_with_token_column_present(monkeypatch):
@@ -264,8 +386,14 @@ def _apply_flow_db(state):
 
     def _q(sql, params=None):
         s = sql.strip().upper()
-        if "CONTINUATION_TOKEN FROM APPLICATIONS" in s:  # authz lookup
-            return [{"applicant_id": None, "continuation_token": _E2E_TOKEN}]
+        if "CONTINUATION_TOKEN_EXPIRES_AT FROM APPLICATIONS" in s:  # authz lookup
+            return [
+                {
+                    "applicant_id": None,
+                    "continuation_token": authz.hash_token(_E2E_TOKEN),
+                    "continuation_token_expires_at": _FUTURE,
+                }
+            ]
         if "LEFT JOIN KYC_CHECKS" in s:  # ADR 0011 KYC gate -> passing (natural person)
             return [
                 {

@@ -592,5 +592,14 @@ def accept_offer(
         "ON CONFLICT (loan_id) DO NOTHING",
         (loan_id, float(principal)),
     )
-    db.query("UPDATE applications SET status = 'funded' WHERE id = %s", (app_id,))
+    # Fund AND retire the continuation token in one statement (PR #7 review): boarding is
+    # the terminal money action, so the anonymous bearer capability must not outlive it.
+    # Clearing the hash + expiry makes the token single-use at funding -- a token left in
+    # browser storage / shared-device residue cannot re-drive a funded application. Idempotent
+    # on replay (already NULL). Officer/owner access is unaffected (it never used the token).
+    db.query(
+        "UPDATE applications SET status = 'funded', continuation_token = NULL, "
+        "continuation_token_expires_at = NULL WHERE id = %s",
+        (app_id,),
+    )
     return {"loan_id": loan_id}

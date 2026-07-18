@@ -293,6 +293,49 @@ def test_probe_fails_when_continuation_token_column_missing(monkeypatch):
     assert err == "schema_not_ready:applications.continuation_token"
 
 
+class _ExpiresAtMissingCursor:
+    """continuation_token present but continuation_token_expires_at absent -- a volume
+    predating migration 0009, on which authz's token SELECT and submit's INSERT would 500
+    while /health looked fine (PR #7 review)."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "'continuation_token_expires_at'" in self._last:
+            return None
+        return (1,)
+
+
+class _ExpiresAtMissingConn:
+    def cursor(self):
+        return _ExpiresAtMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_continuation_token_expires_at_column_missing(monkeypatch):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _ExpiresAtMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:applications.continuation_token_expires_at"
+
+
 def test_probe_false_when_database_url_unset(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", "")
     ok, err = config.database_reachable()

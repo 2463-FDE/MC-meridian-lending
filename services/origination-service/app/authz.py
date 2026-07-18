@@ -17,13 +17,44 @@ the IDOR being closed is anonymous serial-id enumeration of applications, so the
 must not let a caller tell a real application id from a missing one.
 """
 
+import hashlib
 import hmac
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
-from . import db
+from . import config, db
 
 _OFFICER_ROLES = {"underwriter", "admin"}
+
+
+def _expired(expires_at: datetime | None) -> bool:
+    """A continuation token with no expiry (legacy/officer rows never had one) or a past
+    expiry is not a valid token capability. Fail closed: treat a missing expiry as expired
+    on the token path, so only a freshly issued, unexpired token authorizes."""
+    if expires_at is None:
+        return True
+    if expires_at.tzinfo is None:  # DB may return a naive UTC timestamp
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) >= expires_at
+
+
+def hash_token(raw: str) -> str:
+    """Keyed hash of a continuation token for storage/compare (PR #7 review).
+
+    The token is a bearer credential for money-moving routes, so it is never stored in
+    the clear: applications.continuation_token holds this hex digest, not the raw token,
+    which is returned to the applicant exactly once at submit. A DB read / backup leak /
+    logged row then yields only the digest, which cannot be replayed as X-Application-Token.
+    Keyed with INTERNAL_SERVICE_TOKEN (a server-only secret) so a DB-without-key compromise
+    cannot even offline-verify guesses; unkeyed in dev when the secret is unset (the raw
+    token is already 256-bit random, so at-rest confidentiality holds either way).
+    """
+    return hmac.new(
+        config.INTERNAL_SERVICE_TOKEN.encode("utf-8"),
+        raw.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _is_officer(x_user_role: str | None) -> bool:
@@ -66,7 +97,8 @@ def require_officer_or_owner(
     if user_id is None and not x_application_token:
         raise HTTPException(status_code=404, detail="application not found")
     app_rows = db.query(
-        "SELECT applicant_id, continuation_token FROM applications WHERE id = %s",
+        "SELECT applicant_id, continuation_token, continuation_token_expires_at "
+        "FROM applications WHERE id = %s",
         (app_id,),
     )
     app_row = app_rows[0] if app_rows else None
@@ -82,18 +114,22 @@ def require_officer_or_owner(
                 and app_row["applicant_id"] == caller_applicant_id
             ):
                 return
-        # Continuation token: constant-time match against THIS application's stored token
-        # (scoped to one app_id, so a token for app A cannot authorize app B). A legacy
-        # row with a NULL token has no token path. Compare as UTF-8 bytes (mirrors the
-        # internal-service guards): hmac.compare_digest raises TypeError on a non-ASCII str,
-        # which on an existing token-bearing row would 500 while a missing/NULL row 404s --
-        # an existence oracle that breaks the no-enumeration invariant. Bytes never raise.
+        # Continuation token: constant-time match of the KEYED HASH of the presented token
+        # against THIS application's stored digest (scoped to one app_id, so a token for
+        # app A cannot authorize app B). The stored value is hash_token(raw), never the raw
+        # token. A legacy/officer row with a NULL token, or a token past its expiry, has no
+        # token path. Compare as UTF-8 bytes (the digest is hex/ASCII, but hashing the
+        # presented token first also means a non-ASCII X-Application-Token can never reach
+        # compare_digest as a raw non-ASCII str -- no TypeError->500 existence oracle).
         stored = app_row["continuation_token"]
+        expires_at = app_row["continuation_token_expires_at"]
         if (
             x_application_token
             and stored
+            and not _expired(expires_at)
             and hmac.compare_digest(
-                x_application_token.encode("utf-8"), stored.encode("utf-8")
+                hash_token(x_application_token).encode("utf-8"),
+                stored.encode("utf-8"),
             )
         ):
             return

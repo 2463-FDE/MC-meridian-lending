@@ -101,19 +101,41 @@ enumeration cannot even confirm which application ids are real.
 
 Anonymous apply is kept, not deprecated. `POST /applications`
 (`routers/applications.py`) issues an unguessable per-application continuation token
-(`secrets.token_urlsafe(32)`), persists it to `applications.continuation_token`, and
-returns it once in the submit response. `authz.require_officer_or_owner` accepts it as a
-third authorization path: officer OR owner OR `hmac.compare_digest(X-Application-Token,
-stored)` for THAT application. The token is a capability scoped to one application id (a
-token minted for app A cannot authorize app B), so the logged-out applicant completes
-their own decision/offer/accept while serial-id enumeration stays closed — the gateway
-forwards `X-Application-Token` (it is the applicant's own capability, unlike the spoofable
-`X-User-*` it strips). A NULL token (officer-created/legacy row) has no token path, so
-those stay officer-OR-owner only. The frontend apply page carries the returned token on
-its three POSTs; no login, no signup. Because the token is returned only once, the apply
-page persists it in scoped client storage keyed by app id and rehydrates it on mount
-(re-fetching the application with the token) so a refresh or tab close does not strand the
-applicant — it is treated as a magic-link-style bearer, cleared when the flow completes.
+(`secrets.token_urlsafe(32)`), returns it once in the submit response, and persists it to
+`applications.continuation_token`. `authz.require_officer_or_owner` accepts it as a third
+authorization path: officer OR owner OR a valid continuation token for THAT application.
+The token is a capability scoped to one application id (a token minted for app A cannot
+authorize app B), so the logged-out applicant completes their own decision/offer/accept
+while serial-id enumeration stays closed — the gateway forwards `X-Application-Token` (it
+is the applicant's own capability, unlike the spoofable `X-User-*` it strips). A NULL token
+(officer-created/legacy row) has no token path, so those stay officer-OR-owner only. The
+frontend apply page carries the returned token on its three POSTs; no login, no signup.
+Because the token is returned only once, the apply page persists it in scoped client
+storage keyed by app id and rehydrates it on mount (re-fetching the application with the
+token) so a refresh or tab close does not strand the applicant — a magic-link-style bearer.
+
+**Token hardening (PR #7 review).** Because the token is a bearer credential for
+money-moving routes, it is not stored or lived unbounded:
+
+- **Hash at rest.** `applications.continuation_token` stores a keyed hash
+  (`authz.hash_token` = HMAC-SHA256 keyed with `INTERNAL_SERVICE_TOKEN`), never the raw
+  token; the raw value exists only in the applicant's possession after the one-time submit
+  response. A DB read / backup / logged row yields a non-replayable digest. authz compares
+  `hash_token(X-Application-Token)` against the stored digest with `hmac.compare_digest`.
+- **Expiry.** `continuation_token_expires_at` (migration 0009) time-boxes the token
+  (`CONTINUATION_TOKEN_TTL_DAYS`, default 7); authz rejects a token past — or with a NULL —
+  expiry, so it fails closed.
+- **Single-use at funding.** `accept_offer` clears the token hash + expiry to NULL in the
+  same statement that sets `status='funded'`, so the terminal money action retires the
+  bearer capability — token residue cannot re-drive a funded application.
+
+**Not done (deliberate; product decision).** No separate short-lived *acceptance* token and
+no capability split between resume/read and `/accept`: a "stronger authenticated applicant
+action before boarding" requires an authenticated applicant, which the anonymous flow does
+not have (no login, no verified email/SMS channel — the same wall as the pre-migration
+recovery in §Migration). Splitting the capability is only meaningful once anonymous apply
+is deprecated in favor of applicant accounts (the retirement path noted below); until that
+product decision, the token is hardened but remains a single capability.
 
 Why this over deprecating anonymous apply: forcing a login would need a borrower
 self-registration flow that does not exist and a product decision to drop "apply without
