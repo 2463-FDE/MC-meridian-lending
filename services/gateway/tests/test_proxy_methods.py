@@ -249,6 +249,71 @@ def test_submit_returns_503_not_500_when_session_write_fails(monkeypatch):
     assert "continuation_token" not in resp.json()
 
 
+def test_anonymous_resume_read_503s_when_redis_down(monkeypatch):
+    # Parity with submit (PR #7 review): a Redis outage on a resume read (decision/offer/
+    # accept) must not 500 -- an anonymous caller gets a retryable 503, not a stack trace.
+    from app import auth
+
+    def _boom(sid):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(auth, "resolve_resume", _boom)
+    resp = TestClient(app, cookies={"meridian_resume": "sid-5"}).post(
+        "/los/applications/5/decision"
+    )
+    assert resp.status_code == 503
+
+
+def test_authenticated_resume_read_unaffected_by_redis_down(monkeypatch):
+    # An authenticated caller does not need the resume session; a Redis blip resolving a
+    # stale cookie must not block them -- they proceed via their login session.
+    from app import auth
+
+    monkeypatch.setattr(
+        auth, "get_session", lambda token: {"id": 7, "role": "borrower"}
+    )
+
+    def _boom(sid):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(auth, "resolve_resume", _boom)
+    captured = _capture_forwarded_headers(monkeypatch)
+    resp = TestClient(app, cookies={"meridian_resume": "sid-5"}).post(
+        "/los/applications/5/decision", headers={"Authorization": "Bearer sesh"}
+    )
+    assert resp.status_code == 200  # session auth carries them; no token injected
+    assert "x-application-token" not in captured["headers"]
+
+
+def test_authenticated_submit_needs_no_resume_session(monkeypatch):
+    # An authenticated owner resumes via their login session, not the anonymous resume
+    # cookie. Their submit must NOT create a resume session and must NOT be 503'd when Redis
+    # is down (the cookie mechanism is anonymous-only). The token is still stripped from the
+    # body (they never use it).
+    from app import auth, main
+
+    monkeypatch.setattr(
+        auth, "get_session", lambda token: {"id": 7, "role": "borrower"}
+    )
+    monkeypatch.setattr(main.config, "redis_reachable", lambda *a, **k: (False, "down"))
+
+    def _must_not_create(*a, **k):
+        raise AssertionError("authenticated submit must not create a resume session")
+
+    monkeypatch.setattr(auth, "create_resume_session", _must_not_create)
+    _capture_forwarded_headers(
+        monkeypatch, resp_body={"app_id": 5, "continuation_token": "raw-tok"}
+    )
+    resp = TestClient(app).post(
+        "/los/applications",
+        json={"name": "Jane", "amount": 15000},
+        headers={"Authorization": "Bearer sesh"},
+    )
+    assert resp.status_code == 200  # not 503 -- Redis is irrelevant to an authed submit
+    assert "meridian_resume" not in resp.headers.get("set-cookie", "")
+    assert "continuation_token" not in resp.json()
+
+
 def test_recheck_response_body_never_leaks_the_raw_token(monkeypatch):
     # recheck-kyc echoes the continuation token in its body downstream; the gateway must
     # strip it (like it does at submit) so the browser never receives the raw credential.

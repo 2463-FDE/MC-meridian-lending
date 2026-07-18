@@ -267,7 +267,18 @@ async def los(path: str, request: Request, authorization: str | None = Header(No
     sid = request.cookies.get(RESUME_COOKIE)
     inject_token = None
     app_id = _app_id_in_path(path)
-    sess = auth.resolve_resume(sid) if sid else None
+    sess = None
+    if sid:
+        try:
+            sess = auth.resolve_resume(sid)
+        except Exception as e:  # noqa: BLE001 -- Redis outage on the resume read path
+            # Parity with the submit path (PR #7 review): a Redis blip must not 500 a resume
+            # request. An anonymous caller's capability lives in Redis, so surface a retryable
+            # 503; an authenticated caller doesn't need it -- they proceed via their session.
+            log.warning("resume session resolve failed: %s", type(e).__name__)
+            if user is None:
+                return _resume_unavailable()
+            sess = None
     if sess:
         if app_id is not None and str(sess.get("app_id")) == app_id:
             # Application-scoped path (applications/{id}/...): inject only when the cookie
@@ -295,11 +306,14 @@ async def los(path: str, request: Request, authorization: str | None = Header(No
     response = JSONResponse(status_code=status, content=content)
 
     # Submit: capture the freshly issued token into a server-side resume session and hand the
-    # browser only the HttpOnly cookie holding its opaque id.
+    # browser only the HttpOnly cookie holding its opaque id. ANONYMOUS submits only -- an
+    # authenticated owner resumes via their login session (owner authz) and needs no resume
+    # cookie, so we neither create a session for them nor 503 their submit on a Redis outage.
     is_submit = (
         request.method == "POST"
         and path.strip("/") == "applications"
         and status == 200
+        and user is None
         and raw_token
         and app_id_in_body is not None
     )
