@@ -218,6 +218,14 @@ DECISION_URL = os.getenv("DECISION_URL", "http://decision-service:8004")
 DISCLOSURE_URL = os.getenv("DISCLOSURE_URL", "http://disclosure-service:8005")
 PAYMENT_URL = os.getenv("PAYMENT_URL", "http://payment-service:8006")
 
+# Shared service-to-service secret. The gateway strips any client-supplied X-Internal-Service
+# (it must never be forgeable through the proxy) and normally does not originate internal
+# calls, but it needs the token to invoke origination's internal /abandon compensator when a
+# resume session cannot be stored after submit (PR #7 review). Same value as every service's
+# INTERNAL_SERVICE_TOKEN (compose loads .env for all). Unset -> compensation is skipped
+# (the inert application is left for officer reconciliation).
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+
 # 8-hour sessions. (No refresh, no rotation, no CSRF token — Halcyon "v1 auth".)
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "28800"))
 

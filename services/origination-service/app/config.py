@@ -232,6 +232,18 @@ DISCLOSURE_URL = os.getenv("DISCLOSURE_URL", "http://disclosure-service:8005")
 # unset token makes the internal routes fail closed. See docs/security-remediation.
 INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 
+# Dedicated pepper(s) for hashing anonymous continuation tokens, SEPARATE from
+# INTERNAL_SERVICE_TOKEN (PR #7 review). Keying the token hash with the service-auth secret
+# meant rotating that secret -- routine or emergency -- silently invalidated every live
+# resume token (all stored digests became unverifiable -> anonymous 404s). Format:
+# comma-separated "version:secret", newest first. The FIRST is the CURRENT key (used to hash
+# new tokens); the rest are still ACCEPTED on verify, so a rotation keeps pre-rotation tokens
+# working until they expire -- keep the old key configured for at least CONTINUATION_TOKEN_
+# TTL_DAYS after rotating, then drop it. Unset -> falls back to INTERNAL_SERVICE_TOKEN under a
+# stable "legacy" version (the old coupling; set this env to decouple resume tokens from
+# service-auth rotation). Host-env/secret-manager only.
+CONTINUATION_TOKEN_KEYS = os.getenv("CONTINUATION_TOKEN_KEYS", "")
+
 # Lifetime of an anonymous continuation token (ADR 0010 Phase B, PR #7 review). The token
 # is a bearer capability for money-moving routes, so it is not valid forever: authz rejects
 # it once past this window, bounding the exposure of a token left in browser storage /

@@ -397,6 +397,60 @@ def capture_monthly_debt(
     return {"app_id": app_id, "monthly_debt": body.monthly_debt}
 
 
+@router.post("/{app_id}/abandon")
+def abandon_application(
+    app_id: int,
+    x_internal_service: str | None = Header(default=None, alias="X-Internal-Service"),
+):
+    """Delete an INERT just-submitted application (compensating rollback, PR #7 review).
+
+    The gateway calls this when it cannot store the anonymous resume session after
+    origination has already committed the application (a Redis failure in the submit window).
+    Without it, that application is stranded: the applicant never got a working credential and
+    will resubmit, leaving a duplicate PII-bearing row for manual cleanup. Deleting it makes
+    submit atomic from the applicant's perspective -- the retry creates one clean application,
+    not a duplicate-plus-orphan.
+
+    Internal-only (X-Internal-Service; the gateway strips any client copy) -- deletion is an
+    ops/compensation action, never client-reachable through the anonymous /los proxy.
+
+    Guarded: only an INERT application is deletable -- no decision, no offer, no boarded loan.
+    If any exists the application is past the submit window and is NOT deleted (409); this can
+    never remove a decisioned/funded application. Deletes the application, then its applicant
+    if no other application references it (intake creates one applicant per application).
+    """
+    _require_internal_caller(x_internal_service)
+    rows = db.query(
+        "SELECT a.applicant_id, "
+        "  (SELECT count(*) FROM decisions d WHERE d.app_id = a.id) AS n_decisions, "
+        "  (SELECT count(*) FROM offers o WHERE o.app_id = a.id) AS n_offers, "
+        "  (SELECT count(*) FROM loans l WHERE l.app_id = a.id) AS n_loans "
+        "FROM applications a WHERE a.id = %s",
+        (app_id,),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="application not found")
+    r = rows[0]
+    if r["n_decisions"] or r["n_offers"] or r["n_loans"]:
+        # Past the submit window -- a real in-flight/funded application. Never delete it.
+        raise HTTPException(
+            status_code=409, detail="application is not inert; refusing to abandon"
+        )
+    applicant_id = r["applicant_id"]
+    db.query("DELETE FROM applications WHERE id = %s", (app_id,))
+    if applicant_id is not None:
+        others = db.query(
+            "SELECT 1 FROM applications WHERE applicant_id = %s LIMIT 1",
+            (applicant_id,),
+        )
+        if not others:
+            db.query("DELETE FROM applicants WHERE id = %s", (applicant_id,))
+    log.info(
+        "abandoned inert application app_id=%s (resume-session compensation)", app_id
+    )
+    return {"app_id": app_id, "status": "abandoned"}
+
+
 def decision_request_payload(app_id: int) -> dict:
     """Build the decision-service request for an application from the LOS database.
 

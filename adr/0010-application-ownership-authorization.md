@@ -129,11 +129,16 @@ opaque, expiring, HttpOnly session id — not the credential.
 **Token hardening at rest (PR #7 review).** The persisted token (in Postgres, distinct from
 the Redis resume session above) is also not stored or lived unbounded:
 
-- **Hash at rest.** `applications.continuation_token` stores a keyed hash
-  (`authz.hash_token` = HMAC-SHA256 keyed with `INTERNAL_SERVICE_TOKEN`), never the raw
+- **Hash at rest, versioned dedicated pepper.** `applications.continuation_token` stores a
+  version-tagged keyed digest `"<version>:<HMAC-SHA256>"` (`authz.hash_token`), never the raw
   token; the raw value exists only in the applicant's possession after the one-time submit
-  response. A DB read / backup / logged row yields a non-replayable digest. authz compares
-  `hash_token(X-Application-Token)` against the stored digest with `hmac.compare_digest`.
+  response. A DB read / backup / logged row yields a non-replayable digest. The HMAC key is a
+  **dedicated pepper** (`CONTINUATION_TOKEN_KEYS`), separate from `INTERNAL_SERVICE_TOKEN`, so
+  rotating the service-auth secret does not invalidate live resume tokens. Keys are versioned:
+  `authz.verify_token` picks the key matching the stored version, so a pepper rotation keeps
+  pre-rotation tokens verifiable until they expire (keep the old key configured ≥
+  `CONTINUATION_TOKEN_TTL_DAYS`, then drop it). Unset falls back to `INTERNAL_SERVICE_TOKEN`
+  under a `legacy` version (the prior coupling; documented so operators decouple).
 - **Expiry.** `continuation_token_expires_at` (migration 0009) time-boxes the token
   (`CONTINUATION_TOKEN_TTL_DAYS`, default 7); authz rejects a token past — or with a NULL —
   expiry, so it fails closed.
@@ -192,11 +197,17 @@ the existing identity path cannot cover.
   (never a 500 that discards the raw token) if it still fails. Resume/decision/offer/accept
   fail closed on a Redis outage (no capability resolved → denied), never a silent bypass.
   The gateway `depends_on: redis` (compose) and the `/health` readiness probe surface
-  reachability. **Residual:** if Redis dies within that post-check window and stays down
-  through the retry, origination has already committed an application that gets no resume
-  session — it is **inert** (no decision/offer/loan) and officer-reconcilable; the applicant
-  retries. Fully eliminating it needs a compensating "abandon application" call, out of
-  scope here (no such origination endpoint today).
+  reachability. If Redis dies within that post-check window and stays down through the
+  retry, the gateway issues a **compensating rollback** — an internal-only
+  `POST /applications/{id}/abandon` that deletes the just-committed application (guarded to
+  INERT rows only: no decision/offer/loan is ever deletable) — so the applicant's retry
+  creates one clean application, not a duplicate plus a stranded PII-bearing orphan.
+  **Residual:** the compensation is best-effort; if origination is *also* unreachable at
+  that moment (or `INTERNAL_SERVICE_TOKEN` is unset), the inert application is left for
+  officer reconciliation (logged). A fully transactional submit would need submit
+  idempotency, but the one-time raw token cannot be re-issued on an idempotent replay
+  (origination stores only its hash), so refuse-before-commit + retry + compensating-delete
+  is the correct closure here.
 - **No single end-to-end test spans gateway ↔ Redis ↔ origination.** Each seam is unit-
   tested — the gateway trust-boundary/resume-cookie behavior in `test_proxy_methods.py`
   (blocking `gateway-trust-boundary-gate`, Redis + origination mocked), and origination's

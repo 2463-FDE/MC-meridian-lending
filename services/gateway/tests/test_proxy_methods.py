@@ -45,11 +45,11 @@ class _FakeResp:
 
 def _capture_forwarded_headers(monkeypatch, resp_body=None):
     """Replace the gateway's httpx.AsyncClient with a fake that records the headers it
-    would forward downstream and returns resp_body (default {"ok": True}) without a
-    network call."""
+    would forward downstream and every (method, url) it is asked to call, returning
+    resp_body (default {"ok": True}) without a network call."""
     from app import main
 
-    captured = {}
+    captured = {"calls": []}
 
     class _FakeAsyncClient:
         def __init__(self, *a, **k):
@@ -63,7 +63,12 @@ def _capture_forwarded_headers(monkeypatch, resp_body=None):
 
         async def request(self, method, url, content=None, headers=None, params=None):
             captured["headers"] = {k.lower(): v for k, v in (headers or {}).items()}
+            captured["calls"].append((method, url))
             return _FakeResp(body=resp_body)
+
+        async def post(self, url, content=None, headers=None, params=None, json=None):
+            # The compensating /abandon call uses .post directly.
+            return await self.request("POST", url, content=content, headers=headers)
 
     monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
     return captured
@@ -239,7 +244,8 @@ def test_submit_returns_503_not_500_when_session_write_fails(monkeypatch):
         raise RuntimeError("redis down")
 
     monkeypatch.setattr(auth, "create_resume_session", _boom)
-    _capture_forwarded_headers(
+    monkeypatch.setattr(main.config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    captured = _capture_forwarded_headers(
         monkeypatch, resp_body={"app_id": 5, "continuation_token": "raw-tok"}
     )
     resp = client.post("/los/applications", json={"name": "Jane", "amount": 15000})
@@ -247,6 +253,9 @@ def test_submit_returns_503_not_500_when_session_write_fails(monkeypatch):
     # No resume cookie, and the raw token never reaches the browser body.
     assert "meridian_resume" not in resp.headers.get("set-cookie", "")
     assert "continuation_token" not in resp.json()
+    # Compensating rollback: the gateway deletes the inert committed application so the
+    # applicant's retry does not leave a stranded duplicate.
+    assert any(url.endswith("/applications/5/abandon") for _, url in captured["calls"])
 
 
 def test_anonymous_resume_read_503s_when_redis_down(monkeypatch):

@@ -228,6 +228,35 @@ def _resume_unavailable() -> JSONResponse:
     )
 
 
+async def _abandon_application(app_id) -> None:
+    """Compensating rollback (PR #7 review): delete a just-committed application when its
+    resume session could not be stored, so the applicant's retry does not leave a stranded,
+    duplicate PII-bearing row. Best-effort -- if origination is unreachable or the token is
+    unset, the inert application is left for officer reconciliation (logged). Origination's
+    /abandon guards that only an INERT application (no decision/offer/loan) can be deleted."""
+    token = config.INTERNAL_SERVICE_TOKEN
+    if not token:
+        log.error(
+            "cannot compensate submit for app_id=%s: INTERNAL_SERVICE_TOKEN unset; "
+            "application left inert for officer reconciliation",
+            app_id,
+        )
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{ORIGINATION_URL}/applications/{app_id}/abandon",
+                headers={"X-Internal-Service": token},
+            )
+        log.info("compensating abandon for app_id=%s -> %s", app_id, resp.status_code)
+    except Exception as e:  # noqa: BLE001 -- best-effort compensation
+        log.error(
+            "compensating abandon failed for app_id=%s: %s; application left inert",
+            app_id,
+            type(e).__name__,
+        )
+
+
 def _set_resume_cookie(response: JSONResponse, sid: str) -> None:
     response.set_cookie(
         RESUME_COOKIE,
@@ -321,14 +350,15 @@ async def los(path: str, request: Request, authorization: str | None = Header(No
         new_sid = await _create_resume_session_with_retry(app_id_in_body, raw_token)
         if new_sid is None:
             # Redis went down in the window after the pre-check and stayed down through the
-            # retry. The application is committed but has no resume session; it is inert (no
-            # decision/offer/loan) and officer-reconcilable. Return a retryable 503 rather
-            # than a 500 that silently discards the raw token.
+            # retry. The application is committed but has no resume session. Compensate by
+            # deleting the inert application so the applicant's retry does not leave a
+            # stranded, duplicate PII-bearing row, then return a retryable 503 (never a 500
+            # that silently discards the raw token).
             log.error(
-                "resume session unstorable after submit for app_id=%s; application is inert "
-                "(no decision/offer/loan), officer-reconcilable",
+                "resume session unstorable after submit for app_id=%s; compensating",
                 app_id_in_body,
             )
+            await _abandon_application(app_id_in_body)
             return _resume_unavailable()
         _set_resume_cookie(response, new_sid)
         return response

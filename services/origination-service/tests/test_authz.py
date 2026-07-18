@@ -13,7 +13,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app import authz
+from app import authz, config
 from app.database import get_session
 from app.main import app
 from app.routers import applications
@@ -194,6 +194,102 @@ def test_token_is_scoped_to_its_application(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         authz.require_officer_or_owner(2, None, None, x_application_token="token-for-1")
     assert exc.value.status_code == 404
+
+
+def test_token_survives_service_token_rotation_with_dedicated_pepper(monkeypatch):
+    # PR #7 review: the token hash is keyed by a DEDICATED pepper, not INTERNAL_SERVICE_TOKEN,
+    # so rotating the service-auth secret does not invalidate live resume tokens.
+    monkeypatch.setattr(config, "CONTINUATION_TOKEN_KEYS", "v1:pepper-one")
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "svc-A")
+    stored = authz.hash_token("tok")
+    monkeypatch.setattr(
+        config, "INTERNAL_SERVICE_TOKEN", "svc-B-rotated"
+    )  # rotate service
+    assert (
+        authz.verify_token("tok", stored) is True
+    )  # pepper unchanged -> still verifies
+
+
+def test_token_survives_pepper_rotation_until_old_key_dropped(monkeypatch):
+    # Rotating the pepper itself: keep the old key configured for the grace window (<= TTL) so
+    # pre-rotation tokens still verify; new tokens hash under the new current key; once the old
+    # key is dropped, the old token no longer verifies.
+    monkeypatch.setattr(config, "CONTINUATION_TOKEN_KEYS", "v1:old")
+    stored = authz.hash_token("tok")
+    assert stored.startswith("v1:")
+    monkeypatch.setattr(
+        config, "CONTINUATION_TOKEN_KEYS", "v2:new,v1:old"
+    )  # rotate w/ grace
+    assert authz.verify_token("tok", stored) is True
+    assert authz.hash_token("tok2").startswith("v2:")  # new tokens use the current key
+    monkeypatch.setattr(
+        config, "CONTINUATION_TOKEN_KEYS", "v2:new"
+    )  # grace elapsed, drop v1
+    assert authz.verify_token("tok", stored) is False
+
+
+def test_legacy_fallback_is_service_token_coupled(monkeypatch):
+    # Unset dedicated pepper -> falls back to INTERNAL_SERVICE_TOKEN under "legacy" (the OLD
+    # coupling, documented). Prove it verifies pre-rotation and breaks post -- exactly why the
+    # dedicated pepper exists; operators set CONTINUATION_TOKEN_KEYS to decouple.
+    monkeypatch.setattr(config, "CONTINUATION_TOKEN_KEYS", "")
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "svc-A")
+    stored = authz.hash_token("tok")
+    assert stored.startswith("legacy:")
+    assert authz.verify_token("tok", stored) is True
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "svc-B")
+    assert authz.verify_token("tok", stored) is False
+
+
+def test_abandon_requires_internal_token(monkeypatch):
+    # Compensating /abandon is reachable through the anonymous /los proxy, so it is
+    # internal-only (the gateway strips any client X-Internal-Service). No token -> 403.
+    monkeypatch.setattr(applications.config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    resp = TestClient(app).post("/applications/5/abandon")
+    assert resp.status_code == 403
+
+
+def test_abandon_deletes_inert_application(monkeypatch):
+    monkeypatch.setattr(applications.config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    deleted = []
+
+    def _q(sql, params=None):
+        s = sql.strip().upper()
+        if s.startswith("SELECT A.APPLICANT_ID"):  # inertness probe
+            return [{"applicant_id": 42, "n_decisions": 0, "n_offers": 0, "n_loans": 0}]
+        if s.startswith("DELETE FROM APPLICATIONS"):
+            deleted.append(("app", params))
+            return []
+        if "SELECT 1 FROM APPLICATIONS WHERE APPLICANT_ID" in s:
+            return []  # applicant has no other applications
+        if s.startswith("DELETE FROM APPLICANTS"):
+            deleted.append(("applicant", params))
+            return []
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(applications.db, "query", _q)
+    resp = TestClient(app).post(
+        "/applications/5/abandon", headers={"X-Internal-Service": "sekret"}
+    )
+    assert resp.status_code == 200
+    assert ("app", (5,)) in deleted
+    assert ("applicant", (42,)) in deleted
+
+
+def test_abandon_refuses_non_inert_application(monkeypatch):
+    # An application with a decision/offer/loan is past the submit window -> never deleted.
+    monkeypatch.setattr(applications.config, "INTERNAL_SERVICE_TOKEN", "sekret")
+
+    def _q(sql, params=None):
+        if sql.strip().upper().startswith("SELECT A.APPLICANT_ID"):
+            return [{"applicant_id": 42, "n_decisions": 1, "n_offers": 0, "n_loans": 0}]
+        raise AssertionError("must not delete a non-inert application")
+
+    monkeypatch.setattr(applications.db, "query", _q)
+    resp = TestClient(app).post(
+        "/applications/5/abandon", headers={"X-Internal-Service": "sekret"}
+    )
+    assert resp.status_code == 409
 
 
 def test_token_against_null_token_row_denied(monkeypatch):

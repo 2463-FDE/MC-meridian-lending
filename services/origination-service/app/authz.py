@@ -39,22 +39,66 @@ def _expired(expires_at: datetime | None) -> bool:
     return datetime.now(timezone.utc) >= expires_at
 
 
-def hash_token(raw: str) -> str:
-    """Keyed hash of a continuation token for storage/compare (PR #7 review).
+def _token_keys() -> list[tuple[str, str]]:
+    """Ordered (version, secret) pairs for continuation-token hashing (PR #7 review).
 
-    The token is a bearer credential for money-moving routes, so it is never stored in
-    the clear: applications.continuation_token holds this hex digest, not the raw token,
-    which is returned to the applicant exactly once at submit. A DB read / backup leak /
-    logged row then yields only the digest, which cannot be replayed as X-Application-Token.
-    Keyed with INTERNAL_SERVICE_TOKEN (a server-only secret) so a DB-without-key compromise
-    cannot even offline-verify guesses; unkeyed in dev when the secret is unset (the raw
-    token is already 256-bit random, so at-rest confidentiality holds either way).
-    """
+    First = the CURRENT key (used to hash new tokens); the rest are still accepted on verify,
+    so a key rotation keeps pre-rotation resume tokens working until they expire. Parsed from
+    CONTINUATION_TOKEN_KEYS ("version:secret,version:secret", newest first). Unset -> falls
+    back to INTERNAL_SERVICE_TOKEN under a stable "legacy" version (the old coupling)."""
+    keys: list[tuple[str, str]] = []
+    for part in config.CONTINUATION_TOKEN_KEYS.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        ver, sep, secret = part.partition(":")
+        if sep and ver.strip() and secret:
+            keys.append((ver.strip(), secret))
+    if not keys:
+        keys.append(("legacy", config.INTERNAL_SERVICE_TOKEN))
+    return keys
+
+
+def _digest(raw: str, secret: str) -> str:
     return hmac.new(
-        config.INTERNAL_SERVICE_TOKEN.encode("utf-8"),
-        raw.encode("utf-8"),
-        hashlib.sha256,
+        secret.encode("utf-8"), raw.encode("utf-8"), hashlib.sha256
     ).hexdigest()
+
+
+def hash_token(raw: str) -> str:
+    """Version-tagged keyed digest of a continuation token: "<version>:<hexdigest>".
+
+    The token is a bearer credential for money-moving routes, so it is never stored in the
+    clear: applications.continuation_token holds this digest, not the raw token, which is
+    returned to the applicant exactly once at submit. A DB read / backup / logged row then
+    yields only a non-replayable digest. Hashed with the CURRENT dedicated pepper (see
+    _token_keys); the version prefix lets verify_token pick the right key after a rotation."""
+    ver, secret = _token_keys()[0]
+    return f"{ver}:{_digest(raw, secret)}"
+
+
+def verify_token(raw: str, stored: str) -> bool:
+    """Constant-time verify of a presented token against a stored version-tagged digest.
+
+    Selects the key matching the stored version, so a rotation (new current key, old key kept
+    configured) still verifies pre-rotation tokens until they expire. A legacy digest with no
+    version prefix (pre-versioning) is tried against every configured key."""
+    if not raw or not stored:
+        return False
+    ver, sep, digest = stored.partition(":")
+    if sep:
+        candidates = [s for v, s in _token_keys() if v == ver]
+        target = digest
+    else:
+        # Unversioned legacy digest: try all keys.
+        candidates = [s for _, s in _token_keys()]
+        target = stored
+    for secret in candidates:
+        if hmac.compare_digest(
+            _digest(raw, secret).encode("utf-8"), target.encode("utf-8")
+        ):
+            return True
+    return False
 
 
 def _is_officer(x_user_role: str | None) -> bool:
@@ -114,23 +158,21 @@ def require_officer_or_owner(
                 and app_row["applicant_id"] == caller_applicant_id
             ):
                 return
-        # Continuation token: constant-time match of the KEYED HASH of the presented token
-        # against THIS application's stored digest (scoped to one app_id, so a token for
+        # Continuation token: constant-time verify of the presented token against THIS
+        # application's stored version-tagged digest (scoped to one app_id, so a token for
         # app A cannot authorize app B). The stored value is hash_token(raw), never the raw
-        # token. A legacy/officer row with a NULL token, or a token past its expiry, has no
-        # token path. Compare as UTF-8 bytes (the digest is hex/ASCII, but hashing the
-        # presented token first also means a non-ASCII X-Application-Token can never reach
-        # compare_digest as a raw non-ASCII str -- no TypeError->500 existence oracle).
+        # token; verify_token selects the key matching the stored version, so a pepper
+        # rotation keeps pre-rotation tokens working until they expire. A legacy/officer row
+        # with a NULL token, or a token past its expiry, has no token path. verify_token
+        # hashes the presented token before compare, so a non-ASCII X-Application-Token can
+        # never reach compare_digest as a raw non-ASCII str -- no TypeError->500 oracle.
         stored = app_row["continuation_token"]
         expires_at = app_row["continuation_token_expires_at"]
         if (
             x_application_token
             and stored
             and not _expired(expires_at)
-            and hmac.compare_digest(
-                hash_token(x_application_token).encode("utf-8"),
-                stored.encode("utf-8"),
-            )
+            and verify_token(x_application_token, stored)
         ):
             return
     # Non-owner, wrong/absent token, or unknown application: deny without revealing
