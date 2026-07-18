@@ -137,3 +137,62 @@ def test_absent_kyc_blocks_decision(monkeypatch):
     monkeypatch.setattr(applications.clients, "post", _must_not_call)
     resp = TestClient(app).post("/applications/1/decision", headers=_OFFICER)
     assert resp.status_code == 409
+
+
+# --- recovery: an application submitted during a KYC outage is repairable -----
+# The gate fails closed on a missing kyc_checks row; without a recovery path an application
+# submitted while kyc-service was down would be permanently stuck (retries just create
+# duplicate applications). recheck-kyc re-runs KYC for the SAME application, so a transient
+# outage is recoverable without resubmitting.
+
+_APPLICANT_ROW = {
+    "applicant_id": 42,
+    "name": "Jane Doe",
+    "dob": None,
+    "ssn": None,
+    "address": "10 Main St",
+    "is_entity": False,
+}
+
+
+def _recheck_db(monkeypatch):
+    """Serve the recheck applicant-load SELECT; swallow the kyc_unavailable audit INSERT."""
+
+    def _q(sql, params=None):
+        if "FROM applications a JOIN applicants" in sql:
+            return [_APPLICANT_ROW]
+        if "INSERT INTO audit_logs" in sql:
+            return []
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(applications.db, "query", _q)
+
+
+def test_recheck_recovers_application_after_kyc_outage(monkeypatch):
+    # kyc-service is back; recheck re-runs KYC for the existing application and it passes,
+    # so kyc-service persists the kyc_checks row -- no resubmit, no duplicate application.
+    _recheck_db(monkeypatch)
+    monkeypatch.setattr(
+        applications.clients, "post", lambda *a, **k: {"cip_passed": True}
+    )
+    resp = TestClient(app).post("/applications/7/recheck-kyc", headers=_OFFICER)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["app_id"] == 7
+    assert body["kyc_checked"] is True
+    assert body["kyc"]["name_verified"] is True
+    assert body["kyc"]["address_verified"] is True
+
+
+def test_recheck_while_still_unavailable_stays_resilient(monkeypatch):
+    # KYC still down at recheck: must not 500; record kyc_unavailable and return
+    # kyc_checked=False so the caller can retry later (no duplicate application created).
+    _recheck_db(monkeypatch)
+
+    def _boom(*a, **k):
+        raise RuntimeError("kyc down")
+
+    monkeypatch.setattr(applications.clients, "post", _boom)
+    resp = TestClient(app).post("/applications/7/recheck-kyc", headers=_OFFICER)
+    assert resp.status_code == 200
+    assert resp.json()["kyc_checked"] is False

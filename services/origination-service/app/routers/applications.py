@@ -50,6 +50,87 @@ def _require_internal_caller(x_internal_service: str | None) -> None:
         )
 
 
+def _run_kyc(
+    app_id: int,
+    applicant_id: int | None,
+    name: str | None,
+    dob: str | None,
+    ssn: str | None,
+    address: str | None,
+    is_entity: bool,
+) -> tuple[dict, bool]:
+    """Call kyc-service for an application and map the result to the four KycOut booleans.
+
+    kyc-service persists its own kyc_checks row (the authoritative gate, ADR 0011). Returns
+    (cip, kyc_checked): cip is the boolean map for the response; kyc_checked is False when
+    the call did NOT complete (outage/timeout/auth failure/persistence 503) -- distinct from
+    a KYC that ran and declined (200 with cip_passed False). A failure records a
+    kyc_unavailable audit row and never 500s the caller (deliberate intake resilience); the
+    application then has no kyc_checks row and stays blocked at the gate until a successful
+    recheck persists one (see recheck_kyc). Shared by submit and recheck so the mapping and
+    the failure handling cannot drift on this regulated path.
+    """
+    cip = {
+        "name_verified": False,
+        "dob_verified": False,
+        "address_verified": False,
+        "ssn_verified": False,
+    }
+    kyc_checked = True
+    try:
+        resp = clients.post(
+            clients.KYC_URL,
+            "/kyc/check",
+            {
+                "application_id": app_id,
+                "applicant_id": applicant_id,
+                "name": name,
+                "dob": dob,
+                "ssn": ssn,
+                "address": address,
+                "entity_type": "llc" if is_entity else None,
+            },
+        )
+        passed = bool(resp.get("cip_passed"))
+        # Map kyc-service cip_passed -> the four KycOut booleans the frontend expects.
+        # CIP verifies name/dob/address/ssn that were provided; entity applicants have no
+        # dob/ssn so those stay false even on a pass (mirrors the old in-process stub).
+        cip = {
+            "name_verified": passed,
+            "dob_verified": passed and not is_entity,
+            "address_verified": passed,
+            "ssn_verified": passed and not is_entity,
+        }
+    except Exception as e:  # noqa
+        # A transport/auth failure (outage, timeout, a missing/rotated internal token ->
+        # 403, or a persistence 503) is NOT a KYC "not verified" result -- the check never
+        # persisted. A genuine decline comes back 200 with cip_passed False, so only an
+        # exception reaches here. Keep the deliberate intake resilience (a KYC hiccup must
+        # not 500 the applicant), but do NOT let the failure masquerade as an ordinary
+        # all-false verification: raise the log to error, record a kyc_unavailable audit
+        # row so an application created while KYC was down is queryable, and flag
+        # kyc_checked=False so a caller can tell it apart from a real decline.
+        kyc_checked = False
+        log.error("kyc-service call failed for app_id=%s: %s", app_id, type(e).__name__)
+        try:
+            db.query(
+                "INSERT INTO audit_logs (actor, action, detail) VALUES (%s, %s, %s)",
+                (
+                    "origination-service",
+                    "kyc_unavailable",
+                    f"app_id={app_id} error={type(e).__name__}",
+                ),
+            )
+        except Exception as audit_err:  # noqa
+            # Audit write is best-effort — never 500 intake on it, but make the miss loud.
+            log.error(
+                "failed to record kyc_unavailable audit for app_id=%s: %s",
+                app_id,
+                type(audit_err).__name__,
+            )
+    return cip, kyc_checked
+
+
 @router.post("", response_model=ApplicationCreated)
 def submit_application(body: ApplicationIn):
     payload = body.model_dump()
@@ -71,74 +152,69 @@ def submit_application(body: ApplicationIn):
         log.warning("could not resolve applicant_id: %s", e)
 
     # CIP/KYC moved to kyc-service. It persists its own kyc_checks row (so no INSERT here).
-    # Default to all-false; a kyc-service hiccup must not 500 the intake (resilience kept).
-    cip = {
-        "name_verified": False,
-        "dob_verified": False,
-        "address_verified": False,
-        "ssn_verified": False,
-    }
+    # A kyc-service hiccup must not 500 the intake (resilience kept); on failure the app is
+    # recoverable via POST /applications/{app_id}/recheck-kyc without resubmitting.
     is_entity = bool(payload.get("is_entity"))
-    kyc_checked = True
-    try:
-        resp = clients.post(
-            clients.KYC_URL,
-            "/kyc/check",
-            {
-                "application_id": app_id,
-                "applicant_id": applicant_id,
-                "name": payload.get("name"),
-                "dob": payload.get("dob"),
-                "ssn": payload.get("ssn"),
-                "address": payload.get("address"),
-                "entity_type": "llc" if is_entity else None,
-            },
-        )
-        passed = bool(resp.get("cip_passed"))
-        # Map kyc-service cip_passed -> the four KycOut booleans the frontend expects.
-        # CIP verifies name/dob/address/ssn that were provided; entity applicants have no
-        # dob/ssn so those stay false even on a pass (mirrors the old in-process stub).
-        cip = {
-            "name_verified": passed,
-            "dob_verified": passed and not is_entity,
-            "address_verified": passed,
-            "ssn_verified": passed and not is_entity,
-        }
-    except Exception as e:  # noqa
-        # A transport/auth failure (outage, timeout, or a missing/rotated internal token
-        # -> 403) is NOT a KYC "not verified" result — the check never ran. A genuine
-        # decline comes back 200 with cip_passed False, so only an exception reaches
-        # here. Keep the deliberate intake resilience (a KYC hiccup must not 500 the
-        # applicant), but do NOT let the failure masquerade as an ordinary all-false
-        # verification (PR review): raise the log to error, record an audit_logs row so
-        # an application created while KYC was down is queryable, and flag
-        # kyc_checked=False so a caller can tell it apart from a real decline. Whether
-        # such an application may proceed to decisioning is a separate policy decision
-        # (KYC-gating ADR follow-up); this only stops the failure from being silent.
-        kyc_checked = False
-        log.error("kyc-service call failed for app_id=%s: %s", app_id, type(e).__name__)
-        try:
-            db.query(
-                "INSERT INTO audit_logs (actor, action, detail) VALUES (%s, %s, %s)",
-                (
-                    "origination-service",
-                    "kyc_unavailable",
-                    f"app_id={app_id} error={type(e).__name__}",
-                ),
-            )
-        except Exception as audit_err:  # noqa
-            # Audit write is best-effort — never 500 intake on it, but make the miss loud.
-            log.error(
-                "failed to record kyc_unavailable audit for app_id=%s: %s",
-                app_id,
-                type(audit_err).__name__,
-            )
+    cip, kyc_checked = _run_kyc(
+        app_id,
+        applicant_id,
+        payload.get("name"),
+        payload.get("dob"),
+        payload.get("ssn"),
+        payload.get("address"),
+        is_entity,
+    )
     return {
         "app_id": app_id,
         "status": "submitted",
         "kyc": KycOut(**cip),
         "kyc_checked": kyc_checked,
         "continuation_token": continuation_token,
+    }
+
+
+@router.post("/{app_id}/recheck-kyc", response_model=ApplicationCreated)
+def recheck_kyc(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    x_application_token: str | None = Header(default=None, alias="X-Application-Token"),
+):
+    # In-product recovery for an application submitted while kyc-service was unavailable
+    # (PR review). Under the mandatory persisted-KYC gate (ADR 0011) such an application
+    # has no kyc_checks row and cannot decision/offer/board; before this route the only
+    # recourse was resubmitting, which created a duplicate applicant/application. This
+    # re-runs KYC for the existing application from its stored identity fields and lets
+    # kyc-service persist the row, repairing the original. Same officer-OR-owner-OR-token
+    # authorization as the other application-scoped routes (ADR 0010).
+    authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
+    rows = db.query(
+        "SELECT a.applicant_id, ap.name, ap.dob, ap.ssn, ap.address, ap.is_entity "
+        "FROM applications a JOIN applicants ap ON ap.id = a.applicant_id "
+        "WHERE a.id = %s",
+        (app_id,),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="application not found")
+    r = rows[0]
+    # dob is a DATE column -> a date object; kyc-service CipCheckIn expects an optional
+    # string, so serialize it (None stays None for an entity/partial applicant).
+    dob = r["dob"].isoformat() if r.get("dob") else None
+    cip, kyc_checked = _run_kyc(
+        app_id,
+        r["applicant_id"],
+        r["name"],
+        dob,
+        r["ssn"],
+        r["address"],
+        bool(r["is_entity"]),
+    )
+    return {
+        "app_id": app_id,
+        "status": "submitted",
+        "kyc": KycOut(**cip),
+        "kyc_checked": kyc_checked,
+        "continuation_token": None,
     }
 
 
