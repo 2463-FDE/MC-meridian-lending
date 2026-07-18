@@ -10,7 +10,7 @@ a future PATCH endpoint on origination re-surfaces the gap here instead of shipp
 
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import app  # noqa: E402
 
 client = TestClient(app)
 
@@ -35,15 +35,18 @@ def test_los_route_allows_get_and_post_only():
 
 
 class _FakeResp:
-    status_code = 200
+    def __init__(self, body=None, status_code=200):
+        self._body = {"ok": True} if body is None else body
+        self.status_code = status_code
 
     def json(self):
-        return {"ok": True}
+        return self._body
 
 
-def _capture_forwarded_headers(monkeypatch):
+def _capture_forwarded_headers(monkeypatch, resp_body=None):
     """Replace the gateway's httpx.AsyncClient with a fake that records the headers it
-    would forward downstream, and returns without a network call."""
+    would forward downstream and returns resp_body (default {"ok": True}) without a
+    network call."""
     from app import main
 
     captured = {}
@@ -60,7 +63,7 @@ def _capture_forwarded_headers(monkeypatch):
 
         async def request(self, method, url, content=None, headers=None, params=None):
             captured["headers"] = {k.lower(): v for k, v in (headers or {}).items()}
-            return _FakeResp()
+            return _FakeResp(body=resp_body)
 
     monkeypatch.setattr(main.httpx, "AsyncClient", _FakeAsyncClient)
     return captured
@@ -113,19 +116,141 @@ def test_los_proxy_forwards_idempotency_key(monkeypatch):
     assert captured["headers"].get("idempotency-key") == "los-decision-1"
 
 
-def test_los_proxy_forwards_application_continuation_token(monkeypatch):
-    # PR review (front-door reachability): ADR 0010's anonymous apply flow authorizes on
-    # the X-Application-Token issued at submit. Unlike X-User-*/X-Internal-Service (which
-    # the gateway strips as spoofable identity), this token is the applicant's own
-    # capability and MUST be forwarded -- a stripped token would 404 every logged-out
-    # decision/offer/accept and break public apply.
+def test_los_proxy_strips_client_supplied_application_token(monkeypatch):
+    # PR #7 review: the continuation token is no longer a client-supplied header. It lives
+    # server-side (Redis) behind the HttpOnly resume cookie, and the gateway is its ONLY
+    # source (injected from the resume session below). A client that sends its own
+    # X-Application-Token -- e.g. a stolen token, or a script probing -- must have it
+    # stripped, exactly like X-User-*/X-Internal-Service, so it cannot authorize by header.
     captured = _capture_forwarded_headers(monkeypatch)
     resp = client.post(
         "/los/applications/1/decision",
         headers={"X-Application-Token": "tok-xyz"},
     )
     assert resp.status_code == 200
-    assert captured["headers"].get("x-application-token") == "tok-xyz"
+    assert "x-application-token" not in captured["headers"]
+
+
+# --- anonymous resume via server-side session + HttpOnly cookie (PR #7 review) -------
+#
+# The continuation token must never be browser-readable. The gateway stashes it in Redis
+# keyed by an opaque id, hands the browser an HttpOnly cookie holding only that id, strips
+# the raw token from the submit body, and re-injects the token downstream from the session.
+
+
+def _fake_resume_store(monkeypatch):
+    """In-memory stand-in for the Redis-backed resume session (tests have no Redis)."""
+    from app import auth
+
+    store = {}
+    calls = {"cleared": []}
+
+    def _create(app_id, token):
+        sid = f"sid-{app_id}"
+        store[sid] = {"app_id": app_id, "token": token}
+        return sid
+
+    def _resolve(sid):
+        return store.get(sid)
+
+    def _clear(sid):
+        calls["cleared"].append(sid)
+        store.pop(sid, None)
+
+    monkeypatch.setattr(auth, "create_resume_session", _create)
+    monkeypatch.setattr(auth, "resolve_resume", _resolve)
+    monkeypatch.setattr(auth, "clear_resume", _clear)
+    return store, calls
+
+
+def test_submit_stashes_token_server_side_and_sets_httponly_cookie(monkeypatch):
+    store, _ = _fake_resume_store(monkeypatch)
+    _capture_forwarded_headers(
+        monkeypatch,
+        resp_body={"app_id": 5, "continuation_token": "raw-tok", "status": "submitted"},
+    )
+    resp = client.post("/los/applications", json={"name": "Jane", "amount": 15000})
+    assert resp.status_code == 200
+    # The raw token is stripped from the body the browser sees.
+    assert "continuation_token" not in resp.json()
+    assert resp.json()["app_id"] == 5
+    # It is stored server-side instead.
+    assert store["sid-5"] == {"app_id": 5, "token": "raw-tok"}
+    # And handed back only as an HttpOnly, SameSite=Strict, path-scoped cookie.
+    set_cookie = resp.headers.get("set-cookie", "")
+    lc = set_cookie.lower()
+    assert "meridian_resume=sid-5" in set_cookie
+    assert "httponly" in lc
+    assert "samesite=strict" in lc
+    assert "path=/los" in lc
+
+
+def test_resume_cookie_injects_token_downstream_scoped_to_app(monkeypatch):
+    _fake_resume_store(monkeypatch)[0]["sid-5"] = {"app_id": 5, "token": "raw-tok"}
+    captured = _capture_forwarded_headers(monkeypatch)
+    resp = TestClient(app, cookies={"meridian_resume": "sid-5"}).post(
+        "/los/applications/5/decision"
+    )
+    assert resp.status_code == 200
+    # The gateway re-attaches the token from the session; the browser never sent it.
+    assert captured["headers"].get("x-application-token") == "raw-tok"
+
+
+def test_resume_cookie_not_injected_for_a_different_application(monkeypatch):
+    # Scope: a resume session for app 5 must not authorize app 9 (a cookie for app A cannot
+    # drive app B). The token is not injected, so origination denies the anonymous caller.
+    _fake_resume_store(monkeypatch)[0]["sid-5"] = {"app_id": 5, "token": "raw-tok"}
+    captured = _capture_forwarded_headers(monkeypatch)
+    resp = TestClient(app, cookies={"meridian_resume": "sid-5"}).post(
+        "/los/applications/9/decision"
+    )
+    assert resp.status_code == 200
+    assert "x-application-token" not in captured["headers"]
+
+
+def test_recheck_response_body_never_leaks_the_raw_token(monkeypatch):
+    # recheck-kyc echoes the continuation token in its body downstream; the gateway must
+    # strip it (like it does at submit) so the browser never receives the raw credential.
+    _fake_resume_store(monkeypatch)[0]["sid-5"] = {"app_id": 5, "token": "raw-tok"}
+    _capture_forwarded_headers(
+        monkeypatch,
+        resp_body={"app_id": 5, "status": "submitted", "continuation_token": "raw-tok"},
+    )
+    resp = TestClient(app, cookies={"meridian_resume": "sid-5"}).post(
+        "/los/applications/5/recheck-kyc"
+    )
+    assert resp.status_code == 200
+    assert "continuation_token" not in resp.json()
+    assert resp.json()["app_id"] == 5
+
+
+def test_resume_cookie_injects_token_on_offer_route(monkeypatch):
+    # /los/offer carries app_id in the body, not the path, so the gateway injects the
+    # session token and origination binds+validates it against body.app_id downstream.
+    _fake_resume_store(monkeypatch)[0]["sid-5"] = {"app_id": 5, "token": "raw-tok"}
+    captured = _capture_forwarded_headers(monkeypatch)
+    resp = TestClient(app, cookies={"meridian_resume": "sid-5"}).post(
+        "/los/offer", json={"app_id": 5}
+    )
+    assert resp.status_code == 200
+    assert captured["headers"].get("x-application-token") == "raw-tok"
+
+
+def test_accept_revokes_resume_session_and_clears_cookie(monkeypatch):
+    store, calls = _fake_resume_store(monkeypatch)
+    store["sid-5"] = {"app_id": 5, "token": "raw-tok"}
+    _capture_forwarded_headers(monkeypatch, resp_body={"loan_id": 77})
+    resp = TestClient(app, cookies={"meridian_resume": "sid-5"}).post(
+        "/los/applications/5/accept"
+    )
+    assert resp.status_code == 200
+    # Terminal money action: the server-side session is revoked and the cookie cleared.
+    assert calls["cleared"] == ["sid-5"]
+    set_cookie = resp.headers.get("set-cookie", "")
+    assert "meridian_resume=" in set_cookie
+    assert ("Max-Age=0" in set_cookie) or (
+        "expires=Thu, 01 Jan 1970" in set_cookie.lower()
+    )
 
 
 def test_anonymous_post_to_offer_cannot_carry_internal_token(monkeypatch):

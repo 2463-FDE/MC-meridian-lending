@@ -7,32 +7,30 @@ import StatusChip from "../../components/StatusChip";
 import { apiGet, apiPost } from "../../lib/api";
 import { usd, pct } from "../../lib/format";
 
-// The continuation token is the logged-out applicant's only capability to complete their
-// application (ADR 0010 Phase B). It is returned once at submit, so keep it in scoped
-// client storage keyed by app id -- otherwise a refresh, tab close, or crash drops the
-// only credential and the applicant is stranded with an app id but no way to proceed.
-// Treated like a magic-link bearer: scoped to one application, cleared when the flow ends.
+// Resume state (ADR 0010 Phase B, PR #7 review). The continuation token is NO LONGER held
+// by the browser: the gateway keeps it server-side and hands back an HttpOnly resume cookie
+// that JS cannot read (so XSS / a compromised script cannot exfiltrate the credential). All
+// we persist here is the (non-sensitive) app id, so a refresh/tab-close can re-open the
+// application; the cookie -- sent automatically with credentials:"include" -- is what
+// actually authorizes the resumed request.
 const RESUME_KEY = "meridian:apply:resume";
 
-function saveResume(appId: string | number, token: string | null | undefined) {
-  if (typeof window === "undefined" || !token) return;
+function saveResume(appId: string | number) {
+  if (typeof window === "undefined" || appId == null) return;
   try {
-    window.localStorage.setItem(
-      RESUME_KEY,
-      JSON.stringify({ app_id: appId, continuation_token: token })
-    );
+    window.localStorage.setItem(RESUME_KEY, JSON.stringify({ app_id: appId }));
   } catch {
     // storage unavailable (private mode / quota) -- in-memory state still works this session
   }
 }
 
-function readResume(): { app_id: string | number; continuation_token: string } | null {
+function readResume(): { app_id: string | number } | null {
   if (typeof window === "undefined") return null;
   try {
     const raw = window.localStorage.getItem(RESUME_KEY);
     if (!raw) return null;
     const v = JSON.parse(raw);
-    return v && v.app_id != null && v.continuation_token ? v : null;
+    return v && v.app_id != null ? v : null;
   } catch {
     return null;
   }
@@ -99,10 +97,9 @@ interface AppResult {
   // such an application 409s on decision/offer/accept until a recheck persists a passing
   // row, so the UI must offer a retry rather than the (misleading) all-false KYC result.
   kyc_checked?: boolean;
-  // ADR 0010: unguessable per-application continuation token issued at submit. The
-  // logged-out applicant sends it as X-Application-Token to authorize their own
-  // decision/offer/accept on this application (officer/owner are authorized otherwise).
-  continuation_token?: string | null;
+  // ADR 0010 (PR #7 review): the continuation token is no longer returned to the browser.
+  // The gateway strips it from this response, stores it server-side, and authorizes the
+  // logged-out applicant via an HttpOnly resume cookie the client cannot read.
 }
 
 interface DecisionResult {
@@ -179,9 +176,9 @@ export default function ApplyPage() {
     setResuming(true);
     (async () => {
       try {
-        const d = (await apiGet(`/los/applications/${saved.app_id}`, {
-          "X-Application-Token": saved.continuation_token,
-        })) as {
+        // No token header: the resume cookie (sent via credentials:"include") is what
+        // authorizes this read; the gateway re-attaches the token server-side.
+        const d = (await apiGet(`/los/applications/${saved.app_id}`)) as {
           status?: string;
           kyc?: Kyc | null;
           decision?: string | null;
@@ -194,7 +191,6 @@ export default function ApplyPage() {
           kyc: d.kyc ?? undefined,
           // No persisted KYC row -> the check never completed (outage) -> offer the retry.
           kyc_checked: !!d.kyc,
-          continuation_token: saved.continuation_token,
         });
         if (d.decision) setDecision({ app_id: saved.app_id, decision: d.decision });
         if (d.offer) setDisclosure(d.offer);
@@ -274,7 +270,7 @@ export default function ApplyPage() {
         purpose: form.purpose,
       })) as AppResult;
       setApp(res);
-      saveResume(res.app_id, res.continuation_token);
+      saveResume(res.app_id);
       setStep(5);
     } catch (err) {
       setApiError(errMsg(err, "Could not submit your application."));
@@ -283,32 +279,24 @@ export default function ApplyPage() {
     }
   }
 
-  // ADR 0010: authorize the logged-out applicant's own decision/offer/accept with the
-  // continuation token returned at submit. Officers/owners are authorized by session, so
-  // the header is simply absent for them.
-  function appTokenHeader(): Record<string, string> {
-    return app?.continuation_token
-      ? { "X-Application-Token": app.continuation_token }
-      : {};
-  }
+  // ADR 0010 (PR #7 review): the logged-out applicant's decision/offer/accept are
+  // authorized by the HttpOnly resume cookie (sent automatically), not a client header.
+  // Officers/owners are authorized by their session. No token is handled in the browser.
 
   // KYC recovery (ADR 0011): submit stays resilient during a KYC-service outage
   // (kyc_checked=false, no persisted row), so the mandatory gate 409s decision/offer/
   // accept. Re-run KYC for THIS application instead of resubmitting (which would create a
-  // duplicate). The response echoes the continuation token back, so setApp preserves the
-  // capability; it also carries the fresh kyc + kyc_checked.
+  // duplicate); the resume cookie authorizes it. setApp carries the fresh kyc + kyc_checked.
   async function recheckKyc() {
     if (!app) return;
     setBusy(true);
     setApiError(null);
     try {
       const res = (await apiPost(
-        `/los/applications/${app.app_id}/recheck-kyc`,
-        undefined,
-        appTokenHeader()
+        `/los/applications/${app.app_id}/recheck-kyc`
       )) as AppResult;
       setApp(res);
-      saveResume(res.app_id, res.continuation_token);
+      saveResume(res.app_id);
     } catch (err) {
       setApiError(errMsg(err, "Could not re-run identity verification."));
     } finally {
@@ -329,7 +317,6 @@ export default function ApplyPage() {
           // replays the recorded decision instead of re-pulling credit and appending
           // another regulated decision event (PR review).
           "Idempotency-Key": `los-decision-${app.app_id}`,
-          ...appTokenHeader(),
         }
       )) as DecisionResult;
       setDecision(res);
@@ -345,16 +332,12 @@ export default function ApplyPage() {
     setBusy(true);
     setApiError(null);
     try {
-      const res = (await apiPost(
-        "/los/offer",
-        {
-          app_id: app.app_id,
-          principal: form.amount,
-          annual_rate_pct: OFFER_RATE_PCT,
-          term_months: parseInt(form.term_months, 10),
-        },
-        appTokenHeader()
-      )) as { app_id: string | number; disclosure: Disclosure };
+      const res = (await apiPost("/los/offer", {
+        app_id: app.app_id,
+        principal: form.amount,
+        annual_rate_pct: OFFER_RATE_PCT,
+        term_months: parseInt(form.term_months, 10),
+      })) as { app_id: string | number; disclosure: Disclosure };
       setDisclosure(res.disclosure);
     } catch (err) {
       setApiError(errMsg(err, "Could not generate your offer."));
@@ -369,12 +352,12 @@ export default function ApplyPage() {
     setApiError(null);
     try {
       const res = (await apiPost(
-        `/los/applications/${app.app_id}/accept`,
-        undefined,
-        appTokenHeader()
+        `/los/applications/${app.app_id}/accept`
       )) as { loan_id: string | number };
       setAcceptedLoanId(res.loan_id);
-      clearResume(); // flow complete -- drop the saved capability
+      // Flow complete: drop the saved app id. The gateway also revokes the server-side
+      // resume session and clears the HttpOnly cookie on this accept response.
+      clearResume();
     } catch (err) {
       setApiError(errMsg(err, "Could not accept the offer."));
     } finally {

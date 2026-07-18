@@ -188,6 +188,27 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_authz.py -q
 
+  gateway-trust-boundary-gate:
+    # The gateway is the sole trust boundary: it must strip client-supplied identity/
+    # capability headers (X-User-*, X-Internal-Service, X-Application-Token) so they cannot
+    # be forged through the proxy, and it holds the anonymous continuation token server-side
+    # (Redis) behind an HttpOnly resume cookie -- the raw token is stripped from the submit
+    # body, injected downstream only from the session, and revoked on accept (ADR 0010
+    # Phase B, PR #7). These tests live in test_proxy_methods.py, which the `backend` job
+    # runs under continue-on-error/|| true, so a reopened leak would stay green. This job
+    # MUST block -- no continue-on-error, no `|| true`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: gateway trust-boundary + resume-cookie tests
+        run: |
+          cd services/gateway
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_proxy_methods.py -q
+
   kyc-enforcement-gate:
     # ADR 0011 is a compliance control: a regulated decision, an offer, and loan boarding
     # must not proceed on an application whose identity check failed or never ran. The

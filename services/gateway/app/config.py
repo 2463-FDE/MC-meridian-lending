@@ -1,4 +1,5 @@
 """Gateway configuration."""
+
 import os
 import threading
 import time
@@ -51,7 +52,10 @@ def database_url_configured() -> bool:
     # stale/rotated DSN is caught by the POSTGRES_PASSWORD consistency check below.
     if password.lower() in {
         "replace_with_postgres_password",
-        "changeme", "change_me", "password", "postgres",
+        "changeme",
+        "change_me",
+        "password",
+        "postgres",
     }:
         return False
     # When POSTGRES_PASSWORD is the source of truth (compose ${VAR:?}), the DSN
@@ -147,6 +151,8 @@ def missing_required_secrets() -> list:
     if not database_url_configured():
         missing.append("DATABASE_URL")
     return missing
+
+
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
 
@@ -214,4 +220,20 @@ PAYMENT_URL = os.getenv("PAYMENT_URL", "http://payment-service:8006")
 
 # 8-hour sessions. (No refresh, no rotation, no CSRF token — Halcyon "v1 auth".)
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "28800"))
+
+# Anonymous resume session (ADR 0010 Phase B, PR #7 review). The continuation token is a
+# bearer credential for money-moving routes; instead of returning it to the browser (where
+# localStorage would expose it to any same-origin script / XSS), the gateway keeps it
+# server-side in Redis keyed by an opaque session id and hands the browser only an
+# HttpOnly cookie holding that id. Default TTL mirrors origination's CONTINUATION_TOKEN_TTL.
+RESUME_TTL_SECONDS = int(os.getenv("RESUME_TTL_SECONDS", str(7 * 24 * 3600)))
+
+# The browser origin allowed to send credentialed (cookie-bearing) requests. Credentialed
+# CORS forbids a "*" origin, so this must be the concrete portal origin.
+PORTAL_ORIGIN = os.getenv("PORTAL_ORIGIN", "http://localhost:3000")
+
+# Set the Secure flag on the resume cookie (https-only). Default on; set false for local
+# http development so the cookie is still sent over http://localhost.
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

@@ -106,16 +106,28 @@ Anonymous apply is kept, not deprecated. `POST /applications`
 authorization path: officer OR owner OR a valid continuation token for THAT application.
 The token is a capability scoped to one application id (a token minted for app A cannot
 authorize app B), so the logged-out applicant completes their own decision/offer/accept
-while serial-id enumeration stays closed — the gateway forwards `X-Application-Token` (it
-is the applicant's own capability, unlike the spoofable `X-User-*` it strips). A NULL token
-(officer-created/legacy row) has no token path, so those stay officer-OR-owner only. The
-frontend apply page carries the returned token on its three POSTs; no login, no signup.
-Because the token is returned only once, the apply page persists it in scoped client
-storage keyed by app id and rehydrates it on mount (re-fetching the application with the
-token) so a refresh or tab close does not strand the applicant — a magic-link-style bearer.
+while serial-id enumeration stays closed. Origination authorizes on `X-Application-Token`;
+that header is now set **only by the gateway** (it strips any client-supplied copy, as it
+does `X-User-*`) — see the browser-side custody note below. A NULL token (officer-created/
+legacy row) has no token path, so those stay officer-OR-owner only. No login, no signup.
 
-**Token hardening (PR #7 review).** Because the token is a bearer credential for
-money-moving routes, it is not stored or lived unbounded:
+**Browser-side custody: server-side session, never localStorage (PR #7 review).** The raw
+token is a bearer credential for money-moving routes, so it is never handed to the browser
+(localStorage/JS would expose it to any same-origin script or XSS). Instead the **gateway**
+holds it: on submit it stashes `{app_id, token}` in Redis under an opaque session id
+(`auth.create_resume_session`), returns the browser only an **HttpOnly, Secure, SameSite=
+Strict** cookie (`meridian_resume`, `Path=/los`) carrying that id, and **strips the raw
+token from the submit response body**. On each application-scoped `/los` request the gateway
+resolves the cookie and re-injects `X-Application-Token` downstream — scoped to the app id
+in the path, or (for `/los/offer`, whose app id is in the body) validated per-app by
+origination. On accept it revokes the Redis session and clears the cookie. The frontend
+persists only the non-sensitive `app_id` for resume; the cookie (sent with
+`credentials:"include"`) is the actual capability. Result: the token never exists in
+browser-readable storage, is server-side revocable, and a stolen cookie yields only an
+opaque, expiring, HttpOnly session id — not the credential.
+
+**Token hardening at rest (PR #7 review).** The persisted token (in Postgres, distinct from
+the Redis resume session above) is also not stored or lived unbounded:
 
 - **Hash at rest.** `applications.continuation_token` stores a keyed hash
   (`authz.hash_token` = HMAC-SHA256 keyed with `INTERNAL_SERVICE_TOKEN`), never the raw
