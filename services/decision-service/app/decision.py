@@ -286,16 +286,28 @@ def decide(application: dict) -> dict:
     replayed — no bureau pull, no new event. A request WITHOUT a request_id is an
     explicit re-decision. The key is scoped per application: reused on a different
     app_id it is an independent key, never a replay of another application's record.
+
+    Concurrency (PR #7 review): the replay lookup and the paid/regulated bureau pull are
+    NOT one atomic step, so two same-key requests could both miss the lookup and both pull
+    credit before either persisted (the unique index dedups the EVENT afterward, but not
+    the second external pull). The idempotent path now holds a per-(app_id, request_id)
+    advisory lock across lookup→pull→persist, so concurrent retries serialize: exactly one
+    performs the pull, the rest wait and replay the recorded event.
     """
     request_id = application.get("request_id") or None
-    if request_id:
-        existing = _find_event_by_request(application.get("app_id"), request_id)
+    if not request_id:
+        # Explicit re-decision: no idempotency key, no lock, always a fresh pull.
+        return _run_decision(application, None)
+
+    app_id = application.get("app_id")
+    with db.advisory_lock(f"decision:{app_id}:{request_id}"):
+        existing = _find_event_by_request(app_id, request_id)
         if existing is not None:
             if _inputs_conflict(existing.get("inputs"), _request_inputs(application)):
                 log.warning(
                     "request_id reused with changed inputs app_id=%s request_id=%s — "
                     "refusing to replay a stale decision",
-                    application.get("app_id"),
+                    app_id,
                     request_id,
                 )
                 raise DecisionInputMismatch(
@@ -303,11 +315,18 @@ def decide(application: dict) -> dict:
                 )
             log.info(
                 "decision replayed from record app_id=%s request_id=%s",
-                application.get("app_id"),
+                app_id,
                 request_id,
             )
             return _result_from_event(existing)
+        # Hold the lock through the pull + persist so a concurrent same-key request cannot
+        # start its own pull until this one has recorded its event (which the waiter replays).
+        return _run_decision(application, request_id)
 
+
+def _run_decision(application: dict, request_id: str | None) -> dict:
+    """Perform the bureau pull, score, and persist the decision event. Called with the
+    idempotency lock held (keyed path) or directly (explicit re-decision, no key)."""
     bureau_score = _pull_credit(application.get("ssn", ""))
 
     # Identifier-free model inputs (ADR 0007 rule 1) — this dict is persisted verbatim.

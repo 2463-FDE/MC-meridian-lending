@@ -6,11 +6,25 @@ written (no live Postgres in unit tests; the DB trigger and end-to-end write are
 by the smoke test against the compose stack).
 """
 
+import contextlib
 import json
 
 import pytest
 
 from app import config, decision, model_vendor
+
+
+@pytest.fixture(autouse=True)
+def _noop_advisory_lock(monkeypatch):
+    """decide()'s idempotent path takes a real Postgres advisory lock (its own connection);
+    unit tests have no live DB, so stub it to a no-op. The concurrency test overrides this
+    with a real serializing lock to prove single-pull under contention."""
+
+    @contextlib.contextmanager
+    def _noop(name):
+        yield
+
+    monkeypatch.setattr(decision.db, "advisory_lock", _noop)
 
 
 @pytest.fixture
@@ -484,6 +498,114 @@ def test_concurrent_duplicate_request_serves_first_writers_record(
     assert result["decision"] == "deny"
     assert result["score"] == 518
     assert state["n"] == 3
+
+
+def test_concurrent_same_key_requests_pull_credit_only_once(
+    synthetic_mode, monkeypatch
+):
+    # PR #7 review: the replay lookup and the paid bureau pull are not one atomic step, so
+    # two same-key requests could both miss the lookup and both pull credit before either
+    # persisted (the unique index dedups the EVENT, not the second external pull). With the
+    # per-(app_id, request_id) advisory lock held across lookup->pull->persist, concurrent
+    # retries serialize: exactly one pulls, the other waits and replays. This test stands a
+    # REAL serializing lock in for pg_advisory_xact_lock (the DB is not available in unit
+    # tests) and drives two threads through decide() with the same key.
+    import threading
+    import time
+
+    name_locks = {}
+    name_guard = threading.Lock()
+
+    @contextlib.contextmanager
+    def _real_lock(name):
+        with name_guard:
+            lk = name_locks.setdefault(name, threading.Lock())
+        lk.acquire()
+        try:
+            yield
+        finally:
+            lk.release()
+
+    monkeypatch.setattr(decision.db, "advisory_lock", _real_lock)
+
+    # In-memory decision_events keyed by (app_id, request_id). Every access is inside the
+    # lock (lookup + persist), so a plain dict needs no extra guard -- which is the whole
+    # point of the lock.
+    store = {}
+
+    def _db(sql, params=None):
+        if sql.strip().startswith("SELECT"):  # _find_event_by_request
+            row = store.get((params[0], params[1]))
+            return [dict(row)] if row else []
+        # persist: WITH ev ... INSERT INTO decision_events ...
+        (
+            app_id,
+            outcome,
+            reasons_json,
+            drivers_json,
+            band,
+            inputs_json,
+            decided_by,
+            rid,
+        ) = params
+        key = (app_id, rid)
+        if key in store:  # the unique index would reject a second event for this key
+            raise decision.pg_errors.UniqueViolation("duplicate key")
+        store[key] = {
+            "outcome": outcome,
+            "principal_reasons": json.loads(reasons_json),
+            "drivers": json.loads(drivers_json),
+            "policy_band": band,
+            "inputs": json.loads(inputs_json),
+            "decided_by": decided_by,
+            "request_id": rid,
+        }
+        return []
+
+    monkeypatch.setattr(decision.db, "query", _db)
+
+    pulls = {"n": 0}
+    pull_guard = threading.Lock()
+    real_pull = decision._pull_credit
+
+    def _counting_pull(ssn):
+        with pull_guard:
+            pulls["n"] += 1
+        # Widen the pull window so that if the lock were ever removed, both threads overlap
+        # here and pulls==2 -- i.e. this test actually fails on a regression rather than
+        # being masked by the GIL serializing the fast path. With the lock held, this only
+        # adds a few ms and the assertion stays deterministic (exactly one pull).
+        time.sleep(0.02)
+        return real_pull(ssn)
+
+    monkeypatch.setattr(decision, "_pull_credit", _counting_pull)
+
+    app = dict(WEAK_APP, request_id="req-concurrent")
+    results = {}
+    errors = {}
+    barrier = threading.Barrier(2)
+
+    def _run(i):
+        try:
+            barrier.wait()  # release both threads into decide() together
+            results[i] = decision.decide(dict(app))
+        except Exception as e:  # surface a thread failure to the assertions
+            errors[i] = e
+
+    threads = [threading.Thread(target=_run, args=(i,)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"decide() raised under concurrency: {errors}"
+    assert (
+        pulls["n"] == 1
+    )  # exactly one paid/regulated bureau pull for the duplicate retry
+    assert len(store) == 1  # exactly one decision event
+    assert (
+        results[0]["decision"] == results[1]["decision"]
+    )  # both got the recorded outcome
 
 
 def test_request_id_reuse_across_apps_never_replays_other_apps_record(

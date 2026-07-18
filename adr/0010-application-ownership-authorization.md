@@ -219,6 +219,38 @@ stepping stone toward it, not throwaway.
   removes the enumeration oracle anyway); optionally move to non-sequential ids later as
   defense-in-depth, out of scope here.
 
+### Rollout / cutover plan (PR #7 review)
+
+Enabling the gate is a user-visible compatibility change for any **pre-migration in-flight
+anonymous application** (created before Phase B, so `continuation_token IS NULL`, and owned
+by no user login), which loses its self-serve path. This is a planned cutover step, not a
+silent break:
+
+1. **Enumerate affected rows before cutover.** On the target volume, run:
+
+   ```sql
+   SELECT a.id, a.status, a.created_at
+   FROM applications a
+   LEFT JOIN users u ON u.applicant_id = a.applicant_id
+   WHERE a.continuation_token IS NULL          -- predates Phase B token issuance
+     AND u.id IS NULL                          -- not linked to any borrower login
+     AND a.status NOT IN ('funded', 'withdrawn', 'declined');  -- still in flight
+   ```
+
+2. **If the query returns rows, drain/handle them before enabling the gate** — an officer
+   completes or advances each on the applicant's behalf (officer-mediated recovery above),
+   or product issues approved comms and links the applicant to a borrower account. Only then
+   flip the gate on.
+3. **If it returns zero rows, cutover is clean.** A fresh `db/init` volume + the seed have
+   none (seed applications carry an `applicant_id` and are officer/owner-managed), so in this
+   repo's environment the query is empty and no drain step is required.
+
+**Why not conditionally exempt pre-migration rows from the gate** (the review's "do not
+enforce until…" phrasing): exempting exactly the old, low, guessable serial ids would
+reopen the anonymous serial-id IDOR this ADR closes — for the precise rows an attacker can
+enumerate. The compatibility path is therefore drain-then-cutover + officer-mediated
+recovery, never a standing carve-out that leaves regulated routes anonymously reachable.
+
 ## Alternatives considered
 
 1. **Per-application capability token** — mint an unguessable token at submit, return it,
