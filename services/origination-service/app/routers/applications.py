@@ -443,22 +443,37 @@ def abandon_application(
     # delete had committed under db.query's per-statement autocommit -- stranding the applicant
     # plus its KYC/PII rows, the exact orphan this endpoint exists to prevent. Do the whole
     # delete in one transaction, removing dependent rows (kyc_checks) before the applicant.
-    with db.transaction() as cur:
-        cur.execute("DELETE FROM applications WHERE id = %s", (app_id,))
-        if applicant_id is not None:
-            cur.execute(
-                "SELECT 1 FROM applications WHERE applicant_id = %s LIMIT 1",
-                (applicant_id,),
-            )
-            if cur.fetchone() is None:
-                # No other application references this applicant (intake creates one applicant
-                # per application). Remove the applicant's dependent PII rows, then the
-                # applicant. kyc_checks.applicant_id -> applicants(id) has no cascade, so this
-                # explicit child delete is what lets the applicant delete succeed.
+    try:
+        with db.transaction() as cur:
+            cur.execute("DELETE FROM applications WHERE id = %s", (app_id,))
+            if applicant_id is not None:
                 cur.execute(
-                    "DELETE FROM kyc_checks WHERE applicant_id = %s", (applicant_id,)
+                    "SELECT 1 FROM applications WHERE applicant_id = %s LIMIT 1",
+                    (applicant_id,),
                 )
-                cur.execute("DELETE FROM applicants WHERE id = %s", (applicant_id,))
+                if cur.fetchone() is None:
+                    # No other application references this applicant (intake creates one
+                    # applicant per application). Remove the applicant's dependent PII rows,
+                    # then the applicant. kyc_checks.applicant_id -> applicants(id) has no
+                    # cascade, so this explicit child delete is what lets the applicant delete
+                    # succeed.
+                    cur.execute(
+                        "DELETE FROM kyc_checks WHERE applicant_id = %s",
+                        (applicant_id,),
+                    )
+                    cur.execute("DELETE FROM applicants WHERE id = %s", (applicant_id,))
+    except pg_errors.ForeignKeyViolation:
+        # TOCTOU (PR #7 review): the inertness probe above ran outside this transaction, so a
+        # decision/offer/loan could race in between the probe and the DELETE. It cannot cause a
+        # wrongful delete -- decisions/decision_events/offers carry RESTRICT FKs to
+        # applications (no ON DELETE CASCADE), and any non-inert state requires a prior decision
+        # (offer generation and boarding are gated on an approved decision) -- so the DELETE
+        # aborts the whole transaction rather than removing a now-non-inert application. The FK,
+        # not the probe timing, is the hard guarantee; surface the raced case as 409 (same as
+        # the up-front guard) instead of a 500.
+        raise HTTPException(
+            status_code=409, detail="application is not inert; refusing to abandon"
+        )
     log.info(
         "abandoned inert application app_id=%s (resume-session compensation)", app_id
     )

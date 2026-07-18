@@ -273,8 +273,14 @@ def continuation_token_keys() -> list:
         if not part:
             continue
         ver, sep, secret = part.partition(":")
-        if sep and ver.strip() and secret:
-            keys.append((ver.strip(), secret))
+        ver = ver.strip()
+        # "legacy" is RESERVED for the verify-only service-token fallback (authz._verify_keys),
+        # so a configured key may not claim it -- two secrets sharing one version would break
+        # rotation semantics (one version -> one secret). Skip it; an operator who names their
+        # only key "legacy" gets an empty set here and hash_token then refuses in production
+        # (loud), which is the intended nudge to rename.
+        if sep and ver and ver != "legacy" and secret:
+            keys.append((ver, secret))
     return keys
 
 

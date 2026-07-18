@@ -277,6 +277,21 @@ def test_verify_accepts_preexisting_legacy_row_after_pepper_set(monkeypatch):
     assert authz.verify_token("tok", legacy_stored) is True
 
 
+def test_configured_legacy_version_is_reserved(monkeypatch):
+    # PR #7 review: "legacy" is reserved for the verify-only service-token fallback. A configured
+    # key that claims it is ignored (two secrets for one version would break rotation). Here the
+    # ONLY key is named "legacy" -> parsed set is empty -> hash_token refuses in production, the
+    # intended loud nudge to rename, rather than silently colliding with the fallback.
+    monkeypatch.setattr(config, "CONTINUATION_TOKEN_KEYS", "legacy:should-be-ignored")
+    monkeypatch.setattr(config, "ENVIRONMENT", "production")
+    assert config.continuation_token_keys() == []
+    with pytest.raises(RuntimeError):
+        authz.hash_token("tok")
+    # A real key alongside a (reserved) "legacy" entry keeps only the real one.
+    monkeypatch.setattr(config, "CONTINUATION_TOKEN_KEYS", "v1:real,legacy:ignored")
+    assert config.continuation_token_keys() == [("v1", "real")]
+
+
 def test_abandon_requires_internal_token(monkeypatch):
     # Compensating /abandon is reachable through the anonymous /los proxy, so it is
     # internal-only (the gateway strips any client X-Internal-Service). No token -> 403.
@@ -391,6 +406,38 @@ def test_abandon_keeps_applicant_with_other_applications(monkeypatch):
     assert resp.status_code == 200
     tables = [t for t, _ in cur.deletes()]
     assert tables == ["applications"]  # applicant + kyc_checks untouched
+
+
+def test_abandon_raced_non_inert_delete_becomes_409(monkeypatch):
+    # PR #7 review (TOCTOU): the inertness probe runs outside the transaction, so a decision
+    # could race in between the probe and the DELETE. The RESTRICT FK (decisions/decision_events
+    # -> applications, no cascade) makes the DELETE raise ForeignKeyViolation rather than
+    # wrongly removing a non-inert application; the handler must surface that as 409, not 500.
+    from psycopg2 import errors as pg_errors
+
+    monkeypatch.setattr(applications.config, "INTERNAL_SERVICE_TOKEN", "sekret")
+
+    def _q(sql, params=None):
+        if sql.strip().upper().startswith("SELECT A.APPLICANT_ID"):
+            return [{"applicant_id": 42, "n_decisions": 0, "n_offers": 0, "n_loans": 0}]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    class _RacingCursor:
+        def execute(self, sql, params=None):
+            if sql.strip().upper().startswith("DELETE FROM APPLICATIONS"):
+                raise pg_errors.ForeignKeyViolation("decisions_app_id_fkey")
+
+        def fetchone(self):
+            return None
+
+    monkeypatch.setattr(applications.db, "query", _q)
+    monkeypatch.setattr(
+        applications.db, "transaction", _fake_transaction_factory(_RacingCursor())
+    )
+    resp = TestClient(app).post(
+        "/applications/5/abandon", headers={"X-Internal-Service": "sekret"}
+    )
+    assert resp.status_code == 409
 
 
 def test_abandon_refuses_non_inert_application(monkeypatch):
