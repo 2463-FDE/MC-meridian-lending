@@ -373,6 +373,57 @@ def test_authenticated_submit_refused_when_redis_down(monkeypatch):
     assert "meridian_resume" not in resp.headers.get("set-cookie", "")
 
 
+def test_officer_submit_not_coupled_to_redis(monkeypatch):
+    # Both-directions guard (PR #7 review): an officer authorizes any application via role authz
+    # and needs no continuation token, so their submit must NOT be 503'd when Redis is down and
+    # must NOT create a resume session. (The token is still stripped from the body -- unused.)
+    from app import auth, main
+
+    monkeypatch.setattr(
+        auth, "get_session", lambda token: {"id": 7, "role": "underwriter"}
+    )
+    monkeypatch.setattr(main.config, "redis_reachable", lambda *a, **k: (False, "down"))
+
+    def _must_not_create(*a, **k):
+        raise AssertionError("officer submit must not create a resume session")
+
+    monkeypatch.setattr(auth, "create_resume_session", _must_not_create)
+    _capture_forwarded_headers(
+        monkeypatch,
+        resp_body={"app_id": 5, "continuation_token": "raw-tok", "status": "submitted"},
+    )
+    resp = TestClient(app).post(
+        "/los/applications",
+        json={"name": "Jane", "amount": 15000},
+        headers={"Authorization": "Bearer sesh"},
+    )
+    assert (
+        resp.status_code == 200
+    )  # not 503 -- Redis is irrelevant to an officer submit
+    assert "meridian_resume" not in resp.headers.get("set-cookie", "")
+    assert "continuation_token" not in resp.json()
+
+
+def test_officer_with_stale_resume_cookie_unaffected_by_redis_down(monkeypatch):
+    # Both-directions guard: an officer who happens to carry a stale resume cookie must still
+    # proceed via role authz when a Redis blip fails the resolve -- the 503-on-resolve-failure
+    # is for token-dependent self-service callers only, not officers.
+    from app import auth
+
+    monkeypatch.setattr(auth, "get_session", lambda token: {"id": 7, "role": "admin"})
+
+    def _boom(sid):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(auth, "resolve_resume", _boom)
+    captured = _capture_forwarded_headers(monkeypatch)
+    resp = TestClient(app, cookies={"meridian_resume": "sid-5"}).post(
+        "/los/applications/5/decision", headers={"Authorization": "Bearer sesh"}
+    )
+    assert resp.status_code == 200  # role authz carries them; no token injected
+    assert "x-application-token" not in captured["headers"]
+
+
 def test_recheck_response_body_never_leaks_the_raw_token(monkeypatch):
     # recheck-kyc echoes the continuation token in its body downstream; the gateway must
     # strip it (like it does at submit) so the browser never receives the raw credential.

@@ -116,9 +116,12 @@ anonymous ones (PR #7 review).** `POST /applications` creates a fresh applicant 
 to `users.applicant_id`, so owner authz (`users.applicant_id == applications.applicant_id`)
 can never match a submission the caller made themselves — a logged-in borrower on the apply
 page is, for that application, in the same position as an anonymous one. The gateway therefore
-issues the resume session/cookie for **every** submit, authenticated or not; owner authz stays
-meaningful for applications an operator later associates with a user (Phase C), and for the
-seeded borrower/application links. (Rejected alternative: binding the new application to
+issues the resume session/cookie for **every self-service submit**, authenticated or not — but
+**exempts officers** (underwriter/admin), who authorize any application via role authz and so
+need no token: an officer submit neither creates a session nor is 503'd on a Redis outage, and
+an officer carrying a stale resume cookie still proceeds via role authz on a resolve blip.
+Owner authz stays meaningful for applications an operator later associates with a user
+(Phase C), and for the seeded borrower/application links. (Rejected alternative: binding the new application to
 `users.applicant_id` at submit — it would break the one-applicant-per-application invariant
 intake and the abandon compensation rely on, and reusing the applicant drags in its existing
 `kyc_checks`, entangling the ADR 0011 KYC gate. Deferred to the Phase C `owner_user_id` work.)

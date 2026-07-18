@@ -50,6 +50,11 @@ app.add_middleware(
 RESUME_COOKIE = "meridian_resume"
 RESUME_COOKIE_PATH = "/los"
 
+# Roles that authorize any application-scoped action via role authz (mirrors origination's
+# authz._OFFICER_ROLES). An officer needs no continuation token, so they are exempted from the
+# self-service resume-session machinery (PR #7 review).
+_OFFICER_ROLES = {"underwriter", "admin"}
+
 
 @app.get("/health")
 def health():
@@ -274,18 +279,31 @@ async def los(path: str, request: Request, authorization: str | None = Header(No
     # Origination is borrower-facing; an applicant can apply without an account.
     # If a session is present we forward it, otherwise we proxy anonymously.
     user = auth.get_session(auth.bearer_token(authorization))
+    # An officer (underwriter/admin) authorizes every application-scoped action via ROLE authz,
+    # so they never need a continuation token and must not be coupled to the resume session at
+    # all -- creating one, or 503'ing them on a Redis outage, would be a needless regression.
+    # Everyone else who submits is self-service (anonymous OR a logged-in borrower whose
+    # submission is not owner-linked) and depends on the token; see below.
+    is_officer = (
+        user is not None and str(user.get("role", "")).strip().lower() in _OFFICER_ROLES
+    )
 
-    # Submit atomicity (PR #7 review). Submit commits an application whose only credential to
-    # complete decision/offer/accept is the resume session stored here -- for EVERY submitter,
-    # authenticated or not: origination's submit creates a fresh applicant it never links to
-    # users.applicant_id, so owner authz (users.applicant_id == applications.applicant_id) can
-    # never match a self-service submission. A logged-in borrower therefore needs the same
-    # continuation token as an anonymous one. If Redis is down we must NOT let origination
-    # create the application and then discard the one-time raw token when the session write
-    # fails -- that strands the applicant (no cookie, no recovery). So refuse any submit up
-    # front when Redis is unreachable: the applicant retries cleanly with no orphaned row. The
-    # residual post-check race is handled by a bounded retry + controlled 503 below.
-    is_submit_attempt = request.method == "POST" and path.strip("/") == "applications"
+    # Submit atomicity (PR #7 review). A self-service submit commits an application whose only
+    # credential to complete decision/offer/accept is the resume session stored here:
+    # origination's submit creates a fresh applicant it never links to users.applicant_id, so
+    # owner authz (users.applicant_id == applications.applicant_id) can never match a
+    # self-service submission -- a logged-in borrower needs the same continuation token as an
+    # anonymous one. If Redis is down we must NOT let origination create the application and
+    # then discard the one-time raw token when the session write fails -- that strands the
+    # applicant (no cookie, no recovery). So refuse a self-service submit up front when Redis is
+    # unreachable: the applicant retries cleanly with no orphaned row. An officer submit is
+    # exempt (role authz, no token needed). The residual post-check race is handled by a bounded
+    # retry + controlled 503 below.
+    is_submit_attempt = (
+        request.method == "POST"
+        and path.strip("/") == "applications"
+        and not is_officer
+    )
     if is_submit_attempt and not config.redis_reachable()[0]:
         return _resume_unavailable()
 
@@ -305,13 +323,16 @@ async def los(path: str, request: Request, authorization: str | None = Header(No
             sess = auth.resolve_resume(sid)
         except Exception as e:  # noqa: BLE001 -- Redis outage on the resume read path
             # Parity with the submit path (PR #7 review): a Redis blip must not 500 a resume
-            # request. A resume cookie is PRESENT here, so the caller relies on the token
-            # capability in Redis (anonymous OR a self-service authenticated applicant, whose
-            # submission is not owner-linked) -- surface a retryable 503 rather than proceed
-            # token-less into a misleading 404. A real owner/officer carries no resume cookie
-            # and so never reaches this branch; their session authorizes them regardless.
+            # request. A resume cookie is present, so a self-service caller (anonymous OR a
+            # logged-in borrower whose submission is not owner-linked) relies on the token
+            # capability in Redis -- surface a retryable 503 rather than proceed token-less into
+            # a misleading 404. An officer, however, authorizes via role authz and does not need
+            # the token even if they happen to carry a stale resume cookie: let them proceed
+            # (sess stays None) so a Redis outage never blocks an officer.
             log.warning("resume session resolve failed: %s", type(e).__name__)
-            return _resume_unavailable()
+            if not is_officer:
+                return _resume_unavailable()
+            sess = None
     if sess:
         if app_id is not None and str(sess.get("app_id")) == app_id:
             # Application-scoped path (applications/{id}/...): inject only when the cookie
@@ -339,15 +360,17 @@ async def los(path: str, request: Request, authorization: str | None = Header(No
     response = JSONResponse(status_code=status, content=content)
 
     # Submit: capture the freshly issued token into a server-side resume session and hand the
-    # browser only the HttpOnly cookie holding its opaque id. EVERY submitter gets one -- a
-    # self-service submission is never linked to users.applicant_id, so owner authz cannot
-    # authorize the submitter's own decision/offer/accept; the continuation token is their only
-    # path, authenticated or not (PR #7 review). Officers act on any application via role authz
-    # and never hit this route to create their own, so this correctly covers the apply flow.
+    # browser only the HttpOnly cookie holding its opaque id. Every SELF-SERVICE submitter gets
+    # one -- their submission is never linked to users.applicant_id, so owner authz cannot
+    # authorize their own decision/offer/accept; the continuation token is their only path,
+    # anonymous or logged-in borrower alike (PR #7 review). An officer is exempt: they authorize
+    # via role authz, so if one submits on behalf of someone we neither create a session nor
+    # (via is_submit_attempt above) 503 them on a Redis outage -- the token is dropped, unused.
     is_submit = (
         request.method == "POST"
         and path.strip("/") == "applications"
         and status == 200
+        and not is_officer
         and raw_token
         and app_id_in_body is not None
     )
