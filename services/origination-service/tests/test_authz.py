@@ -217,6 +217,14 @@ def test_anonymous_decision_denied_through_route():
     assert resp.status_code == 404
 
 
+def test_anonymous_recheck_kyc_denied_through_route():
+    # recheck-kyc re-runs a regulated identity check + persists a kyc_checks row, so it is
+    # application-scoped like decision/offer/accept: authz runs first, an anonymous caller
+    # is denied 404 before any applicant PII is loaded or KYC is re-run.
+    resp = TestClient(app).post("/applications/1/recheck-kyc")
+    assert resp.status_code == 404
+
+
 def test_anonymous_list_denied_through_route():
     # The roster is officer-only (PII dump) -> 403 for an anonymous caller. Override the
     # DB session dependency (resolved before the handler body) so the test exercises the
