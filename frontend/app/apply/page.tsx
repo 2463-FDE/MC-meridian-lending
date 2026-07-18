@@ -1,11 +1,51 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Stepper, { type Step } from "../../components/Stepper";
 import StatusChip from "../../components/StatusChip";
-import { apiPost } from "../../lib/api";
+import { apiGet, apiPost } from "../../lib/api";
 import { usd, pct } from "../../lib/format";
+
+// The continuation token is the logged-out applicant's only capability to complete their
+// application (ADR 0010 Phase B). It is returned once at submit, so keep it in scoped
+// client storage keyed by app id -- otherwise a refresh, tab close, or crash drops the
+// only credential and the applicant is stranded with an app id but no way to proceed.
+// Treated like a magic-link bearer: scoped to one application, cleared when the flow ends.
+const RESUME_KEY = "meridian:apply:resume";
+
+function saveResume(appId: string | number, token: string | null | undefined) {
+  if (typeof window === "undefined" || !token) return;
+  try {
+    window.localStorage.setItem(
+      RESUME_KEY,
+      JSON.stringify({ app_id: appId, continuation_token: token })
+    );
+  } catch {
+    // storage unavailable (private mode / quota) -- in-memory state still works this session
+  }
+}
+
+function readResume(): { app_id: string | number; continuation_token: string } | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(RESUME_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    return v && v.app_id != null && v.continuation_token ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearResume() {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(RESUME_KEY);
+  } catch {
+    // ignore
+  }
+}
 
 const STEPS: Step[] = [
   { n: 1, label: "Personal" },
@@ -126,6 +166,49 @@ export default function ApplyPage() {
     null
   );
   const [showSchedule, setShowSchedule] = useState(false);
+  const [resuming, setResuming] = useState(false);
+
+  // Resume a submitted application after a refresh / tab close: the continuation token was
+  // persisted at submit, so rehydrate it and re-fetch the application (the token authorizes
+  // the read) to restore the step-5 view. A stale/invalid token or a deleted app clears the
+  // saved state and starts fresh.
+  useEffect(() => {
+    const saved = readResume();
+    if (!saved) return;
+    let cancelled = false;
+    setResuming(true);
+    (async () => {
+      try {
+        const d = (await apiGet(`/los/applications/${saved.app_id}`, {
+          "X-Application-Token": saved.continuation_token,
+        })) as {
+          status?: string;
+          kyc?: Kyc | null;
+          decision?: string | null;
+          offer?: Disclosure | null;
+        };
+        if (cancelled) return;
+        setApp({
+          app_id: saved.app_id,
+          status: d.status,
+          kyc: d.kyc ?? undefined,
+          // No persisted KYC row -> the check never completed (outage) -> offer the retry.
+          kyc_checked: !!d.kyc,
+          continuation_token: saved.continuation_token,
+        });
+        if (d.decision) setDecision({ app_id: saved.app_id, decision: d.decision });
+        if (d.offer) setDisclosure(d.offer);
+        setStep(5);
+      } catch {
+        clearResume();
+      } finally {
+        if (!cancelled) setResuming(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function set<K extends keyof FormState>(k: K, v: FormState[K]) {
     setForm((f) => ({ ...f, [k]: v }));
@@ -191,6 +274,7 @@ export default function ApplyPage() {
         purpose: form.purpose,
       })) as AppResult;
       setApp(res);
+      saveResume(res.app_id, res.continuation_token);
       setStep(5);
     } catch (err) {
       setApiError(errMsg(err, "Could not submit your application."));
@@ -224,6 +308,7 @@ export default function ApplyPage() {
         appTokenHeader()
       )) as AppResult;
       setApp(res);
+      saveResume(res.app_id, res.continuation_token);
     } catch (err) {
       setApiError(errMsg(err, "Could not re-run identity verification."));
     } finally {
@@ -289,6 +374,7 @@ export default function ApplyPage() {
         appTokenHeader()
       )) as { loan_id: string | number };
       setAcceptedLoanId(res.loan_id);
+      clearResume(); // flow complete -- drop the saved capability
     } catch (err) {
       setApiError(errMsg(err, "Could not accept the offer."));
     } finally {
@@ -306,6 +392,10 @@ export default function ApplyPage() {
       <p className="sub">
         Fixed-rate installment loan · $1,000–$50,000 · 12–60 months
       </p>
+
+      {resuming ? (
+        <div className="alert alert-info">Resuming your saved application…</div>
+      ) : null}
 
       <Stepper steps={STEPS} current={step} />
 

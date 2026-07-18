@@ -9,5 +9,22 @@
 --
 -- Nullable: officer-created and pre-migration/legacy rows have no token and remain
 -- officer-OR-owner only (no anonymous token path), which is the safe default. A fresh
--- db/init volume and the seed have no legacy rows, so this applies cleanly.
+-- db/init volume and the seed have no legacy rows (seed applications carry an applicant_id
+-- and are officer/owner-managed), so this applies cleanly here.
+--
+-- Compatibility of a NON-fresh volume with in-flight ANONYMOUS applications: before this
+-- feature the application-scoped routes were unauthenticated, so an anonymous applicant
+-- completed decision/offer/accept with no credential. After this deploy a token is
+-- required, and a pre-migration anonymous row has none -- so its logged-out applicant
+-- cannot self-serve. This migration deliberately does NOT backfill tokens: a generated
+-- token that is never delivered to the applicant (there is no verified email/SMS channel
+-- in this platform) does not restore access, so backfill would be false safety.
+--
+-- Recovery plan for such rows is OFFICER-MEDIATED: officers act on ANY application (the
+-- authz officer short-circuit), and the officer underwriting UI now exposes the full
+-- flow -- re-run identity check, run decision, make offer, accept -- so an officer can
+-- complete or advance a stranded pre-migration application on the applicant's behalf.
+-- This mirrors migration 0007's manual-operator recovery rung. A self-serve verified-
+-- channel resume flow is out of scope (needs a delivery channel + product sign-off);
+-- see adr/0010-application-ownership-authorization.md.
 ALTER TABLE applications ADD COLUMN IF NOT EXISTS continuation_token TEXT;

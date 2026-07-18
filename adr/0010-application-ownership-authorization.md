@@ -110,7 +110,10 @@ their own decision/offer/accept while serial-id enumeration stays closed — the
 forwards `X-Application-Token` (it is the applicant's own capability, unlike the spoofable
 `X-User-*` it strips). A NULL token (officer-created/legacy row) has no token path, so
 those stay officer-OR-owner only. The frontend apply page carries the returned token on
-its three POSTs; no login, no signup.
+its three POSTs; no login, no signup. Because the token is returned only once, the apply
+page persists it in scoped client storage keyed by app id and rehydrates it on mount
+(re-fetching the application with the token) so a refresh or tab close does not strand the
+applicant — it is treated as a magic-link-style bearer, cleared when the flow completes.
 
 Why this over deprecating anonymous apply: forcing a login would need a borrower
 self-registration flow that does not exist and a product decision to drop "apply without
@@ -178,6 +181,18 @@ stepping stone toward it, not throwaway.
   an application whose `applicant_id` is owned by no user login (anonymously created, or a
   seeded/legacy row) is **officer-only** — no borrower's `applicant_id` can match it. This
   grandfathers legacy data without exposing it to arbitrary borrowers.
+- **Pre-migration in-flight anonymous applications (compatibility).** Before this feature
+  the application-scoped routes were unauthenticated, so an anonymous applicant completed
+  the flow with no credential; after this deploy a token is required and a pre-migration
+  anonymous row has none, so its logged-out applicant cannot self-serve. Migration 0008
+  deliberately does **not** backfill tokens — an undelivered token (no verified email/SMS
+  channel exists) is false safety. Recovery is **officer-mediated**: officers act on any
+  application and the officer underwriting UI now exposes the full flow (re-run identity
+  check, decision, offer, accept), so an officer can advance a stranded application on the
+  applicant's behalf — the same manual-operator recovery rung as migration 0007. A fresh
+  `db/init` volume + the seed have no such rows (seed applications carry an `applicant_id`).
+  A self-serve verified-channel resume flow needs a delivery channel + product sign-off and
+  is out of scope here.
 - Serial ids can remain (ownership, not obscurity, is the control; the 404-not-403 denial
   removes the enumeration oracle anyway); optionally move to non-sequential ids later as
   defense-in-depth, out of scope here.

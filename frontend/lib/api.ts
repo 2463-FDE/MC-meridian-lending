@@ -100,10 +100,10 @@ async function parse(res: Response) {
   return data;
 }
 
-export async function apiGet(path: string) {
+export async function apiGet(path: string, headers?: Record<string, string>) {
   const res = await fetch(`${GATEWAY_URL}${path}`, {
     cache: "no-store",
-    headers: { ...authHeaders() },
+    headers: { ...authHeaders(), ...(headers || {}) },
   });
   return parse(res);
 }
