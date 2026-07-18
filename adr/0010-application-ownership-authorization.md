@@ -180,6 +180,20 @@ the existing identity path cannot cover.
 - Touches schema (`owner_user_id` + migration), three routes, and the frontend (borrower
   login before apply; carry the session).
 - Legacy/anonymous rows have `owner_user_id = NULL` and need a policy (below).
+- **New Redis coupling on the anonymous flow (PR #7 review).** Moving token custody to a
+  server-side resume session (Phase B §3) makes anonymous submit — and every subsequent
+  resume/decision/offer/accept — depend on Redis to create/resolve the session. Redis was
+  already required for login sessions, but anonymous submit previously had no such
+  dependency (the token rode in the response body). If Redis is unavailable these requests
+  **fail closed** (500 — the gateway cannot mint or resolve the capability), never a silent
+  authorization bypass. The gateway `depends_on: redis` (compose) and the `/health`
+  readiness probe already surface Redis reachability.
+- **No single end-to-end test spans gateway ↔ Redis ↔ origination.** Each seam is unit-
+  tested — the gateway trust-boundary/resume-cookie behavior in `test_proxy_methods.py`
+  (blocking `gateway-trust-boundary-gate`, Redis + origination mocked), and origination's
+  per-application token authorization in `test_authz.py` (blocking `adr-0010-authz-gate`).
+  The full chain against live Redis + origination is covered by the compose smoke test, not
+  a unit gate.
 
 ### Forward compatibility (future RBAC)
 
