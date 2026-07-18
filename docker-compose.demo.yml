@@ -26,6 +26,15 @@ x-demo-internal-token: &demo_internal_token "dev-internal-token-not-for-producti
 # blank/placeholder pepper reports unhealthy outside development.
 x-demo-fingerprint-pepper: &demo_fingerprint_pepper "dev-fingerprint-pepper-not-for-production"
 services:
+  gateway:
+    environment:
+      # Local demo runs over http://localhost, so the resume cookie must not be Secure-only (a
+      # Secure cookie is not sent over plain http). The base compose defaults COOKIE_SECURE to
+      # true (prod-safe); this override relaxes it for the local http demo only (PR #7 review).
+      COOKIE_SECURE: "false"
+      # The gateway is an internal caller too (the compensating /abandon on a resume-session
+      # failure), so it must share the same demo internal token as the services it calls.
+      INTERNAL_SERVICE_TOKEN: *demo_internal_token
   origination-service:
     environment:
       # Local demo only: development relaxes the dedicated-pepper requirement (PR #7 review),

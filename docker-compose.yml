@@ -175,9 +175,11 @@ services:
     build: ./services/gateway
     env_file: .env
     environment:
-      # Local demo runs over http://localhost, so the resume cookie must not be Secure-only
-      # (it would not be sent over http). Keep the prod default (true) via .env in real deploys.
-      COOKIE_SECURE: "false"
+      # Resume cookie Secure flag. Defaults to true (PR #7 review): a compose-based real deploy
+      # that does not set COOKIE_SECURE inherits the Secure default, so the resume-session
+      # capability is never sent over plain HTTP. The local http demo relaxes it explicitly in
+      # docker-compose.demo.yml (or export COOKIE_SECURE=false), NOT here in the base file.
+      COOKIE_SECURE: "${COOKIE_SECURE:-true}"
       # Portal origin allowed to send the credentialed (cookie) resume requests.
       PORTAL_ORIGIN: http://localhost:3000
     ports:

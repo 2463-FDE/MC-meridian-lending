@@ -400,7 +400,19 @@ async def los(path: str, request: Request, authorization: str | None = Header(No
         and status == 200
     )
     if is_accept and sid:
-        auth.clear_resume(sid)
+        # Best-effort cleanup (PR #7 review). The loan is already boarded/funded (status == 200)
+        # and origination has already nulled applications.continuation_token on funding, so the
+        # token is single-use-spent regardless of what happens here -- clearing the Redis session
+        # is only hygiene. A Redis blip on the delete must NOT turn a completed money action into
+        # a gateway 500 (which could drive a duplicate accept or a "loan unfunded" support
+        # ticket). Swallow it, and still clear the cookie so the browser drops the dead handle.
+        try:
+            auth.clear_resume(sid)
+        except Exception as e:  # noqa: BLE001 -- Redis outage on the post-commit cleanup path
+            log.warning(
+                "post-accept resume cleanup failed (loan already funded): %s",
+                type(e).__name__,
+            )
         response.delete_cookie(RESUME_COOKIE, path=RESUME_COOKIE_PATH)
 
     return response

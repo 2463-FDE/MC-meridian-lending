@@ -469,6 +469,37 @@ def test_accept_revokes_resume_session_and_clears_cookie(monkeypatch):
     )
 
 
+def test_accept_succeeds_even_if_resume_cleanup_fails(monkeypatch):
+    # PR #7 review: the loan is already boarded/funded (200) and origination has nulled the
+    # continuation token, so the post-accept Redis session cleanup is best-effort hygiene. A
+    # Redis blip on clear_resume must NOT turn a completed money action into a 500 -- the
+    # successful downstream response is returned and the cookie is still cleared.
+    from app import auth
+
+    _fake_resume_store(monkeypatch)  # stubs healthy redis_reachable + resolve
+    monkeypatch.setattr(
+        auth, "resolve_resume", lambda sid: {"app_id": 5, "token": "raw-tok"}
+    )
+
+    def _boom(sid):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(auth, "clear_resume", _boom)
+    _capture_forwarded_headers(monkeypatch, resp_body={"loan_id": 77})
+    resp = TestClient(app, cookies={"meridian_resume": "sid-5"}).post(
+        "/los/applications/5/accept"
+    )
+    assert resp.status_code == 200  # funded action is not 500'd by cleanup failure
+    assert resp.json() == {"loan_id": 77}
+    set_cookie = resp.headers.get("set-cookie", "")
+    assert (
+        "meridian_resume=" in set_cookie
+    )  # cookie still cleared despite the Redis failure
+    assert ("Max-Age=0" in set_cookie) or (
+        "expires=Thu, 01 Jan 1970" in set_cookie.lower()
+    )
+
+
 def test_anonymous_post_to_offer_cannot_carry_internal_token(monkeypatch):
     # PR review: /los/offer makes origination call disclosure-service with the internal
     # token (a confused-deputy write). A client-supplied X-Internal-Service must be
