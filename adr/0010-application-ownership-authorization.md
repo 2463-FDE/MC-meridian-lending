@@ -184,10 +184,19 @@ the existing identity path cannot cover.
   server-side resume session (Phase B §3) makes anonymous submit — and every subsequent
   resume/decision/offer/accept — depend on Redis to create/resolve the session. Redis was
   already required for login sessions, but anonymous submit previously had no such
-  dependency (the token rode in the response body). If Redis is unavailable these requests
-  **fail closed** (500 — the gateway cannot mint or resolve the capability), never a silent
-  authorization bypass. The gateway `depends_on: redis` (compose) and the `/health`
-  readiness probe already surface Redis reachability.
+  dependency (the token rode in the response body). Submit is made atomic from the
+  applicant's perspective: the gateway (1) refuses an anonymous submit up front with a
+  retryable **503** when Redis is unreachable, so origination never commits an application
+  whose one-time token could not be stored; and (2) rides a transient blip in the tiny
+  post-check window with a bounded retry on the session write, returning a controlled 503
+  (never a 500 that discards the raw token) if it still fails. Resume/decision/offer/accept
+  fail closed on a Redis outage (no capability resolved → denied), never a silent bypass.
+  The gateway `depends_on: redis` (compose) and the `/health` readiness probe surface
+  reachability. **Residual:** if Redis dies within that post-check window and stays down
+  through the retry, origination has already committed an application that gets no resume
+  session — it is **inert** (no decision/offer/loan) and officer-reconcilable; the applicant
+  retries. Fully eliminating it needs a compensating "abandon application" call, out of
+  scope here (no such origination endpoint today).
 - **No single end-to-end test spans gateway ↔ Redis ↔ origination.** Each seam is unit-
   tested — the gateway trust-boundary/resume-cookie behavior in `test_proxy_methods.py`
   (blocking `gateway-trust-boundary-gate`, Redis + origination mocked), and origination's

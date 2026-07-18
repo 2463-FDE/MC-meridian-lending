@@ -139,8 +139,9 @@ def test_los_proxy_strips_client_supplied_application_token(monkeypatch):
 
 
 def _fake_resume_store(monkeypatch):
-    """In-memory stand-in for the Redis-backed resume session (tests have no Redis)."""
-    from app import auth
+    """In-memory stand-in for the Redis-backed resume session (tests have no Redis).
+    Also stubs the submit-time Redis reachability pre-check to healthy."""
+    from app import auth, main
 
     store = {}
     calls = {"cleared": []}
@@ -160,6 +161,7 @@ def _fake_resume_store(monkeypatch):
     monkeypatch.setattr(auth, "create_resume_session", _create)
     monkeypatch.setattr(auth, "resolve_resume", _resolve)
     monkeypatch.setattr(auth, "clear_resume", _clear)
+    monkeypatch.setattr(main.config, "redis_reachable", lambda *a, **k: (True, None))
     return store, calls
 
 
@@ -206,6 +208,45 @@ def test_resume_cookie_not_injected_for_a_different_application(monkeypatch):
     )
     assert resp.status_code == 200
     assert "x-application-token" not in captured["headers"]
+
+
+def test_submit_refused_before_creating_application_when_redis_down(monkeypatch):
+    # PR #7 review: submit commits an application whose only anonymous credential is the
+    # Redis resume session. If Redis is down, refuse UP FRONT (503) so origination never
+    # creates a stranded application whose one-time token would be discarded.
+    from app import main
+
+    monkeypatch.setattr(main.config, "redis_reachable", lambda *a, **k: (False, "down"))
+    captured = _capture_forwarded_headers(
+        monkeypatch
+    )  # would record a forward if it happened
+    resp = client.post("/los/applications", json={"name": "Jane", "amount": 15000})
+    assert resp.status_code == 503
+    # Origination was never called -> no application committed, clean retry.
+    assert "headers" not in captured
+
+
+def test_submit_returns_503_not_500_when_session_write_fails(monkeypatch):
+    # PR #7 review: Redis passes the pre-check but the setex then fails (blip in the window).
+    # The gateway must not 500 with the raw token silently discarded; it returns a retryable
+    # 503 and never sets a resume cookie. (The committed application is inert/officer-
+    # reconcilable -- see ADR 0010 consequences.)
+    from app import auth, main
+
+    monkeypatch.setattr(main.config, "redis_reachable", lambda *a, **k: (True, None))
+
+    def _boom(*a, **k):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(auth, "create_resume_session", _boom)
+    _capture_forwarded_headers(
+        monkeypatch, resp_body={"app_id": 5, "continuation_token": "raw-tok"}
+    )
+    resp = client.post("/los/applications", json={"name": "Jane", "amount": 15000})
+    assert resp.status_code == 503
+    # No resume cookie, and the raw token never reaches the browser body.
+    assert "meridian_resume" not in resp.headers.get("set-cookie", "")
+    assert "continuation_token" not in resp.json()
 
 
 def test_recheck_response_body_never_leaks_the_raw_token(monkeypatch):

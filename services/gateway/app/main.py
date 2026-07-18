@@ -10,6 +10,8 @@ servicing-service, which also doesn't check. Any authenticated user can adjust b
 or waive fees. (weak authz — kept on purpose)
 """
 
+import asyncio
+
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -199,6 +201,33 @@ def _app_id_in_path(path: str) -> str | None:
     return None
 
 
+async def _create_resume_session_with_retry(app_id, token, attempts: int = 3):
+    """Create the resume session, riding a transient Redis blip with a short bounded retry.
+    Returns the session id, or None if Redis is still unreachable after all attempts (the
+    caller then fails the submit closed rather than 500-ing with the raw token discarded)."""
+    for i in range(attempts):
+        try:
+            return auth.create_resume_session(app_id, token)
+        except Exception as e:  # noqa: BLE001 -- any Redis error is a retryable outage here
+            log.warning(
+                "resume session create failed (attempt %d/%d) app_id=%s: %s",
+                i + 1,
+                attempts,
+                app_id,
+                type(e).__name__,
+            )
+            if i < attempts - 1:
+                await asyncio.sleep(0.05 * (i + 1))
+    return None
+
+
+def _resume_unavailable() -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "resume session store unavailable; please retry"},
+    )
+
+
 def _set_resume_cookie(response: JSONResponse, sid: str) -> None:
     response.set_cookie(
         RESUME_COOKIE,
@@ -216,6 +245,19 @@ async def los(path: str, request: Request, authorization: str | None = Header(No
     # Origination is borrower-facing; an applicant can apply without an account.
     # If a session is present we forward it, otherwise we proxy anonymously.
     user = auth.get_session(auth.bearer_token(authorization))
+
+    # Submit atomicity (PR #7 review). Submit commits an application whose ONLY anonymous
+    # credential is the resume session stored here. If Redis is down we must NOT let
+    # origination create that application and then discard the one-time raw token when the
+    # session write fails -- that strands the applicant (500, no cookie, no recovery). So for
+    # an anonymous submit, refuse up front when Redis is unreachable: the applicant retries
+    # cleanly with no orphaned row. (An authenticated owner needs no resume session.) The
+    # residual post-check race is handled by a bounded retry + controlled 503 below.
+    is_submit_attempt = (
+        request.method == "POST" and path.strip("/") == "applications" and user is None
+    )
+    if is_submit_attempt and not config.redis_reachable()[0]:
+        return _resume_unavailable()
 
     # Anonymous resume capability (ADR 0010 Phase B, PR #7 review). The continuation token
     # lives server-side in Redis, keyed by the opaque id in the HttpOnly resume cookie. On
@@ -262,7 +304,18 @@ async def los(path: str, request: Request, authorization: str | None = Header(No
         and app_id_in_body is not None
     )
     if is_submit:
-        new_sid = auth.create_resume_session(app_id_in_body, raw_token)
+        new_sid = await _create_resume_session_with_retry(app_id_in_body, raw_token)
+        if new_sid is None:
+            # Redis went down in the window after the pre-check and stayed down through the
+            # retry. The application is committed but has no resume session; it is inert (no
+            # decision/offer/loan) and officer-reconcilable. Return a retryable 503 rather
+            # than a 500 that silently discards the raw token.
+            log.error(
+                "resume session unstorable after submit for app_id=%s; application is inert "
+                "(no decision/offer/loan), officer-reconcilable",
+                app_id_in_body,
+            )
+            return _resume_unavailable()
         _set_resume_cookie(response, new_sid)
         return response
 
