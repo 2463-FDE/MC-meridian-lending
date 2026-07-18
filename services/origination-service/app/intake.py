@@ -40,43 +40,55 @@ def create_application(payload: dict) -> tuple[int, str]:
         payload.get("term_months", 36),
         payload.get("is_entity", False),
     )
-    applicant = db.query(
-        "INSERT INTO applicants (name, dob, ssn, ein, is_entity, address) "
-        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-        (
-            payload.get("name"),
-            payload.get("dob"),
-            payload.get("ssn"),
-            payload.get("ein"),
-            payload.get("is_entity", False),
-            payload.get("address"),
-        ),
-    )
-    applicant_id = applicant[0]["id"]
+    # Hash the token BEFORE any write (PR #7 review). hash_token raises when the continuation
+    # pepper is misconfigured; doing it first means that failure aborts submit with NOTHING
+    # persisted, rather than after the applicant row is already committed. The applicant and the
+    # application (with its token hash) are then written in ONE transaction, so a failure on the
+    # second insert rolls back the first -- never an orphaned applicant PII row with no
+    # application, no token, and no app id for the gateway compensator to target. db.query's
+    # per-statement autocommit could leave exactly that orphan, so this path does not use it.
     continuation_token = secrets.token_urlsafe(32)  # 256-bit; returned raw once, below
+    token_hash = authz.hash_token(
+        continuation_token
+    )  # keyed hash; raises here if misconfigured
     expires_at = datetime.now(timezone.utc) + timedelta(
         days=config.CONTINUATION_TOKEN_TTL_DAYS
     )
-    app_row = db.query(
-        "INSERT INTO applications "
-        "(applicant_id, amount, term_months, purpose, income, monthly_debt, "
-        "employment_years, continuation_token, continuation_token_expires_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-        (
-            applicant_id,
-            payload.get("amount"),
-            payload.get("term_months", 36),
-            payload.get("purpose"),
-            payload.get("income"),
-            payload.get("monthly_debt"),
-            payload.get("employment_years"),
-            authz.hash_token(continuation_token),  # store the keyed hash, never the raw
-            expires_at,
-        ),
-    )
+    with db.transaction() as cur:
+        cur.execute(
+            "INSERT INTO applicants (name, dob, ssn, ein, is_entity, address) "
+            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            (
+                payload.get("name"),
+                payload.get("dob"),
+                payload.get("ssn"),
+                payload.get("ein"),
+                payload.get("is_entity", False),
+                payload.get("address"),
+            ),
+        )
+        applicant_id = cur.fetchone()["id"]
+        cur.execute(
+            "INSERT INTO applications "
+            "(applicant_id, amount, term_months, purpose, income, monthly_debt, "
+            "employment_years, continuation_token, continuation_token_expires_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (
+                applicant_id,
+                payload.get("amount"),
+                payload.get("term_months", 36),
+                payload.get("purpose"),
+                payload.get("income"),
+                payload.get("monthly_debt"),
+                payload.get("employment_years"),
+                token_hash,  # store the keyed hash, never the raw
+                expires_at,
+            ),
+        )
+        app_id = cur.fetchone()["id"]
     # Return the RAW token to the caller (the only time it exists outside the applicant's
     # possession); the DB holds only its hash.
-    return app_row[0]["id"], continuation_token
+    return app_id, continuation_token
 
 
 def board_to_servicing(

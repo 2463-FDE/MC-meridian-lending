@@ -150,6 +150,15 @@ def missing_required_secrets() -> list:
     missing = []
     if not database_url_configured():
         missing.append("DATABASE_URL")
+    # INTERNAL_SERVICE_TOKEN is required for the post-submit rollback (PR #7 review): if a
+    # resume session cannot be stored after a self-service submit, the gateway calls
+    # origination's internal /abandon to delete the just-committed application. With the token
+    # unset that compensator is skipped, so a gateway that stays in rotation would strand
+    # PII-bearing applications on every Redis-write failure. Fail readiness loud instead, so an
+    # instance that cannot compensate is taken out of rotation rather than accepting submits it
+    # cannot roll back. (Mirrors origination, which already requires this token.)
+    if not INTERNAL_SERVICE_TOKEN:
+        missing.append("INTERNAL_SERVICE_TOKEN")
     return missing
 
 

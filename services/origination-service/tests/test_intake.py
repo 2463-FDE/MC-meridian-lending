@@ -25,14 +25,28 @@ def _kyc_passes(monkeypatch):
     )
 
 
+def _capturing_transaction(monkeypatch, captured):
+    """Fake intake.db.transaction: records every (sql, params) and returns an id per
+    INSERT ... RETURNING (applicant id, then application id)."""
+    from contextlib import contextmanager
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            captured.append((sql, params))
+
+        def fetchone(self):
+            return {"id": 1}
+
+    @contextmanager
+    def _txn():
+        yield _Cur()
+
+    monkeypatch.setattr(intake.db, "transaction", _txn)
+
+
 def test_create_application_persists_model_inputs(monkeypatch):
     captured = []
-
-    def _query(sql, params=None):
-        captured.append((sql, params))
-        return [{"id": 1}]  # applicant id, then application id
-
-    monkeypatch.setattr(intake.db, "query", _query)
+    _capturing_transaction(monkeypatch, captured)
     intake.create_application(
         {
             "name": "Test Borrower",
@@ -44,6 +58,13 @@ def test_create_application_persists_model_inputs(monkeypatch):
             "employment_years": 3,
         }
     )
+    # Applicant + application are written in ONE transaction (PR #7 review), applicant first.
+    tables = [
+        c[0].split("INSERT INTO ")[1].split()[0]
+        for c in captured
+        if "INSERT INTO" in c[0]
+    ]
+    assert tables == ["applicants", "applications"]
     app_insert = next(c for c in captured if "INSERT INTO applications" in c[0])
     # (applicant_id, amount, term_months, purpose, income, monthly_debt,
     #  employment_years, continuation_token)
@@ -52,6 +73,26 @@ def test_create_application_persists_model_inputs(monkeypatch):
     # best-effort UPDATE
     assert isinstance(app_insert[1][7], str) and app_insert[1][7]
     assert "continuation_token" in app_insert[0]
+
+
+def test_create_application_writes_nothing_when_token_hash_misconfigured(monkeypatch):
+    # PR #7 review: hash_token is computed BEFORE any write, so a misconfigured continuation
+    # pepper aborts submit with NO applicant PII persisted -- no orphaned row.
+    from app import config
+
+    monkeypatch.setattr(config, "CONTINUATION_TOKEN_KEYS", "")
+    monkeypatch.setattr(config, "ENVIRONMENT", "production")
+
+    def _must_not_open(*a, **k):
+        raise AssertionError(
+            "no write may happen when the token hash cannot be computed"
+        )
+
+    monkeypatch.setattr(intake.db, "transaction", _must_not_open)
+    with pytest.raises(RuntimeError):
+        intake.create_application(
+            {"name": "Test", "amount": 15000, "monthly_debt": 100}
+        )
 
 
 def test_decision_request_payload_uses_captured_inputs(monkeypatch):

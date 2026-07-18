@@ -244,6 +244,60 @@ def test_hash_token_refuses_without_pepper_in_production(monkeypatch):
     assert "CONTINUATION_TOKEN_KEYS" in config.missing_required_secrets()
 
 
+def test_intake_no_orphan_pii_when_token_hash_misconfigured(monkeypatch):
+    # PR #7 review (blocking gate): the continuation-token/PII boundary. hash_token is computed
+    # BEFORE any write, so a misconfigured pepper aborts submit with NOTHING persisted -- no
+    # orphaned applicant PII row with no application, no token, and no app id for the gateway
+    # compensator to target.
+    from app import intake
+
+    monkeypatch.setattr(config, "CONTINUATION_TOKEN_KEYS", "")
+    monkeypatch.setattr(config, "ENVIRONMENT", "production")
+
+    def _must_not_open(*a, **k):
+        raise AssertionError(
+            "no DB write may occur when the token hash cannot be computed"
+        )
+
+    monkeypatch.setattr(intake.db, "transaction", _must_not_open)
+    with pytest.raises(RuntimeError):
+        intake.create_application({"name": "T", "amount": 15000, "monthly_debt": 100})
+
+
+def test_intake_writes_applicant_and_application_in_one_transaction(monkeypatch):
+    # Atomicity: applicant + application are inserted in a SINGLE transaction (applicant first),
+    # so a failure on the application insert rolls back the applicant -- no orphaned PII.
+    from contextlib import contextmanager
+
+    from app import intake
+
+    executed = []
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            executed.append(sql.strip())
+
+        def fetchone(self):
+            return {"id": 1}
+
+    @contextmanager
+    def _txn():
+        yield _Cur()
+
+    monkeypatch.setattr(intake.db, "transaction", _txn)
+    # No stray db.query writes outside the transaction.
+    monkeypatch.setattr(
+        intake.db,
+        "query",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no autocommit write")),
+    )
+    intake.create_application({"name": "T", "amount": 15000, "monthly_debt": 100})
+    inserts = [
+        s.split("INSERT INTO ")[1].split()[0] for s in executed if "INSERT INTO" in s
+    ]
+    assert inserts == ["applicants", "applications"]
+
+
 def test_hash_token_dev_fallback_is_service_token_coupled(monkeypatch):
     # Development-only convenience: no dedicated pepper -> hash under INTERNAL_SERVICE_TOKEN so
     # the local demo runs. Prove it is still service-token-coupled (breaks on service rotation)
