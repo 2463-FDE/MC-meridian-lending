@@ -140,6 +140,26 @@ export default function UnderwritingDetailPage() {
     }
   }
 
+  // KYC recovery (ADR 0011): an application submitted while kyc-service was down has no
+  // passing kyc_checks row, so the mandatory gate 409s Run decision / Make offer / Accept.
+  // Re-run KYC for this application (officer is authorized by session) and reload to show
+  // the refreshed result -- the operational counterpart to the borrower's retry.
+  async function recheckKyc() {
+    if (!appId) return;
+    setActionBusy(true);
+    setActionErr(null);
+    setActionMsg(null);
+    try {
+      await apiPost(`/los/applications/${appId}/recheck-kyc`, undefined);
+      await load();
+      setActionMsg("Identity verification re-run.");
+    } catch (err) {
+      setActionErr(errMsg(err, "Could not re-run identity verification."));
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   async function makeOffer() {
     if (!app || !appId) return;
     setActionBusy(true);
@@ -295,6 +315,17 @@ export default function UnderwritingDetailPage() {
           <KycRow label="Address" ok={app?.kyc?.address_verified} />
           <KycRow label="SSN" ok={app?.kyc?.ssn_verified} />
         </div>
+        <p className="hint" style={{ marginTop: 12 }}>
+          If identity verification was unavailable at submit, decision/offer/accept
+          are blocked until it is re-run.
+        </p>
+        <button
+          className="secondary"
+          onClick={recheckKyc}
+          disabled={actionBusy}
+        >
+          {actionBusy ? "Re-checking…" : "Re-run identity check"}
+        </button>
       </div>
 
       {/* Action feedback (shared by all panels) */}

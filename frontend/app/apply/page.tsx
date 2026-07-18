@@ -54,6 +54,11 @@ interface AppResult {
   app_id: string | number;
   status?: string;
   kyc?: Kyc;
+  // False when the KYC service call did not complete at submit (outage/timeout/auth) --
+  // distinct from a KYC that ran and declined. Under the mandatory KYC gate (ADR 0011)
+  // such an application 409s on decision/offer/accept until a recheck persists a passing
+  // row, so the UI must offer a retry rather than the (misleading) all-false KYC result.
+  kyc_checked?: boolean;
   // ADR 0010: unguessable per-application continuation token issued at submit. The
   // logged-out applicant sends it as X-Application-Token to authorize their own
   // decision/offer/accept on this application (officer/owner are authorized otherwise).
@@ -201,6 +206,29 @@ export default function ApplyPage() {
     return app?.continuation_token
       ? { "X-Application-Token": app.continuation_token }
       : {};
+  }
+
+  // KYC recovery (ADR 0011): submit stays resilient during a KYC-service outage
+  // (kyc_checked=false, no persisted row), so the mandatory gate 409s decision/offer/
+  // accept. Re-run KYC for THIS application instead of resubmitting (which would create a
+  // duplicate). The response echoes the continuation token back, so setApp preserves the
+  // capability; it also carries the fresh kyc + kyc_checked.
+  async function recheckKyc() {
+    if (!app) return;
+    setBusy(true);
+    setApiError(null);
+    try {
+      const res = (await apiPost(
+        `/los/applications/${app.app_id}/recheck-kyc`,
+        undefined,
+        appTokenHeader()
+      )) as AppResult;
+      setApp(res);
+    } catch (err) {
+      setApiError(errMsg(err, "Could not re-run identity verification."));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function getDecision() {
@@ -530,28 +558,47 @@ export default function ApplyPage() {
                   Application <strong>#{String(app.app_id)}</strong> received.
                 </div>
 
-                {app.kyc ? (
+                {app.kyc_checked === false ? (
                   <>
                     <h3 style={{ marginTop: 18 }}>Identity verification (KYC)</h3>
-                    <div className="dl">
-                      <KycRow
-                        label="Name"
-                        ok={app.kyc.name_verified}
-                      />
-                      <KycRow label="Date of birth" ok={app.kyc.dob_verified} />
-                      <KycRow label="Address" ok={app.kyc.address_verified} />
-                      <KycRow label="SSN" ok={app.kyc.ssn_verified} />
+                    <div className="alert alert-warn">
+                      We couldn&apos;t complete identity verification just now —
+                      this is usually a temporary issue, not a decline. Retry to
+                      continue; you won&apos;t need to re-enter anything.
                     </div>
+                    <button onClick={recheckKyc} disabled={busy}>
+                      {busy ? "Re-checking…" : "Retry identity check"}
+                    </button>
                   </>
-                ) : null}
-
-                <hr className="divider" />
-
-                {!decision ? (
-                  <button onClick={getDecision} disabled={busy}>
-                    {busy ? "Evaluating…" : "Get decision"}
-                  </button>
                 ) : (
+                  <>
+                    {app.kyc ? (
+                      <>
+                        <h3 style={{ marginTop: 18 }}>
+                          Identity verification (KYC)
+                        </h3>
+                        <div className="dl">
+                          <KycRow label="Name" ok={app.kyc.name_verified} />
+                          <KycRow
+                            label="Date of birth"
+                            ok={app.kyc.dob_verified}
+                          />
+                          <KycRow
+                            label="Address"
+                            ok={app.kyc.address_verified}
+                          />
+                          <KycRow label="SSN" ok={app.kyc.ssn_verified} />
+                        </div>
+                      </>
+                    ) : null}
+
+                    <hr className="divider" />
+
+                    {!decision ? (
+                      <button onClick={getDecision} disabled={busy}>
+                        {busy ? "Evaluating…" : "Get decision"}
+                      </button>
+                    ) : (
                   <>
                     <div className="spread">
                       <h3 style={{ margin: 0 }}>Underwriting decision</h3>
@@ -576,6 +623,8 @@ export default function ApplyPage() {
                         {busy ? "Preparing offer…" : "View your offer"}
                       </button>
                     ) : null}
+                      </>
+                    )}
                   </>
                 )}
 
