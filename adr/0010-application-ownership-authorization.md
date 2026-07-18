@@ -111,6 +111,18 @@ that header is now set **only by the gateway** (it strips any client-supplied co
 does `X-User-*`) — see the browser-side custody note below. A NULL token (officer-created/
 legacy row) has no token path, so those stay officer-OR-owner only. No login, no signup.
 
+**The continuation token also carries *self-service authenticated* applicants, not just
+anonymous ones (PR #7 review).** `POST /applications` creates a fresh applicant it never links
+to `users.applicant_id`, so owner authz (`users.applicant_id == applications.applicant_id`)
+can never match a submission the caller made themselves — a logged-in borrower on the apply
+page is, for that application, in the same position as an anonymous one. The gateway therefore
+issues the resume session/cookie for **every** submit, authenticated or not; owner authz stays
+meaningful for applications an operator later associates with a user (Phase C), and for the
+seeded borrower/application links. (Rejected alternative: binding the new application to
+`users.applicant_id` at submit — it would break the one-applicant-per-application invariant
+intake and the abandon compensation rely on, and reusing the applicant drags in its existing
+`kyc_checks`, entangling the ADR 0011 KYC gate. Deferred to the Phase C `owner_user_id` work.)
+
 **Browser-side custody: server-side session, never localStorage (PR #7 review).** The raw
 token is a bearer credential for money-moving routes, so it is never handed to the browser
 (localStorage/JS would expose it to any same-origin script or XSS). Instead the **gateway**
@@ -190,12 +202,13 @@ the existing identity path cannot cover.
 - Touches schema (`owner_user_id` + migration), three routes, and the frontend (borrower
   login before apply; carry the session).
 - Legacy/anonymous rows have `owner_user_id = NULL` and need a policy (below).
-- **New Redis coupling on the anonymous flow (PR #7 review).** Moving token custody to a
-  server-side resume session (Phase B §3) makes anonymous submit — and every subsequent
-  resume/decision/offer/accept — depend on Redis to create/resolve the session. Redis was
-  already required for login sessions, but anonymous submit previously had no such
+- **New Redis coupling on the self-service apply flow (PR #7 review).** Moving token custody
+  to a server-side resume session (Phase B §3) makes every self-service submit — anonymous OR
+  authenticated (see §3: neither is owner-linked) — and every subsequent
+  resume/decision/offer/accept depend on Redis to create/resolve the session. Redis was
+  already required for login sessions, but self-service submit previously had no such
   dependency (the token rode in the response body). Submit is made atomic from the
-  applicant's perspective: the gateway (1) refuses an anonymous submit up front with a
+  applicant's perspective: the gateway (1) refuses a submit up front with a
   retryable **503** when Redis is unreachable, so origination never commits an application
   whose one-time token could not be stored; and (2) rides a transient blip in the tiny
   post-check window with a bounded retry on the session write, returning a controlled 503

@@ -273,9 +273,13 @@ def test_anonymous_resume_read_503s_when_redis_down(monkeypatch):
     assert resp.status_code == 503
 
 
-def test_authenticated_resume_read_unaffected_by_redis_down(monkeypatch):
-    # An authenticated caller does not need the resume session; a Redis blip resolving a
-    # stale cookie must not block them -- they proceed via their login session.
+def test_self_service_authenticated_resume_read_503s_when_redis_down(monkeypatch):
+    # PR #7 review: a self-service submission is never linked to users.applicant_id, so a
+    # logged-in applicant's ONLY path to decision/offer/accept is the continuation token in the
+    # resume cookie -- exactly like an anonymous one. A resume cookie is present here, so a
+    # Redis blip resolving it must surface a retryable 503, not proceed token-less into a
+    # misleading 404 (which the borrower cannot recover from). Being authenticated does not
+    # exempt them: the capability lives in Redis.
     from app import auth
 
     monkeypatch.setattr(
@@ -286,19 +290,67 @@ def test_authenticated_resume_read_unaffected_by_redis_down(monkeypatch):
         raise RuntimeError("redis down")
 
     monkeypatch.setattr(auth, "resolve_resume", _boom)
-    captured = _capture_forwarded_headers(monkeypatch)
     resp = TestClient(app, cookies={"meridian_resume": "sid-5"}).post(
+        "/los/applications/5/decision", headers={"Authorization": "Bearer sesh"}
+    )
+    assert resp.status_code == 503
+
+
+def test_owner_without_resume_cookie_unaffected_by_redis_down(monkeypatch):
+    # A real owner/officer carries NO resume cookie -- their session authorizes them via
+    # role/owner authz. With no cookie the resolve branch is never entered, so a Redis outage
+    # cannot block them (regression guard: the 503-on-resolve-failure must stay scoped to
+    # cookie-bearing callers).
+    from app import auth
+
+    monkeypatch.setattr(
+        auth, "get_session", lambda token: {"id": 7, "role": "underwriter"}
+    )
+
+    def _boom(sid):
+        raise AssertionError("resolve must not be called without a resume cookie")
+
+    monkeypatch.setattr(auth, "resolve_resume", _boom)
+    captured = _capture_forwarded_headers(monkeypatch)
+    resp = TestClient(app).post(
         "/los/applications/5/decision", headers={"Authorization": "Bearer sesh"}
     )
     assert resp.status_code == 200  # session auth carries them; no token injected
     assert "x-application-token" not in captured["headers"]
 
 
-def test_authenticated_submit_needs_no_resume_session(monkeypatch):
-    # An authenticated owner resumes via their login session, not the anonymous resume
-    # cookie. Their submit must NOT create a resume session and must NOT be 503'd when Redis
-    # is down (the cookie mechanism is anonymous-only). The token is still stripped from the
-    # body (they never use it).
+def test_authenticated_submit_creates_resume_session_and_cookie(monkeypatch):
+    # PR #7 review regression: a logged-in borrower using the apply page must NOT be stranded.
+    # Their submission is not owner-linked, so the gateway captures the freshly issued token
+    # into a resume session and hands them the HttpOnly cookie -- same as anonymous -- so their
+    # next decision/offer/accept authorizes via the token. (Previously this was gated on
+    # user is None, leaving authenticated borrowers with a 200 submit but no working capability.)
+    from app import auth
+
+    monkeypatch.setattr(
+        auth, "get_session", lambda token: {"id": 7, "role": "borrower"}
+    )
+    store, _ = _fake_resume_store(monkeypatch)
+    _capture_forwarded_headers(
+        monkeypatch,
+        resp_body={"app_id": 5, "continuation_token": "raw-tok", "status": "submitted"},
+    )
+    resp = TestClient(app).post(
+        "/los/applications",
+        json={"name": "Jane", "amount": 15000},
+        headers={"Authorization": "Bearer sesh"},
+    )
+    assert resp.status_code == 200
+    assert "continuation_token" not in resp.json()  # never reaches the browser body
+    assert store["sid-5"] == {"app_id": 5, "token": "raw-tok"}  # captured server-side
+    assert "meridian_resume=sid-5" in resp.headers.get("set-cookie", "")
+
+
+def test_authenticated_submit_refused_when_redis_down(monkeypatch):
+    # Parity with the anonymous submit (PR #7 review): an authenticated submit also needs the
+    # resume session (its submission is not owner-linked), so it must be refused up front with
+    # a retryable 503 when Redis is down -- origination never commits an application whose
+    # one-time token could not be stored.
     from app import auth, main
 
     monkeypatch.setattr(
@@ -307,20 +359,18 @@ def test_authenticated_submit_needs_no_resume_session(monkeypatch):
     monkeypatch.setattr(main.config, "redis_reachable", lambda *a, **k: (False, "down"))
 
     def _must_not_create(*a, **k):
-        raise AssertionError("authenticated submit must not create a resume session")
+        raise AssertionError(
+            "submit must not proceed to session creation when Redis is down"
+        )
 
     monkeypatch.setattr(auth, "create_resume_session", _must_not_create)
-    _capture_forwarded_headers(
-        monkeypatch, resp_body={"app_id": 5, "continuation_token": "raw-tok"}
-    )
     resp = TestClient(app).post(
         "/los/applications",
         json={"name": "Jane", "amount": 15000},
         headers={"Authorization": "Bearer sesh"},
     )
-    assert resp.status_code == 200  # not 503 -- Redis is irrelevant to an authed submit
+    assert resp.status_code == 503
     assert "meridian_resume" not in resp.headers.get("set-cookie", "")
-    assert "continuation_token" not in resp.json()
 
 
 def test_recheck_response_body_never_leaks_the_raw_token(monkeypatch):
