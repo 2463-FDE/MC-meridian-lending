@@ -258,6 +258,17 @@ def _apply_flow_db(state):
             return [{"name_verified": True, "address_verified": True}]
         if s.startswith("SELECT APPLICANT_ID FROM APPLICATIONS"):  # submit resolve
             return [{"applicant_id": None}]
+        if "APPLICATIONS A JOIN APPLICANTS" in s:  # recheck applicant-load
+            return [
+                {
+                    "applicant_id": None,
+                    "name": "Jane",
+                    "dob": None,
+                    "ssn": None,
+                    "address": "10 Main St",
+                    "is_entity": False,
+                }
+            ]
         if "LEFT JOIN APPLICANTS" in s:  # decision_request_payload
             return [
                 {
@@ -311,6 +322,30 @@ def test_public_apply_flow_completes_with_continuation_token(monkeypatch):
     assert denied.status_code == 404
 
     # With the issued token -> authorized, decision returns.
+    ok = client.post("/applications/1/decision", headers={"X-Application-Token": token})
+    assert ok.status_code == 200
+    assert ok.json()["decision"] == "approve"
+
+
+def test_recheck_preserves_token_for_anonymous_recovery(monkeypatch):
+    # PR review: a token-authenticated recheck must echo the capability back, or a client
+    # that updates its state from the ApplicationCreated response would null its own token
+    # and be unable to proceed. Prove the token survives recheck AND still authorizes the
+    # next call using only the response-updated state.
+    monkeypatch.setattr(applications.db, "query", _apply_flow_db({}))
+    monkeypatch.setattr(applications.clients, "post", _apply_flow_clients_post)
+    client = TestClient(app)
+
+    rechecked = client.post(
+        "/applications/1/recheck-kyc",
+        headers={"X-Application-Token": _E2E_TOKEN},
+    )
+    assert rechecked.status_code == 200
+    # the recovered client reads its capability from this response, as it does at submit
+    token = rechecked.json()["continuation_token"]
+    assert token == _E2E_TOKEN
+
+    # that response-carried token still authorizes the next step (no resubmit, no support).
     ok = client.post("/applications/1/decision", headers={"X-Application-Token": token})
     assert ok.status_code == 200
     assert ok.json()["decision"] == "approve"

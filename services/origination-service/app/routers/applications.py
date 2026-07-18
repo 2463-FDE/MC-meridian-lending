@@ -214,7 +214,12 @@ def recheck_kyc(
         "status": "submitted",
         "kyc": KycOut(**cip),
         "kyc_checked": kyc_checked,
-        "continuation_token": None,
+        # Echo back the token the caller authenticated with so a client that stores this
+        # ApplicationCreated response does not null its own capability (PR review). authz
+        # already validated it against the stored token, so this discloses nothing new; it
+        # is the credential the anonymous applicant needs for the next decision/offer/accept.
+        # None for officer/owner callers (session-authed) -- they never use the token path.
+        "continuation_token": x_application_token,
     }
 
 
