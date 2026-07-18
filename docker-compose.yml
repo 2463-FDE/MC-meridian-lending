@@ -180,8 +180,12 @@ services:
       # capability is never sent over plain HTTP. The local http demo relaxes it explicitly in
       # docker-compose.demo.yml (or export COOKIE_SECURE=false), NOT here in the base file.
       COOKIE_SECURE: "${COOKIE_SECURE:-true}"
-      # Portal origin allowed to send the credentialed (cookie) resume requests.
-      PORTAL_ORIGIN: http://localhost:3000
+      # Browser origin allowed to send credentialed (cookie) resume requests. Credentialed CORS
+      # rejects any other origin, so a real deploy MUST set its portal origin (via .env / host
+      # env) -- pinning localhost here would make CORS reject the deployed portal, breaking
+      # resume from submit through decision/offer/accept (PR #7 review). Pass the deployment
+      # value through, defaulting to localhost only when unset (local dev).
+      PORTAL_ORIGIN: "${PORTAL_ORIGIN:-http://localhost:3000}"
     ports:
       - "8000:8000"
     depends_on:

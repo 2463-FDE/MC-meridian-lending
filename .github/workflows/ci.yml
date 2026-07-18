@@ -209,6 +209,31 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_proxy_methods.py -q
 
+  compose-hardening-gate:
+    # The resume-cookie flow (ADR 0010 Phase B, PR #7) depends on two gateway settings that
+    # must follow the DEPLOYMENT, not be pinned to local-dev literals in the BASE compose file:
+    #   COOKIE_SECURE  -- pinned false => the resume capability rides plain HTTP in prod.
+    #   PORTAL_ORIGIN  -- pinned localhost => credentialed CORS rejects the real portal, so the
+    #                     applicant cannot continue submit -> decision/offer/accept.
+    # Both must be ${VAR:-default} in docker-compose.yml so a real deploy's .env/host value wins;
+    # the local http relaxation lives in docker-compose.demo.yml only. This job BLOCKS -- no
+    # continue-on-error -- so a future edit that re-pins a literal in the base file fails CI.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: base compose does not pin resume-cookie CORS/Secure config
+        run: |
+          set -euo pipefail
+          # Every COOKIE_SECURE / PORTAL_ORIGIN assignment in the BASE file must interpolate a
+          # variable (contain "${"). A literal value fails. The demo override is exempt.
+          if grep -nE '^[[:space:]]*(COOKIE_SECURE|PORTAL_ORIGIN):' docker-compose.yml \
+              | grep -vF '${'; then
+            echo "FAIL: base docker-compose.yml pins COOKIE_SECURE/PORTAL_ORIGIN to a literal."
+            echo "Use \${VAR:-default} so a real deploy's value wins; keep localhost/false in docker-compose.demo.yml."
+            exit 1
+          fi
+          echo "OK: resume-cookie CORS/Secure config is deployment-overridable in base compose."
+
   kyc-enforcement-gate:
     # ADR 0011 is a compliance control: a regulated decision, an offer, and loan boarding
     # must not proceed on an application whose identity check failed or never ran. The
