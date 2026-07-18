@@ -2,8 +2,9 @@
 regulated / money action (decision, offer, acceptance).
 
 Fails closed: a declined check (CIP false) OR no check at all (kyc-service was down at
-submit, so no kyc_checks row) blocks advancement with 409. Pass mirrors kyc-service's own
-definition: name_verified AND address_verified.
+submit, so no kyc_checks row) blocks advancement with 409. Pass is applicant-type aware:
+a natural person needs name+DOB+address+SSN verified; an entity needs name+address (the
+D11 carve-out -- an LLC has no DOB/SSN/real person).
 """
 
 import pytest
@@ -21,19 +22,47 @@ def _kyc_db(row):
 
     def _q(sql, params=None):
         assert "LEFT JOIN kyc_checks" in sql
+        assert "JOIN applicants" in sql  # gate must load is_entity to be type-aware
         return [row] if row is not None else []
 
     return _q
+
+
+def _person(**over):
+    """A fully-verified natural-person kyc_checks join row; override columns to fail one."""
+    row = {
+        "is_entity": False,
+        "name_verified": True,
+        "dob_verified": True,
+        "address_verified": True,
+        "ssn_verified": True,
+    }
+    row.update(over)
+    return row
 
 
 # --- require_kyc_passed unit -------------------------------------------------
 
 
 def test_passing_kyc_allowed(monkeypatch):
+    monkeypatch.setattr(kyc_gate.db, "query", _kyc_db(_person()))
+    kyc_gate.require_kyc_passed(1)  # no raise
+
+
+def test_entity_passes_on_name_and_address_only(monkeypatch):
+    # Entity/LLC has no DOB/SSN (D11 carve-out): name+address is the whole CIP bar.
     monkeypatch.setattr(
         kyc_gate.db,
         "query",
-        _kyc_db({"name_verified": True, "address_verified": True}),
+        _kyc_db(
+            {
+                "is_entity": True,
+                "name_verified": True,
+                "address_verified": True,
+                "dob_verified": False,
+                "ssn_verified": False,
+            }
+        ),
     )
     kyc_gate.require_kyc_passed(1)  # no raise
 
@@ -41,9 +70,19 @@ def test_passing_kyc_allowed(monkeypatch):
 @pytest.mark.parametrize(
     "row",
     [
-        {"name_verified": False, "address_verified": True},  # name failed
-        {"name_verified": True, "address_verified": False},  # address failed
-        {"name_verified": False, "address_verified": False},  # both failed
+        _person(name_verified=False),  # name failed
+        _person(address_verified=False),  # address failed
+        _person(dob_verified=False),  # natural person, DOB not verified
+        _person(ssn_verified=False),  # natural person, SSN not verified
+        # natural person who supplied only name+address (DOB/SSN null in schema) -- the
+        # exact bypass the finding described: must NOT pass now.
+        {
+            "is_entity": False,
+            "name_verified": True,
+            "address_verified": True,
+            "dob_verified": None,
+            "ssn_verified": None,
+        },
         None,  # no kyc_checks row / missing application (KYC never ran)
     ],
 )
@@ -63,11 +102,7 @@ _OFFICER = {"X-User-Role": "underwriter"}
 
 def _kyc_blocks(monkeypatch):
     # latest kyc_checks row present but declined -> gate blocks.
-    monkeypatch.setattr(
-        applications.db,
-        "query",
-        _kyc_db({"name_verified": False, "address_verified": False}),
-    )
+    monkeypatch.setattr(applications.db, "query", _kyc_db(_person(name_verified=False)))
 
 
 def test_decision_blocked_when_kyc_not_passed(monkeypatch):
@@ -113,9 +148,7 @@ def test_assistant_score_tool_blocked_when_kyc_not_passed(monkeypatch):
         assistant, "decision_request_payload", lambda app_id: {"application_id": app_id}
     )
     monkeypatch.setattr(
-        assistant.kyc_gate.db,
-        "query",
-        _kyc_db({"name_verified": False, "address_verified": False}),
+        assistant.kyc_gate.db, "query", _kyc_db(_person(name_verified=False))
     )
 
     def _must_not_post(*a, **k):

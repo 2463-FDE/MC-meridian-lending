@@ -266,8 +266,16 @@ def _apply_flow_db(state):
         s = sql.strip().upper()
         if "CONTINUATION_TOKEN FROM APPLICATIONS" in s:  # authz lookup
             return [{"applicant_id": None, "continuation_token": _E2E_TOKEN}]
-        if "LEFT JOIN KYC_CHECKS" in s:  # ADR 0011 KYC gate -> passing
-            return [{"name_verified": True, "address_verified": True}]
+        if "LEFT JOIN KYC_CHECKS" in s:  # ADR 0011 KYC gate -> passing (natural person)
+            return [
+                {
+                    "is_entity": False,
+                    "name_verified": True,
+                    "dob_verified": True,
+                    "address_verified": True,
+                    "ssn_verified": True,
+                }
+            ]
         if s.startswith("SELECT APPLICANT_ID FROM APPLICATIONS"):  # submit resolve
             return [{"applicant_id": None}]
         if "APPLICATIONS A JOIN APPLICANTS" in s:  # recheck applicant-load
