@@ -68,7 +68,14 @@ def kyc_check(
 
     # persist the CIP result (still no sanctions/ubo columns to persist — debt preserved).
     # Raw psycopg2 write path, matching how origination wrote it.
-    check_id = -1
+    #
+    # Fail closed if the row cannot be written (ADR 0011, PR review): the persisted
+    # kyc_checks row -- not this response -- is the gate for decision/offer/boarding
+    # (origination require_kyc_passed). Returning status=pass with no row would tell the
+    # applicant they were KYC-checked while every downstream action stays blocked, an
+    # application with no in-product recovery path. A 503 surfaces the persistence failure
+    # to the caller (origination records kyc_unavailable and flags kyc_checked=False)
+    # instead of hiding it behind a successful KYC response.
     try:
         rows = db.query(
             "INSERT INTO kyc_checks (applicant_id, name_verified, dob_verified, "
@@ -81,9 +88,17 @@ def kyc_check(
                 cip["ssn_verified"],
             ),
         )
-        check_id = rows[0]["id"] if rows else -1
     except Exception as e:  # noqa
-        log.warning("could not persist kyc: %s", e)
+        log.error("could not persist kyc for applicant_id=%s: %s", body.applicant_id, e)
+        raise HTTPException(
+            status_code=503, detail="could not persist identity verification result"
+        )
+    if not rows:
+        log.error("kyc insert returned no id for applicant_id=%s", body.applicant_id)
+        raise HTTPException(
+            status_code=503, detail="could not persist identity verification result"
+        )
+    check_id = rows[0]["id"]
 
     return CipCheckOut(
         check_id=check_id,

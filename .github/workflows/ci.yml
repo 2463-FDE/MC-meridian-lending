@@ -195,6 +195,13 @@ jobs:
     # KYC. They also run in the `backend` job under continue-on-error/|| true, so a
     # reopened gap would stay green. This job MUST block -- no continue-on-error, no
     # `|| true`.
+    #
+    # The gate only holds if kyc-service actually persists a kyc_checks row for every
+    # successful KYC response: test_kyc_persistence.py proves /kyc/check fails closed (503)
+    # when the insert fails instead of reporting a pass with no row, and that a partial /
+    # entity request (no dob/ssn) persists a pass/fail row rather than 422-ing into a
+    # phantom "KYC unavailable". Runs under the continue-on-error backend job too, so it
+    # blocks here.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -206,6 +213,11 @@ jobs:
           cd services/origination-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_kyc_gate.py -q
+      - name: kyc-service persistence + boundary-contract tests
+        run: |
+          cd services/kyc-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_kyc_persistence.py -q
 
   db-readiness-gate:
     # DB readiness is a security control: a passwordless / placeholder / stale
