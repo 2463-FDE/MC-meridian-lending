@@ -316,6 +316,47 @@ class TestPiiRedactorSsn:
         assert PiiRedactor.redact("version 4.12.55") == "version 4.12.55"
         assert PiiRedactor.redact("loan_id: 412559981") == "loan_id: 412559981"
 
+    # --- M1 regression: unlabeled 3-2-4 SSN with non-space separators / whitespace
+    # runs previously slipped past 3a (dash-only) and 3a-bis (single-space-only),
+    # leaking a full SSN into a str(payload) log line when the SSN sits in a
+    # free-text or unlabeled field. The 3-2-4 grouping is SSN-specific, so these
+    # are redacted even without a label.
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "412.55.9981",  # dotted
+            "412/55/9981",  # slashed
+            "412 55 9981",  # single space (already covered; keep as guard)
+            "412  55  9981",  # double space (blind spot)
+            "412\t55\t9981",  # tab (blind spot)
+        ],
+    )
+    def test_unlabeled_ssn_separator_variants_masked(self, raw):
+        result = PiiRedactor.redact(f"Applicant {raw} flagged for review")
+        assert "9981" in result  # last 4 preserved
+        assert "•••-••-9981" in result
+        assert raw not in result  # full grouped SSN gone
+
+    def test_labeled_ssn_double_separator_run_masked(self):
+        # 3b previously used a single optional separator ([-.\s/]?), so a labeled
+        # SSN with a two-char separator ("412  55  9981") left the second space
+        # unconsumed and the value slipped through even WITH the label.
+        result = PiiRedactor.redact('{"ssn": "412  55  9981"}')
+        assert "412  55" not in result
+        assert "•••-••-9981" in result
+
+    def test_unlabeled_separator_pass_no_false_positive(self):
+        # 1-2-2 version strings and real IPv4 are not 3-2-4 and must survive the
+        # generalized unlabeled SSN pass unchanged.
+        for benign in ("version 4.12.55", "ip 192.168.1.1"):
+            assert PiiRedactor.redact(benign) == benign
+        # A 3-3-4 free-text phone is caught by the phone pass, not the SSN pass:
+        # it is still redacted (PII), just not as an SSN. Assert it does not slip
+        # AND is not mis-masked in SSN (•••-••-) shape.
+        phone_out = PiiRedactor.redact("call 555 123 4567")
+        assert "555 123 4567" not in phone_out
+        assert "•••-••-" not in phone_out  # not mistaken for an SSN
+
 
 class TestPiiRedactorEmail:
     """Test email redaction."""
