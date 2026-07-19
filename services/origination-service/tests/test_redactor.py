@@ -327,8 +327,10 @@ class TestPiiRedactorSsn:
             "412.55.9981",  # dotted
             "412/55/9981",  # slashed
             "412 55 9981",  # single space (already covered; keep as guard)
-            "412  55  9981",  # double space (blind spot)
-            "412\t55\t9981",  # tab (blind spot)
+            "412  55  9981",  # double space
+            "412   55   9981",  # triple space -- must not slip by adding a space
+            "412\t55\t9981",  # tab
+            "412 \t 55 \t 9981",  # mixed space/tab run
         ],
     )
     def test_unlabeled_ssn_separator_variants_masked(self, raw):
@@ -337,13 +339,23 @@ class TestPiiRedactorSsn:
         assert "•••-••-9981" in result
         assert raw not in result  # full grouped SSN gone
 
-    def test_labeled_ssn_double_separator_run_masked(self):
-        # 3b previously used a single optional separator ([-.\s/]?), so a labeled
-        # SSN with a two-char separator ("412  55  9981") left the second space
-        # unconsumed and the value slipped through even WITH the label.
-        result = PiiRedactor.redact('{"ssn": "412  55  9981"}')
-        assert "412  55" not in result
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "412  55  9981",  # 2 spaces
+            "412    55    9981",  # 4 spaces -- unbounded run, not a fixed cap
+            "412\t\t55\t\t9981",  # tab run
+            "412 . 55 . 9981",  # separator + surrounding space run
+        ],
+    )
+    def test_labeled_ssn_separator_run_masked(self, raw):
+        # 3b previously bounded the separator ([-.\s/]{0,3}), so a labeled SSN with
+        # one extra space ("412    55    9981") slipped through even WITH the label.
+        # The label is the signal, so any-length separator run must be consumed.
+        result = PiiRedactor.redact(f'{{"ssn": "{raw}"}}')
+        assert "9981" in result
         assert "•••-••-9981" in result
+        assert raw not in result
 
     def test_unlabeled_separator_pass_no_false_positive(self):
         # 1-2-2 version strings and real IPv4 are not 3-2-4 and must survive the

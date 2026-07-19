@@ -331,28 +331,29 @@ class PiiRedactor:
             r"\b\d{3}-\d{2}-(\d{4})\b", lambda m: "•••-••-" + m.group(1), text
         )
         # 3a-bis. Unlabeled SSN with a consistent non-dash separator
-        # (XXX.XX.XXXX, XXX/XX/XXXX) or whitespace (single/double space or tab:
-        # "XXX XX XXXX", "XXX  XX  XXXX", "XXX\tXX\tXXXX"). The 3-2-4 grouping is
-        # SSN-specific (phones are 3-3-4), so the false-positive risk is low
-        # enough to redact even unlabeled, unlike the bare-digit case in 3b. A
-        # dotted/slashed/tabbed/multi-space SSN is still a plain SSN and must not
-        # slip through the way a single-space one already doesn't. Dash is covered
-        # by 3a above; the \1 backref keeps the dot/slash separator consistent so
-        # we don't match mixed-punctuation noise.
+        # (XXX.XX.XXXX, XXX/XX/XXXX) or a whitespace RUN of any length (space/tab,
+        # single or many: "XXX XX XXXX", "XXX   XX   XXXX", "XXX\tXX\tXXXX"). The
+        # 3-2-4 grouping is SSN-specific (phones are 3-3-4), so the false-positive
+        # risk is low enough to redact even unlabeled, unlike the bare-digit case
+        # in 3b. Whitespace uses [ \t]+ (not a fixed cap) so an extra space can't
+        # smuggle a full SSN past redaction. Dash is covered by 3a above; the \1
+        # backref keeps the dot/slash separator consistent so we don't match
+        # mixed-punctuation noise.
         text = re.sub(
-            r"\b\d{3}(?:([./])\d{2}\1|[ \t]{1,2}\d{2}[ \t]{1,2})(\d{4})\b",
+            r"\b\d{3}(?:([./])\d{2}\1|[ \t]+\d{2}[ \t]+)(\d{4})\b",
             lambda m: "•••-••-" + m.group(2),
             text,
         )
         # 3b. Redact bare/loosely-formatted SSN ONLY inside a labeled field, so we
         # don't mask unrelated 9-digit numbers (loan IDs, amounts, timestamps).
         # The label is the signal, so accept any separator (dash/dot/slash/space/
-        # tab/none) -- including a RUN of them ("412  55  9981") -- between the
-        # digit groups: a dotted "ssn": "412.55.9981" or double-spaced value is
-        # still a plain SSN and must not slip through. {0,3} (not a single ?) is
-        # what lets a two-space or space+tab separator through.
+        # tab/none) -- including an arbitrarily long RUN of them ("412    55    9981")
+        # -- between the digit groups: a dotted "ssn": "412.55.9981" or a value
+        # padded with many spaces is still a plain SSN and must not slip through.
+        # [-.\s/]* (not a bounded {0,N}) is what stops an extra separator from
+        # smuggling the SSN past the labeled rule.
         text = re.sub(
-            r'(["\']?(?:ssn|social[_ ]?security|tax[_ ]?id|tin)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?)\d{3}[-.\s/]{0,3}\d{2}[-.\s/]{0,3}(\d{4})\b',
+            r'(["\']?(?:ssn|social[_ ]?security|tax[_ ]?id|tin)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?)\d{3}[-.\s/]*\d{2}[-.\s/]*(\d{4})\b',
             lambda m: m.group(1) + "•••-••-" + m.group(2),
             text,
             flags=re.IGNORECASE,
