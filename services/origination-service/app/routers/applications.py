@@ -590,7 +590,23 @@ def accept_offer(
     # money-moving action, so only an officer, the owning borrower, or the applicant
     # holding this application's continuation token may accept -- never an anonymous caller
     # who guessed an approved application id.
-    authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
+    try:
+        authz.require_officer_or_owner(
+            app_id, x_user_role, x_user_id, x_application_token
+        )
+    except HTTPException:
+        # Terminal accept replay (PR review): the FIRST accept funds the loan and retires
+        # the continuation token (expiry nulled below), so a lost-response retry from the
+        # anonymous applicant -- whose token is their only credential -- would now 404 and
+        # hide a funded loan behind an unrecoverable failure. If the retried token still
+        # matches THIS application's preserved token hash AND a loan is already boarded,
+        # replay that loan. This path only RETURNS an existing loan (never boards, never
+        # touches state), so the retired token grants no new capability -- forward routes
+        # (decision/offer/detail) stay closed because they see the nulled expiry as expired.
+        replay_loan = authz.terminal_accept_replay(app_id, x_application_token)
+        if replay_loan is None:
+            raise
+        return {"loan_id": replay_loan}
     # ADR 0011: boarding is the money action -- require a passing KYC (defense in depth;
     # decisioning is already gated, but never board a funded loan on an unverified identity
     # even if an approved decision somehow predates the gate).
@@ -677,11 +693,15 @@ def accept_offer(
     )
     # Fund AND retire the continuation token in one statement (PR #7 review): boarding is
     # the terminal money action, so the anonymous bearer capability must not outlive it.
-    # Clearing the hash + expiry makes the token single-use at funding -- a token left in
-    # browser storage / shared-device residue cannot re-drive a funded application. Idempotent
-    # on replay (already NULL). Officer/owner access is unaffected (it never used the token).
+    # Nulling the EXPIRY retires the token for every normal route -- authz treats a NULL
+    # expiry as expired (_expired), so a token left in browser storage / shared-device
+    # residue cannot re-drive a funded application (decision/offer/detail all deny). The
+    # token HASH is deliberately PRESERVED (not nulled) so a lost-response accept retry can
+    # still be verified for the replay-only terminal_accept_replay path above -- that path
+    # can only return the already-boarded loan, never board or drive anything. Idempotent on
+    # replay (expiry already NULL). Officer/owner access is unaffected (it never used the token).
     db.query(
-        "UPDATE applications SET status = 'funded', continuation_token = NULL, "
+        "UPDATE applications SET status = 'funded', "
         "continuation_token_expires_at = NULL WHERE id = %s",
         (app_id,),
     )

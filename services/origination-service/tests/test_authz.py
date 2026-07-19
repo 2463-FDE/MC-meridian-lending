@@ -581,9 +581,13 @@ def test_null_expiry_token_denied(monkeypatch):
     assert exc.value.status_code == 404
 
 
-def test_accept_clears_continuation_token_on_funding(monkeypatch):
-    # single-use at the money action: boarding a loan must retire the bearer token so it
-    # cannot re-drive a funded application. Assert the funded UPDATE nulls the token.
+def test_accept_retires_token_expiry_but_preserves_hash_on_funding(monkeypatch):
+    # single-use at the money action: boarding retires the bearer token for every forward
+    # route by nulling its EXPIRY (authz treats a NULL expiry as expired), so it can no
+    # longer re-drive a funded application. The token HASH is deliberately PRESERVED so a
+    # lost-response accept retry can still be verified for the replay-only recovery path
+    # (see test_anonymous_accept_retry_replays_loan_after_token_retired). Assert the funded
+    # UPDATE nulls the expiry and does NOT null the hash.
     captured = []
 
     def _q(sql, params=None):
@@ -619,8 +623,69 @@ def test_accept_clears_continuation_token_on_funding(monkeypatch):
     )
     assert resp.status_code == 200
     funded = next(s for s in captured if s.startswith("UPDATE APPLICATIONS SET STATUS"))
-    assert "CONTINUATION_TOKEN = NULL" in funded
     assert "CONTINUATION_TOKEN_EXPIRES_AT = NULL" in funded
+    # the hash must survive funding so the terminal accept-retry can still verify it
+    assert "CONTINUATION_TOKEN = NULL" not in funded
+
+
+def test_anonymous_accept_retry_replays_loan_after_token_retired(monkeypatch):
+    # PR review regression: the FIRST anonymous accept funds the loan and retires the token
+    # (expiry nulled, hash preserved). The applicant's browser loses the response and
+    # retries with the SAME token. The token now fails the normal (expired) authz check, so
+    # the retry must fall through to terminal_accept_replay and return the SAME loan -- an
+    # idempotent success -- never a 404 that hides the funded loan. Exercises the token
+    # path, not officer replay.
+    stored_hash = authz.hash_token(_E2E_TOKEN)
+
+    def _q(sql, params=None):
+        s = sql.strip().upper()
+        # normal authz lookup: token retired -> expiry is NULL -> _expired() denies
+        if "CONTINUATION_TOKEN_EXPIRES_AT FROM APPLICATIONS" in s:
+            return [
+                {
+                    "applicant_id": None,
+                    "continuation_token": stored_hash,
+                    "continuation_token_expires_at": None,
+                }
+            ]
+        # terminal_accept_replay: funded app still carries the preserved hash
+        if "SELECT CONTINUATION_TOKEN FROM APPLICATIONS" in s:
+            return [{"continuation_token": stored_hash}]
+        # terminal_accept_replay: the already-boarded loan
+        if "SELECT ID FROM LOANS WHERE APP_ID" in s:
+            return [{"id": 909}]
+        raise AssertionError(f"unexpected query on retry path: {sql}")
+
+    monkeypatch.setattr(applications.db, "query", _q)
+    monkeypatch.setattr(authz.db, "query", _q)
+
+    def _must_not_board(*a, **k):
+        raise AssertionError("terminal replay must not board a second loan")
+
+    monkeypatch.setattr(applications.intake, "board_to_servicing", _must_not_board)
+
+    resp = TestClient(app).post(
+        "/applications/1/accept",
+        headers={"X-Application-Token": _E2E_TOKEN},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["loan_id"] == 909  # same funded loan, replayed idempotently
+
+
+def test_retired_token_still_denied_on_forward_route(monkeypatch):
+    # Security regression: preserving the token hash at funding must NOT reopen forward
+    # routes. A retired token (expiry NULL, hash present) presented to decision must still
+    # 404 -- the replay allowance is accept-scoped, not a general capability.
+    monkeypatch.setattr(
+        authz.db,
+        "query",
+        _authz_db(None, app_applicant_id=None, app_token=_E2E_TOKEN, expires_at=None),
+    )
+    resp = TestClient(app).post(
+        "/applications/1/decision",
+        headers={"X-Application-Token": _E2E_TOKEN},
+    )
+    assert resp.status_code == 404
 
 
 def test_owner_still_allowed_with_token_column_present(monkeypatch):

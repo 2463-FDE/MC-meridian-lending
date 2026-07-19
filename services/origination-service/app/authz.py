@@ -112,6 +112,38 @@ def verify_token(raw: str, stored: str) -> bool:
     return False
 
 
+def terminal_accept_replay(app_id: int, x_application_token: str | None) -> int | None:
+    """Replay-only authorization for a retried anonymous accept after funding (PR review).
+
+    The first accept funds the loan and retires the continuation token by nulling its
+    expiry (accept_offer), so require_officer_or_owner now denies the retry (expired). But
+    the token hash is preserved, and the applicant's lost-response retry still carries the
+    raw token -- their only credential. Return the already-boarded loan id when that token
+    verifies against THIS funded application's preserved hash and a loan exists; else None.
+
+    This grants NO forward capability: it is called only by accept, requires the
+    application to already be 'funded', and only ever RETURNS an existing loan (it never
+    boards, mutates, or authorizes another route). So the retired token cannot re-drive a
+    funded application -- it can only recover the idempotent success it already earned.
+    """
+    if not x_application_token:
+        return None
+    rows = db.query(
+        "SELECT continuation_token FROM applications "
+        "WHERE id = %s AND status = 'funded'",
+        (app_id,),
+    )
+    if not rows:
+        return None
+    stored = rows[0]["continuation_token"]
+    if not stored or not verify_token(x_application_token, stored):
+        return None
+    loans = db.query(
+        "SELECT id FROM loans WHERE app_id = %s ORDER BY id LIMIT 1", (app_id,)
+    )
+    return loans[0]["id"] if loans else None
+
+
 def _is_officer(x_user_role: str | None) -> bool:
     return (x_user_role or "").strip().lower() in _OFFICER_ROLES
 
