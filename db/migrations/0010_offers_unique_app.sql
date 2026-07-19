@@ -1,0 +1,34 @@
+-- PR review: offer generation must not persist duplicate TILA/Reg-Z disclosures on retry.
+-- disclosure-service create_offer inserts an offers row per POST /offers, and origination
+-- make_offer forwards every authorized /offer POST with no idempotency check, so a borrower
+-- double-click, a browser retry, or a gateway timeout after the downstream insert creates
+-- multiple regulated disclosure records for one application. accept_offer then reads the
+-- LATEST offer (ORDER BY o.id DESC) to board the loan, so a retry after a policy/rate deploy
+-- could even change which disclosure is boarded.
+--
+-- One current offer per application makes generation idempotent: create_offer reuses the
+-- existing offer, and the concurrent loser gets a UniqueViolation and replays it instead of
+-- inserting a second. Partial so any legacy app_id-less offer row is unaffected. Mirrors
+-- uq_loans_app (migration 0007); disclosure-service /health reports
+-- schema_not_ready:uq_offers_app until it exists.
+--
+-- LEGACY DATA (apply-order rung): an already-initialized volume may ALREADY contain
+-- duplicate offers for one app_id -- created by the very duplication bug this index closes.
+-- On such a volume this CREATE UNIQUE INDEX FAILS ("... contains duplicated values") and
+-- disclosure-service /health reports schema_not_ready:uq_offers_app (unhealthy, loud) until
+-- the duplicates are resolved. Deduplicate first, keeping the EARLIEST offer per application
+-- (offers are deterministic from server-derived inputs, so duplicates carry identical terms).
+-- This is intentionally a MANUAL, operator-run step (not auto-run here) -- it deletes rows, a
+-- data decision to review against any funded loan that already read an offer. Example:
+--
+--   -- inspect first
+--   SELECT app_id, count(*), array_agg(id ORDER BY id)
+--   FROM offers WHERE app_id IS NOT NULL GROUP BY app_id HAVING count(*) > 1;
+--
+--   -- then, per reviewed app_id, drop the later duplicate offers, keeping the earliest id:
+--   DELETE FROM offers o
+--     WHERE o.app_id IS NOT NULL
+--       AND o.id > (SELECT min(id) FROM offers o2 WHERE o2.app_id = o.app_id);
+--
+-- A fresh db/init volume (and the seed) has no duplicates, so this applies cleanly there.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_offers_app ON offers (app_id) WHERE app_id IS NOT NULL;

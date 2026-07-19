@@ -14,8 +14,30 @@ class RedactingFormatter(logging.Formatter):
     """Custom formatter that redacts PII before writing logs."""
 
     def format(self, record: logging.LogRecord) -> str:
-        msg = super().format(record)
-        return PiiRedactor.redact(msg)
+        # A prior handler's plain formatter may have already cached record.exc_text
+        # RAW (stdlib caches the traceback on first format()). stdlib format() then
+        # SKIPS formatException when exc_text is already set, so our formatException
+        # override never runs and the raw traceback would be appended verbatim.
+        # Redact the cached copy in place before super() appends it.
+        if record.exc_text:
+            record.exc_text = PiiRedactor.redact(record.exc_text)
+        return super().format(record)
+
+    def formatMessage(self, record: logging.LogRecord) -> str:
+        # Redact the MESSAGE only (args already expanded) -- never the levelname/asctime
+        # prefix. Redacting the whole formatted line let a Luhn-valid timestamp digit run
+        # (YYYYMMDDHHMMSSmmm) be masked as a false PAN: corrupted timestamps + time-flaky
+        # redaction tests. record.message is transient (re-derived every format() call), so
+        # mutating it here does not affect other handlers.
+        record.message = PiiRedactor.redact(record.message)
+        return super().formatMessage(record)
+
+    def formatException(self, ei) -> str:
+        # Tracebacks can carry PII -- still redacted (appended after the timestamp prefix).
+        return PiiRedactor.redact(super().formatException(ei))
+
+    def formatStack(self, stack_info: str) -> str:
+        return PiiRedactor.redact(super().formatStack(stack_info))
 
 
 def get_logger(name: str) -> logging.Logger:

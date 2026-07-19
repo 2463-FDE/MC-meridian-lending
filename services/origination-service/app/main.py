@@ -4,16 +4,18 @@ Endpoints: application intake, KYC (CIP), decisioning, offer/disclosure, and the
 LOS->LSS boarding seam. Read paths (list/detail) use SQLAlchemy; the older write paths
 (intake, decisioning, boarding) still use raw psycopg2 — a partial, unfinished migration.
 """
-import logging
+
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+import httpx
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import config, intake
+from . import assistant, authz, config, intake
 from .llm import ClaudeClient, load_llm_config
+from .llm.errors import LLMError
 from .logging_config import get_logger
 from .routers import applications, offers
 
@@ -74,15 +76,90 @@ def health():
     if missing:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "service": "origination", "missing_secrets": missing},
+            content={
+                "status": "unhealthy",
+                "service": "origination",
+                "missing_secrets": missing,
+            },
         )
     ok, db_error = config.database_reachable()
     if not ok:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "service": "origination", "database_error": db_error},
+            content={
+                "status": "unhealthy",
+                "service": "origination",
+                "database_error": db_error,
+            },
         )
     return {"status": "ok", "service": "origination"}
+
+
+@app.post("/assistant/decisions/{app_id}")
+def assistant_decide(
+    app_id: int,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    client: ClaudeClient = Depends(get_llm_client),
+):
+    """Decision an application through the officer assistant (ADR 0009 §5).
+
+    The agent's score tool performs the regulated decision + record write in
+    decision-service; the response below is validated against that persisted record
+    (recorded facts win over narration). Gated by LLM_ENABLED like all LLM routes.
+
+    Optional Idempotency-Key header (same contract as /applications/{app_id}/decision):
+    a retry with the same key replays the recorded decision instead of re-pulling credit
+    and appending a second regulated event. Absent = explicit re-decision.
+    """
+    authz.require_officer(x_user_role)
+    if idempotency_key is not None and len(idempotency_key) > 64:
+        raise HTTPException(
+            status_code=400, detail="Idempotency-Key must be at most 64 characters"
+        )
+    return _run_assistant(app_id, client, "decision", idempotency_key or None)
+
+
+@app.get("/assistant/decisions/{app_id}")
+def assistant_explain(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    client: ClaudeClient = Depends(get_llm_client),
+):
+    """Explain an EXISTING decision from the persisted record (ADR 0009 §5 amendment).
+
+    Read-only: never scores, so asking about an application cannot trigger a fresh
+    credit pull. Legacy outcomes (pre-record, e.g. #6012) are answered honestly as
+    unrecoverable, distinct from 404 never-decisioned.
+    """
+    authz.require_officer(x_user_role)
+    return _run_assistant(app_id, client, "explain")
+
+
+def _run_assistant(
+    app_id: int, client: ClaudeClient, task: str, request_id: str | None = None
+):
+    try:
+        return assistant.run(app_id, client, task, request_id)
+    except assistant.ApplicationNotFound:
+        raise HTTPException(status_code=404, detail="application not found")
+    except assistant.AssistantError as exc:
+        log.error("assistant failed for app_id=%s: %s", app_id, exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except LLMError as exc:
+        log.error("assistant LLM failure for app_id=%s: %s", app_id, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="assistant unavailable") from exc
+    except httpx.HTTPStatusError as exc:
+        if exc.response is not None and exc.response.status_code == 409:
+            # Reused idempotency key with changed inputs — a conflict, not an outage.
+            raise HTTPException(
+                status_code=409,
+                detail="Idempotency-Key reused with different decision inputs",
+            ) from exc
+        # The score tool's downstream refusal (e.g. decision-service failing closed
+        # on bureau or record write) surfaces as service-unavailable, not a 500.
+        log.error("assistant downstream failure for app_id=%s: %s", app_id, exc)
+        raise HTTPException(status_code=503, detail="decisioning unavailable") from exc
 
 
 class BoardIn(BaseModel):
@@ -94,10 +171,32 @@ class BoardIn(BaseModel):
 
 
 @app.post("/board")
-def board(body: BoardIn):
-    """Legacy direct-boarding endpoint (the LOS->LSS seam). See docs/architecture.md."""
+def board(
+    body: BoardIn,
+    x_internal_service: str | None = Header(default=None, alias="X-Internal-Service"),
+):
+    """Legacy direct-boarding endpoint (the LOS->LSS seam). See docs/architecture.md.
+
+    Internal-only (PR review): this creates a loan + balance in servicing from FULLY
+    caller-supplied inputs (principal, term, name) with no LOS lookup, and is reachable
+    through the gateway's anonymous /los proxy — an external caller could board an
+    arbitrary loan. No product caller invokes it (the real flow is /applications/{id}/
+    accept); it is retained only as an ops/seam hatch, so it now requires the shared
+    internal-service secret, which the gateway strips from external requests.
+
+    ADR 0011 KYC gate NOT applied here (deliberate, parity with the ADR 0010 decision-state
+    guard exemption): /board is an internal-only ops hatch with FULLY caller-supplied
+    inputs and no LOS lookup, invoked by no product caller. The product boarding path
+    (/applications/{id}/accept) IS KYC-gated. Gating this hatch on KYC would presume an LOS
+    application it does not read; an operator using it takes explicit responsibility. Noted,
+    not missed.
+    """
+    applications._require_internal_caller(x_internal_service)
     loan_id = intake.board_to_servicing(
-        body.app_id, body.applicant_name, body.principal,
-        body.annual_rate_pct, body.term_months,
+        body.app_id,
+        body.applicant_name,
+        body.principal,
+        body.annual_rate_pct,
+        body.term_months,
     )
     return {"loan_id": loan_id}

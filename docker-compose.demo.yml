@@ -10,8 +10,48 @@
 #
 # This override is NOT auto-loaded — you must pass it explicitly, so it can never
 # silently apply to a production `docker compose up`.
+#
+# It also supplies a DEMO INTERNAL_SERVICE_TOKEN so the internal service-to-service
+# routes (POST /decisions, /kyc/check, /offers, monthly-debt, /board) actually work and
+# /health reports ready. The value is a fixed non-secret dev string — safe to commit
+# ONLY because this file is the explicit local-demo override; a real deploy uses .env /
+# secret-manager (left blank there so it fails closed). All four internal services get
+# the SAME value: origination forwards it, the others compare against it.
+x-demo-internal-token: &demo_internal_token "dev-internal-token-not-for-production"
+# DEMO pepper for the SSN idempotency fingerprint. Set here (not in .env / .env.example)
+# for the same reason as the token above: committing a usable pepper in the production
+# template would make the persisted SSN fingerprints brute-forceable back to SSNs. Safe
+# here ONLY because this override is local-demo-explicit and runs ENVIRONMENT=development
+# over synthetic SSNs; a real deploy sets a secret pepper from a secret-manager, and a
+# blank/placeholder pepper reports unhealthy outside development.
+x-demo-fingerprint-pepper: &demo_fingerprint_pepper "dev-fingerprint-pepper-not-for-production"
 services:
+  gateway:
+    environment:
+      # Local demo runs over http://localhost, so the resume cookie must not be Secure-only (a
+      # Secure cookie is not sent over plain http). The base compose defaults COOKIE_SECURE to
+      # true (prod-safe); this override relaxes it for the local http demo only (PR #7 review).
+      COOKIE_SECURE: "false"
+      # The gateway is an internal caller too (the compensating /abandon on a resume-session
+      # failure), so it must share the same demo internal token as the services it calls.
+      INTERNAL_SERVICE_TOKEN: *demo_internal_token
+  origination-service:
+    environment:
+      # Local demo only: development relaxes the dedicated-pepper requirement (PR #7 review),
+      # so anonymous apply issues resume tokens without CONTINUATION_TOKEN_KEYS set (falls back
+      # to the demo INTERNAL_SERVICE_TOKEN). Production must set CONTINUATION_TOKEN_KEYS or
+      # /health is unhealthy and submit refuses.
+      ENVIRONMENT: development
+      INTERNAL_SERVICE_TOKEN: *demo_internal_token
+  kyc-service:
+    environment:
+      INTERNAL_SERVICE_TOKEN: *demo_internal_token
+  disclosure-service:
+    environment:
+      INTERNAL_SERVICE_TOKEN: *demo_internal_token
   decision-service:
     environment:
       ENVIRONMENT: development
       ALLOW_SYNTHETIC_CREDIT: "1"
+      INTERNAL_SERVICE_TOKEN: *demo_internal_token
+      DECISION_FINGERPRINT_PEPPER: *demo_fingerprint_pepper

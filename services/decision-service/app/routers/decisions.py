@@ -1,37 +1,172 @@
 """Credit decisioning endpoint.
 
-Runs the SYNCHRONOUS decisioning chain inline on the request thread and persists the
-bare outcome only. No reason codes, no model drivers, no inputs, no timestamp are stored
-(the missing decision audit trail). (D4, D9, D10)
+Runs the SYNCHRONOUS decisioning chain inline on the request thread (deferred async:
+ADR 0009 §6) and persists an append-only decision_events record atomically with the
+outcome — or refuses the decision (fail closed, ADR 0009 §4).
 """
-from fastapi import APIRouter, HTTPException
 
-from .. import decision
+import hmac
+
+from fastapi import APIRouter, Header, HTTPException, Query
+
+from .. import config, db, decision
 from ..logging_config import get_logger
-from ..schemas import DecisionIn, DecisionOut
+from ..reasons import UnmappedFeatureError
+from ..schemas import DecisionIn, DecisionOut, DecisionRecordOut
 
 log = get_logger("decisions")
 router = APIRouter(prefix="/decisions", tags=["decisions"])
 
 
+def _require_internal_caller(x_internal_service: str | None) -> None:
+    """Gate a route to internal service-to-service callers (PR review).
+
+    The record endpoint returns credit-decision data (outcome, reason codes,
+    model score, policy band, decider) and is reachable through the gateway's
+    anonymous /decision proxy, so without this an attacker could enumerate app
+    ids and read decisions. Its only legitimate caller is origination's assistant,
+    which calls decision-service directly (bypassing the gateway) and carries this
+    shared secret; the gateway strips any client-supplied X-Internal-Service header
+    so an external request can never forge it.
+
+    Fail closed: an unconfigured token denies all (503), never opens the route.
+    Constant-time compare so the token cannot be recovered byte-by-byte by timing.
+    """
+    expected = config.INTERNAL_SERVICE_TOKEN
+    if not expected:
+        log.error("INTERNAL_SERVICE_TOKEN not configured; refusing internal route")
+        raise HTTPException(status_code=503, detail="internal auth not configured")
+    # Compare as bytes: hmac.compare_digest rejects non-ASCII str inputs with a
+    # TypeError (which would surface as a 500), so encode both sides — still
+    # constant-time, but robust to any token value an operator configures.
+    if not x_internal_service or not hmac.compare_digest(
+        x_internal_service.encode("utf-8"), expected.encode("utf-8")
+    ):
+        raise HTTPException(
+            status_code=403, detail="internal service identity required"
+        )
+
+
+@router.get("/{app_id}/record", response_model=DecisionRecordOut)
+def get_decision_record(
+    app_id: int,
+    request_id: str | None = Query(default=None, max_length=64),
+    x_internal_service: str | None = Header(default=None, alias="X-Internal-Service"),
+):
+    """Decision event for an application — the identifier-free projection the officer
+    assistant's memory tool reads (ADR 0009 §5). Legacy outcomes whose reasons were
+    never captured answer status=no_record_legacy, distinct from 404.
+
+    Internal-only: requires the X-Internal-Service shared secret (PR review). This is
+    a service-to-service memory-tool lookup, never a public read, so it is refused
+    (403) for callers arriving through the anonymous gateway proxy.
+
+    When request_id is supplied the lookup is scoped to that exact event (the one the
+    caller's own decision created) instead of the app's latest, so a concurrent
+    re-decision landing between scoring and validation cannot swap the record out from
+    under the request (PR #7 review). A scoped miss is a 404 — legacy rows carry no
+    request_id, so falling back to app-latest would return an unrelated event."""
+    _require_internal_caller(x_internal_service)
+    if request_id is not None:
+        events = db.query(
+            "SELECT outcome, principal_reasons, drivers, policy_band, "
+            "decided_by, decided_at FROM decision_events "
+            "WHERE app_id = %s AND request_id = %s ORDER BY id DESC LIMIT 1",
+            (app_id, request_id),
+        )
+        if not events:
+            raise HTTPException(
+                status_code=404, detail="no decision event for this request_id"
+            )
+    else:
+        events = db.query(
+            "SELECT outcome, principal_reasons, drivers, policy_band, "
+            "decided_by, decided_at FROM decision_events "
+            "WHERE app_id = %s ORDER BY id DESC LIMIT 1",
+            (app_id,),
+        )
+    if events:
+        e = events[0]
+        return DecisionRecordOut(
+            application_id=app_id,
+            status="recorded",
+            outcome=e["outcome"],
+            principal_reasons=e["principal_reasons"],
+            drivers=e["drivers"],
+            policy_band=e["policy_band"],
+            decided_by=e["decided_by"],
+            decided_at=e["decided_at"].isoformat() if e["decided_at"] else None,
+        )
+    legacy = db.query("SELECT outcome FROM decisions WHERE app_id = %s", (app_id,))
+    if legacy:
+        return DecisionRecordOut(
+            application_id=app_id,
+            status="no_record_legacy",
+            outcome=legacy[0]["outcome"],
+        )
+    raise HTTPException(status_code=404, detail="application was never decisioned")
+
+
 @router.post("", response_model=DecisionOut)
-def run_decision(body: DecisionIn):
+def run_decision(
+    body: DecisionIn,
+    x_internal_service: str | None = Header(default=None, alias="X-Internal-Service"),
+):
+    # Internal-only (PR review): this POST appends a regulated decision_events record
+    # and updates the mutable decisions pointer from CALLER-SUPPLIED inputs
+    # (application_id/ssn/income/debt/amount). Reachable through the gateway's anonymous
+    # /decision proxy, so without this an external caller could fabricate underwriting
+    # inputs against a guessed app id and forge/alter a regulated decision, bypassing the
+    # LOS lookup that binds inputs to the real application. The only legitimate caller is
+    # origination (officer route + assistant score tool), which builds inputs from the
+    # LOS database and forwards the shared secret; the gateway strips any client-supplied
+    # X-Internal-Service so it cannot be forged from outside.
+    _require_internal_caller(x_internal_service)
     payload = body.model_dump()
-    # map the request onto the dict the legacy scorecard expects
     application = {
         "app_id": payload["application_id"],
         "ssn": payload.get("ssn") or "",
         "income": payload.get("annual_income") or 0,
+        "amount": payload.get("requested_amount") or 0,
+        "term_months": payload.get("term_months") or 36,
+        "monthly_debt": payload.get("monthly_debt") or 0,
+        "employment_years": payload.get("employment_years") or 0,
+        "request_id": payload.get("request_id"),
     }
     try:
-        result = decision.decide(application)  # synchronous chain; persists outcome only (debt)
+        result = decision.decide(application)
+    except decision.DecisionInputMismatch as e:
+        # A reused idempotency key arrived with different decision inputs: replaying the
+        # recorded outcome would be stale. 409 Conflict, not a silent replay.
+        log.warning("idempotency conflict: %s", e)
+        raise HTTPException(
+            status_code=409, detail="request_id reused with different decision inputs"
+        ) from e
     except decision.CreditPullError as e:
         # Fail closed: no decision is issued when the bureau pull cannot be made.
         log.error("credit pull unavailable, refusing decision: %s", e)
         raise HTTPException(status_code=503, detail="credit bureau unavailable") from e
+    except decision.DecisionRecordError as e:
+        # Fail closed: no decision is issued without its persisted Reg B record.
+        log.error("decision record refused: %s", e)
+        raise HTTPException(
+            status_code=503, detail="decision could not be recorded"
+        ) from e
+    except UnmappedFeatureError as e:
+        # Fail closed: the model's vocabulary cannot be explained (ADR 0009 §3 gate).
+        # A typed refusal, not a 500 — the model integration is unfit, not the service.
+        log.error("decision refused, unmapped model feature: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="decision refused: model feature has no mapped adverse-action reason",
+        ) from e
+    principal_reasons = result.get("principal_reasons") or []
     return DecisionOut(
         application_id=payload["application_id"],
         outcome=result["decision"],
         score=result["score"],
-        reason=result.get("adverse_action_reason"),
+        reason=principal_reasons[0]["reason"] if principal_reasons else None,
+        policy_band=result.get("policy_band"),
+        principal_reasons=principal_reasons,
+        decided_by=result.get("decided_by"),
     )

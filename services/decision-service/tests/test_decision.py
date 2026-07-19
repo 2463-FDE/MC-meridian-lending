@@ -3,23 +3,32 @@
 The scorecard tests run in explicit SYNTHETIC-credit mode (ALLOW_SYNTHETIC_CREDIT):
 there is no live Experian in the test environment, so `_pull_credit` uses its
 deterministic stub (680 for an SSN ending in an even digit, 612 otherwise).
-Persistence is best-effort and swallowed when no DB is present.
+Persistence is now MANDATORY (fail closed, ADR 0009 §4) — these tests stub
+app.decision.db.query so no live Postgres is required.
 
 The fail-closed tests prove the security fix: with NO bureau key and synthetic mode
 OFF (a production-like config), decision-service must NOT issue a decision, and
 /health must report unhealthy — closing the "keyless deploy silently issues
 decisions off a stub score" gap.
 
-NOTE (intentional debt, left UNTESTED): there is deliberately NO test asserting a
-decision audit trail / reason-code accuracy exists (D4, D10, twists #1/#2).
+The decision audit trail / reason-code contract (formerly intentional untested debt
+D4/D10) is covered in test_decision_record.py.
 """
+
 import threading
 import time
 
 import pytest
 
 from app import config
+from app import decision as decision_mod
 from app.decision import decide, CreditPullError
+
+
+@pytest.fixture
+def event_sink(monkeypatch):
+    """Swallow the mandatory decision-event write (no Postgres in unit tests)."""
+    monkeypatch.setattr(decision_mod.db, "query", lambda sql, params=None: [])
 
 
 @pytest.fixture(autouse=True)
@@ -65,18 +74,41 @@ def env_example_semantics(monkeypatch):
     monkeypatch.setattr(config, "EXPERIAN_KEY", "")
 
 
-def test_clear_approve(synthetic_mode):
+def test_clear_approve(synthetic_mode, event_sink):
     # SSN ends in an even digit -> stub bureau score 680; high income clears.
-    result = decide({"app_id": 1, "ssn": "123456782", "income": 100000})
+    result = decide(
+        {
+            "app_id": 1,
+            "ssn": "123456782",
+            "income": 100000,
+            "amount": 15000,
+            "term_months": 36,
+            "employment_years": 5,
+        }
+    )
     assert result["decision"] == "approve"
     assert result["score"] >= 660
 
 
-def test_clear_deny(synthetic_mode):
+def test_clear_deny(synthetic_mode, event_sink):
     # SSN ends in an odd digit -> stub bureau score 612; zero income sinks it.
-    result = decide({"app_id": 2, "ssn": "123456781", "income": 0})
+    result = decide(
+        {
+            "app_id": 2,
+            "ssn": "123456781",
+            "income": 0,
+            "amount": 15000,
+            "term_months": 36,
+        }
+    )
     assert result["decision"] == "deny"
     assert result["score"] < 600
+    # Adverse action now carries specific principal reasons, never the generic string.
+    assert result["principal_reasons"]
+    assert all(
+        "purchasing history" not in r["reason"].lower()
+        for r in result["principal_reasons"]
+    )
 
 
 def test_missing_key_fails_closed_no_decision(prod_like):
@@ -101,6 +133,9 @@ def test_health_ok_in_synthetic_mode(synthetic_mode, monkeypatch):
     # the config-readiness path (a real run reaches the compose Postgres). _FakeConn
     # is defined below at module scope, so it resolves at call time.
     monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: _FakeConn())
+    # Internal-service token is now a required secret (PR review); set it so this
+    # exercises the DB-readiness path, not the token gate.
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "tok")
 
     from fastapi.testclient import TestClient
     from app.main import app
@@ -181,7 +216,9 @@ def test_health_flags_database_url_password_drift(monkeypatch):
     monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", True)
     monkeypatch.setattr(config, "EXPERIAN_KEY", "")
     monkeypatch.setattr(
-        config, "DATABASE_URL", "postgresql://meridian:stale_old_pw@postgres:5432/meridian"
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:stale_old_pw@postgres:5432/meridian",
     )
     assert config.database_url_configured() is False
     assert "DATABASE_URL" in config.missing_required_secrets()
@@ -246,7 +283,141 @@ def test_database_url_probe_ok_when_connection_succeeds(monkeypatch):
     assert err is None
 
 
-def test_database_url_probe_fails_on_wrong_password_without_postgres_password(monkeypatch):
+class _SchemaMissingCursor:
+    """Connects and answers SELECT 1, but reports the required schema absent — the
+    unmigrated-volume case (decision_events.request_id not yet applied)."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        return None if "information_schema" in self._last else (1,)
+
+
+class _SchemaMissingConn:
+    def cursor(self):
+        return _SchemaMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_database_url_probe_fails_when_schema_not_migrated(monkeypatch):
+    # PR review: a reachable DB whose volume predates 0004-0006 would 500/503 every
+    # decision. The probe must report readiness FALSE, naming the missing object, so
+    # /health shows unhealthy instead of a silent underwriting outage.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _SchemaMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:decision_events.request_id"
+
+
+class _IndexMissingCursor:
+    """Connects, answers SELECT 1, reports the request_id COLUMN present but the partial
+    unique index absent — the partially-applied-migration case that would silently lose
+    the idempotency concurrency guarantee (PR review)."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        # Column check (information_schema) passes; index check (pg_indexes) fails.
+        return None if "pg_indexes" in self._last else (1,)
+
+
+class _IndexMissingConn:
+    def cursor(self):
+        return _IndexMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_database_url_probe_fails_when_idempotency_index_missing(monkeypatch):
+    # PR review: the request_id column alone is insufficient — a partially-applied
+    # migration with the column but no uq_decision_events_request index would let two
+    # concurrent same-key requests both insert, duplicating regulated decision events.
+    # Readiness must fail on that state too, naming the missing index.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: _IndexMissingConn())
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:uq_decision_events_request"
+
+
+class _TriggerMissingCursor:
+    """Column and unique index present, but the append-only triggers absent — a
+    hand-applied migration that created decision_events without its immutability guard,
+    leaving the Reg B record silently mutable (PR review)."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        # information_schema (column) and pg_indexes (index) pass; pg_trigger fails.
+        return None if "pg_trigger" in self._last else (1,)
+
+
+class _TriggerMissingConn:
+    def cursor(self):
+        return _TriggerMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_database_url_probe_fails_when_append_only_trigger_missing(monkeypatch):
+    # PR review sweep: decision_events is append-only by DB trigger (ADR 0009). A table
+    # created without its triggers is silently mutable while /health looks fine.
+    # Readiness must fail on that state, naming the missing immutability guard.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _TriggerMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:decision_events_append_only_trigger"
+
+
+def test_database_url_probe_fails_on_wrong_password_without_postgres_password(
+    monkeypatch,
+):
     # The documented residual the config gate cannot catch: a real, non-placeholder
     # DSN password with no POSTGRES_PASSWORD to compare against. The gate accepts it;
     # only the live probe detects that it does not authenticate.
@@ -327,6 +498,7 @@ def test_health_flags_unreachable_database_url(monkeypatch):
     monkeypatch.setattr(
         config, "DATABASE_URL", "postgresql://meridian:wrong_pw@postgres:5432/meridian"
     )
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "tok")
     assert config.missing_required_secrets() == []
 
     def _auth_fail(*a, **k):
@@ -349,9 +521,14 @@ def test_decision_endpoint_returns_503_when_key_missing(prod_like):
     resp = TestClient(app).post(
         "/decisions",
         json={
-            "application_id": 9, "applicant_id": 9, "name": "Test Applicant",
-            "ssn": "123456782", "requested_amount": 15000, "term_months": 36,
-            "annual_income": 100000, "monthly_debt": 0,
+            "application_id": 9,
+            "applicant_id": 9,
+            "name": "Test Applicant",
+            "ssn": "123456782",
+            "requested_amount": 15000,
+            "term_months": 36,
+            "annual_income": 100000,
+            "monthly_debt": 0,
         },
     )
     assert resp.status_code == 503  # fail closed — no decision issued
@@ -411,3 +588,88 @@ def test_env_example_gate_stays_closed_by_parsing_the_template():
     assert env_values[-1].strip().lower() != "development"
     # The synthetic escape hatch must not be defaulted on in the template.
     assert not any(k == "ALLOW_SYNTHETIC_CREDIT" for k, _ in pairs)
+
+
+def test_missing_internal_service_token_is_flagged(monkeypatch):
+    # PR review: an unset INTERNAL_SERVICE_TOKEN must surface at /health, else the
+    # internal-only routes fail closed while readiness looks OK (and origination's
+    # intake silently degrades on the kyc call).
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "")
+    assert "INTERNAL_SERVICE_TOKEN" in config.missing_required_secrets()
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "tok")
+    assert "INTERNAL_SERVICE_TOKEN" not in config.missing_required_secrets()
+
+
+# --- SSN-fingerprint pepper: a public/placeholder pepper is reversible PII (PR review) --
+
+
+def test_fingerprint_pepper_rejects_blank_and_placeholders(monkeypatch):
+    # A blank or known-placeholder pepper must be treated as NO pepper, so a copied
+    # .env.example never keys a reversible HMAC of the SSN.
+    for placeholder in [
+        "",
+        "   ",
+        "demo-decision-fingerprint-pepper-change-me",
+        "DEMO-DECISION-FINGERPRINT-PEPPER-CHANGE-ME",  # case-insensitive
+        "replace_with_fingerprint_pepper",
+        "changeme",
+        "placeholder",
+    ]:
+        monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", placeholder)
+        assert config.fingerprint_pepper() is None, placeholder
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", "a-real-secret-pepper")
+    assert config.fingerprint_pepper() == "a-real-secret-pepper"
+
+
+def test_placeholder_pepper_persists_no_fingerprint(monkeypatch):
+    # Even with the env var non-empty, a placeholder must not produce a fingerprint —
+    # otherwise a reversible digest lands in decision_events.inputs.
+    from app import decision
+
+    monkeypatch.setattr(
+        config,
+        "DECISION_FINGERPRINT_PEPPER",
+        "demo-decision-fingerprint-pepper-change-me",
+    )
+    assert decision._ssn_fingerprint("123456789") is None
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", "a-real-secret-pepper")
+    assert decision._ssn_fingerprint("123456789") is not None
+
+
+def test_health_flags_placeholder_pepper_outside_development(monkeypatch):
+    # Outside development, a blank/placeholder pepper reports unhealthy rather than
+    # silently keying a reversible fingerprint (or dropping the check).
+    monkeypatch.setattr(config, "ENVIRONMENT", "production")
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", "")
+    assert "DECISION_FINGERPRINT_PEPPER" in config.missing_required_secrets()
+    monkeypatch.setattr(
+        config,
+        "DECISION_FINGERPRINT_PEPPER",
+        "demo-decision-fingerprint-pepper-change-me",
+    )
+    assert "DECISION_FINGERPRINT_PEPPER" in config.missing_required_secrets()
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", "a-real-secret-pepper")
+    assert "DECISION_FINGERPRINT_PEPPER" not in config.missing_required_secrets()
+
+
+def test_health_allows_missing_pepper_in_development(monkeypatch):
+    # Development may run without a pepper (SSN-change detection simply off); the demo
+    # override supplies a dev value, but its absence must not make the dev stack unhealthy.
+    monkeypatch.setattr(config, "ENVIRONMENT", "development")
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", "")
+    assert "DECISION_FINGERPRINT_PEPPER" not in config.missing_required_secrets()
+
+
+def test_env_example_ships_no_usable_pepper():
+    # Regression (PR review): the committed template must NOT carry a usable pepper — a
+    # public pepper makes every persisted SSN fingerprint brute-forceable. Blank or a
+    # rejected placeholder only, so a copied .env.example can never key a reversible
+    # digest and reports unhealthy outside development.
+    pairs = _parse_env_example()
+    values = [v for k, v in pairs if k == "DECISION_FINGERPRINT_PEPPER"]
+    assert len(values) <= 1, f"expected at most one pepper line, got {values}"
+    if values:
+        assert values[0].strip().lower() in config._PLACEHOLDER_PEPPERS, (
+            "committed .env.example pepper must be blank or a rejected placeholder, "
+            f"got {values[0]!r}"
+        )

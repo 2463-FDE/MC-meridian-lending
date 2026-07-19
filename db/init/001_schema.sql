@@ -34,10 +34,22 @@ CREATE TABLE IF NOT EXISTS applications (
     term_months       INTEGER NOT NULL,
     purpose           TEXT,
     income            DOUBLE PRECISION,            -- money as float
+    monthly_debt      DOUBLE PRECISION,            -- money as float; model DTI input
     employer          TEXT,
     job_title         TEXT,
     employment_years  DOUBLE PRECISION,
     status            TEXT DEFAULT 'submitted',
+    -- ADR 0010 Phase B: unguessable per-application continuation token issued at submit.
+    -- Authorizes the anonymous applicant to complete decision/offer/accept on THIS
+    -- application only (a scoped capability), so anonymous apply keeps working without a
+    -- login while serial-id IDOR stays closed. NULL for officer-created/legacy rows.
+    -- Stores a KEYED HASH of the token, never the raw token (PR #7 review): the raw token
+    -- is returned to the applicant once at submit; a DB read yields only the digest.
+    -- Cleared to NULL when the application is funded (single-use at the money action).
+    continuation_token TEXT,
+    -- Expiry of the continuation token (PR #7 review): authz rejects it past this instant,
+    -- so the bearer capability is time-boxed. NULL for officer/legacy rows (no token path).
+    continuation_token_expires_at TIMESTAMPTZ,
     created_at        TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
@@ -83,6 +95,11 @@ CREATE TABLE IF NOT EXISTS loans (
     status          TEXT DEFAULT 'current',
     opened_at       TIMESTAMPTZ DEFAULT now()
 );
+-- One boarded loan per application: makes offer acceptance idempotent under retries and
+-- concurrency (a double-click / timeout-retry / concurrent POST cannot board a second
+-- loan for the same app; the loser gets a UniqueViolation and replays the first loan).
+-- Partial so any legacy app_id-less loan row is unaffected.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_loans_app ON loans (app_id) WHERE app_id IS NOT NULL;
 
 -- Mutable balance: one column, overwritten in place. No ledger, no transaction history.
 CREATE TABLE IF NOT EXISTS balances (
@@ -114,8 +131,52 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
+-- ADR 0009 / ADR 0008: append-only decision-event record. `decisions` above remains the
+-- mutable current-state pointer; this is the system of record for Reg B adverse action.
+CREATE TABLE IF NOT EXISTS decision_events (
+    id                SERIAL PRIMARY KEY,
+    app_id            INTEGER NOT NULL REFERENCES applications(id),
+    outcome           TEXT NOT NULL,               -- approve | refer | deny | counteroffer
+    principal_reasons JSONB NOT NULL,              -- [] for approve; [{code, reason}, ...] for deny/refer
+    drivers           JSONB NOT NULL,              -- model score, ranked attributions, band cutoff, model id+version
+    policy_band       TEXT NOT NULL,               -- band the score actually landed in
+    inputs            JSONB NOT NULL,              -- identifier-free (ADR 0007 rule 1): no SSN/name/DOB/address/PAN
+    decided_by        TEXT NOT NULL,               -- model id+version, or user id for manual/override decisions
+    decided_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    request_id        TEXT                         -- optional idempotency key; retries replay within the same app_id, absence = explicit re-decision
+);
+CREATE INDEX IF NOT EXISTS idx_decision_events_app ON decision_events(app_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_decision_events_request
+    ON decision_events (app_id, request_id) WHERE request_id IS NOT NULL;
+
+-- Append-only enforced at the database (contrast audit_logs above, which is mutable).
+CREATE OR REPLACE FUNCTION decision_events_append_only() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'decision_events is append-only (ADR 0009): % blocked', TG_OP;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_decision_events_append_only ON decision_events;
+CREATE TRIGGER trg_decision_events_append_only
+    BEFORE UPDATE OR DELETE ON decision_events
+    FOR EACH ROW EXECUTE FUNCTION decision_events_append_only();
+
+-- Row-level triggers do not fire on TRUNCATE; block it explicitly.
+DROP TRIGGER IF EXISTS trg_decision_events_no_truncate ON decision_events;
+CREATE TRIGGER trg_decision_events_no_truncate
+    BEFORE TRUNCATE ON decision_events
+    FOR EACH STATEMENT EXECUTE FUNCTION decision_events_append_only();
+
 -- A few indexes added over time for the servicing dashboard. (No idempotency index on
 -- payments — there is no idempotency key to index. No reason/driver columns on decisions.)
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
 CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
-CREATE INDEX IF NOT EXISTS idx_offers_app ON offers(app_id);
+
+-- One current offer per application: makes offer generation idempotent so a double-click /
+-- timeout-retry / concurrent POST cannot persist duplicate regulated TILA/Reg-Z disclosures
+-- (disclosure-service create_offer reuses the existing offer; the concurrent loser gets a
+-- UniqueViolation and replays it). Partial so any legacy app_id-less offer row is unaffected.
+-- Mirrors uq_loans_app above; disclosure-service /health reports schema_not_ready:uq_offers_app
+-- until it exists. Also shipped as migration 0010 for already-initialized volumes (which may
+-- need a manual dedup first -- see that file). This unique index also serves the plain
+-- app_id lookups (it replaces the former non-unique idx_offers_app).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_offers_app ON offers (app_id) WHERE app_id IS NOT NULL;

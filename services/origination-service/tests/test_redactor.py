@@ -1,4 +1,5 @@
 """Unit tests for PiiRedactor."""
+
 import pytest
 from app.redactor import PiiRedactor
 
@@ -70,8 +71,12 @@ class TestPiiRedactorPan:
         for sep in ("/", "_", "-", " ", ".", "*", "|", "+"):
             pan = sep.join(["4111", "1111", "1111", "1111"])
             result = PiiRedactor.redact('{"pan":"%s","cvv":"123"}' % pan)
-            assert "411111111111" not in result, f"PAN leaked for separator {sep!r}: {result}"
-            assert "4111" not in result, f"PAN prefix leaked for separator {sep!r}: {result}"
+            assert "411111111111" not in result, (
+                f"PAN leaked for separator {sep!r}: {result}"
+            )
+            assert "4111" not in result, (
+                f"PAN prefix leaked for separator {sep!r}: {result}"
+            )
             assert "1111" in result
 
     def test_redact_pan_quote_separators_in_quoted_field(self):
@@ -79,12 +84,18 @@ class TestPiiRedactorPan:
         # pan containing quote chars would close the field early. The labeled matcher
         # must consume past inner quotes to the field-terminating delimiter, else it
         # captures only the first segment (<13 digits) and leaks the raw PAN.
-        for pan in ('4111"1111"1111"1111', "4111'1111'1111'1111", "4111\"1111'1111\"1111"):
+        for pan in (
+            '4111"1111"1111"1111',
+            "4111'1111'1111'1111",
+            '4111"1111\'1111"1111',
+        ):
             result = PiiRedactor.redact('{"pan":"%s","cvv":"123"}' % pan)
             assert "411111111111" not in result, f"PAN leaked for {pan!r}: {result}"
             assert result.count("4111") == 0, f"PAN prefix leaked for {pan!r}: {result}"
             assert "1111" in result
-            assert '"cvv":"••••"' in result, f"trailing field mangled for {pan!r}: {result}"
+            assert '"cvv":"••••"' in result, (
+                f"trailing field mangled for {pan!r}: {result}"
+            )
 
     def test_redact_pan_unquoted_kv(self):
         # Unquoted key=value form, exotic separator, masked up to next delimiter.
@@ -123,7 +134,9 @@ class TestPiiRedactorPan:
         for sep in (",", "~", "\\", "=", " ", "-", "/", "_", "*", "|", "+", "."):
             pan = sep.join(["4111", "1111", "1111", "1111"])
             result = PiiRedactor.redact('{"name":"%s"}' % pan)
-            assert "411111111111" not in result, f"raw PAN leaked for sep {sep!r}: {result}"
+            assert "411111111111" not in result, (
+                f"raw PAN leaked for sep {sep!r}: {result}"
+            )
             assert "4111" not in result, f"PAN prefix leaked for sep {sep!r}: {result}"
             assert "1111" in result  # last 4 preserved
 
@@ -142,16 +155,18 @@ class TestPiiRedactorPan:
         # The bounded free-text pass (1b) misses these; the per-quoted-value scan
         # (1d) catches them regardless of separator.
         variants = [
-            "4111x1111x1111x1111",              # letter separators
-            "4111====1111====1111====1111",     # >3-char runs
-            "card4111a1111b1111c1111end",       # embedded + alpha separators
-            "4111 - / _ 1111 . 1111 ~ 1111",    # mixed multi-char
+            "4111x1111x1111x1111",  # letter separators
+            "4111====1111====1111====1111",  # >3-char runs
+            "card4111a1111b1111c1111end",  # embedded + alpha separators
+            "4111 - / _ 1111 . 1111 ~ 1111",  # mixed multi-char
         ]
         # Both JSON (") and Python-repr (') payload shapes.
         for v in variants:
             for doc in ('{"name":"%s"}' % v, "{'name': '%s'}" % v):
                 result = PiiRedactor.redact(doc)
-                assert "411111111111" not in result, f"raw PAN leaked: {doc!r} -> {result!r}"
+                assert "411111111111" not in result, (
+                    f"raw PAN leaked: {doc!r} -> {result!r}"
+                )
                 assert "4111" not in result, f"PAN prefix leaked: {doc!r} -> {result!r}"
                 assert "1111" in result  # last 4 preserved
 
@@ -179,7 +194,9 @@ class TestPiiRedactorPan:
         result = PiiRedactor.redact(line)
         assert "4111111111111111" not in result
         assert "111111111111" not in result, f"split PAN leaked: {result}"
-        assert result == "INFO GET /payments?••• HTTP/1.1"  # whole query gone, path kept
+        assert (
+            result == "INFO GET /payments?••• HTTP/1.1"
+        )  # whole query gone, path kept
 
     def test_access_log_split_pan_across_query_keys_masked(self):
         # Regression (Codex round 5): param NAMES are attacker-controlled too, so a
@@ -205,12 +222,15 @@ class TestPiiRedactorPan:
             assert "4111111111111111" not in result, f"leaked: {result}"
             assert "111111111111" not in result, f"leaked: {result}"
 
-    @pytest.mark.parametrize("value", [
-        "4111x1111x1111x1111",              # single-letter separators
-        "4111xx1111xx1111xx1111",           # multi-letter separators
-        "4111%2D1111%2D1111%2D1111",        # percent-encoded '-'
-        "%34%31%31%31%31%31%31%31%31%31%31%31%31%31%31%31",  # fully percent-encoded
-    ])
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "4111x1111x1111x1111",  # single-letter separators
+            "4111xx1111xx1111xx1111",  # multi-letter separators
+            "4111%2D1111%2D1111%2D1111",  # percent-encoded '-'
+            "%34%31%31%31%31%31%31%31%31%31%31%31%31%31%31%31",  # fully percent-encoded
+        ],
+    )
     def test_access_log_query_pan_value_masked(self, value):
         # Any obfuscated PAN carried in a query value is dropped with the query.
         line = f"GET /payments?name={value} HTTP/1.1"
@@ -223,10 +243,14 @@ class TestPiiRedactorPan:
     def test_access_log_drops_whole_query_keeps_path(self):
         # The entire query (keys + values) is replaced by a single marker; the path
         # is kept, and a query-less request line is untouched.
-        assert PiiRedactor.redact("GET /applications?status=funded&limit=25 HTTP/1.1") == \
-            "GET /applications?••• HTTP/1.1"
-        assert PiiRedactor.redact("GET /applications HTTP/1.1") == \
-            "GET /applications HTTP/1.1"
+        assert (
+            PiiRedactor.redact("GET /applications?status=funded&limit=25 HTTP/1.1")
+            == "GET /applications?••• HTTP/1.1"
+        )
+        assert (
+            PiiRedactor.redact("GET /applications HTTP/1.1")
+            == "GET /applications HTTP/1.1"
+        )
 
 
 class TestPiiRedactorCvv:
@@ -239,7 +263,7 @@ class TestPiiRedactorCvv:
         assert "••••" in result
 
     def test_redact_cvv_no_quotes(self):
-        text = 'cvv: 456'
+        text = "cvv: 456"
         result = PiiRedactor.redact(text)
         assert "456" not in result
         assert "••••" in result
@@ -274,6 +298,23 @@ class TestPiiRedactorSsn:
         assert "222-22" not in result
         assert "1111" in result
         assert "2222" in result
+
+    @pytest.mark.parametrize("sep", ["-", ".", "/", " ", "\t", ""])
+    def test_labeled_ssn_masked_for_any_separator(self, sep):
+        # The label is the signal, so a labeled SSN must be masked no matter what
+        # separator joins the groups. Dot/slash/tab previously slipped through the
+        # 3b regex (only dash/space/none were accepted), leaking a full SSN in the
+        # str(payload) log line and in the pre-send payload to the LLM (ADR 0005).
+        text = f'{{"ssn": "412{sep}55{sep}9981"}}'
+        result = PiiRedactor.redact(text)
+        assert "412" + sep + "55" not in result
+        assert "•••-••-9981" in result  # last 4 preserved
+
+    def test_dotted_ssn_label_does_not_mask_unrelated_numbers(self):
+        # The dotted/slashed acceptance is label-gated -- unlabeled dotted numbers
+        # (version strings, ratios) must not be mistaken for an SSN.
+        assert PiiRedactor.redact("version 4.12.55") == "version 4.12.55"
+        assert PiiRedactor.redact("loan_id: 412559981") == "loan_id: 412559981"
 
 
 class TestPiiRedactorEmail:
@@ -315,7 +356,11 @@ class TestPiiRedactorPhone:
     def test_redact_phone_with_parens(self):
         text = "call (555) 123-4567"
         result = PiiRedactor.redact(text)
-        assert "555" not in result or "555" not in result.split("(")[1] if "(" in result else True
+        assert (
+            "555" not in result or "555" not in result.split("(")[1]
+            if "(" in result
+            else True
+        )
         assert "4567" in result
 
     def test_bare_10_digit_not_treated_as_phone(self):
@@ -376,8 +421,14 @@ class TestPiiRedactorAdversarialFixes:
     def test_bare_9_digit_id_not_masked_as_ssn(self):
         # SSN masking of bare 9-digit runs used to clobber loan IDs / amounts.
         # Only DASHED or LABELED nine-digit values may be treated as SSN.
-        assert PiiRedactor.redact("loan_id=402551998 approved") == "loan_id=402551998 approved"
-        assert PiiRedactor.redact("principal 100000000 cents") == "principal 100000000 cents"
+        assert (
+            PiiRedactor.redact("loan_id=402551998 approved")
+            == "loan_id=402551998 approved"
+        )
+        assert (
+            PiiRedactor.redact("principal 100000000 cents")
+            == "principal 100000000 cents"
+        )
 
     def test_labeled_bare_ssn_still_masked(self):
         result = PiiRedactor.redact('{"ssn":"412559981"}')
@@ -435,17 +486,27 @@ class TestPiiRedactorAdversarialFixes:
         text = '{"loan_number": 412559981, "account_number": 5551234567}'
         result = PiiRedactor.redact(text)
         assert '"loan_number": 412559981' in result  # not an account/PII field
-        assert "5551234567" not in result            # account number masked
-        assert "4567" in result                       # last 4 preserved for audit
+        assert "5551234567" not in result  # account number masked
+        assert "4567" in result  # last 4 preserved for audit
 
     def test_bank_account_label_variants_masked(self):
         # Label-gated bank/account/routing fields, various names + separators.
-        for label in ("account_number", "account_no", "acct", "bank_account",
-                      "routing_number", "routing", "aba", "rtn", "transit",
-                      "dda", "ach_account"):
+        for label in (
+            "account_number",
+            "account_no",
+            "acct",
+            "bank_account",
+            "routing_number",
+            "routing",
+            "aba",
+            "rtn",
+            "transit",
+            "dda",
+            "ach_account",
+        ):
             result = PiiRedactor.redact('{"%s": "123456789012"}' % label)
             assert "123456789012" not in result, label
-            assert "9012" in result, label            # last 4 preserved
+            assert "9012" in result, label  # last 4 preserved
 
     def test_routing_number_bare_masked_in_field(self):
         result = PiiRedactor.redact('{"routing_number": 123456789}')
@@ -454,8 +515,10 @@ class TestPiiRedactorAdversarialFixes:
 
     def test_iban_masked_labeled_and_free_text(self):
         # IBAN is self-identifying (ISO 13616), so it is redacted even in free text.
-        for text in ('{"iban": "GB82WEST12345698765432"}',
-                     "wire to GB82WEST12345698765432 today"):
+        for text in (
+            '{"iban": "GB82WEST12345698765432"}',
+            "wire to GB82WEST12345698765432 today",
+        ):
             result = PiiRedactor.redact(text)
             assert "GB82WEST12345698765432" not in result
             assert "5432" in result
@@ -465,13 +528,21 @@ class TestPiiRedactorAdversarialFixes:
         # value must mask regardless of internal separators/charset. Enumerating
         # separators (as the first cut did) left tails leaking: 555*1234*567*8901
         # masked only "555". Now separator-agnostic via digit-count masking.
-        for val in ("555*1234*567*8901", "ACCT5551234567", "5551/2345/678",
-                    "5551 2345 678", "5551-2345-678"):
+        for val in (
+            "555*1234*567*8901",
+            "ACCT5551234567",
+            "5551/2345/678",
+            "5551 2345 678",
+            "5551-2345-678",
+        ):
             result = PiiRedactor.redact('{"account_number":"%s"}' % val)
             # no run of >=4 consecutive raw account digits survives
             import re as _re
+
             digits = _re.sub(r"\D", "", val)
-            assert digits[:-4] not in result, f"account digits leaked for {val!r}: {result}"
+            assert digits[:-4] not in result, (
+                f"account digits leaked for {val!r}: {result}"
+            )
             assert digits[-4:] in result, f"last 4 missing for {val!r}: {result}"
 
     def test_lowercase_iban_in_labeled_field_masked(self):
@@ -485,9 +556,11 @@ class TestPiiRedactorAdversarialFixes:
     def test_account_labels_no_false_positive_on_non_account(self):
         # A field that merely contains 'account' in its name but is not a number
         # (or is a different concept) must not be mangled.
-        for text in ('{"account_type": "checking"}',
-                     '{"account_name": "Jane Doe"}',
-                     '{"account_status": "open"}'):
+        for text in (
+            '{"account_type": "checking"}',
+            '{"account_name": "Jane Doe"}',
+            '{"account_status": "open"}',
+        ):
             assert PiiRedactor.redact(text) == text
         # A bare 9-digit number NOT in an account field is left alone.
         assert PiiRedactor.redact("ref 123456789 seen") == "ref 123456789 seen"
@@ -496,11 +569,15 @@ class TestPiiRedactorAdversarialFixes:
         # Review ask: free-text is where redaction most often slips. PII buried in
         # a prose note (not a labeled field) must still be masked by shape.
         # Dashed SSN — always redacted regardless of surrounding text.
-        out = PiiRedactor.redact("notes: please call the borrower re SSN 412-55-9981 before noon")
+        out = PiiRedactor.redact(
+            "notes: please call the borrower re SSN 412-55-9981 before noon"
+        )
         assert "412-55-9981" not in out
         assert "•••-••-9981" in out  # last-4 preserved for audit
         # PAN in a prose note.
-        out = PiiRedactor.redact("notes: card on file 4111 1111 1111 1111 per client request")
+        out = PiiRedactor.redact(
+            "notes: card on file 4111 1111 1111 1111 per client request"
+        )
         assert "4111 1111 1111 1111" not in out and "411111111111" not in out
         assert "(PAN)" in out
         # Email in a prose note — local part masked, domain kept.
@@ -511,6 +588,7 @@ class TestPiiRedactorAdversarialFixes:
     def test_pii_in_free_text_json_value_masked(self):
         # Same, as a JSON free-text value (how a notes field reaches a log dump).
         import json as _json
+
         out = PiiRedactor.redact('{"notes": "borrower ssn 412-55-9981, ok to proceed"}')
         assert "412-55-9981" not in out
         assert _json.loads(out)  # still valid JSON

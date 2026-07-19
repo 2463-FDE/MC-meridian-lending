@@ -230,3 +230,94 @@ def test_probe_single_flight_under_concurrent_misses(monkeypatch):
 
     assert calls["n"] == 1  # exactly one probe despite 8 concurrent misses
     assert results == [(True, None)] * 8
+
+
+def test_missing_internal_service_token_is_flagged(monkeypatch):
+    # PR review: an unset INTERNAL_SERVICE_TOKEN must surface at /health, else the
+    # internal-only routes fail closed while readiness looks OK (and origination's
+    # intake silently degrades on the kyc call).
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "")
+    assert "INTERNAL_SERVICE_TOKEN" in config.missing_required_secrets()
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "tok")
+    assert "INTERNAL_SERVICE_TOKEN" not in config.missing_required_secrets()
+
+
+# --- uq_offers_app schema readiness (PR review) ----------------------------
+# Idempotent offer writes depend on the uq_offers_app unique index; the live probe reports
+# schema_not_ready if a dirty-volume migration failed to create it, so /health is not green
+# while duplicate regulated disclosures are silently possible.
+
+
+class _IndexAwareCursor:
+    def __init__(self, has_index):
+        self.has_index = has_index
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "pg_indexes" in self._last:
+            return (1,) if self.has_index else None
+        return (1,)
+
+
+class _IndexAwareConn:
+    def __init__(self, has_index):
+        self.has_index = has_index
+        self.closed_flag = False
+
+    def cursor(self):
+        return _IndexAwareCursor(self.has_index)
+
+    def close(self):
+        self.closed_flag = True
+
+
+def test_probe_reports_missing_uq_offers_app(monkeypatch):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _IndexAwareConn(has_index=False)
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:uq_offers_app"
+
+
+def test_probe_ok_when_uq_offers_app_present(monkeypatch):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _IndexAwareConn(has_index=True)
+    )
+    ok, err = config.database_reachable()
+    assert ok is True
+    assert err is None
+
+
+# --- uq_offers_app must live in the CANONICAL init schema, not only a migration ----
+# M2 regression: the live probe above reports schema_not_ready when the index is absent,
+# but the index was only ever in the hand-tracked migration 0010 -- nothing applies that on
+# `make up`, so a default deploy silently ran without it and the readiness rung/idempotency
+# replay were dead. It must be created by db/init/001_schema.sql, in parity with uq_loans_app.
+
+
+def test_uq_offers_app_is_in_canonical_init_schema():
+    from pathlib import Path
+
+    schema = Path(__file__).resolve().parents[3] / "db" / "init" / "001_schema.sql"
+    text = schema.read_text()
+    assert "uq_loans_app" in text, "parity anchor missing -- test path is wrong"
+    assert "uq_offers_app" in text, (
+        "uq_offers_app is not created by db/init/001_schema.sql -- a default `make up` "
+        "deploy runs without the unique index, so duplicate TILA disclosures are possible"
+    )

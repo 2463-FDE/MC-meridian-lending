@@ -5,6 +5,7 @@ misconfigured so /health can report unhealthy instead of connecting
 unauthenticated or failing auth at first query. Covers the passwordless DSN
 (meridian:@postgres) the secret purge left behind and the shipped placeholder.
 """
+
 import threading
 import time
 
@@ -58,7 +59,9 @@ def test_stale_password_rejected_against_postgres_password(monkeypatch):
     # without a DB round trip.
     monkeypatch.setenv("POSTGRES_PASSWORD", "the_real_pw")
     monkeypatch.setattr(
-        config, "DATABASE_URL", "postgresql://meridian:stale_old_pw@postgres:5432/meridian"
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:stale_old_pw@postgres:5432/meridian",
     )
     assert config.database_url_configured() is False
     assert "DATABASE_URL" in config.missing_required_secrets()
@@ -67,7 +70,9 @@ def test_stale_password_rejected_against_postgres_password(monkeypatch):
 def test_password_matching_postgres_password_is_ok(monkeypatch):
     monkeypatch.setenv("POSTGRES_PASSWORD", "the_real_pw")
     monkeypatch.setattr(
-        config, "DATABASE_URL", "postgresql://meridian:the_real_pw@postgres:5432/meridian"
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:the_real_pw@postgres:5432/meridian",
     )
     assert config.database_url_configured() is True
     assert "DATABASE_URL" not in config.missing_required_secrets()
@@ -285,10 +290,21 @@ def test_redis_probe_cached_within_ttl(monkeypatch):
     assert calls["n"] == 1  # second call served from cache, no new connection
 
 
+def test_missing_internal_service_token_is_reported(monkeypatch):
+    # PR #7 review: the gateway's post-submit rollback (origination /abandon) needs
+    # INTERNAL_SERVICE_TOKEN. Unset -> readiness must report it so the instance is taken out of
+    # rotation rather than accepting self-service submits it cannot compensate.
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "")
+    assert "INTERNAL_SERVICE_TOKEN" in config.missing_required_secrets()
+
+
 def test_health_503_when_db_ok_but_redis_unavailable(monkeypatch):
     # The regression the review calls out: Postgres reachable, Redis down -> /health
     # must return 503, not keep the instance in rotation while auth is broken.
     monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+    monkeypatch.setattr(
+        config, "INTERNAL_SERVICE_TOKEN", "tok"
+    )  # required secret present
     monkeypatch.setattr(
         config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
     )
@@ -307,8 +323,30 @@ def test_health_503_when_db_ok_but_redis_unavailable(monkeypatch):
     assert resp.json()["redis_error"] == "ConnectionError"
 
 
+def test_health_503_when_internal_token_unset(monkeypatch):
+    # Even with DB + Redis reachable, an unset INTERNAL_SERVICE_TOKEN must fail readiness
+    # (the rollback credential is a required secret) -- reported via missing_secrets.
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "")
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: _FakeConn())
+    monkeypatch.setattr(config.redis.Redis, "from_url", lambda *a, **k: _FakeRedis())
+
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    resp = TestClient(app).get("/health")
+    assert resp.status_code == 503
+    assert "INTERNAL_SERVICE_TOKEN" in resp.json()["missing_secrets"]
+
+
 def test_health_ok_when_db_and_redis_reachable(monkeypatch):
     monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+    monkeypatch.setattr(
+        config, "INTERNAL_SERVICE_TOKEN", "tok"
+    )  # required secret present
     monkeypatch.setattr(
         config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
     )

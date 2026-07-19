@@ -1,0 +1,25 @@
+-- PR #7 review: harden the ADR 0010 Phase B continuation token from an unbounded
+-- clear-text bearer credential into a hashed, time-boxed, single-use-at-funding capability.
+--
+-- Two changes to applications:
+--   1. continuation_token now stores a KEYED HASH of the token (authz.hash_token), never
+--      the raw value. The raw token is returned to the applicant exactly once at submit;
+--      a DB read / backup / logged row then yields only a non-replayable digest. (No DDL
+--      change to the column -- it stays TEXT; the semantics of what it holds changed.)
+--   2. continuation_token_expires_at bounds the token's lifetime -- authz rejects a token
+--      with no expiry or a past expiry, so a token in browser storage / shared-device
+--      residue / a stale link stops working after CONTINUATION_TOKEN_TTL_DAYS (default 7).
+-- The token is also cleared to NULL when the application is funded (accept_offer), making
+-- it single-use at the money action.
+--
+-- Compatibility of a NON-fresh volume with in-flight ANONYMOUS applications: rows issued
+-- BEFORE this deploy stored the RAW token and have a NULL expiry. After this deploy authz
+-- compares hash(presented) against the stored value (now a hash) AND requires a non-NULL,
+-- future expiry -- so a pre-hardening raw token no longer self-authorizes. This migration
+-- deliberately does NOT rehash-in-place or backfill an expiry: the stored raw value is the
+-- applicant's live credential, and there is no verified channel to reissue a token (same
+-- constraint as migration 0008). Recovery for such rows is OFFICER-MEDIATED -- an officer
+-- advances/completes the application on the applicant's behalf (see 0008 + ADR 0010).
+-- A fresh db/init volume and the seed have no such rows.
+ALTER TABLE applications
+  ADD COLUMN IF NOT EXISTS continuation_token_expires_at TIMESTAMPTZ;

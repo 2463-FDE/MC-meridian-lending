@@ -5,6 +5,7 @@ misconfigured so /health can report unhealthy instead of connecting
 unauthenticated or failing auth at first query. Covers the passwordless DSN
 (meridian:@postgres) the secret purge left behind and the shipped placeholder.
 """
+
 import threading
 import time
 
@@ -56,7 +57,9 @@ def test_stale_password_rejected_against_postgres_password(monkeypatch):
     # without a DB round trip.
     monkeypatch.setenv("POSTGRES_PASSWORD", "the_real_pw")
     monkeypatch.setattr(
-        config, "DATABASE_URL", "postgresql://meridian:stale_old_pw@postgres:5432/meridian"
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:stale_old_pw@postgres:5432/meridian",
     )
     assert config.database_url_configured() is False
     assert "DATABASE_URL" in config.missing_required_secrets()
@@ -65,7 +68,9 @@ def test_stale_password_rejected_against_postgres_password(monkeypatch):
 def test_password_matching_postgres_password_is_ok(monkeypatch):
     monkeypatch.setenv("POSTGRES_PASSWORD", "the_real_pw")
     monkeypatch.setattr(
-        config, "DATABASE_URL", "postgresql://meridian:the_real_pw@postgres:5432/meridian"
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:the_real_pw@postgres:5432/meridian",
     )
     assert config.database_url_configured() is True
     assert "DATABASE_URL" not in config.missing_required_secrets()
@@ -154,6 +159,181 @@ def test_probe_fails_on_wrong_password_without_postgres_password(monkeypatch):
     ok, err = config.database_reachable()
     assert ok is False
     assert err == "OperationalError"  # class name only — no DSN/password leak
+
+
+class _SchemaMissingCursor:
+    """Connects and answers SELECT 1, but reports the required schema absent — the
+    unmigrated-volume case (applications.monthly_debt not yet applied)."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        return None if "information_schema" in self._last else (1,)
+
+
+class _SchemaMissingConn:
+    def cursor(self):
+        return _SchemaMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_schema_not_migrated(monkeypatch):
+    # PR review: a reachable DB whose volume predates 0006 would 500 the decision path
+    # on the monthly_debt SELECT. The probe must report readiness FALSE, naming the
+    # missing column, so /health shows unhealthy instead of a silent decisioning break.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _SchemaMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:applications.monthly_debt"
+
+
+class _LoansIndexMissingCursor:
+    """Column present but the uq_loans_app unique index absent — a partially-applied
+    migration that would let concurrent accepts board duplicate loans (PR review)."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        # information_schema (monthly_debt column) passes; pg_indexes (index) fails.
+        return None if "pg_indexes" in self._last else (1,)
+
+
+class _LoansIndexMissingConn:
+    def cursor(self):
+        return _LoansIndexMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_loans_unique_index_missing(monkeypatch):
+    # PR review: idempotent boarding relies on uq_loans_app; a partially-applied
+    # migration with the loans table but no index would let concurrent accepts board
+    # duplicate loans. Readiness must fail on that state, naming the missing index.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _LoansIndexMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:uq_loans_app"
+
+
+class _ContinuationTokenMissingCursor:
+    """monthly_debt column + uq_loans_app index present, but the ADR 0010 Phase B
+    continuation_token column absent -- a volume predating migration 0008, on which submit
+    could not issue a token and anonymous apply would silently break."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "continuation_token" in self._last:
+            return None
+        return (1,)
+
+
+class _ContinuationTokenMissingConn:
+    def cursor(self):
+        return _ContinuationTokenMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_continuation_token_column_missing(monkeypatch):
+    # PR review: the public apply flow authorizes on applications.continuation_token; a
+    # volume without the column must report unhealthy, naming it, not 500 submit silently.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _ContinuationTokenMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:applications.continuation_token"
+
+
+class _ExpiresAtMissingCursor:
+    """continuation_token present but continuation_token_expires_at absent -- a volume
+    predating migration 0009, on which authz's token SELECT and submit's INSERT would 500
+    while /health looked fine (PR #7 review)."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "'continuation_token_expires_at'" in self._last:
+            return None
+        return (1,)
+
+
+class _ExpiresAtMissingConn:
+    def cursor(self):
+        return _ExpiresAtMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_continuation_token_expires_at_column_missing(monkeypatch):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _ExpiresAtMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:applications.continuation_token_expires_at"
 
 
 def test_probe_false_when_database_url_unset(monkeypatch):

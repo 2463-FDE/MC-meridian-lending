@@ -5,6 +5,7 @@ Bureau/DB credentials are now read from the environment only — no secret defau
 in source (was: inline "so the demo just works"). Inject via the host env /
 secret manager; see docs/security-remediation-2026-07.md.
 """
+
 import os
 import threading
 import time
@@ -15,7 +16,58 @@ import psycopg2
 # --- Credit bureau (Experian) — env only; no committed default. Rotate the key
 # that was previously hardcoded/committed. ---
 EXPERIAN_KEY = os.getenv("EXPERIAN_KEY", "")
-EXPERIAN_BASE_URL = os.getenv("EXPERIAN_BASE_URL", "https://api.experian.example.com/v2")
+EXPERIAN_BASE_URL = os.getenv(
+    "EXPERIAN_BASE_URL", "https://api.experian.example.com/v2"
+)
+
+# Shared secret proving a request is an internal service-to-service call (origination's
+# assistant reading the decision record), NOT an external caller coming through the
+# anonymous gateway /decision proxy. Env only, no committed default (same posture as the
+# bureau key). When unset the guard fails CLOSED — an unconfigured token never means open.
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+
+# Keyed pepper for the SSN idempotency fingerprint (see decision._ssn_fingerprint).
+# SSN drives the bureau pull, so a reused request_id arriving with a DIFFERENT SSN must
+# not replay the recorded decision (PR review). We persist only an HMAC-SHA256 of the
+# SSN (never the SSN itself — identifier-free record, ADR 0007). Env only; NO committed
+# default (same posture as INTERNAL_SERVICE_TOKEN / EXPERIAN_KEY).
+#
+# CRITICAL: the digest is only non-reversible while the pepper is SECRET. An SSN is a
+# 9-digit space, so a public/placeholder pepper lets anyone with decision_events access
+# brute-force the fingerprints and recover SSNs (PR review). So a blank or KNOWN
+# PLACEHOLDER pepper is treated as NO pepper — no fingerprint is ever persisted under it
+# (see fingerprint_pepper) — and in a non-development deployment it reports unhealthy
+# (missing_required_secrets) rather than silently keying a reversible digest.
+DECISION_FINGERPRINT_PEPPER = os.getenv("DECISION_FINGERPRINT_PEPPER", "")
+
+# Pepper values that must NEVER key a real fingerprint: blank, the value the template
+# once shipped, and generic stubs. Compared case-insensitively; a copied .env.example
+# can therefore never produce a reversible digest.
+_PLACEHOLDER_PEPPERS = frozenset(
+    {
+        "",
+        "demo-decision-fingerprint-pepper-change-me",
+        "replace_with_fingerprint_pepper",
+        "change-me",
+        "changeme",
+        "change_me",
+        "placeholder",
+    }
+)
+
+
+def fingerprint_pepper() -> str | None:
+    """The SSN-fingerprint pepper, or None when it is unset or a known placeholder.
+
+    A placeholder is treated as unset so a copied .env.example (or an operator who never
+    set a real secret) can never key a reversible fingerprint. When this returns None the
+    SSN-change conflict check degrades to the financial-input fields only; no
+    ssn_fingerprint is persisted."""
+    pepper = DECISION_FINGERPRINT_PEPPER.strip()
+    if pepper.lower() in _PLACEHOLDER_PEPPERS:
+        return None
+    return pepper
+
 
 # Deployment environment. Synthetic credit is gated on this being exactly
 # "development", so no production config can enable it — not even by mistake.
@@ -26,7 +78,10 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "production").strip().lower()
 # without a live bureau. Guarded by TWO independent conditions (see
 # synthetic_credit_enabled): the explicit opt-in flag AND ENVIRONMENT=development.
 ALLOW_SYNTHETIC_CREDIT = os.getenv("ALLOW_SYNTHETIC_CREDIT", "").strip().lower() in (
-    "1", "true", "yes", "on",
+    "1",
+    "true",
+    "yes",
+    "on",
 )
 
 
@@ -80,7 +135,10 @@ def database_url_configured() -> bool:
     # stale/rotated DSN is caught by the POSTGRES_PASSWORD consistency check below.
     if password.lower() in {
         "replace_with_postgres_password",
-        "changeme", "change_me", "password", "postgres",
+        "changeme",
+        "change_me",
+        "password",
+        "postgres",
     }:
         return False
     # When POSTGRES_PASSWORD is the source of truth (compose ${VAR:?}), the DSN
@@ -157,6 +215,44 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
+            # Schema readiness (PR review): the decision write path unconditionally
+            # inserts decision_events(request_id). Migrations are hand-applied and lag
+            # the init DDL (CLAUDE.md / ADR 0002), so a DB volume that predates
+            # 0004-0006 is reachable but would 500/503 EVERY decision. Fail readiness
+            # loud here, naming the missing object, so an unmigrated deployment is
+            # visible at /health rather than a silent underwriting outage.
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'decision_events' AND column_name = 'request_id'"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:decision_events.request_id"
+            # The column alone is not enough (PR review): idempotency correctness under
+            # concurrency relies on the PARTIAL UNIQUE index uq_decision_events_request
+            # (app_id, request_id) WHERE request_id IS NOT NULL. It is what turns a
+            # concurrent same-key retry into the UniqueViolation that _persist_event
+            # catches and replays. A partially-applied migration where the column exists
+            # but the index does not would let two concurrent requests both miss the
+            # pre-check, both insert, and append DUPLICATE regulated decision events
+            # (with duplicate bureau pulls). Require the index too, so that state reports
+            # unhealthy instead of silently losing the concurrency guarantee.
+            cur.execute(
+                "SELECT 1 FROM pg_indexes WHERE indexname = 'uq_decision_events_request'"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:uq_decision_events_request"
+            # Append-only guarantee (PR review): decision_events is the Reg B system of
+            # record (ADR 0009), kept immutable by DB triggers that block UPDATE/DELETE
+            # and TRUNCATE. A hand-applied migration that created the table but not its
+            # triggers would leave the regulated record silently mutable while /health
+            # read healthy. Require BOTH triggers so that state reports unhealthy.
+            for trigger in (
+                "trg_decision_events_append_only",
+                "trg_decision_events_no_truncate",
+            ):
+                cur.execute("SELECT 1 FROM pg_trigger WHERE tgname = %s", (trigger,))
+                if cur.fetchone() is None:
+                    return False, "schema_not_ready:decision_events_append_only_trigger"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__
@@ -181,7 +277,20 @@ def missing_required_secrets() -> list:
         missing.append("EXPERIAN_KEY")
     if not database_url_configured():
         missing.append("DATABASE_URL")
+    # Fail loud on a missing internal-service token (PR review): without it the
+    # internal-only routes (POST /decisions, GET record) fail closed, so a misconfig
+    # would look healthy while every officer/assistant decision 503s. Surface at /health.
+    if not INTERNAL_SERVICE_TOKEN:
+        missing.append("INTERNAL_SERVICE_TOKEN")
+    # Fail loud outside development when the SSN-fingerprint pepper is unset or still a
+    # placeholder (PR review): a placeholder pepper would key a REVERSIBLE HMAC of the
+    # SSN into the append-only decision_events (breaking the identifier-free guarantee),
+    # and an unset one silently drops the reused-key SSN-change conflict check. A
+    # development deployment may run without it (fingerprint simply not persisted).
+    if ENVIRONMENT != "development" and fingerprint_pepper() is None:
+        missing.append("DECISION_FINGERPRINT_PEPPER")
     return missing
+
 
 # Core banking key — env only; no committed default.
 CORE_BANKING_API_KEY = os.getenv("CORE_BANKING_API_KEY", "")

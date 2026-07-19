@@ -41,14 +41,19 @@ All seeded with password `password`:
 
 ## Health checks
 
+The backend services (8001–8006) are NOT host-published — the gateway (:8000) is the sole
+external entry (PR review: a direct host port would let a caller forge X-User-Role and
+bypass the officer gate). Reach a service's /health from inside the network via
+`docker compose exec`:
+
 ```bash
-curl localhost:8000/health     # gateway
-curl localhost:8001/health     # origination (LOS, intake + boarding orchestrator)
-curl localhost:8002/health     # servicing (LSS)
-curl localhost:8003/health     # kyc-service
-curl localhost:8004/health     # decision-service
-curl localhost:8005/health     # disclosure-service
-curl localhost:8006/health     # payment-service
+curl localhost:8000/health                                        # gateway (published)
+docker compose exec origination-service curl -s localhost:8001/health   # LOS
+docker compose exec servicing-service   curl -s localhost:8002/health   # LSS
+docker compose exec kyc-service          curl -s localhost:8003/health
+docker compose exec decision-service     curl -s localhost:8004/health
+docker compose exec disclosure-service   curl -s localhost:8005/health
+docker compose exec payment-service      curl -s localhost:8006/health
 ```
 
 Ports 8003–8006 are the four services extracted from the old origination monolith
@@ -72,6 +77,34 @@ orchestrates the LOS flow and calls them over HTTP.
   path is dead-but-present.
 - **Look at the portfolio:** `GET /lss/loans?limit=25&offset=0&status=current` (requires auth).
 - **Reconciliation eyeball:** `GET /lss/reconciliation/peek` (ledger vs settlement totals).
+
+### Idempotent decisions
+
+`POST /los/applications/{id}/decision` accepts an `Idempotency-Key` header (forwarded to
+`decision-service` as `request_id`). A retry with the SAME key replays the recorded
+decision — no second bureau pull, no second `decision_events` row. The borrower portal
+sends a stable per-application key automatically; officer/ops callers should send their
+own on retryable requests. A key reused with DIFFERENT decision inputs (amount, income,
+term, monthly_debt, employment_years, or SSN) returns **409** rather than a stale replay.
+
+- **`DECISION_FINGERPRINT_PEPPER` (decision-service, env only).** SSN drives the bureau
+  pull, so the SSN is part of that conflict check — but only via a keyed HMAC (the raw
+  SSN is never persisted). This pepper is the HMAC key and **must be a real secret**: the
+  digest is only non-reversible while the pepper is secret, and an SSN is a 9-digit space,
+  so a public/placeholder pepper lets anyone with `decision_events` access brute-force the
+  fingerprints back to SSNs. So:
+  - `.env.example` ships it **blank** (no committed value — same posture as
+    `INTERNAL_SERVICE_TOKEN` / `EXPERIAN_KEY`). Set a real secret from a secret-manager in
+    any non-dev deploy.
+  - A blank or known-placeholder value is treated as **no pepper**: no fingerprint is
+    persisted, and **outside development `/health` reports unhealthy** (it is in
+    `missing_required_secrets`). SSN-change detection then degrades to the financial-input
+    fields only.
+  - The **local demo** supplies a dev-only value via `docker-compose.demo.yml`
+    (`ENVIRONMENT=development`, synthetic SSNs), so the check runs in the demo without a
+    committed production secret.
+  - Rotating it invalidates in-flight fingerprints, so a retry mid-rotation may 409 (fails
+    safe — never a stale decision).
 
 ## Known operational pain (unresolved)
 

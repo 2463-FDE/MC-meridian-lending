@@ -1,11 +1,49 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Stepper, { type Step } from "../../components/Stepper";
 import StatusChip from "../../components/StatusChip";
-import { apiPost } from "../../lib/api";
+import { apiGet, apiPost } from "../../lib/api";
 import { usd, pct } from "../../lib/format";
+
+// Resume state (ADR 0010 Phase B, PR #7 review). The continuation token is NO LONGER held
+// by the browser: the gateway keeps it server-side and hands back an HttpOnly resume cookie
+// that JS cannot read (so XSS / a compromised script cannot exfiltrate the credential). All
+// we persist here is the (non-sensitive) app id, so a refresh/tab-close can re-open the
+// application; the cookie -- sent automatically with credentials:"include" -- is what
+// actually authorizes the resumed request.
+const RESUME_KEY = "meridian:apply:resume";
+
+function saveResume(appId: string | number) {
+  if (typeof window === "undefined" || appId == null) return;
+  try {
+    window.localStorage.setItem(RESUME_KEY, JSON.stringify({ app_id: appId }));
+  } catch {
+    // storage unavailable (private mode / quota) -- in-memory state still works this session
+  }
+}
+
+function readResume(): { app_id: string | number } | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(RESUME_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    return v && v.app_id != null ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearResume() {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(RESUME_KEY);
+  } catch {
+    // ignore
+  }
+}
 
 const STEPS: Step[] = [
   { n: 1, label: "Personal" },
@@ -36,6 +74,7 @@ interface FormState {
   employer: string;
   job_title: string;
   annual_income: string;
+  monthly_debt: string;
   employment_years: string;
   amount: number;
   term_months: string;
@@ -53,6 +92,14 @@ interface AppResult {
   app_id: string | number;
   status?: string;
   kyc?: Kyc;
+  // False when the KYC service call did not complete at submit (outage/timeout/auth) --
+  // distinct from a KYC that ran and declined. Under the mandatory KYC gate (ADR 0011)
+  // such an application 409s on decision/offer/accept until a recheck persists a passing
+  // row, so the UI must offer a retry rather than the (misleading) all-false KYC result.
+  kyc_checked?: boolean;
+  // ADR 0010 (PR #7 review): the continuation token is no longer returned to the browser.
+  // The gateway strips it from this response, stores it server-side, and authorizes the
+  // logged-out applicant via an HttpOnly resume cookie the client cannot read.
 }
 
 interface DecisionResult {
@@ -98,6 +145,7 @@ export default function ApplyPage() {
     employer: "",
     job_title: "",
     annual_income: "",
+    monthly_debt: "",
     employment_years: "",
     amount: 15000,
     term_months: "36",
@@ -115,6 +163,48 @@ export default function ApplyPage() {
     null
   );
   const [showSchedule, setShowSchedule] = useState(false);
+  const [resuming, setResuming] = useState(false);
+
+  // Resume a submitted application after a refresh / tab close: the continuation token was
+  // persisted at submit, so rehydrate it and re-fetch the application (the token authorizes
+  // the read) to restore the step-5 view. A stale/invalid token or a deleted app clears the
+  // saved state and starts fresh.
+  useEffect(() => {
+    const saved = readResume();
+    if (!saved) return;
+    let cancelled = false;
+    setResuming(true);
+    (async () => {
+      try {
+        // No token header: the resume cookie (sent via credentials:"include") is what
+        // authorizes this read; the gateway re-attaches the token server-side.
+        const d = (await apiGet(`/los/applications/${saved.app_id}`)) as {
+          status?: string;
+          kyc?: Kyc | null;
+          decision?: string | null;
+          offer?: Disclosure | null;
+        };
+        if (cancelled) return;
+        setApp({
+          app_id: saved.app_id,
+          status: d.status,
+          kyc: d.kyc ?? undefined,
+          // No persisted KYC row -> the check never completed (outage) -> offer the retry.
+          kyc_checked: !!d.kyc,
+        });
+        if (d.decision) setDecision({ app_id: saved.app_id, decision: d.decision });
+        if (d.offer) setDisclosure(d.offer);
+        setStep(5);
+      } catch {
+        clearResume();
+      } finally {
+        if (!cancelled) setResuming(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function set<K extends keyof FormState>(k: K, v: FormState[K]) {
     setForm((f) => ({ ...f, [k]: v }));
@@ -137,6 +227,9 @@ export default function ApplyPage() {
       if (!form.annual_income.trim()) e.annual_income = "Required";
       else if (Number(form.annual_income) <= 0)
         e.annual_income = "Must be greater than 0";
+      if (!form.monthly_debt.trim()) e.monthly_debt = "Required";
+      else if (Number(form.monthly_debt) < 0)
+        e.monthly_debt = "Cannot be negative";
       if (!form.employment_years.trim()) e.employment_years = "Required";
       else if (Number(form.employment_years) < 0)
         e.employment_years = "Cannot be negative";
@@ -169,16 +262,43 @@ export default function ApplyPage() {
         phone: form.phone,
         employer: form.employer,
         job_title: form.job_title,
-        annual_income: parseFloat(form.annual_income || "0"),
+        income: parseFloat(form.annual_income || "0"),
+        monthly_debt: parseFloat(form.monthly_debt || "0"),
         employment_years: parseInt(form.employment_years || "0", 10),
         amount: form.amount,
         term_months: parseInt(form.term_months, 10),
         purpose: form.purpose,
       })) as AppResult;
       setApp(res);
+      saveResume(res.app_id);
       setStep(5);
     } catch (err) {
       setApiError(errMsg(err, "Could not submit your application."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ADR 0010 (PR #7 review): the logged-out applicant's decision/offer/accept are
+  // authorized by the HttpOnly resume cookie (sent automatically), not a client header.
+  // Officers/owners are authorized by their session. No token is handled in the browser.
+
+  // KYC recovery (ADR 0011): submit stays resilient during a KYC-service outage
+  // (kyc_checked=false, no persisted row), so the mandatory gate 409s decision/offer/
+  // accept. Re-run KYC for THIS application instead of resubmitting (which would create a
+  // duplicate); the resume cookie authorizes it. setApp carries the fresh kyc + kyc_checked.
+  async function recheckKyc() {
+    if (!app) return;
+    setBusy(true);
+    setApiError(null);
+    try {
+      const res = (await apiPost(
+        `/los/applications/${app.app_id}/recheck-kyc`
+      )) as AppResult;
+      setApp(res);
+      saveResume(res.app_id);
+    } catch (err) {
+      setApiError(errMsg(err, "Could not re-run identity verification."));
     } finally {
       setBusy(false);
     }
@@ -190,7 +310,14 @@ export default function ApplyPage() {
     setApiError(null);
     try {
       const res = (await apiPost(
-        `/los/applications/${app.app_id}/decision`
+        `/los/applications/${app.app_id}/decision`,
+        undefined,
+        {
+          // Stable per-application idempotency key: a timeout retry or a second click
+          // replays the recorded decision instead of re-pulling credit and appending
+          // another regulated decision event (PR review).
+          "Idempotency-Key": `los-decision-${app.app_id}`,
+        }
       )) as DecisionResult;
       setDecision(res);
     } catch (err) {
@@ -228,6 +355,9 @@ export default function ApplyPage() {
         `/los/applications/${app.app_id}/accept`
       )) as { loan_id: string | number };
       setAcceptedLoanId(res.loan_id);
+      // Flow complete: drop the saved app id. The gateway also revokes the server-side
+      // resume session and clears the HttpOnly cookie on this accept response.
+      clearResume();
     } catch (err) {
       setApiError(errMsg(err, "Could not accept the offer."));
     } finally {
@@ -235,7 +365,9 @@ export default function ApplyPage() {
     }
   }
 
-  const decisionApproved = (decision?.decision || "").toLowerCase() === "approved";
+  // decision-service emits the outcome enum "approve" (not "approved"): match it, or
+  // the "View your offer" CTA never renders for an approved borrower (PR review).
+  const decisionApproved = (decision?.decision || "").toLowerCase() === "approve";
 
   return (
     <main className="wrap">
@@ -243,6 +375,10 @@ export default function ApplyPage() {
       <p className="sub">
         Fixed-rate installment loan · $1,000–$50,000 · 12–60 months
       </p>
+
+      {resuming ? (
+        <div className="alert alert-info">Resuming your saved application…</div>
+      ) : null}
 
       <Stepper steps={STEPS} current={step} />
 
@@ -347,6 +483,20 @@ export default function ApplyPage() {
                 />
               </Field>
             </div>
+            <div className="field-row">
+              <Field
+                label="Monthly debt payments (USD)"
+                error={errors.monthly_debt}
+              >
+                <input
+                  type="number"
+                  min="0"
+                  value={form.monthly_debt}
+                  onChange={(e) => set("monthly_debt", e.target.value)}
+                  placeholder="500"
+                />
+              </Field>
+            </div>
           </>
         )}
 
@@ -427,6 +577,10 @@ export default function ApplyPage() {
                 value={usd(form.annual_income)}
               />
               <SummaryRow
+                label="Monthly debt payments"
+                value={usd(form.monthly_debt)}
+              />
+              <SummaryRow
                 label="Years at employer"
                 value={form.employment_years}
               />
@@ -477,28 +631,47 @@ export default function ApplyPage() {
                   Application <strong>#{String(app.app_id)}</strong> received.
                 </div>
 
-                {app.kyc ? (
+                {app.kyc_checked === false ? (
                   <>
                     <h3 style={{ marginTop: 18 }}>Identity verification (KYC)</h3>
-                    <div className="dl">
-                      <KycRow
-                        label="Name"
-                        ok={app.kyc.name_verified}
-                      />
-                      <KycRow label="Date of birth" ok={app.kyc.dob_verified} />
-                      <KycRow label="Address" ok={app.kyc.address_verified} />
-                      <KycRow label="SSN" ok={app.kyc.ssn_verified} />
+                    <div className="alert alert-warn">
+                      We couldn&apos;t complete identity verification just now —
+                      this is usually a temporary issue, not a decline. Retry to
+                      continue; you won&apos;t need to re-enter anything.
                     </div>
+                    <button onClick={recheckKyc} disabled={busy}>
+                      {busy ? "Re-checking…" : "Retry identity check"}
+                    </button>
                   </>
-                ) : null}
-
-                <hr className="divider" />
-
-                {!decision ? (
-                  <button onClick={getDecision} disabled={busy}>
-                    {busy ? "Evaluating…" : "Get decision"}
-                  </button>
                 ) : (
+                  <>
+                    {app.kyc ? (
+                      <>
+                        <h3 style={{ marginTop: 18 }}>
+                          Identity verification (KYC)
+                        </h3>
+                        <div className="dl">
+                          <KycRow label="Name" ok={app.kyc.name_verified} />
+                          <KycRow
+                            label="Date of birth"
+                            ok={app.kyc.dob_verified}
+                          />
+                          <KycRow
+                            label="Address"
+                            ok={app.kyc.address_verified}
+                          />
+                          <KycRow label="SSN" ok={app.kyc.ssn_verified} />
+                        </div>
+                      </>
+                    ) : null}
+
+                    <hr className="divider" />
+
+                    {!decision ? (
+                      <button onClick={getDecision} disabled={busy}>
+                        {busy ? "Evaluating…" : "Get decision"}
+                      </button>
+                    ) : (
                   <>
                     <div className="spread">
                       <h3 style={{ margin: 0 }}>Underwriting decision</h3>
@@ -523,6 +696,8 @@ export default function ApplyPage() {
                         {busy ? "Preparing offer…" : "View your offer"}
                       </button>
                     ) : null}
+                      </>
+                    )}
                   </>
                 )}
 

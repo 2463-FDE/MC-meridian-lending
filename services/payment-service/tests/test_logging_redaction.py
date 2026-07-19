@@ -3,6 +3,7 @@
 This test simulates a payment request with full PAN/CVV/SSN,
 verifies the log file does NOT contain these fields unredacted.
 """
+
 import io
 import json
 import logging
@@ -41,7 +42,7 @@ def test_payment_request_logging_redacts_pan(temp_log_dir):
         "pan": "4111-1111-1111-1111",
         "cvv": "123",
         "ssn": "412-55-9981",
-        "amount": 250.00
+        "amount": 250.00,
     }
     logger.info("charge request: %s", payment_req)
 
@@ -53,7 +54,9 @@ def test_payment_request_logging_redacts_pan(temp_log_dir):
 
     # Verify PAN first 12 digits are NOT in the log
     assert "4111-1111-1111" not in content, "Full PAN should be redacted"
-    assert "4111" not in content or "411111111111" not in content, "PAN prefix should be redacted"
+    assert "4111" not in content or "411111111111" not in content, (
+        "PAN prefix should be redacted"
+    )
 
     # Verify last 4 of PAN IS in the log (preserved for reference)
     assert "1111" in content, "Last 4 of PAN should be preserved"
@@ -63,20 +66,23 @@ def test_payment_request_logging_redacts_pan(temp_log_dir):
     assert "••••" in content, "Redaction marker should be present"
 
 
-@pytest.mark.parametrize("pan", [
-    "4111/1111/1111/1111",   # slash-separated — previously leaked
-    "4111_1111_1111_1111",   # underscore-separated — previously leaked
-    "4111  1111  1111  1111",  # repeated whitespace — previously leaked
-    "4111-1111-1111-1111",   # hyphen
-    "4111 1111 1111 1111",   # single space
-    "4111.1111.1111.1111",   # dotted
-    "4111*1111*1111*1111",   # star — separator the field-context rule catches
-    "4111|1111|1111|1111",   # pipe
-    '4111"1111"1111"1111',   # double-quote — closes the quoted log field early
-    "4111'1111'1111'1111",   # single-quote — same bypass, other quote char
-    "4111\"1111'1111\"1111",  # mixed quotes
-    "4111111111111111",      # contiguous
-])
+@pytest.mark.parametrize(
+    "pan",
+    [
+        "4111/1111/1111/1111",  # slash-separated — previously leaked
+        "4111_1111_1111_1111",  # underscore-separated — previously leaked
+        "4111  1111  1111  1111",  # repeated whitespace — previously leaked
+        "4111-1111-1111-1111",  # hyphen
+        "4111 1111 1111 1111",  # single space
+        "4111.1111.1111.1111",  # dotted
+        "4111*1111*1111*1111",  # star — separator the field-context rule catches
+        "4111|1111|1111|1111",  # pipe
+        '4111"1111"1111"1111',  # double-quote — closes the quoted log field early
+        "4111'1111'1111'1111",  # single-quote — same bypass, other quote char
+        '4111"1111\'1111"1111',  # mixed quotes
+        "4111111111111111",  # contiguous
+    ],
+)
 def test_payment_request_logging_redacts_pan_separator_variants(temp_log_dir, pan):
     """Regression: PAN must be redacted on the charge log path for every separator
     a client can put in the unconstrained PaymentIn.pan string. Mirrors the real
@@ -85,7 +91,9 @@ def test_payment_request_logging_redacts_pan_separator_variants(temp_log_dir, pa
 
     logger.info(
         'POST /payments charge req={"pan":"%s","cvv":"%s","amount":%s}',
-        pan, "123", 250.00,
+        pan,
+        "123",
+        250.00,
     )
 
     content = (Path(temp_log_dir) / "payment-service.log").read_text()
@@ -137,14 +145,17 @@ def test_name_field_exotic_separator_pan_redacted(temp_log_dir):
     assert "1111" in content
 
 
-@pytest.mark.parametrize("name", [
-    "Apt 12 4111x1111x1111x1111",     # reviewer repro: leading digits defeat whole-value Luhn
-    "4111x1111x1111x1111",            # bare smuggled card, letter separators
-    "Unit 5 4111,1111,1111,1111",     # apartment digits + comma-separated card
-    "order 99 4111 1111 1111 1111",   # order digits + spaced card
-    "4111====1111====1111====1111",   # long separator runs
-    "Jane Doe",                       # ordinary name — nothing to leak
-])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Apt 12 4111x1111x1111x1111",  # reviewer repro: leading digits defeat whole-value Luhn
+        "4111x1111x1111x1111",  # bare smuggled card, letter separators
+        "Unit 5 4111,1111,1111,1111",  # apartment digits + comma-separated card
+        "order 99 4111 1111 1111 1111",  # order digits + spaced card
+        "4111====1111====1111====1111",  # long separator runs
+        "Jane Doe",  # ordinary name — nothing to leak
+    ],
+)
 def test_charge_log_never_contains_name(temp_log_dir, monkeypatch, name):
     """Regression (Codex): a PAN smuggled into the free-text `name` — including
     with LEADING ordinary digits (`Apt 12 ...`) that break a whole-value Luhn
@@ -158,16 +169,23 @@ def test_charge_log_never_contains_name(temp_log_dir, monkeypatch, name):
     monkeypatch.setattr(payments.db, "query", lambda *a, **k: [{"id": 1}])
     monkeypatch.setattr(payments, "_apply_via_servicing", lambda *a, **k: None)
 
-    payments.charge(loan_id=7, pan="4111111111111111", cvv="123",
-                    amount=250.0, ssn="412-55-9981", name=name)
+    payments.charge(
+        loan_id=7,
+        pan="4111111111111111",
+        cvv="123",
+        amount=250.0,
+        ssn="412-55-9981",
+        name=name,
+    )
 
     content = (Path(temp_log_dir) / "payment-service.log").read_text()
     # The card the client submitted (pan field) is masked to its last 4.
     assert "411111111111" not in content, f"12-digit PAN leaked for name={name!r}"
     # name is not logged at all, so nothing smuggled into it can appear.
     assert '"name"' not in content, "name field should not be logged"
-    assert "Apt" not in content and "Unit" not in content and "Jane" not in content, \
+    assert "Apt" not in content and "Unit" not in content and "Jane" not in content, (
         f"raw name reached the log for {name!r}"
+    )
 
 
 def test_payment_request_logging_redacts_ssn(temp_log_dir):
@@ -199,18 +217,47 @@ def test_payment_request_logging_redacts_cvv(temp_log_dir):
     content = log_file.read_text()
 
     # Verify CVV is redacted
-    assert "456" not in content, "CVV should be redacted"
+    assert "'cvv': '••••'" in content, "CVV value should be masked"
+    assert "'cvv': '456'" not in content, "raw CVV must not appear"
     assert "••••" in content, "Redaction marker should be present"
+
+
+def test_timestamp_is_not_masked_as_a_false_pan():
+    # Regression (PR #7 review): the formatter redacts the MESSAGE, not the levelname/asctime
+    # prefix. The previous whole-line redaction masked a Luhn-valid timestamp digit run
+    # (YYYYMMDDHHMMSSmmm) as a false PAN -- corrupting the timestamp and making the CVV/PAN
+    # substring assertions time-dependent (they flaked whenever the masked timestamp tail
+    # happened to contain the asserted digits). A strftime format with no % directives returns
+    # its literal, so this pins a Luhn-valid "timestamp" (the classic 4111... test PAN)
+    # independent of the wall clock: the OLD formatter masked it, the fixed one leaves it.
+    fmt = RedactingFormatter(
+        "%(levelname)s %(asctime)s %(message)s", datefmt="4111111111111111"
+    )
+    rec = logging.LogRecord("t", logging.INFO, __file__, 1, "ok", None, None)
+    out = fmt.format(rec)
+    assert "4111111111111111" in out  # timestamp survives intact (not masked as a PAN)
+    assert "(PAN)" not in out
+    assert "ok" in out
+
+
+def test_message_pan_still_masked_with_timestamp_untouched():
+    # The other direction: a PAN in the MESSAGE is still masked even though the timestamp is
+    # now exempt -- redaction of PII is preserved, only the timestamp scan is removed.
+    fmt = RedactingFormatter("%(asctime)s %(message)s", datefmt="20000101000000")
+    rec = logging.LogRecord(
+        "t", logging.INFO, __file__, 1, "pan=%s", ("4111111111111111",), None
+    )
+    out = fmt.format(rec)
+    assert "20000101000000" in out  # timestamp intact
+    assert "4111111111111111" not in out  # the message PAN is masked
+    assert "(PAN)" in out
 
 
 def test_logging_with_email_and_phone(temp_log_dir):
     """Test: Email and phone are redacted."""
     logger = get_logger("payment_test")
 
-    customer_data = {
-        "email": "customer@example.com",
-        "phone": "555-123-4567"
-    }
+    customer_data = {"email": "customer@example.com", "phone": "555-123-4567"}
     logger.info("customer: %s", customer_data)
 
     log_file = Path(temp_log_dir) / "payment-service.log"
@@ -229,11 +276,7 @@ def test_logging_does_not_redact_non_pii(temp_log_dir):
     """Test: Non-PII data (amounts, IDs) is not redacted."""
     logger = get_logger("payment_test")
 
-    data = {
-        "transaction_id": "TXN-12345",
-        "amount": "250.00",
-        "reference": "REF-9876"
-    }
+    data = {"transaction_id": "TXN-12345", "amount": "250.00", "reference": "REF-9876"}
     logger.info("transaction: %s", data)
 
     log_file = Path(temp_log_dir) / "payment-service.log"
@@ -269,6 +312,43 @@ def test_no_leak_via_root_handler(temp_log_dir):
     assert logger.propagate is False, "service logger must not propagate to root"
 
 
+def test_traceback_pan_redacted_despite_precached_exc_text(temp_log_dir):
+    """A prior plain handler must not poison the redacted handler's traceback.
+
+    Regression for the formatter split (formatMessage/formatException). When a
+    pre-existing NON-redacting handler formats the record first, stdlib caches
+    record.exc_text RAW; stdlib format() then SKIPS formatException on the
+    RedactingFormatter handler (exc_text already set) and would append the raw
+    traceback -- a full PAN in the stream/file log. The overridden format()
+    redacts the cached exc_text before super() appends it.
+    """
+    name = "payment_test"
+    # Pre-existing plain handler attached BEFORE get_logger -> caches exc_text raw.
+    plain = logging.StreamHandler(io.StringIO())
+    plain.setFormatter(logging.Formatter("%(message)s"))
+    logging.getLogger(name).addHandler(plain)
+
+    logger = get_logger(name)
+    red_buf = io.StringIO()
+    for h in logger.handlers:
+        if isinstance(h.formatter, RedactingFormatter):
+            h.stream = red_buf
+
+    try:
+        raise ValueError('card 4111111111111111 {"ssn": "412-55-9981"}')
+    except ValueError:
+        logger.exception("charge failed")
+
+    out = red_buf.getvalue()
+    assert "4111111111111111" not in out, (
+        "raw PAN leaked in traceback via exc_text cache"
+    )
+    assert "412-55-9981" not in out, "raw SSN leaked in traceback via exc_text cache"
+    assert "(PAN)" in out and "•••-••-9981" in out, (
+        "expected masked PAN + SSN in traceback"
+    )
+
+
 def test_charge_masks_invalid_luhn_labeled_pan(temp_log_dir, monkeypatch):
     """An invalid-Luhn card in the labeled `pan` field is still cardholder data.
 
@@ -284,8 +364,14 @@ def test_charge_masks_invalid_luhn_labeled_pan(temp_log_dir, monkeypatch):
     monkeypatch.setattr(payments.db, "query", lambda *a, **k: [{"id": 1}])
     monkeypatch.setattr(payments, "_apply_via_servicing", lambda *a, **k: None)
 
-    payments.charge(loan_id=7, pan="4111111111111112", cvv="123",
-                    amount=250.00, ssn="412-55-9981", name="Jane Doe")
+    payments.charge(
+        loan_id=7,
+        pan="4111111111111112",
+        cvv="123",
+        amount=250.00,
+        ssn="412-55-9981",
+        name="Jane Doe",
+    )
 
     content = (Path(temp_log_dir) / "payment-service.log").read_text()
     assert "4111111111111112" not in content, "invalid-Luhn PAN logged in the clear"
@@ -303,7 +389,7 @@ def test_labeled_pan_masked_regardless_of_luhn():
     assert "4111111111111112" not in r('{"pan":"4111111111111112"}')
     assert "1112 (PAN)" in r('{"pan":"4111111111111112"}')
     assert "1112 (PAN)" in r('{"card_number":"4111-1111-1111-1112"}')
-    assert "1112 (PAN)" in r('cc_number=4111111111111112')
+    assert "1112 (PAN)" in r("cc_number=4111111111111112")
     # Unlabeled non-Luhn 16-digit run must NOT be masked (order id false positive).
     assert r('{"order_id":"1234567890123456"}') == '{"order_id":"1234567890123456"}'
     # A short value under a card key is left as-is (brand string, last-4).

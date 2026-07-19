@@ -100,19 +100,32 @@ async function parse(res: Response) {
   return data;
 }
 
-export async function apiGet(path: string) {
+// credentials:"include" sends the gateway's HttpOnly resume cookie (ADR 0010 Phase B):
+// the anonymous continuation token is no longer a client-held header, so the browser must
+// carry the cookie for the gateway to re-attach the token server-side.
+export async function apiGet(path: string, headers?: Record<string, string>) {
   const res = await fetch(`${GATEWAY_URL}${path}`, {
     cache: "no-store",
-    headers: { ...authHeaders() },
+    credentials: "include",
+    headers: { ...authHeaders(), ...(headers || {}) },
   });
   return parse(res);
 }
 
-export async function apiPost(path: string, body?: unknown) {
+export async function apiPost(
+  path: string,
+  body?: unknown,
+  headers?: Record<string, string>,
+) {
   const res = await fetch(`${GATEWAY_URL}${path}`, {
     method: "POST",
     cache: "no-store",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(),
+      ...(headers || {}),
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return parse(res);
@@ -122,6 +135,7 @@ export async function apiDelete(path: string) {
   const res = await fetch(`${GATEWAY_URL}${path}`, {
     method: "DELETE",
     cache: "no-store",
+    credentials: "include",
     headers: { ...authHeaders() },
   });
   return parse(res);

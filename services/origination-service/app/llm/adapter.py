@@ -12,6 +12,7 @@ package — and the whole test suite — works without either installed.
 `FakeAdapter` is the in-memory double used by tests so they spend no tokens and
 never flake on the network.
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -37,7 +38,7 @@ class CompletionRequest:
     """Provider-neutral request. The request builder produces this."""
 
     system: str
-    messages: list[dict]              # [{"role": "user"|"assistant", "content": str}]
+    messages: list[dict]  # [{"role": "user"|"assistant", "content": str}]
     model: str
     max_tokens: int
     temperature: float
@@ -76,11 +77,15 @@ def _translate_anthropic_error(exc: Exception) -> LLMHTTPError | LLMTimeoutError
     status = getattr(exc, "status_code", None)
     if status is None:
         # Connection error, etc. — treat as transient.
-        return LLMHTTPError(f"Claude API connection error: {type(exc).__name__}",
-                            status_code=0, retryable=True)
+        return LLMHTTPError(
+            f"Claude API connection error: {type(exc).__name__}",
+            status_code=0,
+            retryable=True,
+        )
     retryable = status == 429 or 500 <= status < 600
-    return LLMHTTPError(f"Claude API returned HTTP {status}.",
-                        status_code=status, retryable=retryable)
+    return LLMHTTPError(
+        f"Claude API returned HTTP {status}.", status_code=status, retryable=retryable
+    )
 
 
 class _AnthropicSDKAdapter(ModelAdapter):
@@ -149,6 +154,7 @@ class ClaudeAdapter(_AnthropicSDKAdapter):
         if self._client is None:
             try:
                 import anthropic
+
                 self._client = anthropic.Anthropic(api_key=self._api_key)
             except ImportError as exc:  # pragma: no cover - env-dependent
                 raise LLMHTTPError(
@@ -187,6 +193,7 @@ class BedrockAdapter(_AnthropicSDKAdapter):
             # typed error — the exact "missing extra" gap the review flagged.
             try:
                 import anthropic
+
                 kwargs = {"aws_region": self._region} if self._region else {}
                 self._client = anthropic.AnthropicBedrock(**kwargs)
             except ImportError as exc:
@@ -214,8 +221,10 @@ class FakeAdapter(ModelAdapter):
         on_complete=None,
         input_tokens: int = 10,
         output_tokens: int = 10,
+        responses: list[str] | None = None,
     ):
         self.response = response
+        self._responses = list(responses or [])  # scripted sequence (agent-loop tests)
         self._raises = list(raises or [])
         self._on_complete = on_complete
         self._input_tokens = input_tokens
@@ -229,7 +238,7 @@ class FakeAdapter(ModelAdapter):
         if self._on_complete is not None:
             return self._on_complete(req)
         return Completion(
-            text=self.response,
+            text=self._responses.pop(0) if self._responses else self.response,
             input_tokens=self._input_tokens,
             output_tokens=self._output_tokens,
             model=req.model,
@@ -242,4 +251,4 @@ class FakeAdapter(ModelAdapter):
             raise self._raises.pop(0)
         # Chunk the canned response to mimic token streaming.
         for i in range(0, len(self.response), 8):
-            yield self.response[i:i + 8]
+            yield self.response[i : i + 8]

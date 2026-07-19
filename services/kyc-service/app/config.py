@@ -5,6 +5,7 @@ Bureau/DB credentials are now read from the environment only — no secret defau
 in source (was: inline "so the demo just works"). Inject via the host env /
 secret manager; see docs/security-remediation-2026-07.md.
 """
+
 import os
 import threading
 import time
@@ -15,7 +16,9 @@ import psycopg2
 # --- Credit bureau (Experian) — env only; no committed default. Rotate the key
 # that was previously hardcoded/committed. ---
 EXPERIAN_KEY = os.getenv("EXPERIAN_KEY", "")
-EXPERIAN_BASE_URL = os.getenv("EXPERIAN_BASE_URL", "https://api.experian.example.com/v2")
+EXPERIAN_BASE_URL = os.getenv(
+    "EXPERIAN_BASE_URL", "https://api.experian.example.com/v2"
+)
 
 # No committed default: a passwordless fallback DSN (meridian:@postgres) would
 # let a deploy that omits DATABASE_URL connect unauthenticated and look healthy.
@@ -61,7 +64,10 @@ def database_url_configured() -> bool:
     # stale/rotated DSN is caught by the POSTGRES_PASSWORD consistency check below.
     if password.lower() in {
         "replace_with_postgres_password",
-        "changeme", "change_me", "password", "postgres",
+        "changeme",
+        "change_me",
+        "password",
+        "postgres",
     }:
         return False
     # When POSTGRES_PASSWORD is the source of truth (compose ${VAR:?}), the DSN
@@ -156,6 +162,18 @@ def missing_required_secrets() -> list:
     missing = []
     if not database_url_configured():
         missing.append("DATABASE_URL")
+    # Fail loud on a missing internal-service token (PR review): without it POST
+    # /kyc/check fails closed (503), and origination's intake call catches that and
+    # returns a submitted application with all CIP booleans false — a silent degrade.
+    # Surface it at /health so a misconfig fails readiness instead.
+    if not INTERNAL_SERVICE_TOKEN:
+        missing.append("INTERNAL_SERVICE_TOKEN")
     return missing
+
+
+# Shared secret identifying an internal service-to-service call. Required by the
+# CIP-check route, which only origination calls (during intake) with the secret
+# forwarded. Env only, no committed default; unset makes the route fail closed.
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

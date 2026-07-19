@@ -69,6 +69,14 @@ jobs:
           cd services/origination-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_redactor.py -q
+      - name: origination-service adversarial PII export matrix (no PII to the model)
+        # The black-box no-leak property of redact_json across the full variant space
+        # (shapes, labels, containers, free-text notes/reason fields). The `backend` job
+        # runs it under continue-on-error/|| true, so a reopened export leak would stay
+        # green; this step is the enforceable gate.
+        run: |
+          cd services/origination-service
+          python -m pytest tests/test_pii_matrix.py -q
       - name: origination-service LLM client tests (provider/retry/schema/pre-send PII redaction)
         # Highest-risk behavior in the LLM feature — must block the build. The
         # `backend` job also runs these but under continue-on-error/|| true, so a
@@ -114,7 +122,156 @@ jobs:
         run: |
           cd services/decision-service
           pip install -r requirements.txt pytest
-          python -m pytest tests/test_decision.py::test_env_example_gate_stays_closed_by_parsing_the_template -q
+          python -m pytest tests/test_decision.py -k "env_example or pepper" -q
+
+  decision-idempotency-gate:
+    # Decision idempotency is a regulatory control: a reused Idempotency-Key must
+    # replay the recorded decision (no second bureau pull / no second append-only
+    # decision_events row), and a key reused with CHANGED decision inputs — including
+    # the SSN that drives the credit pull — must 409, never serve a stale outcome as
+    # the regulated record. The tests live in test_decision_record.py, which the
+    # `backend` job runs under continue-on-error/|| true, so a reopened gap would stay
+    # green. This job MUST block — no continue-on-error, no `|| true`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: decision-service idempotency + append-only record regression tests
+        run: |
+          cd services/decision-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_decision_record.py -q
+
+  offer-guard-gate:
+    # Offer generation and loan boarding are state-changing money operations reachable
+    # through the anonymous /los proxy. The guards -- offer inputs bound to the stored
+    # application, offer requires an approved decision, boarding requires an approved
+    # decision AND an existing offer -- limit an anonymous trigger to at most a no-op on
+    # an approved application (never a forged offer or a loan boarded on a not-approved
+    # app). The tests live in test_offers.py, which the `backend` job runs under
+    # continue-on-error/|| true, so a reopened gap would stay green. This job MUST block.
+    # (The remaining anonymous-trigger authorization is deferred to ADR 0010.)
+    #
+    # The disclosure-service offer routes (POST /offers write, GET /applications/{id}/offer
+    # read) are the same offer surface, reachable directly through the anonymous /disclosure
+    # proxy. Both are internal-only (X-Internal-Service); a caller must go through the
+    # origination offer routes that enforce officer-OR-owner. test_auth_gate.py proves that
+    # gate and also runs under the continue-on-error backend job, so it blocks here too.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: origination-service offer/accept guard regression tests
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_offers.py -q
+      - name: disclosure-service offer internal-only gate tests
+        run: |
+          cd services/disclosure-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_auth_gate.py -q
+
+  adr-0010-authz-gate:
+    # ADR 0010 authorization is a security control: the application-scoped orchestration
+    # routes (GET /applications/{id}, /decision, /accept, /offer, offer read) and the PII
+    # roster (GET /applications) are reachable through the anonymous /los proxy, so they
+    # must authorize as officer-OR-owner and deny anonymous callers. The tests live in
+    # test_authz.py, which the `backend` job runs under continue-on-error/|| true, so a
+    # reopened IDOR would stay green. This job MUST block -- no continue-on-error, no
+    # `|| true`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: origination-service officer-OR-owner authorization tests
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_authz.py -q
+
+  gateway-trust-boundary-gate:
+    # The gateway is the sole trust boundary: it must strip client-supplied identity/
+    # capability headers (X-User-*, X-Internal-Service, X-Application-Token) so they cannot
+    # be forged through the proxy, and it holds the anonymous continuation token server-side
+    # (Redis) behind an HttpOnly resume cookie -- the raw token is stripped from the submit
+    # body, injected downstream only from the session, and revoked on accept (ADR 0010
+    # Phase B, PR #7). These tests live in test_proxy_methods.py, which the `backend` job
+    # runs under continue-on-error/|| true, so a reopened leak would stay green. This job
+    # MUST block -- no continue-on-error, no `|| true`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: gateway trust-boundary + resume-cookie tests
+        run: |
+          cd services/gateway
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_proxy_methods.py -q
+
+  compose-hardening-gate:
+    # The resume-cookie flow (ADR 0010 Phase B, PR #7) depends on two gateway settings that
+    # must follow the DEPLOYMENT, not be pinned to local-dev literals in the BASE compose file:
+    #   COOKIE_SECURE  -- pinned false => the resume capability rides plain HTTP in prod.
+    #   PORTAL_ORIGIN  -- pinned localhost => credentialed CORS rejects the real portal, so the
+    #                     applicant cannot continue submit -> decision/offer/accept.
+    # Both must be ${VAR:-default} in docker-compose.yml so a real deploy's .env/host value wins;
+    # the local http relaxation lives in docker-compose.demo.yml only. This job BLOCKS -- no
+    # continue-on-error -- so a future edit that re-pins a literal in the base file fails CI.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: base compose does not pin resume-cookie CORS/Secure config
+        run: |
+          set -euo pipefail
+          # Every COOKIE_SECURE / PORTAL_ORIGIN assignment in the BASE file must interpolate a
+          # variable (contain "${"). A literal value fails. The demo override is exempt.
+          if grep -nE '^[[:space:]]*(COOKIE_SECURE|PORTAL_ORIGIN):' docker-compose.yml \
+              | grep -vF '${'; then
+            echo "FAIL: base docker-compose.yml pins COOKIE_SECURE/PORTAL_ORIGIN to a literal."
+            echo "Use \${VAR:-default} so a real deploy's value wins; keep localhost/false in docker-compose.demo.yml."
+            exit 1
+          fi
+          echo "OK: resume-cookie CORS/Secure config is deployment-overridable in base compose."
+
+  kyc-enforcement-gate:
+    # ADR 0011 is a compliance control: a regulated decision, an offer, and loan boarding
+    # must not proceed on an application whose identity check failed or never ran. The
+    # tests in test_kyc_gate.py prove decision/offer/accept 409 on a declined or absent
+    # KYC. They also run in the `backend` job under continue-on-error/|| true, so a
+    # reopened gap would stay green. This job MUST block -- no continue-on-error, no
+    # `|| true`.
+    #
+    # The gate only holds if kyc-service actually persists a kyc_checks row for every
+    # successful KYC response: test_kyc_persistence.py proves /kyc/check fails closed (503)
+    # when the insert fails instead of reporting a pass with no row, and that a partial /
+    # entity request (no dob/ssn) persists a pass/fail row rather than 422-ing into a
+    # phantom "KYC unavailable". Runs under the continue-on-error backend job too, so it
+    # blocks here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: origination-service KYC enforcement tests
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_kyc_gate.py -q
+      - name: kyc-service persistence + boundary-contract tests
+        run: |
+          cd services/kyc-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_kyc_persistence.py -q
 
   db-readiness-gate:
     # DB readiness is a security control: a passwordless / placeholder / stale
@@ -152,7 +309,7 @@ jobs:
         run: |
           cd services/decision-service
           pip install -r requirements.txt pytest
-          python -m pytest tests/test_decision.py -k database_url -q
+          python -m pytest tests/test_decision.py -k "database_url or internal_service_token or schema" -q
 
   rag-eval-gate:
     # The RAG eval hygiene gate (refuses contaminated kb_dump: ssn/pan/ein) and

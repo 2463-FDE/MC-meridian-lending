@@ -4,6 +4,7 @@ Bureau/DB credentials are now read from the environment only — no secret defau
 in source (was: inline "so the demo just works"). Inject via the host env /
 secret manager; see docs/security-remediation-2026-07.md.
 """
+
 import os
 import threading
 import time
@@ -14,7 +15,9 @@ import psycopg2
 # --- Credit bureau (Experian) — env only; no committed default. Rotate the key
 # that was previously hardcoded/committed. ---
 EXPERIAN_KEY = os.getenv("EXPERIAN_KEY", "")
-EXPERIAN_BASE_URL = os.getenv("EXPERIAN_BASE_URL", "https://api.experian.example.com/v2")
+EXPERIAN_BASE_URL = os.getenv(
+    "EXPERIAN_BASE_URL", "https://api.experian.example.com/v2"
+)
 
 # Core banking key — env only; no committed default.
 CORE_BANKING_API_KEY = os.getenv("CORE_BANKING_API_KEY", "")
@@ -63,7 +66,10 @@ def database_url_configured() -> bool:
     # stale/rotated DSN is caught by the POSTGRES_PASSWORD consistency check below.
     if password.lower() in {
         "replace_with_postgres_password",
-        "changeme", "change_me", "password", "postgres",
+        "changeme",
+        "change_me",
+        "password",
+        "postgres",
     }:
         return False
     # When POSTGRES_PASSWORD is the source of truth (compose ${VAR:?}), the DSN
@@ -140,6 +146,50 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
+            # Schema readiness (PR review): decisioning reads applications.monthly_debt
+            # (decision_request_payload). Migrations are hand-applied and lag the init
+            # DDL (CLAUDE.md / ADR 0002), so a DB volume that predates 0006 is reachable
+            # but the SELECT would 500 the decision path. Fail readiness loud here,
+            # naming the missing column, so an unmigrated deployment shows at /health.
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'applications' AND column_name = 'monthly_debt'"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:applications.monthly_debt"
+            # Idempotent boarding depends on the uq_loans_app unique index (PR review):
+            # it is what turns a concurrent duplicate acceptance into the UniqueViolation
+            # accept_offer catches and replays. A partially-applied migration with the
+            # loans table but no index would let concurrent accepts board duplicate loans
+            # while /health reads healthy — same class as the decision idempotency index.
+            cur.execute("SELECT 1 FROM pg_indexes WHERE indexname = 'uq_loans_app'")
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:uq_loans_app"
+            # ADR 0010 Phase B: the anonymous apply flow authorizes decision/offer/accept
+            # by the applications.continuation_token issued at submit. A volume predating
+            # 0008 has no column, so submit's UPDATE would 500 and no token could be issued
+            # -- silently breaking anonymous apply. Fail readiness loud, naming the column,
+            # same as the monthly_debt / uq_loans_app rungs.
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'applications' "
+                "AND column_name = 'continuation_token'"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:applications.continuation_token"
+            # PR #7 review: authz SELECTs continuation_token_expires_at on every token check
+            # and intake INSERTs it at submit. A volume with continuation_token but not this
+            # column (predating migration 0009) would 500 on submit and on every token
+            # authorization while /health looked fine -- fail readiness loud, naming it.
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'applications' "
+                "AND column_name = 'continuation_token_expires_at'"
+            )
+            if cur.fetchone() is None:
+                return False, (
+                    "schema_not_ready:applications.continuation_token_expires_at"
+                )
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__
@@ -158,7 +208,22 @@ def missing_required_secrets() -> list:
     missing = []
     if not database_url_configured():
         missing.append("DATABASE_URL")
+    # Fail loud on a missing internal-service token (PR review): without it every
+    # internal-only route (monthly-debt, /board) fails closed AND origination's calls to
+    # kyc/decision/disclosure carry no secret — the kyc call is caught in submit's
+    # try/except and silently degrades CIP to all-false, so a misconfig would otherwise
+    # look healthy while quietly breaking verification. Surface it at /health instead.
+    if not INTERNAL_SERVICE_TOKEN:
+        missing.append("INTERNAL_SERVICE_TOKEN")
+    # PR #7 review: the dedicated continuation-token pepper is required outside development.
+    # Without it authz would fall back to hashing resume tokens with INTERNAL_SERVICE_TOKEN,
+    # re-coupling them to the service-auth secret (rotating that secret would then invalidate
+    # every live anonymous resume session). Surface it at /health so a production deploy that
+    # forgot the pepper reads unhealthy instead of issuing service-token-coupled tokens.
+    if ENVIRONMENT != "development" and not continuation_token_keys():
+        missing.append("CONTINUATION_TOKEN_KEYS")
     return missing
+
 
 SERVICING_URL = os.getenv("SERVICING_URL", "http://servicing-service:8002")
 
@@ -167,5 +232,63 @@ SERVICING_URL = os.getenv("SERVICING_URL", "http://servicing-service:8002")
 KYC_URL = os.getenv("KYC_URL", "http://kyc-service:8003")
 DECISION_URL = os.getenv("DECISION_URL", "http://decision-service:8004")
 DISCLOSURE_URL = os.getenv("DISCLOSURE_URL", "http://disclosure-service:8005")
+
+# Shared secret identifying an internal service-to-service call. Forwarded on the
+# calls this service makes to decision-service (record read) and required by this
+# service's own internal-only remediation route. Env only, no committed default; an
+# unset token makes the internal routes fail closed. See docs/security-remediation.
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+
+# Dedicated pepper(s) for hashing anonymous continuation tokens, SEPARATE from
+# INTERNAL_SERVICE_TOKEN (PR #7 review). Keying the token hash with the service-auth secret
+# meant rotating that secret -- routine or emergency -- silently invalidated every live
+# resume token (all stored digests became unverifiable -> anonymous 404s). Format:
+# comma-separated "version:secret", newest first. The FIRST is the CURRENT key (used to hash
+# new tokens); the rest are still ACCEPTED on verify, so a rotation keeps pre-rotation tokens
+# working until they expire -- keep the old key configured for at least CONTINUATION_TOKEN_
+# TTL_DAYS after rotating, then drop it. Unset -> falls back to INTERNAL_SERVICE_TOKEN under a
+# stable "legacy" version (the old coupling; set this env to decouple resume tokens from
+# service-auth rotation). Host-env/secret-manager only.
+CONTINUATION_TOKEN_KEYS = os.getenv("CONTINUATION_TOKEN_KEYS", "")
+
+# Deployment environment. "development" is the ONLY value that relaxes the dedicated-pepper
+# requirement below (mirrors decision-service's synthetic-credit / fingerprint-pepper gates):
+# outside development a missing CONTINUATION_TOKEN_KEYS is reported unhealthy and hash_token
+# refuses to issue, so a real deploy can never silently couple resume tokens to the service
+# secret. Defaults to production so a config that forgets to set it fails closed.
+ENVIRONMENT = os.getenv("ENVIRONMENT", "production").strip().lower()
+
+
+def continuation_token_keys() -> list:
+    """Parsed (version, secret) pairs from CONTINUATION_TOKEN_KEYS, newest first.
+
+    Empty when unset/malformed -- callers decide what that means: authz.hash_token refuses to
+    issue a NEW token outside development (never falls back to INTERNAL_SERVICE_TOKEN for a new
+    hash), and missing_required_secrets() reports it missing so /health is unhealthy in
+    production. Verifying a pre-existing legacy row is handled separately (authz._verify_keys),
+    which keeps a service-token fallback for OLD rows only."""
+    keys = []
+    for part in CONTINUATION_TOKEN_KEYS.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        ver, sep, secret = part.partition(":")
+        ver = ver.strip()
+        # "legacy" is RESERVED for the verify-only service-token fallback (authz._verify_keys),
+        # so a configured key may not claim it -- two secrets sharing one version would break
+        # rotation semantics (one version -> one secret). Skip it; an operator who names their
+        # only key "legacy" gets an empty set here and hash_token then refuses in production
+        # (loud), which is the intended nudge to rename.
+        if sep and ver and ver != "legacy" and secret:
+            keys.append((ver, secret))
+    return keys
+
+
+# Lifetime of an anonymous continuation token (ADR 0010 Phase B, PR #7 review). The token
+# is a bearer capability for money-moving routes, so it is not valid forever: authz rejects
+# it once past this window, bounding the exposure of a token left in browser storage /
+# shared-device residue / a stale link. The apply flow is a short single-session or
+# same-week resume, so a few days is ample.
+CONTINUATION_TOKEN_TTL_DAYS = int(os.getenv("CONTINUATION_TOKEN_TTL_DAYS", "7"))
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

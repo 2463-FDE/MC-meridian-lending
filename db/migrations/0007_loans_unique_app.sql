@@ -1,0 +1,31 @@
+-- PR review: offer acceptance must not board duplicate loans on retries.
+-- accept_offer boards a loan and marks the application funded; a double-click, a
+-- timeout-retry, or a concurrent POST could insert a second loan + balance for the same
+-- approved application. One boarded loan per application makes acceptance idempotent: the
+-- concurrent loser gets a UniqueViolation and replays the first loan instead of boarding
+-- another. Partial so any legacy app_id-less loan row is unaffected.
+
+-- LEGACY DATA (apply-order rung): an already-initialized volume may ALREADY contain
+-- duplicate loans for one app_id -- created by the very double-boarding bug this index
+-- closes. On such a volume this CREATE UNIQUE INDEX FAILS ("could not create unique
+-- index ... contains duplicated values"), and origination /health then reports
+-- schema_not_ready:uq_loans_app (unhealthy, loud) until the duplicates are resolved.
+-- Deduplicate first, keeping the earliest loan per application. This is intentionally a
+-- MANUAL, operator-run step (not auto-run here): it deletes loans/balances rows, a
+-- destructive data decision that must be reviewed against servicing state. Example:
+--
+--   -- inspect first
+--   SELECT app_id, count(*), array_agg(id ORDER BY id)
+--   FROM loans WHERE app_id IS NOT NULL GROUP BY app_id HAVING count(*) > 1;
+--
+--   -- then, per reviewed app_id, drop the later duplicate loans (and their balances),
+--   -- keeping the earliest id:
+--   DELETE FROM balances b USING loans l
+--     WHERE b.loan_id = l.id AND l.app_id IS NOT NULL
+--       AND l.id > (SELECT min(id) FROM loans l2 WHERE l2.app_id = l.app_id);
+--   DELETE FROM loans l
+--     WHERE l.app_id IS NOT NULL
+--       AND l.id > (SELECT min(id) FROM loans l2 WHERE l2.app_id = l.app_id);
+--
+-- A fresh `db/init` volume (and the seed) has no duplicates, so this applies cleanly there.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_loans_app ON loans (app_id) WHERE app_id IS NOT NULL;

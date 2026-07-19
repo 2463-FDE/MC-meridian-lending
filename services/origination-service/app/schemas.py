@@ -1,7 +1,8 @@
 """Pydantic request/response models for the LOS API."""
+
 from typing import Generic, Optional, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 T = TypeVar("T")
 
@@ -19,9 +20,32 @@ class ApplicationIn(BaseModel):
     term_months: int = Field(default=36, ge=12, le=60)
     purpose: Optional[str] = None
     income: Optional[float] = Field(default=None, ge=0)
+    # Required underwriting input: the model scores debt-to-income from it, so a
+    # missing value must be rejected at the API boundary rather than silently scored
+    # as zero debt (over-approval risk, PR #7 review). Explicit 0 is allowed.
+    monthly_debt: float = Field(ge=0)
     employer: Optional[str] = None
     job_title: Optional[str] = None
     employment_years: Optional[float] = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _entity_requires_ein(self) -> "ApplicationIn":
+        # is_entity is applicant-supplied and drops the natural-person DOB/SSN
+        # requirement at the KYC gate (kyc_gate.require_kyc_passed). Without this an
+        # applicant self-declares is_entity=true and clears KYC with no identity
+        # element at all. Require an EIN for the entity carve-out so the claim costs
+        # an identifier, not a free boolean. (Presence only -- run_cip depth is D11.)
+        if self.is_entity and not (self.ein and self.ein.strip()):
+            raise ValueError("is_entity requires an ein")
+        return self
+
+
+class MonthlyDebtIn(BaseModel):
+    # Remediation capture for a quarantined row: a legacy/seeded application with
+    # NULL monthly_debt is rejected at decisioning (422) with "must be captured
+    # before a decision can be made"; this is the path that captures it. Same
+    # ge=0 rule as ApplicationIn.monthly_debt (explicit 0 allowed).
+    monthly_debt: float = Field(ge=0)
 
 
 class KycOut(BaseModel):
@@ -35,6 +59,16 @@ class ApplicationCreated(BaseModel):
     app_id: int
     status: str
     kyc: KycOut
+    # False when the KYC service call did not complete (outage/timeout/auth failure) —
+    # distinct from a KYC that ran and returned all-false. Lets a caller tell "not
+    # verified" from "verification could not be performed" (PR review). Default True so
+    # the field is backward-compatible for existing consumers.
+    kyc_checked: bool = True
+    # ADR 0010 Phase B: unguessable per-application continuation token (see authz.py). The
+    # anonymous applicant must send it as X-Application-Token to complete decision/offer/
+    # accept on this application. None for officer-created flows (the officer is already
+    # authorized by role). Bearer capability — the client holds it like a magic link.
+    continuation_token: str | None = None
 
 
 class ApplicantOut(BaseModel):
