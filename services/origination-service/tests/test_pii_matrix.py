@@ -45,6 +45,23 @@ LEAK_CASES = [
     ("ssn_nested", f'{{"applicant": {{"ssn": "{SSN}"}}}}', SSN),
     ("ssn_in_array", f'{{"ids": [{{"ssn": "{SSN}"}}]}}', SSN),
     ("ssn_freetext_val", f'{{"note": "call {NAME} {SSN_DASH}"}}', "9981"),
+    # Free-text notes/reason fields are the classic redactor blind spot: an SSN
+    # buried in prose, and in a SEPARATOR shape (dot/space) that a label-anchored
+    # SSN regex would miss. The provider-export path blanks free-text values
+    # wholesale, so the model never sees it regardless of separator -- note the
+    # dotted case is the exact shape that bypassed the logging redactor's labeled
+    # rule (teeth HIGH-2), proving the higher-stakes export path is not fooled.
+    (
+        "ssn_freetext_reason_dotted",
+        '{"reason": "declined; applicant ssn 412.55.9981 on file per adverse-action notice"}',
+        "412",
+    ),
+    (
+        "ssn_freetext_notes_spaced",
+        '{"notes": "borrower gave 412 55 9981 verbally"}',
+        "412",
+    ),
+    ("ssn_freetext_reason_bare", f'{{"reason": "flagged {SSN} during review"}}', SSN),
     # phone — labeled number, labeled string, bare NANP number under a plain key.
     ("phone_labeled_num", f'{{"phone": {PHONE}}}', PHONE),
     ("phone_labeled_str", f'{{"phone": "{PHONE}"}}', PHONE),

@@ -69,6 +69,14 @@ jobs:
           cd services/origination-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_redactor.py -q
+      - name: origination-service adversarial PII export matrix (no PII to the model)
+        # The black-box no-leak property of redact_json across the full variant space
+        # (shapes, labels, containers, free-text notes/reason fields). The `backend` job
+        # runs it under continue-on-error/|| true, so a reopened export leak would stay
+        # green; this step is the enforceable gate.
+        run: |
+          cd services/origination-service
+          python -m pytest tests/test_pii_matrix.py -q
       - name: origination-service LLM client tests (provider/retry/schema/pre-send PII redaction)
         # Highest-risk behavior in the LLM feature — must block the build. The
         # `backend` job also runs these but under continue-on-error/|| true, so a
