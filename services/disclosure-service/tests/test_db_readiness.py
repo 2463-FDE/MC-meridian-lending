@@ -302,3 +302,22 @@ def test_probe_ok_when_uq_offers_app_present(monkeypatch):
     ok, err = config.database_reachable()
     assert ok is True
     assert err is None
+
+
+# --- uq_offers_app must live in the CANONICAL init schema, not only a migration ----
+# M2 regression: the live probe above reports schema_not_ready when the index is absent,
+# but the index was only ever in the hand-tracked migration 0010 -- nothing applies that on
+# `make up`, so a default deploy silently ran without it and the readiness rung/idempotency
+# replay were dead. It must be created by db/init/001_schema.sql, in parity with uq_loans_app.
+
+
+def test_uq_offers_app_is_in_canonical_init_schema():
+    from pathlib import Path
+
+    schema = Path(__file__).resolve().parents[3] / "db" / "init" / "001_schema.sql"
+    text = schema.read_text()
+    assert "uq_loans_app" in text, "parity anchor missing -- test path is wrong"
+    assert "uq_offers_app" in text, (
+        "uq_offers_app is not created by db/init/001_schema.sql -- a default `make up` "
+        "deploy runs without the unique index, so duplicate TILA disclosures are possible"
+    )

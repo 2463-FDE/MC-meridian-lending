@@ -170,4 +170,13 @@ CREATE TRIGGER trg_decision_events_no_truncate
 -- payments — there is no idempotency key to index. No reason/driver columns on decisions.)
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
 CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
-CREATE INDEX IF NOT EXISTS idx_offers_app ON offers(app_id);
+
+-- One current offer per application: makes offer generation idempotent so a double-click /
+-- timeout-retry / concurrent POST cannot persist duplicate regulated TILA/Reg-Z disclosures
+-- (disclosure-service create_offer reuses the existing offer; the concurrent loser gets a
+-- UniqueViolation and replays it). Partial so any legacy app_id-less offer row is unaffected.
+-- Mirrors uq_loans_app above; disclosure-service /health reports schema_not_ready:uq_offers_app
+-- until it exists. Also shipped as migration 0010 for already-initialized volumes (which may
+-- need a manual dedup first -- see that file). This unique index also serves the plain
+-- app_id lookups (it replaces the former non-unique idx_offers_app).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_offers_app ON offers (app_id) WHERE app_id IS NOT NULL;
