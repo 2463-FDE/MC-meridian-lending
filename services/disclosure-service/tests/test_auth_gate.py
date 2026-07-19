@@ -51,7 +51,20 @@ def test_offers_fails_closed_when_token_unset(monkeypatch):
 
 def test_offers_allows_correct_header(monkeypatch):
     monkeypatch.setattr(offers_router.config, "INTERNAL_SERVICE_TOKEN", TOKEN)
-    monkeypatch.setattr(offers_router.db, "query", lambda *a, **k: [{"id": 1}])
+    monkeypatch.setattr(
+        offers_router.db,
+        "query",
+        lambda *a, **k: [
+            {
+                "id": 1,
+                "apr": 7.99,
+                "finance_charge": 0.0,
+                "monthly_payment": 0.0,
+                "amount_financed": 0.0,
+                "total_of_payments": 0.0,
+            }
+        ],
+    )
     resp = TestClient(app).post(
         "/offers", json=BODY, headers={"X-Internal-Service": TOKEN}
     )
