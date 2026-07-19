@@ -10,6 +10,7 @@ This file is duplicated byte-for-byte across every service (each runs in its
 own container and cannot import a shared package). CI enforces that the copies
 stay identical — edit here, then sync to all services (see scripts/sync_redactor).
 """
+
 import logging
 import re
 
@@ -23,9 +24,9 @@ class PiiRedactor:
     # separator bypasses (4111/1111..., 4111_1111..., 4111*1111..., etc.) on the
     # primary charge-log path where the client controls the raw pan string.
     _PAN_KEY = (
-        r'(?:pan|card[_ ]?(?:number|no|num)|cc[_ ]?(?:number|no|num)'
-        r'|credit[_ ]?card|account[_ ]?(?:number|no|num)'
-        r'|acct[_ ]?(?:number|no|num)|primary[_ ]?account[_ ]?number)'
+        r"(?:pan|card[_ ]?(?:number|no|num)|cc[_ ]?(?:number|no|num)"
+        r"|credit[_ ]?card|account[_ ]?(?:number|no|num)"
+        r"|acct[_ ]?(?:number|no|num)|primary[_ ]?account[_ ]?number)"
     )
 
     @staticmethod
@@ -36,10 +37,10 @@ class PiiRedactor:
         non-card value in a field named 'pan' (e.g. "n/a", a short token) is left
         untouched. Separators are irrelevant — only the digits are counted.
         """
-        digits = re.sub(r'\D', '', value)
+        digits = re.sub(r"\D", "", value)
         if len(digits) < 13:
             return value
-        return PiiRedactor._mask_with_last_4(digits) + ' (PAN)'
+        return PiiRedactor._mask_with_last_4(digits) + " (PAN)"
 
     @staticmethod
     def _mask_with_last_4(text: str) -> str:
@@ -68,9 +69,9 @@ class PiiRedactor:
         Luhn gate avoids redacting unrelated long digit runs (order IDs, timestamps).
         """
         raw = match.group(0)
-        digits = re.sub(r'\D', '', raw)
+        digits = re.sub(r"\D", "", raw)
         if 13 <= len(digits) <= 19 and PiiRedactor._luhn_valid(digits):
-            return PiiRedactor._mask_with_last_4(digits) + ' (PAN)'
+            return PiiRedactor._mask_with_last_4(digits) + " (PAN)"
         return raw
 
     @staticmethod
@@ -81,12 +82,12 @@ class PiiRedactor:
         NAME asserts it is an account/routing number, so no digit-length or Luhn
         gate — the label is the signal.
         """
-        if '•' in value:
+        if "•" in value:
             # Already masked upstream: a card-length account_number is caught by
             # the labeled-PAN pass (rule 1a, account_* is in _PAN_KEY) and holds
             # only its audit last-4 — re-masking here would erase it.
             return value
-        digits = re.sub(r'\D', '', value)
+        digits = re.sub(r"\D", "", value)
         if len(digits) < 4:
             return value  # too few digits to be an account/routing no. — leave as-is
         return PiiRedactor._mask_with_last_4(digits)
@@ -113,7 +114,7 @@ class PiiRedactor:
         """
         if sum(c.isdigit() for c in value) < 13:
             return value
-        return re.sub(r'\d(?:\D*\d){12,18}', PiiRedactor._redact_if_pan, value)
+        return re.sub(r"\d(?:\D*\d){12,18}", PiiRedactor._redact_if_pan, value)
 
     @staticmethod
     def _percent_decode(s: str) -> str:
@@ -124,8 +125,7 @@ class PiiRedactor:
         (%252D) is a documented residual. Only well-formed %XX (two hex digits)
         is decoded; a bare % or %<non-hex> is left as-is.
         """
-        return re.sub(r'%([0-9A-Fa-f]{2})',
-                      lambda m: chr(int(m.group(1), 16)), s)
+        return re.sub(r"%([0-9A-Fa-f]{2})", lambda m: chr(int(m.group(1), 16)), s)
 
     @staticmethod
     def _mask_pan_token(token: str) -> str:
@@ -158,11 +158,11 @@ class PiiRedactor:
     # only \S+ between the method and the protocol). Case-insensitive; works quoted
     # or unquoted. Group 3 is the request target whose query values we mask.
     _REQUEST_LINE = re.compile(
-        r'(?i)\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)(\s+)(\S+)(\s+HTTP/\d)'
+        r"(?i)\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)(\s+)(\S+)(\s+HTTP/\d)"
     )
 
     @staticmethod
-    def _mask_request_target_query(m: 're.Match') -> str:
+    def _mask_request_target_query(m: "re.Match") -> str:
         """Mask the ENTIRE query string of an access-log request target, keeping
         only the path.
 
@@ -179,9 +179,9 @@ class PiiRedactor:
         (values AND keys) rather than chasing separator or key/value tricks.
         """
         method, sp, target, tail = m.group(1), m.group(2), m.group(3), m.group(4)
-        if '?' not in target:
+        if "?" not in target:
             return m.group(0)
-        path = target.split('?', 1)[0]
+        path = target.split("?", 1)[0]
         return f"{method}{sp}{path}?•••{tail}"
 
     @staticmethod
@@ -229,17 +229,26 @@ class PiiRedactor:
         # and stopping at the first inner quote would capture only "4111" (<13 digits,
         # left unmasked). Single quotes work the same way.
         text = re.sub(
-            r'(["\']?\b' + PiiRedactor._PAN_KEY + r'["\']?\s*[:=]\s*)(["\'])(.*?)\2(?=[\s,;}\])]|$)',
-            lambda m: m.group(1) + m.group(2) + PiiRedactor._mask_pan_value(m.group(3)) + m.group(2),
+            r'(["\']?\b'
+            + PiiRedactor._PAN_KEY
+            + r'["\']?\s*[:=]\s*)(["\'])(.*?)\2(?=[\s,;}\])]|$)',
+            lambda m: (
+                m.group(1)
+                + m.group(2)
+                + PiiRedactor._mask_pan_value(m.group(3))
+                + m.group(2)
+            ),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
         #   Unquoted value: pan=4111*1111*1111*1111  -> mask up to the next delimiter.
         text = re.sub(
-            r'(["\']?\b' + PiiRedactor._PAN_KEY + r'["\']?\s*[:=]\s*)([^\s"\',;}\])&]+)',
+            r'(["\']?\b'
+            + PiiRedactor._PAN_KEY
+            + r'["\']?\s*[:=]\s*)([^\s"\',;}\])&]+)',
             lambda m: m.group(1) + PiiRedactor._mask_pan_value(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
         # 1b. Free-text PAN. Cards are 13-19 digits (Amex 15, Visa/MC 16, Diners 14)
         # with optional separators. Between digits we allow EITHER up to 3
@@ -260,16 +269,14 @@ class PiiRedactor:
         # separators in an UNQUOTED value are handled by rule 1e below (token-bounded
         # bound-free scan); a quoted value is covered by rule 1d.
         text = re.sub(
-            r'\b\d(?:(?:[^0-9A-Za-z]{0,3}|[A-Za-z])\d){12,18}\b',
+            r"\b\d(?:(?:[^0-9A-Za-z]{0,3}|[A-Za-z])\d){12,18}\b",
             PiiRedactor._redact_if_pan,
-            text
+            text,
         )
         # 1c. Dot-grouped PANs (e.g. 4111.1111.1111.1111). Kept as a separate,
         # tightly-grouped pattern so we don't mask ordinary decimals like 1234567.89.
         text = re.sub(
-            r'\b\d{4}(?:\.\d{4}){2}\.\d{1,7}\b',
-            PiiRedactor._redact_if_pan,
-            text
+            r"\b\d{4}(?:\.\d{4}){2}\.\d{1,7}\b", PiiRedactor._redact_if_pan, text
         )
         # 1d. PAN hidden in a client-controlled free-text VALUE using separators
         # the bounded pass (1b) can't cover: letters (4111x1111x1111x1111) or
@@ -283,8 +290,10 @@ class PiiRedactor:
         # escaped inner quotes) are handled — Python repr uses ', JSON uses ".
         text = re.sub(
             r'(["\'])((?:(?!\1)[^\\]|\\.)*)\1',
-            lambda m: m.group(1) + PiiRedactor._mask_pan_in_value(m.group(2)) + m.group(1),
-            text
+            lambda m: (
+                m.group(1) + PiiRedactor._mask_pan_in_value(m.group(2)) + m.group(1)
+            ),
+            text,
         )
         # 1e. PAN in UNQUOTED structured text (access-log request lines / URL query
         # strings). Rule 1b bounds a free-text separator to a single letter, and the
@@ -304,7 +313,7 @@ class PiiRedactor:
         text = re.sub(
             r"""[^\s"'?&=/#;,:]+""",
             lambda m: PiiRedactor._mask_pan_token(m.group(0)),
-            text
+            text,
         )
 
         # 2. Redact CVV (3-4 digits in the context of a card-security-code field).
@@ -313,54 +322,53 @@ class PiiRedactor:
             r'(["\']?(?:cvv2|cvv|cvc|cid|card[_ ]?security[_ ]?code|security[_ ]?code)["\']?\s*[:=]\s*["\']?)(\d{3,4})(["\']?)',
             lambda m: m.group(1) + "••••" + m.group(3),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # 3a. Redact dashed SSN (XXX-XX-XXXX) — unambiguous, always redact.
         # Preserve last 4 digits for audit trail.
         text = re.sub(
-            r'\b\d{3}-\d{2}-(\d{4})\b',
-            lambda m: '•••-••-' + m.group(1),
-            text
+            r"\b\d{3}-\d{2}-(\d{4})\b", lambda m: "•••-••-" + m.group(1), text
         )
         # 3a-bis. Space-separated SSN (XXX XX XXXX). The 3-2-4 grouping is
         # SSN-specific (phones are 3-3-4), so the false-positive risk is low
         # enough to redact even unlabeled, unlike the bare-digit case in 3b.
         text = re.sub(
-            r'\b\d{3} \d{2} (\d{4})\b',
-            lambda m: '•••-••-' + m.group(1),
-            text
+            r"\b\d{3} \d{2} (\d{4})\b", lambda m: "•••-••-" + m.group(1), text
         )
         # 3b. Redact bare/loosely-formatted SSN ONLY inside a labeled field, so we
         # don't mask unrelated 9-digit numbers (loan IDs, amounts, timestamps).
+        # The label is the signal, so accept any separator (dash/dot/slash/space/
+        # tab/none) between the digit groups -- a dotted "ssn": "412.55.9981" or
+        # slashed 412/55/9981 is still a plain SSN and must not slip through.
         text = re.sub(
-            r'(["\']?(?:ssn|social[_ ]?security|tax[_ ]?id|tin)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?)\d{3}[-\s]?\d{2}[-\s]?(\d{4})\b',
-            lambda m: m.group(1) + '•••-••-' + m.group(2),
+            r'(["\']?(?:ssn|social[_ ]?security|tax[_ ]?id|tin)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?)\d{3}[-.\s/]?\d{2}[-.\s/]?(\d{4})\b',
+            lambda m: m.group(1) + "•••-••-" + m.group(2),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # 4. Redact email addresses. Redact local part, preserve domain.
         text = re.sub(
-            r'\b[a-zA-Z0-9._%+\-]+@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b',
-            lambda m: '••••@' + m.group(1),
-            text
+            r"\b[a-zA-Z0-9._%+\-]+@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b",
+            lambda m: "••••@" + m.group(1),
+            text,
         )
 
         # 5a. Redact phone in a labeled field (catches bare 10-digit like
         # "phone":"5551234567" that 5b intentionally skips to avoid false positives).
         text = re.sub(
             r'(["\']?(?:phone|telephone|tel|mobile|cell|fax)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?)\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})\b',
-            lambda m: m.group(1) + '•••-•••-' + m.group(2),
+            lambda m: m.group(1) + "•••-•••-" + m.group(2),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
         # 5b. Redact free-text phone numbers (requires area code + separators to
         # avoid false positives on bare 10-digit product/order codes).
         text = re.sub(
-            r'(?:\+\d{1,3}[\s.-])?(?:\(?\d{3}[\s.-]|\(?\d{3}\)[\s.-]?)\d{3}[\s.-]?(\d{4})\b',
-            lambda m: '•••-•••-' + m.group(1),
-            text
+            r"(?:\+\d{1,3}[\s.-])?(?:\(?\d{3}[\s.-]|\(?\d{3}\)[\s.-]?)\d{3}[\s.-]?(\d{4})\b",
+            lambda m: "•••-•••-" + m.group(1),
+            text,
         )
 
         # 6a. Bank account / routing / ABA / IBAN in a LABELED field. These are
@@ -377,30 +385,35 @@ class PiiRedactor:
         # counts digits and leaves a <4-digit value (e.g. "checking") untouched,
         # so enumerating separators — a losing game, see the PAN path — is avoided.
         _BANK_KEY = (
-            r'\b(?:bank[_ ]?account|account|acct|dda|ach(?:[_ ]?account)?'
-            r'|routing|aba|rtn|transit|iban)(?:[_ ]?(?:number|no|num))?'
+            r"\b(?:bank[_ ]?account|account|acct|dda|ach(?:[_ ]?account)?"
+            r"|routing|aba|rtn|transit|iban)(?:[_ ]?(?:number|no|num))?"
         )
         #   Quoted value: consume to the quote that TERMINATES the field.
         text = re.sub(
             r'(["\']?' + _BANK_KEY + r'["\']?\s*[:=]\s*)(["\'])(.*?)\2(?=[\s,;}\])]|$)',
-            lambda m: m.group(1) + m.group(2) + PiiRedactor._mask_bank_value(m.group(3)) + m.group(2),
+            lambda m: (
+                m.group(1)
+                + m.group(2)
+                + PiiRedactor._mask_bank_value(m.group(3))
+                + m.group(2)
+            ),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
         #   Unquoted value: mask up to the next delimiter.
         text = re.sub(
             r'(["\']?' + _BANK_KEY + r'["\']?\s*[:=]\s*)([^\s"\',;}\])&]+)',
             lambda m: m.group(1) + PiiRedactor._mask_bank_value(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
         # 6b. IBAN in FREE TEXT (no label). Self-identifying structure (2-letter
         # country + 2 check digits + 11-30 alphanumeric). Uppercase per ISO 13616;
         # keep last 4 for reference. A labeled iban is handled by 6a above.
         text = re.sub(
-            r'\b([A-Z]{2}\d{2}[A-Za-z0-9]{11,30})\b',
+            r"\b([A-Z]{2}\d{2}[A-Za-z0-9]{11,30})\b",
             lambda m: PiiRedactor._mask_with_last_4(m.group(1)),
-            text
+            text,
         )
 
         return text
