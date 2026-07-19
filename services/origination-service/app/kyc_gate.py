@@ -12,7 +12,10 @@ person) can clear CIP (debt D11). But mirroring that rule for a NATURAL PERSON l
 natural-person application reach a regulated credit pull / boarding with DOB and SSN
 never even asserted, now that ApplicationIn permits them null. So the gate requires:
   - natural person (is_entity false): name + DOB + address + SSN all verified;
-  - entity (is_entity true): name + address verified (the documented D11 entity carve-out).
+  - entity (is_entity true): name + address verified AND an EIN on file (the documented
+    D11 entity carve-out). is_entity is applicant-supplied, so requiring an EIN stops a
+    natural person self-declaring entity to skip DOB/SSN; submit also rejects is_entity
+    with no ein (schemas.ApplicationIn), this gate is the persisted-source backstop.
 The authoritative source is the persisted kyc_checks row, not submit's response.
 
 Scope of what this closes vs debt D11: this makes the REQUIRED identity ELEMENTS
@@ -38,7 +41,7 @@ from . import db
 
 def require_kyc_passed(app_id: int) -> None:
     rows = db.query(
-        "SELECT ap.is_entity, kc.name_verified, kc.address_verified, "
+        "SELECT ap.is_entity, ap.ein, kc.name_verified, kc.address_verified, "
         "kc.dob_verified, kc.ssn_verified "
         "FROM applications a "
         "JOIN applicants ap ON ap.id = a.applicant_id "
@@ -57,6 +60,13 @@ def require_kyc_passed(app_id: int) -> None:
         # Natural person: DOB + SSN are required identity elements (entities have none --
         # D11 carve-out). NULL from the LEFT JOIN (no kyc row) is falsy => blocks.
         passed = passed and bool(row["dob_verified"]) and bool(row["ssn_verified"])
+    else:
+        # Entity carve-out: no DOB/SSN, but an EIN must be on file. Mirrors the
+        # natural-person element requirement so a caller cannot skip every identity
+        # element by self-declaring is_entity. Presence only (run_cip depth is D11);
+        # submit also rejects is_entity with no ein, this is the persisted-source backstop
+        # (strip: don't trust upstream to have rejected a whitespace-only ein; legacy rows).
+        passed = passed and bool((row["ein"] or "").strip())
     if not passed:
         _block()
 

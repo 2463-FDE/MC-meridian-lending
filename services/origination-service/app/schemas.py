@@ -2,7 +2,7 @@
 
 from typing import Generic, Optional, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 T = TypeVar("T")
 
@@ -27,6 +27,17 @@ class ApplicationIn(BaseModel):
     employer: Optional[str] = None
     job_title: Optional[str] = None
     employment_years: Optional[float] = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _entity_requires_ein(self) -> "ApplicationIn":
+        # is_entity is applicant-supplied and drops the natural-person DOB/SSN
+        # requirement at the KYC gate (kyc_gate.require_kyc_passed). Without this an
+        # applicant self-declares is_entity=true and clears KYC with no identity
+        # element at all. Require an EIN for the entity carve-out so the claim costs
+        # an identifier, not a free boolean. (Presence only -- run_cip depth is D11.)
+        if self.is_entity and not (self.ein and self.ein.strip()):
+            raise ValueError("is_entity requires an ein")
+        return self
 
 
 class MonthlyDebtIn(BaseModel):

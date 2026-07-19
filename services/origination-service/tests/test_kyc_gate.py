@@ -49,14 +49,17 @@ def test_passing_kyc_allowed(monkeypatch):
     kyc_gate.require_kyc_passed(1)  # no raise
 
 
-def test_entity_passes_on_name_and_address_only(monkeypatch):
-    # Entity/LLC has no DOB/SSN (D11 carve-out): name+address is the whole CIP bar.
+def test_entity_passes_on_name_address_and_ein(monkeypatch):
+    # Entity/LLC has no DOB/SSN (D11 carve-out) but MUST have an EIN on file, so a caller
+    # cannot skip every identity element by self-declaring is_entity. name+address+ein is
+    # the whole CIP bar for an entity.
     monkeypatch.setattr(
         kyc_gate.db,
         "query",
         _kyc_db(
             {
                 "is_entity": True,
+                "ein": "12-3456789",
                 "name_verified": True,
                 "address_verified": True,
                 "dob_verified": False,
@@ -65,6 +68,31 @@ def test_entity_passes_on_name_and_address_only(monkeypatch):
         ),
     )
     kyc_gate.require_kyc_passed(1)  # no raise
+
+
+@pytest.mark.parametrize("ein", [None, "", "   "])
+def test_entity_without_ein_blocked(monkeypatch, ein):
+    # H1 regression: self-declaring is_entity=true dropped the natural-person DOB/SSN
+    # requirement, so an applicant could clear KYC with name+address and NO identity
+    # element. The entity carve-out now requires an EIN on file -- an entity row with
+    # name+address verified but no EIN must block.
+    monkeypatch.setattr(
+        kyc_gate.db,
+        "query",
+        _kyc_db(
+            {
+                "is_entity": True,
+                "ein": ein,
+                "name_verified": True,
+                "address_verified": True,
+                "dob_verified": False,
+                "ssn_verified": False,
+            }
+        ),
+    )
+    with pytest.raises(HTTPException) as exc:
+        kyc_gate.require_kyc_passed(1)
+    assert exc.value.status_code == 409
 
 
 @pytest.mark.parametrize(
@@ -229,3 +257,41 @@ def test_recheck_while_still_unavailable_stays_resilient(monkeypatch):
     resp = TestClient(app).post("/applications/7/recheck-kyc", headers=_OFFICER)
     assert resp.status_code == 200
     assert resp.json()["kyc_checked"] is False
+
+
+# --- submit-layer defense: is_entity requires an ein (H1) --------------------
+
+
+def _app_payload(**over):
+    p = {"name": "Acme", "amount": 1000.0, "term_months": 36, "monthly_debt": 0.0}
+    p.update(over)
+    return p
+
+
+@pytest.mark.parametrize("ein", [None, "", "   "])
+def test_submit_rejects_entity_without_ein(ein):
+    # H1 regression (submit layer): is_entity is applicant-supplied and relaxes the KYC
+    # gate, so the API must reject an entity application with no EIN rather than let it
+    # persist and reach the gate with no identity element.
+    from pydantic import ValidationError
+
+    from app.schemas import ApplicationIn
+
+    payload = _app_payload(is_entity=True)
+    if ein is not None:
+        payload["ein"] = ein
+    with pytest.raises(ValidationError):
+        ApplicationIn(**payload)
+
+
+def test_submit_accepts_entity_with_ein():
+    from app.schemas import ApplicationIn
+
+    ApplicationIn(**_app_payload(is_entity=True, ein="12-3456789"))
+
+
+def test_submit_accepts_natural_person_without_ein():
+    # A natural person needs no EIN at submit; DOB/SSN are enforced downstream at the gate.
+    from app.schemas import ApplicationIn
+
+    ApplicationIn(**_app_payload(is_entity=False))
