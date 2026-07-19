@@ -8,6 +8,7 @@ persists an offers row via raw psycopg2 (matches the LOS write path). Read path
 import hmac
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from psycopg2 import errors as pg_errors
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -53,20 +54,50 @@ def create_offer(
     _require_internal_caller(x_internal_service)
     o = offer_mod.build_offer(body.principal, body.annual_rate, body.term_months)
     rows = schedule.amortization(body.principal, body.annual_rate, body.term_months)
-    # persist via raw psycopg2 (matches origination's write path) — float money columns
-    inserted = db.query(
-        "INSERT INTO offers (app_id, apr, finance_charge, monthly_payment, "
-        "amount_financed, total_of_payments) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-        (
-            body.application_id,
-            o["apr"],
-            o["finance_charge"],
-            o["monthly_payment"],
-            o["amount_financed"],
-            o["total_of_payments"],
-        ),
+    # Idempotent per application (PR review): a double-click / browser retry / gateway-
+    # timeout replay must not persist a SECOND regulated TILA disclosure. Reuse the existing
+    # offer id when one is already recorded -- the offer is deterministic from the server-
+    # derived inputs (origination binds principal/term from the stored application + a policy
+    # rate), so the disclosure rebuilt below equals the stored one. The uq_offers_app unique
+    # index (migration 0010) is the AUTHORITATIVE guard for the concurrent race: the loser
+    # catches UniqueViolation and replays the winner's offer instead of inserting a second.
+    # Mirrors accept_offer's idempotent loan boarding (origination).
+    existing = db.query(
+        "SELECT id FROM offers WHERE app_id = %s ORDER BY id LIMIT 1",
+        (body.application_id,),
     )
-    offer_id = inserted[0]["id"]
+    if existing:
+        offer_id = existing[0]["id"]
+    else:
+        # persist via raw psycopg2 (matches origination's write path) — float money columns
+        try:
+            inserted = db.query(
+                "INSERT INTO offers (app_id, apr, finance_charge, monthly_payment, "
+                "amount_financed, total_of_payments) VALUES (%s, %s, %s, %s, %s, %s) "
+                "RETURNING id",
+                (
+                    body.application_id,
+                    o["apr"],
+                    o["finance_charge"],
+                    o["monthly_payment"],
+                    o["amount_financed"],
+                    o["total_of_payments"],
+                ),
+            )
+            offer_id = inserted[0]["id"]
+        except pg_errors.UniqueViolation:
+            # A concurrent create won the race and inserted first; serve its offer instead
+            # of a second one (one offer per app_id, enforced by uq_offers_app).
+            won = db.query(
+                "SELECT id FROM offers WHERE app_id = %s ORDER BY id LIMIT 1",
+                (body.application_id,),
+            )
+            if not won:
+                raise HTTPException(
+                    status_code=409,
+                    detail="offer conflict without a retrievable offer",
+                )
+            offer_id = won[0]["id"]
     disclosure = Disclosure(
         apr=o["apr"],
         finance_charge=o["finance_charge"],

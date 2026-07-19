@@ -240,3 +240,65 @@ def test_missing_internal_service_token_is_flagged(monkeypatch):
     assert "INTERNAL_SERVICE_TOKEN" in config.missing_required_secrets()
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "tok")
     assert "INTERNAL_SERVICE_TOKEN" not in config.missing_required_secrets()
+
+
+# --- uq_offers_app schema readiness (PR review) ----------------------------
+# Idempotent offer writes depend on the uq_offers_app unique index; the live probe reports
+# schema_not_ready if a dirty-volume migration failed to create it, so /health is not green
+# while duplicate regulated disclosures are silently possible.
+
+
+class _IndexAwareCursor:
+    def __init__(self, has_index):
+        self.has_index = has_index
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "pg_indexes" in self._last:
+            return (1,) if self.has_index else None
+        return (1,)
+
+
+class _IndexAwareConn:
+    def __init__(self, has_index):
+        self.has_index = has_index
+        self.closed_flag = False
+
+    def cursor(self):
+        return _IndexAwareCursor(self.has_index)
+
+    def close(self):
+        self.closed_flag = True
+
+
+def test_probe_reports_missing_uq_offers_app(monkeypatch):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _IndexAwareConn(has_index=False)
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:uq_offers_app"
+
+
+def test_probe_ok_when_uq_offers_app_present(monkeypatch):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _IndexAwareConn(has_index=True)
+    )
+    ok, err = config.database_reachable()
+    assert ok is True
+    assert err is None

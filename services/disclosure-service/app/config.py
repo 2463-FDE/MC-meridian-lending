@@ -131,6 +131,14 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
+            # Idempotent offer writes depend on the uq_offers_app unique index (PR review):
+            # on a dirty volume the 0010 migration can fail to create it (pre-existing
+            # duplicate offers), which would silently re-allow duplicate regulated TILA
+            # disclosures while /health looks green. Fail readiness loudly instead. Mirrors
+            # origination's uq_loans_app readiness rung.
+            cur.execute("SELECT 1 FROM pg_indexes WHERE indexname = 'uq_offers_app'")
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:uq_offers_app"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__
