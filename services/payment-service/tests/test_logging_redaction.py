@@ -312,6 +312,43 @@ def test_no_leak_via_root_handler(temp_log_dir):
     assert logger.propagate is False, "service logger must not propagate to root"
 
 
+def test_traceback_pan_redacted_despite_precached_exc_text(temp_log_dir):
+    """A prior plain handler must not poison the redacted handler's traceback.
+
+    Regression for the formatter split (formatMessage/formatException). When a
+    pre-existing NON-redacting handler formats the record first, stdlib caches
+    record.exc_text RAW; stdlib format() then SKIPS formatException on the
+    RedactingFormatter handler (exc_text already set) and would append the raw
+    traceback -- a full PAN in the stream/file log. The overridden format()
+    redacts the cached exc_text before super() appends it.
+    """
+    name = "payment_test"
+    # Pre-existing plain handler attached BEFORE get_logger -> caches exc_text raw.
+    plain = logging.StreamHandler(io.StringIO())
+    plain.setFormatter(logging.Formatter("%(message)s"))
+    logging.getLogger(name).addHandler(plain)
+
+    logger = get_logger(name)
+    red_buf = io.StringIO()
+    for h in logger.handlers:
+        if isinstance(h.formatter, RedactingFormatter):
+            h.stream = red_buf
+
+    try:
+        raise ValueError('card 4111111111111111 {"ssn": "412-55-9981"}')
+    except ValueError:
+        logger.exception("charge failed")
+
+    out = red_buf.getvalue()
+    assert "4111111111111111" not in out, (
+        "raw PAN leaked in traceback via exc_text cache"
+    )
+    assert "412-55-9981" not in out, "raw SSN leaked in traceback via exc_text cache"
+    assert "(PAN)" in out and "•••-••-9981" in out, (
+        "expected masked PAN + SSN in traceback"
+    )
+
+
 def test_charge_masks_invalid_luhn_labeled_pan(temp_log_dir, monkeypatch):
     """An invalid-Luhn card in the labeled `pan` field is still cardholder data.
 

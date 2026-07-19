@@ -13,6 +13,16 @@ from .redactor import PiiRedactor, _RedactWrapper, configure_uvicorn
 class RedactingFormatter(logging.Formatter):
     """Custom formatter that redacts PII before writing logs."""
 
+    def format(self, record: logging.LogRecord) -> str:
+        # A prior handler's plain formatter may have already cached record.exc_text
+        # RAW (stdlib caches the traceback on first format()). stdlib format() then
+        # SKIPS formatException when exc_text is already set, so our formatException
+        # override never runs and the raw traceback would be appended verbatim.
+        # Redact the cached copy in place before super() appends it.
+        if record.exc_text:
+            record.exc_text = PiiRedactor.redact(record.exc_text)
+        return super().format(record)
+
     def formatMessage(self, record: logging.LogRecord) -> str:
         # Redact the MESSAGE only (args already expanded) -- never the levelname/asctime
         # prefix. Redacting the whole formatted line let a Luhn-valid timestamp digit run
