@@ -216,10 +216,14 @@ export default function ApplyPage() {
       if (!form.name.trim()) e.name = "Required";
       if (!form.dob) e.dob = "Required";
       if (!form.ssn.trim()) e.ssn = "Required";
+      else if (!/^\d{3}-?\d{2}-?\d{4}$/.test(form.ssn.trim()))
+        e.ssn = "Enter a valid SSN (###-##-####)";
       if (!form.email.trim()) e.email = "Required";
       else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(form.email))
         e.email = "Enter a valid email";
       if (!form.phone.trim()) e.phone = "Required";
+      else if (form.phone.replace(/\D/g, "").length !== 10)
+        e.phone = "Enter a valid 10-digit phone number";
       if (!form.address.trim()) e.address = "Required";
     } else if (s === 2) {
       if (!form.employer.trim()) e.employer = "Required";
@@ -409,6 +413,8 @@ export default function ApplyPage() {
                   value={form.ssn}
                   onChange={(e) => set("ssn", e.target.value)}
                   placeholder="###-##-####"
+                  inputMode="numeric"
+                  maxLength={11}
                 />
               </Field>
             </div>
@@ -426,6 +432,8 @@ export default function ApplyPage() {
                   value={form.phone}
                   onChange={(e) => set("phone", e.target.value)}
                   placeholder="(555) 555-0123"
+                  inputMode="tel"
+                  maxLength={14}
                 />
               </Field>
             </div>
