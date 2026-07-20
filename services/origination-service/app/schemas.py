@@ -1,10 +1,17 @@
 """Pydantic request/response models for the LOS API."""
 
+import re
 from typing import Generic, Optional, TypeVar
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 T = TypeVar("T")
+
+# 9 digits, optionally grouped ###-##-####. Reject any other separator/whitespace shape
+# at the API boundary so malformed SSNs never reach storage or the log redactor, whose
+# separator handling this branch hardens (fix/redactor-ssn-separator-blindspots). Mirrors
+# the apply-form client check; the client gate is UX, this is the enforced one.
+_SSN_RE = re.compile(r"^\d{3}-?\d{2}-?\d{4}$")
 
 
 class ApplicationIn(BaseModel):
@@ -27,6 +34,25 @@ class ApplicationIn(BaseModel):
     employer: Optional[str] = None
     job_title: Optional[str] = None
     employment_years: Optional[float] = Field(default=None, ge=0)
+
+    @field_validator("ssn")
+    @classmethod
+    def _validate_ssn(cls, v: Optional[str]) -> Optional[str]:
+        # Optional: entity applicants carry an EIN, not an SSN (see _entity_requires_ein),
+        # so only a present, non-blank value is format-checked. Rejects the whitespace/
+        # separator noise the redactor would otherwise have to absorb downstream.
+        if v is not None and v.strip() and not _SSN_RE.match(v.strip()):
+            raise ValueError("ssn must be 9 digits, optionally as ###-##-####")
+        return v
+
+    @field_validator("phone")
+    @classmethod
+    def _validate_phone(cls, v: Optional[str]) -> Optional[str]:
+        # Optional; when present require exactly 10 digits ignoring formatting, so
+        # (555) 555-0123, 555-555-0123, and 5555550123 all pass but junk does not.
+        if v is not None and v.strip() and len(re.sub(r"\D", "", v)) != 10:
+            raise ValueError("phone must contain 10 digits")
+        return v
 
     @model_validator(mode="after")
     def _entity_requires_ein(self) -> "ApplicationIn":

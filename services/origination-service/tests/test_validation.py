@@ -42,3 +42,39 @@ def test_monthly_debt_required():
         ).monthly_debt
         == 0
     )
+
+
+def _app(**kw):
+    return ApplicationIn(name="Test", amount=10000, monthly_debt=0, **kw)
+
+
+@pytest.mark.parametrize("ssn", ["412-55-9980", "412559980"])
+def test_ssn_valid_shapes_accepted(ssn):
+    assert _app(ssn=ssn).ssn == ssn
+
+
+@pytest.mark.parametrize(
+    "ssn",
+    ["412 55 9980", "999999999999999", "abc-de-fghi", "412.55.9980", "12-34-5678"],
+)
+def test_ssn_malformed_rejected(ssn):
+    # The redactor's separator handling (this branch) should never have to absorb these:
+    # reject the shape at the boundary instead.
+    with pytest.raises(ValidationError):
+        _app(ssn=ssn)
+
+
+def test_ssn_optional_when_absent():
+    # Entity applicants carry an EIN, not an SSN; absent/blank stays valid.
+    assert _app().ssn is None
+
+
+@pytest.mark.parametrize("phone", ["(555) 555-0123", "555-555-0123", "5555550123"])
+def test_phone_valid_shapes_accepted(phone):
+    assert _app(phone=phone).phone == phone
+
+
+@pytest.mark.parametrize("phone", ["12345", "55555501234", "not-a-phone"])
+def test_phone_malformed_rejected(phone):
+    with pytest.raises(ValidationError):
+        _app(phone=phone)
