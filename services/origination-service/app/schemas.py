@@ -7,11 +7,14 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 T = TypeVar("T")
 
-# 9 digits, optionally grouped ###-##-####. Reject any other separator/whitespace shape
-# at the API boundary so malformed SSNs never reach storage or the log redactor, whose
-# separator handling this branch hardens (fix/redactor-ssn-separator-blindspots). Mirrors
-# the apply-form client check; the client gate is UX, this is the enforced one.
-_SSN_RE = re.compile(r"^\d{3}-?\d{2}-?\d{4}$")
+# 9 bare digits or fully-dashed ###-##-####, nothing else. The alternation forces the
+# dashes all-or-nothing: an independently-optional \d{3}-?\d{2}-?\d{4} would accept
+# partially-dashed junk like 412-559980 / 41255-9980, which would then reach storage and
+# KYC (whose stub verifies any non-empty SSN). Reject at the API boundary so malformed
+# SSNs never hit storage or the log redactor, whose separator handling this branch hardens
+# (fix/redactor-ssn-separator-blindspots). Mirrors the apply-form client check; the client
+# gate is UX, this is the enforced one.
+_SSN_RE = re.compile(r"^(?:\d{9}|\d{3}-\d{2}-\d{4})$")
 
 
 class ApplicationIn(BaseModel):

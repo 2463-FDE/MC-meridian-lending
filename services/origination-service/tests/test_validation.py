@@ -55,7 +55,18 @@ def test_ssn_valid_shapes_accepted(ssn):
 
 @pytest.mark.parametrize(
     "ssn",
-    ["412 55 9980", "999999999999999", "abc-de-fghi", "412.55.9980", "12-34-5678"],
+    [
+        "412 55 9980",
+        "999999999999999",
+        "abc-de-fghi",
+        "412.55.9980",
+        "12-34-5678",
+        # Partially-dashed shapes: exactly one of the two separators present. An
+        # independently-optional-dash regex accepted these; the all-or-nothing
+        # alternation must reject them (fix/redactor-ssn-separator-blindspots review).
+        "412-559980",
+        "41255-9980",
+    ],
 )
 def test_ssn_malformed_rejected(ssn):
     # The redactor's separator handling (this branch) should never have to absorb these:
