@@ -44,7 +44,15 @@ class ApplicationIn(BaseModel):
         # Optional: entity applicants carry an EIN, not an SSN (see _entity_requires_ein),
         # so only a present, non-blank value is format-checked. Rejects the whitespace/
         # separator noise the redactor would otherwise have to absorb downstream.
-        if v is not None and v.strip() and not _SSN_RE.match(v.strip()):
+        # NORMALIZE by returning the stripped value: matching _SSN_RE against v.strip()
+        # while returning the raw v let a padded-but-valid SSN (" 412559980 ") pass and
+        # be preserved by model_dump(), forwarding/storing a malformed SSN and leaving
+        # the labeled value for the log redactor to catch. Strip here so the boundary
+        # invariant holds and only a canonical SSN leaves this validator.
+        if v is None:
+            return v
+        v = v.strip()
+        if v and not _SSN_RE.match(v):
             raise ValueError("ssn must be 9 digits, optionally as ###-##-####")
         return v
 
@@ -53,7 +61,14 @@ class ApplicationIn(BaseModel):
     def _validate_phone(cls, v: Optional[str]) -> Optional[str]:
         # Optional; when present require exactly 10 digits ignoring formatting, so
         # (555) 555-0123, 555-555-0123, and 5555550123 all pass but junk does not.
-        if v is not None and v.strip() and len(re.sub(r"\D", "", v)) != 10:
+        # NORMALIZE by returning the stripped value: same blindspot as _validate_ssn
+        # -- the digit count ignores surrounding whitespace, so " 5555550123 " passed
+        # and model_dump() preserved the padding, forwarding/storing a malformed phone.
+        # Strip so only the padding is removed; internal formatting is left intact.
+        if v is None:
+            return v
+        v = v.strip()
+        if v and len(re.sub(r"\D", "", v)) != 10:
             raise ValueError("phone must contain 10 digits")
         return v
 

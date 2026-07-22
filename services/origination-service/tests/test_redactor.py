@@ -357,6 +357,26 @@ class TestPiiRedactorSsn:
         assert "•••-••-9981" in result
         assert raw not in result
 
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            " 412559980 ",  # bare 9-digit, leading + trailing padding
+            " 412-55-9980 ",  # dashed, leading + trailing padding
+            " 412559980",  # leading pad only
+            "412559980 ",  # trailing pad only
+        ],
+    )
+    def test_labeled_ssn_with_padding_masked(self, raw):
+        # A single leading space inside the labeled value ("ssn": " 412559980 ")
+        # made rule 3b jump-to-\d{3} miss, leaking the full labeled SSN. The \s*
+        # after the value-opening quote now absorbs leading padding; trailing
+        # padding sits past the last-4 and is untouched.
+        result = PiiRedactor.redact(f'{{"ssn": "{raw}"}}')
+        assert "9980" in result  # last 4 preserved
+        assert "•••-••-9980" in result
+        assert "412559980" not in result
+        assert "412-55-9980" not in result
+
     def test_unlabeled_separator_pass_no_false_positive(self):
         # 1-2-2 version strings and real IPv4 are not 3-2-4 and must survive the
         # generalized unlabeled SSN pass unchanged.

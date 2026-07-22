@@ -351,9 +351,12 @@ class PiiRedactor:
         # -- between the digit groups: a dotted "ssn": "412.55.9981" or a value
         # padded with many spaces is still a plain SSN and must not slip through.
         # [-.\s/]* (not a bounded {0,N}) is what stops an extra separator from
-        # smuggling the SSN past the labeled rule.
+        # smuggling the SSN past the labeled rule. The \s* after the value-opening
+        # quote absorbs LEADING padding inside the value ("ssn": " 412559980 "):
+        # without it the pattern jumped straight to \d{3} and a single leading space
+        # let the full labeled SSN escape unmasked.
         text = re.sub(
-            r'(["\']?(?:ssn|social[_ ]?security|tax[_ ]?id|tin)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?)\d{3}[-.\s/]*\d{2}[-.\s/]*(\d{4})\b',
+            r'(["\']?(?:ssn|social[_ ]?security|tax[_ ]?id|tin)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?\s*)\d{3}[-.\s/]*\d{2}[-.\s/]*(\d{4})\b',
             lambda m: m.group(1) + "•••-••-" + m.group(2),
             text,
             flags=re.IGNORECASE,
