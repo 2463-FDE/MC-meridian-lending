@@ -371,8 +371,12 @@ class PiiRedactor:
 
         # 5a. Redact phone in a labeled field (catches bare 10-digit like
         # "phone":"5551234567" that 5b intentionally skips to avoid false positives).
+        # The \s* after the value-opening quote absorbs LEADING padding inside the
+        # value ("phone": "  5551234567"): the trailing [\s.-]? only ate a single
+        # whitespace, so 2+ leading spaces let the full labeled phone escape unmasked
+        # -- the same blindspot fixed for labeled SSN in rule 3b.
         text = re.sub(
-            r'(["\']?(?:phone|telephone|tel|mobile|cell|fax)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?)\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})\b',
+            r'(["\']?(?:phone|telephone|tel|mobile|cell|fax)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?\s*)\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})\b',
             lambda m: m.group(1) + "•••-•••-" + m.group(2),
             text,
             flags=re.IGNORECASE,

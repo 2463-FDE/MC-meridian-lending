@@ -377,6 +377,24 @@ class TestPiiRedactorSsn:
         assert "412559980" not in result
         assert "412-55-9980" not in result
 
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "  5551234567",  # 2 leading spaces (single-space case already passed)
+            "    5551234567",  # many leading spaces
+            "\t5551234567",  # leading tab
+            "  555 123 4567",  # leading pad + internal separators
+        ],
+    )
+    def test_labeled_phone_with_leading_padding_masked(self, raw):
+        # Labeled phone rule 5a only absorbed a SINGLE leading whitespace via the
+        # trailing [\s.-]?, so 2+ leading spaces let the full labeled phone escape
+        # unmasked -- the same blindspot fixed for labeled SSN in 3b. The \s* after
+        # the value-opening quote now absorbs a leading padding run.
+        result = PiiRedactor.redact(f'{{"phone": "{raw}"}}')
+        assert "•••-•••-4567" in result
+        assert "5551234567" not in result
+
     def test_unlabeled_separator_pass_no_false_positive(self):
         # 1-2-2 version strings and real IPv4 are not 3-2-4 and must survive the
         # generalized unlabeled SSN pass unchanged.
