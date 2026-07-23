@@ -102,7 +102,23 @@ def test_phone_valid_shapes_accepted(phone):
     assert _app(phone=phone).phone == phone
 
 
-@pytest.mark.parametrize("phone", ["12345", "55555501234", "not-a-phone"])
+@pytest.mark.parametrize(
+    "phone",
+    [
+        "12345",
+        "55555501234",
+        "not-a-phone",
+        # Junk wrappers that carry exactly 10 digits and so slipped past the old
+        # digit-count-only check, yet sit outside the labeled-phone redactor's NANP
+        # shape -- once labeled they survive redaction into logs/payloads/storage
+        # (PR review). The anchored allowlist must reject them.
+        "abc5555550123",
+        "5555550123xyz",
+        "555::::123::::4567",
+        "555/555/0123",
+        "555_555_0123",
+    ],
+)
 def test_phone_malformed_rejected(phone):
     with pytest.raises(ValidationError):
         _app(phone=phone)

@@ -16,6 +16,15 @@ T = TypeVar("T")
 # gate is UX, this is the enforced one.
 _SSN_RE = re.compile(r"^(?:\d{9}|\d{3}-\d{2}-\d{4})$")
 
+# Anchored NANP allowlist mirroring the labeled-phone redactor (redactor.py rule 5a:
+# \+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}). A digit-count-only check accepted
+# junk wrappers the redactor does not mask -- "abc5555550123" and "555::::123::::4567"
+# both carry 10 digits but sit outside the redactor's narrow shape, so once labeled they
+# survive redaction into logs/provider payloads/storage (PR review). Anchoring to the
+# redactor's own pattern makes every accepted value one the redactor can mask, holding
+# the boundary invariant that junk does not pass.
+_PHONE_RE = re.compile(r"^\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}$")
+
 
 class ApplicationIn(BaseModel):
     name: str = Field(min_length=1)
@@ -59,17 +68,21 @@ class ApplicationIn(BaseModel):
     @field_validator("phone")
     @classmethod
     def _validate_phone(cls, v: Optional[str]) -> Optional[str]:
-        # Optional; when present require exactly 10 digits ignoring formatting, so
+        # Optional; when present match the anchored _PHONE_RE allowlist so
         # (555) 555-0123, 555-555-0123, and 5555550123 all pass but junk does not.
-        # NORMALIZE by returning the stripped value: same blindspot as _validate_ssn
-        # -- the digit count ignores surrounding whitespace, so " 5555550123 " passed
-        # and model_dump() preserved the padding, forwarding/storing a malformed phone.
+        # A digit-count-only check accepted values the labeled-phone redactor cannot
+        # mask ("abc5555550123", "555::::123::::4567" both have 10 digits but fall
+        # outside the redactor's NANP shape), opening a PII leak path once such a value
+        # is labeled downstream (PR review). Anchor to the redactor's own pattern so
+        # accepted values are always maskable. NORMALIZE by returning the stripped value:
+        # the earlier check ignored surrounding whitespace, so " 5555550123 " passed and
+        # model_dump() preserved the padding, forwarding/storing a malformed phone.
         # Strip so only the padding is removed; internal formatting is left intact.
         if v is None:
             return v
         v = v.strip()
-        if v and len(re.sub(r"\D", "", v)) != 10:
-            raise ValueError("phone must contain 10 digits")
+        if v and not _PHONE_RE.match(v):
+            raise ValueError("phone must be 10 digits in a standard US format")
         return v
 
     @model_validator(mode="after")
