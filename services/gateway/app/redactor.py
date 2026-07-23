@@ -330,19 +330,33 @@ class PiiRedactor:
         text = re.sub(
             r"\b\d{3}-\d{2}-(\d{4})\b", lambda m: "•••-••-" + m.group(1), text
         )
-        # 3a-bis. Space-separated SSN (XXX XX XXXX). The 3-2-4 grouping is
-        # SSN-specific (phones are 3-3-4), so the false-positive risk is low
-        # enough to redact even unlabeled, unlike the bare-digit case in 3b.
+        # 3a-bis. Unlabeled SSN with a consistent non-dash separator
+        # (XXX.XX.XXXX, XXX/XX/XXXX) or a whitespace RUN of any length (space/tab,
+        # single or many: "XXX XX XXXX", "XXX   XX   XXXX", "XXX\tXX\tXXXX"). The
+        # 3-2-4 grouping is SSN-specific (phones are 3-3-4), so the false-positive
+        # risk is low enough to redact even unlabeled, unlike the bare-digit case
+        # in 3b. Whitespace uses [ \t]+ (not a fixed cap) so an extra space can't
+        # smuggle a full SSN past redaction. Dash is covered by 3a above; the \1
+        # backref keeps the dot/slash separator consistent so we don't match
+        # mixed-punctuation noise.
         text = re.sub(
-            r"\b\d{3} \d{2} (\d{4})\b", lambda m: "•••-••-" + m.group(1), text
+            r"\b\d{3}(?:([./])\d{2}\1|[ \t]+\d{2}[ \t]+)(\d{4})\b",
+            lambda m: "•••-••-" + m.group(2),
+            text,
         )
         # 3b. Redact bare/loosely-formatted SSN ONLY inside a labeled field, so we
         # don't mask unrelated 9-digit numbers (loan IDs, amounts, timestamps).
         # The label is the signal, so accept any separator (dash/dot/slash/space/
-        # tab/none) between the digit groups -- a dotted "ssn": "412.55.9981" or
-        # slashed 412/55/9981 is still a plain SSN and must not slip through.
+        # tab/none) -- including an arbitrarily long RUN of them ("412    55    9981")
+        # -- between the digit groups: a dotted "ssn": "412.55.9981" or a value
+        # padded with many spaces is still a plain SSN and must not slip through.
+        # [-.\s/]* (not a bounded {0,N}) is what stops an extra separator from
+        # smuggling the SSN past the labeled rule. The \s* after the value-opening
+        # quote absorbs LEADING padding inside the value ("ssn": " 412559980 "):
+        # without it the pattern jumped straight to \d{3} and a single leading space
+        # let the full labeled SSN escape unmasked.
         text = re.sub(
-            r'(["\']?(?:ssn|social[_ ]?security|tax[_ ]?id|tin)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?)\d{3}[-.\s/]?\d{2}[-.\s/]?(\d{4})\b',
+            r'(["\']?(?:ssn|social[_ ]?security|tax[_ ]?id|tin)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?\s*)\d{3}[-.\s/]*\d{2}[-.\s/]*(\d{4})\b',
             lambda m: m.group(1) + "•••-••-" + m.group(2),
             text,
             flags=re.IGNORECASE,
@@ -357,8 +371,12 @@ class PiiRedactor:
 
         # 5a. Redact phone in a labeled field (catches bare 10-digit like
         # "phone":"5551234567" that 5b intentionally skips to avoid false positives).
+        # The \s* after the value-opening quote absorbs LEADING padding inside the
+        # value ("phone": "  5551234567"): the trailing [\s.-]? only ate a single
+        # whitespace, so 2+ leading spaces let the full labeled phone escape unmasked
+        # -- the same blindspot fixed for labeled SSN in rule 3b.
         text = re.sub(
-            r'(["\']?(?:phone|telephone|tel|mobile|cell|fax)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?)\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})\b',
+            r'(["\']?(?:phone|telephone|tel|mobile|cell|fax)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?\s*)\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})\b',
             lambda m: m.group(1) + "•••-•••-" + m.group(2),
             text,
             flags=re.IGNORECASE,
