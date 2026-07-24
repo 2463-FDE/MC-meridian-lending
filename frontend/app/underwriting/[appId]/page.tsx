@@ -203,9 +203,10 @@ export default function UnderwritingDetailPage() {
   // AI decisioning assistant (ADR 0009 §5). "Run" drives the agent loop: its score
   // tool performs the SAME regulated decision + append-only record as Run decision, then
   // the model narrates the recorded outcome (narration validated against the record —
-  // recorded facts win). "Explain" is read-only and never re-scores. Reuses one
-  // idempotency key across retries so a re-click replays the recorded event, not a second
-  // one. 503 = LLM feature off or the provider is unavailable (demo needs a real key).
+  // recorded facts win). "Explain" is read-only and never re-scores. The idempotency
+  // key is held only across retries of a single in-flight attempt and rotated after a
+  // confirmed success, so a later intentional run re-scores current state instead of
+  // replaying the recorded event. 503 = LLM feature off or provider unavailable.
   const assistantKeyRef = useRef<string | null>(null);
 
   async function runAssistant() {
@@ -224,6 +225,19 @@ export default function UnderwritingDetailPage() {
       if (res.outcome) {
         setApp((prev) => (prev ? { ...prev, decision: res.outcome } : prev));
       }
+      // Clear the standard-decision state on any successful run so the primary panel
+      // can't render a prior run's score/adverse-action reason beside the assistant
+      // result -- including a success that returns no outcome, which would otherwise
+      // leave the stale score visible. The assistant endpoint returns no numeric
+      // score, so there is nothing authoritative to repopulate; the assistant card
+      // shows its own outcome and principal_reasons. (PR #11 review; compliance: no
+      // stale regulated decision data on the officer screen.)
+      setDecision(null);
+      // Rotate the idempotency key after a confirmed success so a later intentional
+      // "Run AI assistant" click re-scores current state rather than replaying this
+      // recorded event. A failed run leaves the key set (the catch below does not
+      // reset it) so a retry of the same attempt still replays, not double-records.
+      assistantKeyRef.current = null;
       setActionMsg("AI assistant ran the decision.");
     } catch (err) {
       setActionErr(errMsg(err, "The AI assistant is unavailable."));
