@@ -56,6 +56,23 @@ interface DecisionResult {
   adverse_action_reason?: string;
 }
 
+interface AssistantReason {
+  code: string;
+  reason: string;
+}
+
+interface AssistantResult {
+  application_id: string | number;
+  record_status?: string;
+  outcome?: string;
+  policy_band?: string;
+  principal_reasons?: AssistantReason[];
+  decided_by?: string;
+  decided_at?: string;
+  summary?: string;
+  narration_validated?: boolean;
+}
+
 const OFFER_RATE_PCT = 7.99;
 
 function errMsg(err: unknown, fallback: string): string {
@@ -89,6 +106,7 @@ export default function UnderwritingDetailPage() {
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  const [assistant, setAssistant] = useState<AssistantResult | null>(null);
 
   const load = useCallback(async () => {
     if (!appId) return;
@@ -177,6 +195,70 @@ export default function UnderwritingDetailPage() {
       setActionMsg("Offer generated.");
     } catch (err) {
       setActionErr(errMsg(err, "Could not generate an offer."));
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  // AI decisioning assistant (ADR 0009 §5). "Run" drives the agent loop: its score
+  // tool performs the SAME regulated decision + append-only record as Run decision, then
+  // the model narrates the recorded outcome (narration validated against the record —
+  // recorded facts win). "Explain" is read-only and never re-scores. The idempotency
+  // key is held only across retries of a single in-flight attempt and rotated after a
+  // confirmed success, so a later intentional run re-scores current state instead of
+  // replaying the recorded event. 503 = LLM feature off or provider unavailable.
+  const assistantKeyRef = useRef<string | null>(null);
+
+  async function runAssistant() {
+    if (!appId) return;
+    setActionBusy(true);
+    setActionErr(null);
+    setActionMsg(null);
+    if (!assistantKeyRef.current) assistantKeyRef.current = crypto.randomUUID();
+    try {
+      const res = (await apiPost(
+        `/los/assistant/decisions/${appId}`,
+        undefined,
+        { "Idempotency-Key": assistantKeyRef.current }
+      )) as AssistantResult;
+      setAssistant(res);
+      if (res.outcome) {
+        setApp((prev) => (prev ? { ...prev, decision: res.outcome } : prev));
+      }
+      // Clear the standard-decision state on any successful run so the primary panel
+      // can't render a prior run's score/adverse-action reason beside the assistant
+      // result -- including a success that returns no outcome, which would otherwise
+      // leave the stale score visible. The assistant endpoint returns no numeric
+      // score, so there is nothing authoritative to repopulate; the assistant card
+      // shows its own outcome and principal_reasons. (PR #11 review; compliance: no
+      // stale regulated decision data on the officer screen.)
+      setDecision(null);
+      // Rotate the idempotency key after a confirmed success so a later intentional
+      // "Run AI assistant" click re-scores current state rather than replaying this
+      // recorded event. A failed run leaves the key set (the catch below does not
+      // reset it) so a retry of the same attempt still replays, not double-records.
+      assistantKeyRef.current = null;
+      setActionMsg("AI assistant ran the decision.");
+    } catch (err) {
+      setActionErr(errMsg(err, "The AI assistant is unavailable."));
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function explainAssistant() {
+    if (!appId) return;
+    setActionBusy(true);
+    setActionErr(null);
+    setActionMsg(null);
+    try {
+      const res = (await apiGet(
+        `/los/assistant/decisions/${appId}`
+      )) as AssistantResult;
+      setAssistant(res);
+      setActionMsg("AI assistant explained the recorded decision (no re-score).");
+    } catch (err) {
+      setActionErr(errMsg(err, "The AI assistant is unavailable."));
     } finally {
       setActionBusy(false);
     }
@@ -361,6 +443,79 @@ export default function UnderwritingDetailPage() {
             {actionBusy ? "Working…" : "Run decision"}
           </button>
         </div>
+      </div>
+
+      {/* AI decisioning assistant */}
+      <h2>AI decisioning assistant</h2>
+      <div className="card">
+        <div className="spread">
+          <div>
+            <div className="card-title" style={{ marginBottom: 8 }}>
+              LLM assistant
+            </div>
+            <p className="hint" style={{ margin: 0 }}>
+              The assistant scores through the deterministic model tool, then narrates
+              the recorded outcome. The LLM never sets the score.
+            </p>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={runAssistant} disabled={actionBusy}>
+              {actionBusy ? "Working…" : "Run AI assistant"}
+            </button>
+            <button
+              className="btn-ghost"
+              onClick={explainAssistant}
+              disabled={actionBusy}
+            >
+              {actionBusy ? "Working…" : "Explain"}
+            </button>
+          </div>
+        </div>
+
+        {assistant ? (
+          <div style={{ marginTop: 16 }}>
+            <div className="spread" style={{ marginBottom: 10 }}>
+              {assistant.outcome ? (
+                <StatusChip status={assistant.outcome} />
+              ) : (
+                <span className="muted">No recorded decision.</span>
+              )}
+              {assistant.narration_validated ? (
+                <span className="chip chip-green">
+                  ✓ narration validated against record
+                </span>
+              ) : (
+                <span className="chip chip-amber">
+                  ⚠ narration diverged — showing recorded facts
+                </span>
+              )}
+            </div>
+            {assistant.summary ? (
+              <p style={{ marginTop: 0 }}>{assistant.summary}</p>
+            ) : null}
+            {assistant.principal_reasons &&
+            assistant.principal_reasons.length > 0 ? (
+              <ul className="hint" style={{ marginTop: 8 }}>
+                {assistant.principal_reasons.map((r) => (
+                  <li key={r.code}>
+                    <strong>{r.code}</strong>: {r.reason}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {assistant.decided_by || assistant.decided_at ? (
+              <p className="hint" style={{ marginTop: 8 }}>
+                Recorded by {assistant.decided_by || "—"}
+                {assistant.decided_at
+                  ? ` at ${shortDate(assistant.decided_at)}`
+                  : ""}
+                {assistant.policy_band
+                  ? ` · policy band ${assistant.policy_band}`
+                  : ""}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       {/* Offer */}
