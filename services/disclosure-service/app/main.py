@@ -13,12 +13,13 @@ from fastapi.responses import JSONResponse
 
 from . import config, rules
 from .logging_config import get_logger
-from .routers import offers
+from .routers import disclosures, offers
 
 log = get_logger("disclosure")
 
 app = FastAPI(title="Meridian Disclosure Service", version="2.0.0")
 app.include_router(offers.router)
+app.include_router(disclosures.router)
 
 
 @app.exception_handler(Exception)
