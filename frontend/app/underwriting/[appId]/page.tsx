@@ -65,6 +65,9 @@ interface AssistantResult {
   application_id: string | number;
   record_status?: string;
   outcome?: string;
+  // Model score from the persisted decision record (null on legacy records that never
+  // captured drivers) -- same fact the manual Run decision panel shows.
+  score?: number;
   policy_band?: string;
   principal_reasons?: AssistantReason[];
   decided_by?: string;
@@ -222,17 +225,32 @@ export default function UnderwritingDetailPage() {
         { "Idempotency-Key": assistantKeyRef.current }
       )) as AssistantResult;
       setAssistant(res);
-      if (res.outcome) {
-        setApp((prev) => (prev ? { ...prev, decision: res.outcome } : prev));
+      // Fail closed on a 200 that carries no recorded outcome: an assistant run IS a
+      // regulated decision, so a response missing the outcome is not a success. Leave the
+      // existing decision state untouched, report the failure, and keep the idempotency
+      // key so a retry replays that attempt instead of recording a second event.
+      // (PR #11 review; the server already refuses an unrecorded decision, this is the
+      // client-side backstop for a drifted contract or a proxy-mangled body.)
+      if (!res.outcome) {
+        setActionErr(
+          "The AI assistant returned no recorded outcome — the decision panel was not updated."
+        );
+        return;
       }
-      // Clear the standard-decision state on any successful run so the primary panel
-      // can't render a prior run's score/adverse-action reason beside the assistant
-      // result -- including a success that returns no outcome, which would otherwise
-      // leave the stale score visible. The assistant endpoint returns no numeric
-      // score, so there is nothing authoritative to repopulate; the assistant card
-      // shows its own outcome and principal_reasons. (PR #11 review; compliance: no
-      // stale regulated decision data on the officer screen.)
-      setDecision(null);
+      setApp((prev) => (prev ? { ...prev, decision: res.outcome } : prev));
+      // REPLACE the standard-decision state with THIS run's recorded facts rather than
+      // clearing it. Both paths write the same append-only decision event, so the primary
+      // panel must show the assistant run's score and adverse-action reason exactly as it
+      // does for Run decision -- blanking them hid fields officers rely on, while leaving
+      // them would show a PRIOR run's data beside a fresh outcome. Everything here is
+      // record-derived (recorded facts win, ADR 0009 §5). Reason parity: DecisionOut.reason
+      // is the FIRST principal reason; score parity: DecisionOut.score is an int.
+      setDecision({
+        app_id: res.application_id,
+        decision: res.outcome,
+        score: typeof res.score === "number" ? Math.round(res.score) : undefined,
+        adverse_action_reason: res.principal_reasons?.[0]?.reason,
+      });
       // Rotate the idempotency key after a confirmed success so a later intentional
       // "Run AI assistant" click re-scores current state rather than replaying this
       // recorded event. A failed run leaves the key set (the catch below does not

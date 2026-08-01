@@ -163,10 +163,18 @@ def _validated_final(
     # narration without exception (ADR 0009 §5), so the summary is record-derived and
     # `valid` is retained only as an audit signal on the model's structured claim.
     summary = _constructed_summary(record)
+    # The model score comes from the persisted record's drivers, so the officer screen can
+    # show the SAME decision facts for an assistant run as for a manual Run decision
+    # (applications.py run_decision returns score + first principal reason). Without it the
+    # primary decision panel goes blank on an assistant-recorded outcome (PR #11 review).
+    # Not a model-visible field: this is the officer-facing HTTP response, and the score
+    # tool already returns the score to the model. Legacy records carry no model_score, so
+    # the key is null rather than absent-by-accident.
     return {
         "application_id": app_id,
         "record_status": record.get("status"),
         "outcome": record.get("outcome"),
+        "score": (record.get("drivers") or {}).get("model_score"),
         "policy_band": record.get("policy_band"),
         "principal_reasons": recorded_reasons,
         "decided_by": record.get("decided_by"),
