@@ -351,12 +351,21 @@ class PiiRedactor:
         # -- between the digit groups: a dotted "ssn": "412.55.9981" or a value
         # padded with many spaces is still a plain SSN and must not slip through.
         # [-.\s/]* (not a bounded {0,N}) is what stops an extra separator from
-        # smuggling the SSN past the labeled rule. The \s* after the value-opening
-        # quote absorbs LEADING padding inside the value ("ssn": " 412559980 "):
-        # without it the pattern jumped straight to \d{3} and a single leading space
-        # let the full labeled SSN escape unmasked.
+        # smuggling the SSN past the labeled rule. (?:["\']\s*)? absorbs LEADING
+        # padding inside the value ("ssn": " 412559980 "): without it the pattern
+        # jumped straight to \d{3} and a single leading space let the full labeled
+        # SSN escape unmasked.
+        #
+        # That group must stay quote-THEN-padding, never ["\']?\s* sitting next to
+        # the preceding \s*. Two adjacent \s* with an optional quote between them
+        # can split one whitespace run O(n^2) ways, so a long NON-matching value
+        # ("ssn:" + 10k spaces + "x") made this formatter quadratic (~0.6s, and
+        # ~3.3s for the phone rule below) while formatting a log record. Quote and
+        # whitespace are disjoint classes, so quote-then-padding has exactly one
+        # way to match any input and stays linear. Fix the ambiguity, not the
+        # bounds: capping the runs would reopen the padding bypass above.
         text = re.sub(
-            r'(["\']?(?:ssn|social[_ ]?security|tax[_ ]?id|tin)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?\s*)\d{3}[-.\s/]*\d{2}[-.\s/]*(\d{4})\b',
+            r'(["\']?(?:ssn|social[_ ]?security|tax[_ ]?id|tin)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*(?:["\']\s*)?)\d{3}[-.\s/]*\d{2}[-.\s/]*(\d{4})\b',
             lambda m: m.group(1) + "•••-••-" + m.group(2),
             text,
             flags=re.IGNORECASE,
@@ -371,12 +380,15 @@ class PiiRedactor:
 
         # 5a. Redact phone in a labeled field (catches bare 10-digit like
         # "phone":"5551234567" that 5b intentionally skips to avoid false positives).
-        # The \s* after the value-opening quote absorbs LEADING padding inside the
-        # value ("phone": "  5551234567"): the trailing [\s.-]? only ate a single
-        # whitespace, so 2+ leading spaces let the full labeled phone escape unmasked
-        # -- the same blindspot fixed for labeled SSN in rule 3b.
+        # (?:["\']\s*)? absorbs LEADING padding inside the value ("phone":
+        # "  5551234567"): the trailing [\s.-]? only ate a single whitespace, so 2+
+        # leading spaces let the full labeled phone escape unmasked -- the same
+        # blindspot fixed for labeled SSN in rule 3b. It is quote-THEN-padding for
+        # the same backtracking reason documented on 3b; ["\']?\s* here was even
+        # worse than the SSN case (~3.3s on 10k spaces) because the optional
+        # [\s.-]? separators compound the split.
         text = re.sub(
-            r'(["\']?(?:phone|telephone|tel|mobile|cell|fax)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*["\']?\s*)\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})\b',
+            r'(["\']?(?:phone|telephone|tel|mobile|cell|fax)(?:[_ ]?(?:no|num|number))?s?["\']?\s*[:=]\s*(?:["\']\s*)?)\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})\b',
             lambda m: m.group(1) + "•••-•••-" + m.group(2),
             text,
             flags=re.IGNORECASE,

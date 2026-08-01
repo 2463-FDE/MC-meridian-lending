@@ -684,3 +684,54 @@ class TestPiiRedactorAdversarialFixes:
         assert "412-55-9981" not in out
         assert _json.loads(out)  # still valid JSON
         assert "9981" in out  # last-4 preserved
+
+
+class TestPiiRedactorLinearTime:
+    """redact() must stay linear on long NON-matching labeled values.
+
+    The labeled SSN (3b) and phone (5a) rules run inside the logging formatter of
+    every service, so any attacker-controlled string that reaches a log record
+    with an "ssn:" / "phone:" label is fed to these regexes -- including on the
+    error path, where the request has not finished yet.
+
+    Writing the value prefix as ["']?\\s* directly after the preceding \\s*
+    (\\s*[:=]\\s*["']?\\s*) makes the two whitespace quantifiers adjacent and
+    ambiguous: one padding run of length n can be split between them O(n^2) ways,
+    and a value that never reaches \\d{3} forces the engine through all of them.
+    At 10k spaces that cost ~0.6s per log line for SSN and ~3.3s for phone --
+    quadratic, so it worsens 4x per doubling. Quote-THEN-padding,
+    (?:["']\\s*)?, has exactly one way to match (quotes and whitespace are
+    disjoint classes) and is linear.
+
+    The bound below is deliberately ~100x the observed linear cost so it does not
+    flake on a slow runner, while the quadratic form overshoots it by 3-13x.
+    """
+
+    @pytest.mark.parametrize("label", ["ssn", "phone", "social_security", "mobile"])
+    def test_long_nonmatching_labeled_value_stays_linear(self, label):
+        import time
+
+        # UNQUOTED value, which is what makes the two \s* adjacent: with a quoted
+        # value the optional quote pins the first \s* and there is nothing to
+        # split, so a quoted payload runs linear even on the buggy pattern and
+        # proves nothing. Here ["']? matches empty, both \s* land on the same run,
+        # and the value never reaches \d{3} -- the worst case for the ambiguous
+        # form, a no-op for the unambiguous one.
+        payload = "%s: %sx" % (label, " " * 10_000)
+
+        start = time.perf_counter()
+        result = PiiRedactor.redact(payload)
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 0.25, (
+            f"labeled-{label} redaction took {elapsed:.3f}s on a 10k-space "
+            "non-matching value -- the value-prefix quantifiers are ambiguous again"
+        )
+        assert result  # sanity: it still returns the (unmaskable) text
+
+    def test_padded_labeled_values_still_masked_at_length(self):
+        # Guard the fix from being "optimized" by dropping padding absorption:
+        # a long leading run must still be absorbed so the SSN is masked.
+        result = PiiRedactor.redact('{"ssn": "%s412559980"}' % (" " * 5_000))
+        assert "•••-••-9980" in result
+        assert "412559980" not in result
