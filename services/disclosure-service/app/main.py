@@ -4,13 +4,14 @@ Extracts the TILA / Reg-Z offer + APR + amortization disclosure logic out of the
 a standalone service. Read paths (latest offer lookup) use SQLAlchemy; the offer write path
 still uses raw psycopg2 + float money — the partial-migration seam carried over verbatim.
 """
+
 import logging
 import os
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import config
+from . import config, rules
 from .logging_config import get_logger
 from .routers import offers
 
@@ -32,12 +33,32 @@ def health():
     if missing:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "service": "disclosure-service", "missing_secrets": missing},
+            content={
+                "status": "unhealthy",
+                "service": "disclosure-service",
+                "missing_secrets": missing,
+            },
+        )
+    # Fail closed on policy config: without a loadable fee schedule this service cannot
+    # justify the fee inside a regulated disclosure, so it must not look ready.
+    rules_error = rules.config_error()
+    if rules_error:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "service": "disclosure-service",
+                "rules_config_error": rules_error,
+            },
         )
     ok, db_error = config.database_reachable()
     if not ok:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "service": "disclosure-service", "database_error": db_error},
+            content={
+                "status": "unhealthy",
+                "service": "disclosure-service",
+                "database_error": db_error,
+            },
         )
     return {"status": "ok", "service": "disclosure-service"}

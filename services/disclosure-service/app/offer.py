@@ -1,18 +1,18 @@
 """Offer assembly.
 
-Has its OWN hardcoded copy of the origination fee (0.03) — a third value that has
-drifted from fees.py (0.030) and apr.py (0.025). Same idea, three numbers.
+The origination fee comes from `policies/fee_schedule.json` via rules.py — the same
+source apr.py reads, so amount_financed and the APR can no longer be computed from two
+different rates inside one offer.
 """
-from . import apr
 
-ORIGINATION_FEE_PCT = 0.03   # third copy
+from . import apr, fees
 
 
 def build_offer(principal: float, annual_rate_pct: float, term_months: int) -> dict:
     a = apr.compute_apr(principal, annual_rate_pct, term_months)
     fc = apr.finance_charge(principal, annual_rate_pct, term_months)
     pmt = apr.monthly_payment(principal, annual_rate_pct, term_months)
-    fee = principal * ORIGINATION_FEE_PCT
+    fee = fees.origination_fee(principal)
     return {
         "apr": a,
         "finance_charge": round(fc, 2),

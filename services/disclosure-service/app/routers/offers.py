@@ -12,7 +12,7 @@ from psycopg2 import errors as pg_errors
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import config, db, models, offer as offer_mod, schedule
+from .. import config, db, models, offer as offer_mod, rules, schedule
 from ..database import get_session
 from ..logging_config import get_logger
 from ..schemas import Disclosure, OfferIn, OfferResponse, ScheduleRow
@@ -49,7 +49,12 @@ def _offer_response_from_persisted(row, application_id: int) -> OfferResponse:
     display schedule is reconstructed from the stored disclosure box the same way the LOS read
     path does: back out principal from amount_financed via the origination fee, recover term
     from total/monthly, and reuse the stored APR as the schedule rate. Float math throughout
-    (D1); the drifted fee copy (offer_mod.ORIGINATION_FEE_PCT = 0.03) backs out principal.
+    (D1); the origination fee comes from the one versioned schedule (rules.py).
+
+    Latent hazard, unchanged by that switch: inverting a STORED amount_financed with the
+    CURRENT fee rate is only correct while the rate has not moved. It is correct today (the
+    old hardcoded 0.03 equals the published 0.030), and it stops being an inference at all
+    once `disclosures.compute_snapshot` persists the principal and fee actually used (spec D3).
     """
     apr = row["apr"] or 0
     finance_charge = row["finance_charge"] or 0
@@ -57,7 +62,7 @@ def _offer_response_from_persisted(row, application_id: int) -> OfferResponse:
     total_of_payments = row["total_of_payments"] or 0.0
     amount_financed = row["amount_financed"] or 0.0
     principal = (
-        round(amount_financed / (1 - offer_mod.ORIGINATION_FEE_PCT), 2)
+        round(amount_financed / (1 - rules.get_fee_schedule().origination_fee_pct), 2)
         if amount_financed
         else 0.0
     )

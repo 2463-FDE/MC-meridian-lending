@@ -1,0 +1,8 @@
+{
+  "_comment": "Machine-readable companion to fee_schedule.md. The markdown remains the human-facing published schedule; this file is what the code reads. tests/test_rules.py asserts the two agree, so they cannot drift the way the three hardcoded constants did.",
+  "version": "2024-11",
+  "origination_fee_pct": 0.030,
+  "late_fee_flat": 35.0,
+  "nsf_fee": 25.0,
+  "apr_tolerance_pp": 0.125
+}
