@@ -23,6 +23,15 @@ FIGURES = {
     "monthly_payment": "439.35",
 }
 OFFICER = {"X-User-Role": "underwriter", "X-User-Id": "1"}
+COMPLETE_CHAIN = {
+    "disclosure_id": 5,
+    "offer_id": 11,
+    "decision_event_id": 7,
+    "application_id": 1,
+    "applicant_id": 3,
+    "chain_complete": True,
+    "missing_edges": [],
+}
 
 
 def _document(figures=None) -> str:
@@ -60,6 +69,11 @@ def client(monkeypatch):
         disclosure_coordinator.LangGraphDisclosureCoordinator,
         "_default_persist",
         staticmethod(lambda payload: {"disclosure_id": 5, "status": "draft"}),
+    )
+    monkeypatch.setattr(
+        disclosure_coordinator.LangGraphDisclosureCoordinator,
+        "_default_read_provenance",
+        staticmethod(lambda disclosure_id: dict(COMPLETE_CHAIN)),
     )
     return TestClient(main.app)
 
@@ -122,6 +136,33 @@ def test_an_application_with_no_decision_event_cannot_produce_a_disclosure(
         response.json()["detail"]["reason"]
         == disclosure_coordinator.BlockReason.PROVENANCE_INCOMPLETE
     )
+
+
+def test_a_broken_chain_returns_the_draft_id_so_the_officer_can_act_on_it(
+    client, monkeypatch
+):
+    """A stage-5 provenance block persists the draft before it fails. Returning only
+    "blocked" would leave a regulated row the officer has no handle on."""
+    _stub_db(monkeypatch)
+    monkeypatch.setattr(
+        disclosure_coordinator.LangGraphDisclosureCoordinator,
+        "_default_read_provenance",
+        staticmethod(
+            lambda disclosure_id: {
+                **COMPLETE_CHAIN,
+                "applicant_id": None,
+                "chain_complete": False,
+                "missing_edges": ["applicant_id"],
+            }
+        ),
+    )
+    response = client.post("/applications/1/disclosure", headers=OFFICER)
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["reason"] == disclosure_coordinator.BlockReason.PROVENANCE_INCOMPLETE
+    assert detail["disclosure_id"] == 5
+    assert detail["missing_edges"] == ["applicant_id"]
 
 
 def test_requires_authorization(client, monkeypatch):

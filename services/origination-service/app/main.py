@@ -184,14 +184,20 @@ def generate_disclosure(
             result["reason"],
             result.get("detail", ""),
         )
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "status": "blocked",
-                "reason": result["reason"],
-                "attempts": result.get("attempts", 0),
-            },
-        )
+        detail = {
+            "status": "blocked",
+            "reason": result["reason"],
+            "attempts": result.get("attempts", 0),
+        }
+        # A stage-5 provenance block leaves a persisted draft behind (see the coordinator);
+        # hand back its id so the officer can act on the row rather than hunt for it.
+        persisted = result.get("disclosure") or {}
+        if persisted.get("disclosure_id"):
+            detail["disclosure_id"] = persisted["disclosure_id"]
+            detail["missing_edges"] = (result.get("provenance") or {}).get(
+                "missing_edges", []
+            )
+        raise HTTPException(status_code=422, detail=detail)
     return result
 
 

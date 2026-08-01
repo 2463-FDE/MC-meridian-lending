@@ -9,7 +9,8 @@ mismatch, bounded by an attempt counter.
     [3] assemble   maker agent formats the document from those figures
     [4a] verify    deterministic recompute + comparison — the only thing that can fail it
     [4b] narrate   checker agent briefs the officer on a verdict already reached
-    [5] persist    disclosure-service writes the authoritative minor-unit record
+    [5] persist    disclosure-service writes the authoritative minor-unit record, then the
+                   chain is re-read from the KG view and checked for completeness
 
 Three properties are worth stating because they are what make an LLM safe on this path:
 
@@ -26,6 +27,14 @@ document text drifted while the numbers are sound — loops back to the maker. E
 reason blocks. A loop around a deterministic gate would retry until the model produced
 something the gate happened to accept, which is how you launder a wrong number into a
 document.
+
+**The graph is read through the view, not re-joined.** Stage 5 closes the provenance edge
+and then asks `v_disclosure_provenance` — the one definition of the chain — whether the walk
+disclosure -> offer -> decision_event -> application -> applicant is whole, blocking on
+`provenance_incomplete` if it is not. Stage 1 is the one read that does NOT go through the
+view, and cannot: it gathers the inputs for a chain link that does not exist yet, so there
+is no row to read. Those are two single-table lookups by key, not a join — the thing spec D3
+forbids is a second, ad-hoc definition of the traversal, and there is exactly one.
 
 LangGraph is orchestration only (ADR 0012). Checkpointing is deliberately not wired:
 persisted graph state would hold applicant data at rest, and this pipeline is a single
@@ -106,6 +115,7 @@ class DisclosureState(TypedDict, total=False):
     document: dict
     narration: dict
     disclosure: dict
+    provenance: dict
     attempts: int
     checks_passed: int
     blocked: bool
@@ -180,11 +190,13 @@ class LangGraphDisclosureCoordinator:
         gather: Callable[[int], dict],
         compute_offer: Callable[[dict], dict] | None = None,
         persist_disclosure: Callable[[dict], dict] | None = None,
+        read_provenance: Callable[[int], dict] | None = None,
     ):
         self.client = client
         self._gather = gather
         self._compute_offer = compute_offer or self._default_compute_offer
         self._persist_disclosure = persist_disclosure or self._default_persist
+        self._read_provenance = read_provenance or self._default_read_provenance
         self._graph = self._build()
 
     # ---- stages ---------------------------------------------------------------
@@ -264,7 +276,18 @@ class LangGraphDisclosureCoordinator:
         return {"narration": narration}
 
     def _persist(self, state: DisclosureState) -> dict:
-        """Stage 5. Write the authoritative record and close the provenance edge."""
+        """Stage 5. Write the authoritative record, close the edge, then read the chain back.
+
+        The read-back is the KG read (spec D3): one query on `v_disclosure_provenance`
+        asking whether the walk to the applicant is whole. It runs AFTER the write because
+        that is the first moment a chain exists — the edge `offers.decision_event_id` is
+        closed by the same POST that inserts the disclosure.
+
+        An incomplete chain blocks the run, but the draft row stays. It is already the
+        authoritative record of what was computed, and deleting it to make the pipeline
+        look clean would destroy the evidence an auditor needs to see the gap. The block
+        carries the disclosure id so the officer can find it.
+        """
         record = self._persist_disclosure(
             {
                 "offer_id": state["offer_id"],
@@ -274,7 +297,18 @@ class LangGraphDisclosureCoordinator:
                 "term_months": state["term_months"],
             }
         )
-        return {"disclosure": record}
+        chain = self._read_provenance(record["disclosure_id"])
+        if not chain.get("chain_complete"):
+            missing = ",".join(chain.get("missing_edges") or ["unknown"])
+            return {
+                "disclosure": record,
+                "provenance": chain,
+                **_blocked(
+                    BlockReason.PROVENANCE_INCOMPLETE,
+                    f"disclosure_id={record['disclosure_id']} missing={missing}",
+                ),
+            }
+        return {"disclosure": record, "provenance": chain}
 
     # ---- edges ----------------------------------------------------------------
 
@@ -337,6 +371,12 @@ class LangGraphDisclosureCoordinator:
     def _default_persist(payload: dict) -> dict:
         return clients.post(DISCLOSURE_URL, "/disclosures", payload)
 
+    @staticmethod
+    def _default_read_provenance(disclosure_id: int) -> dict:
+        resp = clients.get(DISCLOSURE_URL, f"/disclosures/{disclosure_id}/provenance")
+        resp.raise_for_status()
+        return resp.json()
+
     # ---- Coordinator -----------------------------------------------------------
 
     def run(self, application_id: int) -> dict:
@@ -352,12 +392,17 @@ class LangGraphDisclosureCoordinator:
                 "reason": reason,
                 "detail": final.get("detail", ""),
                 "attempts": final.get("attempts", 0),
+                # Present only when the block happened at stage 5 — the draft exists and
+                # the officer needs a handle on it.
+                "disclosure": final.get("disclosure"),
+                "provenance": final.get("provenance"),
             }
         return {
             "status": "ok",
             "document": final.get("document"),
             "narration": final.get("narration"),
             "disclosure": final.get("disclosure"),
+            "provenance": final.get("provenance"),
             "attempts": final.get("attempts", 0),
         }
 

@@ -56,8 +56,19 @@ def _client(responses) -> ClaudeClient:
     return ClaudeClient(config, adapter=FakeAdapter(responses=list(responses)))
 
 
-def _coordinator(responses, *, context=None, offer=None, persisted=None):
-    calls = {"compute": 0, "persist": 0}
+COMPLETE_CHAIN = {
+    "disclosure_id": 5,
+    "offer_id": 11,
+    "decision_event_id": 7,
+    "application_id": 42,
+    "applicant_id": 3,
+    "chain_complete": True,
+    "missing_edges": [],
+}
+
+
+def _coordinator(responses, *, context=None, offer=None, persisted=None, chain=None):
+    calls = {"compute": 0, "persist": 0, "provenance": 0}
 
     def compute_offer(payload):
         calls["compute"] += 1
@@ -75,11 +86,16 @@ def _coordinator(responses, *, context=None, offer=None, persisted=None):
             else {"disclosure_id": 5, "status": "draft"}
         )
 
+    def read_provenance(disclosure_id):
+        calls["provenance"] += 1
+        return dict(chain if chain is not None else COMPLETE_CHAIN)
+
     coordinator = LangGraphDisclosureCoordinator(
         _client(responses),
         gather=lambda app_id: dict(context if context is not None else APPROVED),
         compute_offer=compute_offer,
         persist_disclosure=persist,
+        read_provenance=read_provenance,
     )
     return coordinator, calls
 
@@ -93,7 +109,8 @@ def test_approved_application_runs_the_full_pipeline():
     assert result["document"]["figures"] == FIGURES
     assert result["narration"]["officer_action"] == "review_and_send"
     assert result["disclosure"] == {"disclosure_id": 5, "status": "draft"}
-    assert calls == {"compute": 1, "persist": 1}
+    assert result["provenance"]["chain_complete"] is True
+    assert calls == {"compute": 1, "persist": 1, "provenance": 1}
 
 
 @pytest.mark.parametrize("outcome", ["refer", "deny", "counteroffer", None])
@@ -105,7 +122,11 @@ def test_only_an_approved_application_enters_the_pipeline(outcome):
 
     assert result["status"] == "blocked"
     assert result["reason"] == BlockReason.NOT_APPROVED
-    assert calls == {"compute": 0, "persist": 0}, "must not compute or persist"
+    assert calls == {
+        "compute": 0,
+        "persist": 0,
+        "provenance": 0,
+    }, "must not compute or persist"
 
 
 def test_missing_provenance_edge_blocks_before_any_llm_call():
@@ -181,6 +202,67 @@ def test_missing_figure_from_compute_blocks_without_calling_the_maker():
     assert result["status"] == "blocked"
     assert result["reason"] == BlockReason.NUMBER_WRONG
     assert "finance_charge" in result["detail"]
+
+
+def test_the_chain_is_read_back_from_the_kg_after_persisting():
+    """Spec D3: the pipeline pulls from the KG, it does not merely write to it.
+
+    The read happens after the write because the edge `offers.decision_event_id` is closed
+    by the same POST that inserts the disclosure — before stage 5 there is no chain to walk.
+    """
+    seen = []
+    coordinator, calls = _coordinator([_document(), _narration()])
+    inner = coordinator._read_provenance
+
+    def spy(disclosure_id):
+        seen.append(disclosure_id)
+        return inner(disclosure_id)
+
+    # The graph holds bound methods, so the node reads this attribute at call time.
+    coordinator._read_provenance = spy
+    result = coordinator.run(1)
+
+    assert seen == [5], "the chain must be read back by the persisted disclosure id"
+    assert result["provenance"]["applicant_id"] == 3
+    assert calls["persist"] == 1
+
+
+def test_an_incomplete_chain_blocks_and_names_the_missing_edges():
+    """A disclosure that cannot be walked back to an applicant is the exact gap ADR 0012
+    exists to close, so the run reports it instead of returning ok."""
+    coordinator, calls = _coordinator(
+        [_document(), _narration()],
+        chain={
+            **COMPLETE_CHAIN,
+            "applicant_id": None,
+            "chain_complete": False,
+            "missing_edges": ["applicant_id"],
+        },
+    )
+    result = coordinator.run(1)
+
+    assert result["status"] == "blocked"
+    assert result["reason"] == BlockReason.PROVENANCE_INCOMPLETE
+    assert "applicant_id" in result["detail"]
+    assert "disclosure_id=5" in result["detail"]
+    assert calls["persist"] == 1
+
+
+def test_a_stage_five_block_still_hands_back_the_persisted_draft():
+    """The row is already the authoritative record of what was computed. Withholding it to
+    make the failure look clean would hide the evidence of the broken chain."""
+    coordinator, _ = _coordinator(
+        [_document(), _narration()],
+        chain={
+            **COMPLETE_CHAIN,
+            "chain_complete": False,
+            "missing_edges": ["offer_id"],
+        },
+    )
+    result = coordinator.run(1)
+
+    assert result["disclosure"] == {"disclosure_id": 5, "status": "draft"}
+    assert result["provenance"]["missing_edges"] == ["offer_id"]
 
 
 def test_checkpointing_is_not_wired():

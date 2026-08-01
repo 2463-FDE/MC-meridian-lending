@@ -35,14 +35,31 @@ GOOD_INPUTS = dict(
 )
 
 
+class StubResult:
+    def __init__(self, row):
+        self._row = row
+
+    def mappings(self):
+        return self
+
+    def first(self):
+        return self._row
+
+
 class StubSession:
     """Enough Session surface for the router: get / scalar / add / commit / refresh."""
 
-    def __init__(self, offer=None, existing=None):
+    def __init__(self, offer=None, existing=None, provenance_row=None):
         self.offer = offer
         self.existing = existing
+        self.provenance_row = provenance_row
+        self.statements = []
         self.added = []
         self.commits = 0
+
+    def execute(self, statement, params=None):
+        self.statements.append((str(statement), params))
+        return StubResult(self.provenance_row)
 
     def get(self, _model, _pk):
         return self.offer
@@ -251,3 +268,110 @@ class TestFingerprint:
                 apr_method_version="v",
                 outputs={},
             )
+
+
+# ---------------------------------------------------------------------------
+# The KG read (spec D3). What matters here is not just the payload but WHERE it
+# comes from: one statement, against the view, with no join reconstructed in code.
+# ---------------------------------------------------------------------------
+
+CHAIN_ROW = {
+    "disclosure_id": 5,
+    "disclosure_status": "draft",
+    "disclosed_apr": Decimal("9.584"),
+    "compute_snapshot": {
+        "principal_cents": 1800000,
+        "note_rate_pct": "7.99",
+        "term_months": 48,
+        "fee_pct": "0.03",
+    },
+    "fee_schedule_version": "2026.07",
+    "apr_method_version": "actuarial-regz-appj-1",
+    "content_fingerprint": "fp-1:abc",
+    "delivered_at": None,
+    "offer_id": 1,
+    "offer_apr": 9.584,
+    "offer_created_at": None,
+    "decision_event_id": 7,
+    "decision_outcome": "approve",
+    "policy_band": "A",
+    "decided_at": None,
+    "application_id": 42,
+    "applicant_id": 3,
+}
+
+
+def test_provenance_requires_internal_service_identity(client):
+    _with_session(StubSession(provenance_row=CHAIN_ROW))
+    assert client.get("/disclosures/5/provenance").status_code == 403
+
+
+def test_provenance_unknown_disclosure_is_not_found(client):
+    _with_session(StubSession(provenance_row=None))
+    response = client.get(
+        "/disclosures/5/provenance", headers={"X-Internal-Service": TOKEN}
+    )
+    assert response.status_code == 404
+
+
+def test_provenance_returns_the_whole_chain_in_one_view_query(client):
+    """Acceptance D3.3: given a disclosure id, ONE view query returns the full chain
+    including the exact inputs and the rule versions used."""
+    session = _with_session(StubSession(provenance_row=CHAIN_ROW))
+    response = client.get(
+        "/disclosures/5/provenance", headers={"X-Internal-Service": TOKEN}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["chain_complete"] is True
+    assert body["missing_edges"] == []
+    # Every hop of disclosure -> offer -> decision_event -> application -> applicant.
+    assert (body["disclosure_id"], body["offer_id"], body["decision_event_id"]) == (
+        5,
+        1,
+        7,
+    )
+    assert (body["application_id"], body["applicant_id"]) == (42, 3)
+    # Inputs and rule versions, so the figures can be recomputed from this one read.
+    assert body["compute_snapshot"]["principal_cents"] == 1800000
+    assert body["fee_schedule_version"] == "2026.07"
+    assert body["apr_method_version"] == "actuarial-regz-appj-1"
+    # NUMERIC crosses the boundary as a string, same as DisclosureOut.
+    assert body["disclosed_apr"] == "9.584"
+
+    assert len(session.statements) == 1, "the chain must be one query, not a walk"
+
+
+def test_provenance_reads_the_view_and_does_not_rejoin_the_chain(client):
+    """Spec D3 is a code-structure requirement: the traversal is defined once, in the
+    view. A hand-rolled join here would be a second definition free to drift from the one
+    an auditor reads."""
+    session = _with_session(StubSession(provenance_row=CHAIN_ROW))
+    client.get("/disclosures/5/provenance", headers={"X-Internal-Service": TOKEN})
+
+    sql = session.statements[0][0]
+    assert "FROM v_disclosure_provenance" in sql
+    assert "JOIN" not in sql.upper()
+
+
+def test_provenance_reports_a_partial_chain_rather_than_hiding_it(client):
+    """A legacy offer predates `offers.decision_event_id`, so its chain genuinely breaks.
+    Reporting it is the point of the view; raising would make the worst rows invisible."""
+    _with_session(
+        StubSession(
+            provenance_row={
+                **CHAIN_ROW,
+                "decision_event_id": None,
+                "decision_outcome": None,
+                "applicant_id": None,
+            }
+        )
+    )
+    response = client.get(
+        "/disclosures/5/provenance", headers={"X-Internal-Service": TOKEN}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["chain_complete"] is False
+    assert body["missing_edges"] == ["decision_event_id", "applicant_id"]

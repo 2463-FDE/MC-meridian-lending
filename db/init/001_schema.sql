@@ -295,6 +295,11 @@ SELECT
     d.id                    AS disclosure_id,
     d.status                AS disclosure_status,
     d.apr                   AS disclosed_apr,
+    -- The exact inputs the figures were derived from (principal, rate, term, fee_pct).
+    -- Carried here so acceptance D3.3 holds literally: ONE query on this view answers
+    -- "what was disclosed, from what inputs, under which ruleset" without a second read
+    -- of `disclosures`. Identifier-free by construction (ADR 0007).
+    d.compute_snapshot,
     d.fee_schedule_version,
     d.apr_method_version,
     d.content_fingerprint,

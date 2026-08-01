@@ -13,6 +13,12 @@ reproduce the numbers already stored on the offer row, the request is REFUSED ra
 persisted. Silently writing a disclosure that disagrees with the offer the borrower was
 shown is the exact failure this week exists to close, and it fails closed.
 
+**The provenance chain is read through the view, never re-joined here.** `GET
+/disclosures/{id}/provenance` is one query on `v_disclosure_provenance` (spec D3: "pulls
+from the KG" is a code-structure requirement, not just a schema one). Rebuilding the walk
+with SQLAlchemy joins would put a second definition of the chain in application code, free
+to drift from the one the auditor reads.
+
 Internal-only, and idempotent per offer (uq_disclosures_offer), mirroring the offer write
 path: a retry or a concurrent POST must not produce two regulated records for one offer.
 """
@@ -20,7 +26,7 @@ path: a retry or a concurrent POST must not produce two regulated records for on
 from decimal import ROUND_HALF_UP, Decimal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -28,7 +34,7 @@ from .. import apr as apr_mod
 from .. import fingerprint, models, rules
 from ..database import get_session
 from ..logging_config import get_logger
-from ..schemas import DisclosureIn, DisclosureOut
+from ..schemas import DisclosureIn, DisclosureOut, ProvenanceOut
 from .offers import _require_internal_caller
 
 log = get_logger("disclosure")
@@ -165,6 +171,93 @@ def create_disclosure(
         row.content_fingerprint,
     )
     return _disclosure_out(row)
+
+
+# The KG read. One statement, one object: the chain is defined once, in the view, and this
+# is the only place application code walks it. Column list is explicit so a view reshape
+# fails here loudly instead of silently dropping a field from the response.
+_PROVENANCE_SQL = text(
+    """
+    SELECT disclosure_id, disclosure_status, disclosed_apr, compute_snapshot,
+           fee_schedule_version, apr_method_version, content_fingerprint, delivered_at,
+           offer_id, offer_apr, offer_created_at,
+           decision_event_id, decision_outcome, policy_band, decided_at,
+           application_id, applicant_id
+    FROM v_disclosure_provenance
+    WHERE disclosure_id = :disclosure_id
+    """
+)
+
+# Every hop the chain must have to be whole. `applicant_id` is included because an
+# application whose applicant row was deleted (the abandon path does exactly that) leaves a
+# disclosure that cannot be traced to a person — a partial chain, not a complete one.
+_CHAIN_EDGES = (
+    "disclosure_id",
+    "offer_id",
+    "decision_event_id",
+    "application_id",
+    "applicant_id",
+)
+
+
+@router.get("/disclosures/{disclosure_id}/provenance", response_model=ProvenanceOut)
+def read_provenance(
+    disclosure_id: int,
+    session: Session = Depends(get_session),
+    x_internal_service: str | None = Header(default=None, alias="X-Internal-Service"),
+):
+    """Walk disclosure -> offer -> decision_event -> application -> applicant (spec D3.3).
+
+    Internal-only for the same reason the write path is: the chain carries the disclosed
+    APR and the applicant id, and `/disclosure/*` is reachable anonymously through the
+    gateway. Origination's authorized routes are the only intended caller.
+    """
+    _require_internal_caller(x_internal_service)
+    row = (
+        session.execute(_PROVENANCE_SQL, {"disclosure_id": disclosure_id})
+        .mappings()
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="disclosure not found")
+    return _provenance_out(row)
+
+
+def _provenance_out(row) -> ProvenanceOut:
+    missing = [edge for edge in _CHAIN_EDGES if row.get(edge) is None]
+    return ProvenanceOut(
+        disclosure_id=row.get("disclosure_id"),
+        disclosure_status=row.get("disclosure_status"),
+        # Numeric -> string for the same reason DisclosureOut does it: a JSON float would
+        # reintroduce the representation problem the NUMERIC column exists to avoid.
+        disclosed_apr=_text_or_none(row.get("disclosed_apr")),
+        compute_snapshot=row.get("compute_snapshot"),
+        fee_schedule_version=row.get("fee_schedule_version"),
+        apr_method_version=row.get("apr_method_version"),
+        content_fingerprint=row.get("content_fingerprint"),
+        delivered_at=_text_or_none(row.get("delivered_at")),
+        offer_id=row.get("offer_id"),
+        offer_apr=row.get("offer_apr"),
+        offer_created_at=_text_or_none(row.get("offer_created_at")),
+        decision_event_id=row.get("decision_event_id"),
+        decision_outcome=row.get("decision_outcome"),
+        policy_band=row.get("policy_band"),
+        decided_at=_text_or_none(row.get("decided_at")),
+        application_id=row.get("application_id"),
+        applicant_id=row.get("applicant_id"),
+        chain_complete=not missing,
+        missing_edges=missing,
+    )
+
+
+def _text_or_none(value):
+    """Timestamps and Numerics leave psycopg2 as datetime/Decimal; both serialize as ISO
+    text here rather than through Pydantic's float/date coercion."""
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
 
 
 def _refuse_if_offer_disagrees(offer: models.Offer, computed: dict) -> None:
