@@ -330,16 +330,17 @@ and is externalized; "who signs" is a launch flag.
 
 ## Open Decisions
 
-**Decision 1 is genuinely open and blocks nothing. Decisions 2–4 were open when this spec was
-drafted and are now settled** — kept here with their reasoning and rejected alternatives so
+**All four are settled.** They are kept here with their reasoning and rejected alternatives so
 ADR 0012 can be written once, from a record of what was actually weighed.
 
-1. **Is the KG graded on schema or on running an engine?** The client brief says "a
-   knowledge-graph schema" and the alt-research card places Neo4j / AGE / Memgraph in the
-   *research* space — which reads as schema. That is an inference from card text, not a
-   confirmation, and it is the same class of gap that left the framework decision wrong for
-   nine days. If an engine is required, the answer is AGE as a **read-only projection built
-   from the FK chain** — never a second system of record.
+1. **Schema or engine — SETTLED: schema now, graduate to an engine later.** The client brief
+   asks for "a knowledge-graph schema" and the alt-research card places Neo4j / AGE / Memgraph
+   in the *research* space, so the deliverable is the schema. FK-as-graph satisfies it: nodes,
+   edges, and a traversal the pipeline actually reads through. Graduation is not hand-waving —
+   the ladder in *Storage Decision* names each rung and the condition that promotes it, and
+   FK-as-graph is the source data any engine would project from, so nothing is thrown away. If
+   a running engine is ever required for demonstration rather than for traversal, the answer is
+   AGE as a **read-only projection built from the FK chain** — never a second system of record.
 
 2. **`uq_offers_app` versus counteroffer provenance — SETTLED: leave the constraint alone.**
    `db/init/001_schema.sql:182` enforces `UNIQUE (app_id)` on `offers`, added by migration 0010

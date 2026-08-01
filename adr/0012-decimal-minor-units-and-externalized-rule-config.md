@@ -219,11 +219,15 @@ defect. FK-as-graph cannot express edge properties until the `graph_edges` rung.
 ## What Could Supersede This
 
 Client answers on the **APR method of record** (actuarial vs a documented Meridian variant) and
-the **tolerance regime** (0.125pp regular vs 0.25pp irregular) change D1 and D3. A decision to
-**quantify and cure the back book** adds a workstream D7 currently declines. If the knowledge-
-graph deliverable turns out to be graded on running an *engine* rather than on the schema, the
-answer is AGE as a read-only projection built from the FK chain — never a second system of
-record — which adds a rung to D4 rather than reversing it.
+the **tolerance regime** (0.125pp regular vs 0.25pp irregular) change D1 and D3. The tolerance
+is deliberately a config value in `policies/fee_schedule.json` rather than a literal, so that
+answer costs a config change, not a rework. A decision to **quantify and cure the back book**
+adds a workstream D7 currently declines.
+
+The schema-versus-engine question is **decided: schema now, graduate later** — the deliverable
+is a knowledge-graph schema, and D4's ladder names the condition that promotes each rung. A
+later requirement for a running engine adds a rung (AGE as a read-only projection built from
+the FK chain) rather than reversing this decision.
 
 Per the scope lock in `docs/spec-disclosure-week4.md`: a decision that changes after this ADR is
 accepted gets a superseding ADR, not an edit.
