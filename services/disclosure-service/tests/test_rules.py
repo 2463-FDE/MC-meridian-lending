@@ -9,6 +9,7 @@ asserted here.
 
 import json
 import re
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -113,19 +114,51 @@ def test_no_hardcoded_fee_constants_remain():
         )
 
 
-def test_one_rate_reaches_both_apr_and_amount_financed():
-    """The self-contradiction: amount_financed from a $540 fee beside an APR from $450."""
+def test_one_rate_reaches_every_figure_in_the_offer():
+    """The self-contradiction this fixed: amount_financed on a $540 fee (3.0%) sitting
+    beside an APR computed from a $450 fee (2.5%), inside one returned dict.
+
+    Asserted against the schedule rather than against a formula, so it keeps holding when
+    the compute method changes (it since has — add-on gave way to actuarial).
+    """
     principal = 18000.0
+    fee_pct = rules.load_fee_schedule(FEE_SCHEDULE_JSON).origination_fee_pct
+    expected_fee = Decimal(str(principal)) * Decimal(str(fee_pct))
+
     built = offer.build_offer(principal, 7.99, 48)
-    fee = rules.load_fee_schedule(FEE_SCHEDULE_JSON).origination_fee_pct * principal
-    assert built["amount_financed"] == round(principal - fee, 2)
-    # the APR path must charge the same fee it financed
-    assert apr.compute_apr(principal, 7.99, 48) == round(
-        ((apr.finance_charge(principal, 7.99, 48) + fee) / (principal - fee))
-        / (48 / 12)
-        * 100,
-        3,
+    assert apr.prepaid_finance_charge(principal) == expected_fee.quantize(
+        Decimal("0.01")
     )
+    assert built["amount_financed"] == float(
+        (Decimal(str(principal)) - expected_fee).quantize(Decimal("0.01"))
+    )
+    # The same fee that reduced amount_financed must also sit inside the finance charge...
+    assert built["finance_charge"] == float(
+        (apr.interest_charge(principal, 7.99, 48) + expected_fee).quantize(
+            Decimal("0.01")
+        )
+    )
+    # ...and inside the APR: a fee-bearing loan prices above its note rate.
+    assert built["apr"] > 7.99
+
+
+def test_changing_the_rate_moves_every_figure_together(monkeypatch):
+    """Guards the coupling itself: one source means one rate change reaches all of them.
+
+    Under the old three-constant layout, editing one copy moved one figure and left the
+    others on their own rate — which is precisely the state this replaced.
+    """
+    principal = 18000.0
+    base = offer.build_offer(principal, 7.99, 48)
+
+    schedule = rules.load_fee_schedule(FEE_SCHEDULE_JSON)
+    doubled = type(schedule)(**{**vars(schedule), "origination_fee_pct": 0.060})
+    monkeypatch.setattr(rules, "get_fee_schedule", lambda: doubled)
+    raised = offer.build_offer(principal, 7.99, 48)
+
+    assert raised["amount_financed"] < base["amount_financed"]
+    assert raised["finance_charge"] > base["finance_charge"]
+    assert raised["apr"] > base["apr"]
 
 
 def test_health_reports_unhealthy_when_schedule_unloadable(monkeypatch, tmp_path):
