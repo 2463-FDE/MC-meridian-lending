@@ -39,7 +39,7 @@ from typing import Any, Callable, Protocol, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from . import clients
+from . import clients, db
 from .llm import ClaudeClient
 from .logging_config import get_logger
 
@@ -113,6 +113,53 @@ class DisclosureState(TypedDict, total=False):
     detail: str
 
 
+class ApplicationNotFound(RuntimeError):
+    """No such application — a 404, distinct from an application that cannot proceed."""
+
+
+def gather_disclosure_context(application_id: int) -> dict:
+    """Stage 1, production implementation: loan terms and the authorising decision.
+
+    Terms come from the STORED application and the rate from server-side policy — never
+    from the caller. `/los/*` is reachable anonymously through the gateway and origination
+    forwards the internal-service token downstream, so accepting caller-supplied terms
+    would make this a confused deputy able to mint a disclosure for fabricated numbers.
+    Same binding `make_offer` already does.
+
+    The outcome is read from `decision_events`, not `decisions`: the latter is a mutable
+    current-state pointer, the former is the append-only system of record (ADR 0009), and
+    it is the row the disclosure's provenance edge points at. The latest event wins — a
+    re-decision supersedes.
+    """
+    from .routers.offers import POLICY_RATE_PCT
+
+    rows = db.query(
+        "SELECT amount, term_months FROM applications WHERE id = %s", (application_id,)
+    )
+    if not rows:
+        raise ApplicationNotFound(f"application {application_id} not found")
+    application = rows[0]
+
+    events = db.query(
+        "SELECT id, outcome FROM decision_events WHERE app_id = %s "
+        "ORDER BY decided_at DESC, id DESC LIMIT 1",
+        (application_id,),
+    )
+    latest = events[0] if events else {}
+    return {
+        "outcome": (latest.get("outcome") or "").lower(),
+        "decision_event_id": latest.get("id"),
+        "principal": application["amount"],
+        "term_months": application["term_months"],
+        "annual_rate": POLICY_RATE_PCT,
+    }
+
+
+def build_coordinator(client: ClaudeClient) -> "LangGraphDisclosureCoordinator":
+    """The production wiring: real gather, real downstream service calls."""
+    return LangGraphDisclosureCoordinator(client, gather=gather_disclosure_context)
+
+
 def _blocked(reason: str, detail: str = "") -> dict:
     log.warning("disclosure pipeline blocked reason=%s detail=%s", reason, detail)
     return {"blocked": True, "reason": reason, "detail": detail}
@@ -145,16 +192,22 @@ class LangGraphDisclosureCoordinator:
     def _route(self, state: DisclosureState) -> dict:
         """Stage 0. Only an approved application produces a disclosure."""
         context = self._gather(state["application_id"])
+        # Provenance is checked FIRST and separately. Since the outcome is read from the
+        # decision event, a missing event would otherwise surface as "not approved" —
+        # true but misleading. "No decision on record" and "decisioned, and the answer
+        # was no" are different problems with different fixes, and the officer acting on
+        # this needs to know which one they have.
+        if not context.get("decision_event_id"):
+            return {
+                **context,
+                **_blocked(BlockReason.PROVENANCE_INCOMPLETE, "no decision event"),
+            }
         outcome = context.get("outcome")
         if outcome not in PIPELINE_OUTCOMES:
             return {
                 **context,
                 **_blocked(BlockReason.NOT_APPROVED, f"outcome={outcome}"),
             }
-        if not context.get("decision_event_id"):
-            # No provenance edge means the disclosure could not be traced back to the
-            # decision that authorised it — the gap ADR 0012 exists to close.
-            return {**context, **_blocked(BlockReason.PROVENANCE_INCOMPLETE)}
         return {**context, "attempts": 0, "blocked": False}
 
     def _compute(self, state: DisclosureState) -> dict:

@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import assistant, authz, config, intake
+from . import assistant, authz, config, disclosure_coordinator, intake, kyc_gate
 from .llm import ClaudeClient, load_llm_config
 from .llm.errors import LLMError
 from .logging_config import get_logger
@@ -134,6 +134,65 @@ def assistant_explain(
     """
     authz.require_officer(x_user_role)
     return _run_assistant(app_id, client, "explain")
+
+
+@app.post("/applications/{app_id}/disclosure")
+def generate_disclosure(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    x_application_token: str | None = Header(default=None, alias="X-Application-Token"),
+    client: ClaudeClient = Depends(get_llm_client),
+):
+    """Generate the TILA disclosure for an approved application (ADR 0012, spec D4).
+
+    Same authorization posture as `make_offer`, because this persists a regulated document
+    for the application: officer, owning borrower, or the applicant holding this
+    application's continuation token (ADR 0010), and a passing KYC (ADR 0011). Loan terms
+    are bound server-side from the stored application — the caller supplies nothing but
+    the id.
+
+    A blocked run returns 422 with the typed reason rather than a 500: "the gate refused
+    this document" is a result, not a failure, and the officer needs to see which check
+    stopped it.
+    """
+    authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
+    kyc_gate.require_kyc_passed(app_id)
+
+    coordinator = disclosure_coordinator.build_coordinator(client)
+    try:
+        result = coordinator.run(app_id)
+    except disclosure_coordinator.ApplicationNotFound:
+        raise HTTPException(status_code=404, detail="application not found")
+    except LLMError as exc:
+        log.error(
+            "disclosure pipeline LLM failure app_id=%s: %s", app_id, type(exc).__name__
+        )
+        raise HTTPException(
+            status_code=503, detail="disclosure agent unavailable"
+        ) from exc
+    except httpx.HTTPError as exc:
+        log.error("disclosure pipeline downstream failure app_id=%s: %s", app_id, exc)
+        raise HTTPException(
+            status_code=502, detail="disclosure service unavailable"
+        ) from exc
+
+    if result["status"] == "blocked":
+        log.warning(
+            "disclosure blocked app_id=%s reason=%s detail=%s",
+            app_id,
+            result["reason"],
+            result.get("detail", ""),
+        )
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "status": "blocked",
+                "reason": result["reason"],
+                "attempts": result.get("attempts", 0),
+            },
+        )
+    return result
 
 
 def _run_assistant(
