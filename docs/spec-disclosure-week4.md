@@ -375,10 +375,19 @@ ADR 0012 can be written once, from a record of what was actually weighed.
    append-only would contradict the status machine, since `draft → in_review → approved` are
    legitimate mutations. The trigger therefore blocks UPDATE/DELETE only when
    `OLD.status = 'delivered'`, mirroring the `decision_events` pattern at
-   `db/init/001_schema.sql:152`. Re-issue after delivery creates a new row with
-   `supersedes_disclosure_id`. Column and trigger ship in the same migration, so no window
-   exists in which delivered rows are mutable. Compliance may ratify the posture afterward;
-   ratification does not change the DDL.
+   `db/init/001_schema.sql:152`, plus a statement-level trigger for TRUNCATE (row triggers do
+   not fire on it, and truncation would erase delivered rows wholesale). Table and triggers
+   ship in the same migration, so no window exists in which delivered rows are mutable.
+   Compliance may ratify the posture afterward; ratification does not change the DDL.
+
+   *Amended at implementation:* the earlier draft of this line had re-issue creating a new row
+   with a `supersedes_disclosure_id` column, shipping now. That column is **not** built. Re-issue
+   only exists once delivery is a real channel (transport is stubbed this week), so shipping the
+   pointer now would be precisely what Open Decision 2 declines to do for `supersedes_offer_id`
+   — an unused nullable column with no defined semantics, inviting writes that mean nothing.
+   Instead `uq_disclosures_offer` enforces one disclosure per offer, giving the same idempotency
+   guarantee `uq_offers_app` gives the offer. **Roadmap trigger:** *when a real delivery channel
+   lands, re-issue supersedes rather than replaces, and the uniqueness moves off bare `offer_id`.*
 
 4. **Ruleset — SETTLED: property, not node.** Version strings (`fee_schedule_version`,
    `apr_method_version`) on the disclosure row, plus a versioned committed policy file. Content
