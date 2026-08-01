@@ -13,7 +13,15 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import assistant, authz, config, disclosure_coordinator, intake, kyc_gate
+from . import (
+    assistant,
+    authz,
+    clients,
+    config,
+    disclosure_coordinator,
+    intake,
+    kyc_gate,
+)
 from .llm import ClaudeClient, load_llm_config
 from .llm.errors import LLMError
 from .logging_config import get_logger
@@ -199,6 +207,94 @@ def generate_disclosure(
             )
         raise HTTPException(status_code=422, detail=detail)
     return result
+
+
+class TransitionIn(BaseModel):
+    to_status: str
+    reason_code: str | None = None
+
+
+@app.get("/applications/{app_id}/disclosure")
+def read_disclosure(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    x_application_token: str | None = Header(default=None, alias="X-Application-Token"),
+):
+    """The disclosure's status and its provenance chain, read from the KG view.
+
+    Same read posture as `get_offer`: the chain carries the disclosed APR, so officer,
+    owner, or token-holder only (ADR 0010).
+    """
+    authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
+    return _read_chain(app_id)
+
+
+@app.post("/applications/{app_id}/disclosure/transition")
+def transition_disclosure(
+    app_id: int,
+    body: TransitionIn,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+):
+    """Compliance hold and delivery (spec D6): draft -> in_review -> approved -> delivered.
+
+    Officer-only, not officer-OR-owner. Every other disclosure route admits the borrower
+    because it is their document; this one is the control that decides whether the
+    document is fit to send, and a borrower approving their own TILA disclosure would
+    make the compliance hold ceremonial.
+
+    The disclosure id is resolved from the application server-side rather than accepted
+    from the caller — that is what binds the transition to the application the caller was
+    authorized for.
+    """
+    authz.require_officer(x_user_role)
+    chain = _read_chain(app_id)
+    disclosure_id = chain.get("disclosure_id")
+    if not disclosure_id:
+        raise HTTPException(
+            status_code=404, detail="no disclosure for this application"
+        )
+    return _downstream(
+        "POST",
+        f"/disclosures/{disclosure_id}/transition",
+        json=body.model_dump(),
+    )
+
+
+def _read_chain(app_id: int) -> dict:
+    return _downstream("GET", f"/applications/{app_id}/disclosure/provenance")
+
+
+def _downstream(method: str, path: str, json: dict | None = None) -> dict:
+    """Call disclosure-service and preserve its 4xx.
+
+    A 409 "illegal transition" or a TILA timing refusal is an answer the officer needs to
+    read, not an outage. Collapsing it into 502 would tell them the service is down when
+    what actually happened is that the service said no.
+    """
+    try:
+        if method == "GET":
+            resp = clients.get(clients.DISCLOSURE_URL, path)
+        else:
+            resp = clients.post_raw(clients.DISCLOSURE_URL, path, json)
+    except httpx.HTTPError as exc:
+        log.error("disclosure-service unreachable path=%s: %s", path, exc)
+        raise HTTPException(
+            status_code=502, detail="disclosure service unavailable"
+        ) from exc
+    if 400 <= resp.status_code < 500:
+        raise HTTPException(status_code=resp.status_code, detail=_detail(resp))
+    if resp.status_code >= 500:
+        log.error("disclosure-service %s on %s", resp.status_code, path)
+        raise HTTPException(status_code=502, detail="disclosure service unavailable")
+    return resp.json()
+
+
+def _detail(resp: httpx.Response):
+    try:
+        return resp.json().get("detail", "disclosure request refused")
+    except ValueError:
+        return "disclosure request refused"
 
 
 def _run_assistant(

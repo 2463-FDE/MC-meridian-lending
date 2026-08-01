@@ -36,8 +36,9 @@ GOOD_INPUTS = dict(
 
 
 class StubResult:
-    def __init__(self, row):
+    def __init__(self, row, rowcount=0):
         self._row = row
+        self.rowcount = rowcount
 
     def mappings(self):
         return self
@@ -47,21 +48,45 @@ class StubResult:
 
 
 class StubSession:
-    """Enough Session surface for the router: get / scalar / add / commit / refresh."""
+    """Enough Session surface for the router: get / scalar / execute / add / commit."""
 
-    def __init__(self, offer=None, existing=None, provenance_row=None):
+    def __init__(
+        self,
+        offer=None,
+        existing=None,
+        provenance_row=None,
+        disclosure=None,
+        consummated=False,
+        update_rowcount=1,
+    ):
         self.offer = offer
         self.existing = existing
         self.provenance_row = provenance_row
+        self.disclosure = disclosure
+        self.consummated = consummated
+        self.update_rowcount = update_rowcount
         self.statements = []
         self.added = []
         self.commits = 0
 
     def execute(self, statement, params=None):
-        self.statements.append((str(statement), params))
+        sql = str(statement)
+        self.statements.append((sql, params))
+        if sql.strip().upper().startswith("UPDATE"):
+            if self.update_rowcount and self.disclosure is not None:
+                # Stand in for expire-on-commit: the router reads the row back after the
+                # UPDATE, so the stub must reflect what the UPDATE wrote.
+                for field, value in statement.compile().params.items():
+                    if hasattr(self.disclosure, field):
+                        setattr(self.disclosure, field, value)
+            return StubResult(None, rowcount=self.update_rowcount)
+        if "FROM loans" in sql:
+            return StubResult((1,) if self.consummated else None)
         return StubResult(self.provenance_row)
 
-    def get(self, _model, _pk):
+    def get(self, model, _pk):
+        if model is models.Disclosure:
+            return self.disclosure
         return self.offer
 
     def scalar(self, _stmt):
@@ -375,3 +400,215 @@ def test_provenance_reports_a_partial_chain_rather_than_hiding_it(client):
     body = response.json()
     assert body["chain_complete"] is False
     assert body["missing_edges"] == ["decision_event_id", "applicant_id"]
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle (spec D6). The freeze trigger and the CHECK constraints live in the DDL and
+# were exercised against postgres:16-alpine; what these cover is the machine above them.
+# ---------------------------------------------------------------------------
+
+
+def _disclosure(status="draft", delivered_at=None):
+    row = models.Disclosure(
+        id=5,
+        offer_id=1,
+        decision_event_id=7,
+        status=status,
+        apr=Decimal("9.584"),
+        finance_charge_cents=362871,
+        amount_financed_cents=1746000,
+        monthly_payment_cents=43935,
+        total_of_payments_cents=2108871,
+        compute_snapshot={},
+        fee_schedule_version="2026.07",
+        apr_method_version="actuarial-regz-appj-1",
+        content_fingerprint="fp-1:abc",
+    )
+    row.delivered_at = delivered_at
+    return row
+
+
+def _transition(client, body, disclosure_id=5):
+    return client.post(
+        f"/disclosures/{disclosure_id}/transition",
+        json=body,
+        headers={"X-Internal-Service": TOKEN},
+    )
+
+
+def test_transition_requires_internal_service_identity(client):
+    _with_session(StubSession(disclosure=_disclosure()))
+    response = client.post("/disclosures/5/transition", json={"to_status": "in_review"})
+    assert response.status_code == 403
+
+
+def test_transition_unknown_disclosure_is_not_found(client):
+    _with_session(StubSession(disclosure=None))
+    assert _transition(client, {"to_status": "in_review"}).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "current,target",
+    [
+        ("draft", "in_review"),
+        ("in_review", "approved"),
+        ("approved", "delivered"),
+    ],
+)
+def test_the_happy_path_transitions_are_allowed(client, current, target):
+    _with_session(StubSession(disclosure=_disclosure(current)))
+    response = _transition(client, {"to_status": target})
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == target
+
+
+@pytest.mark.parametrize(
+    "current,target",
+    [
+        # Skipping compliance entirely — the whole point of the hold.
+        ("draft", "approved"),
+        ("draft", "delivered"),
+        ("in_review", "delivered"),
+        # Backwards without a reject.
+        ("approved", "in_review"),
+        # A delivered disclosure is what the borrower was shown. It has no outgoing edge.
+        ("delivered", "approved"),
+        ("delivered", "draft"),
+        ("delivered", "delivered"),
+        # Not in the vocabulary at all.
+        ("draft", "rescinded"),
+    ],
+)
+def test_illegal_transitions_are_refused(client, current, target):
+    session = _with_session(StubSession(disclosure=_disclosure(current)))
+    response = _transition(client, {"to_status": target})
+    assert response.status_code == 409
+    assert "illegal transition" in response.json()["detail"]
+    assert session.commits == 0, "a refused transition must not commit"
+
+
+def test_delivering_sets_delivered_at_exactly_once(client):
+    session = _with_session(StubSession(disclosure=_disclosure("approved")))
+    response = _transition(client, {"to_status": "delivered"})
+
+    assert response.status_code == 200
+    assert response.json()["delivered_at"] is not None
+    assert session.disclosure.delivered_at is not None
+    updates = [
+        sql for sql, _ in session.statements if sql.strip().upper().startswith("UPDATE")
+    ]
+    assert len(updates) == 1
+
+
+@pytest.mark.parametrize("target", ["in_review", "approved"])
+def test_no_other_transition_writes_delivered_at(client, target):
+    """The DDL check constraint says status='delivered' iff delivered_at IS NOT NULL.
+    Setting the timestamp on any other edge would violate it — or worse, satisfy it."""
+    current = "draft" if target == "in_review" else "in_review"
+    session = _with_session(StubSession(disclosure=_disclosure(current)))
+    _transition(client, {"to_status": target})
+
+    assert session.disclosure.delivered_at is None
+
+
+def test_a_reject_needs_a_routable_reason_code(client):
+    """An unrouted reject leaves a regulated document in draft with nobody owning the
+    next step."""
+    session = _with_session(StubSession(disclosure=_disclosure("in_review")))
+    response = _transition(client, {"to_status": "draft"})
+
+    assert response.status_code == 400
+    assert "reason_code" in response.json()["detail"]
+    assert session.commits == 0
+
+
+def test_an_unknown_reason_code_is_refused_rather_than_defaulted(client):
+    _with_session(StubSession(disclosure=_disclosure("in_review")))
+    response = _transition(
+        client, {"to_status": "draft", "reason_code": "officer_disliked_it"}
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "reason_code,routed_to",
+    [
+        ("wording", "assemble"),
+        ("formatting", "assemble"),
+        ("wrong_terms", "decisioning"),
+        ("wrong_rate", "decisioning"),
+        ("ineligible", "decisioning"),
+    ],
+)
+def test_a_reject_routes_by_reason_code(client, reason_code, routed_to):
+    """Spec D5 stage 6: presentational failures go back to the maker; a wrong loan cannot
+    be fixed by re-rendering it, so it exits to decisioning."""
+    _with_session(StubSession(disclosure=_disclosure("in_review")))
+    response = _transition(client, {"to_status": "draft", "reason_code": reason_code})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "draft"
+    assert body["routed_to"] == routed_to
+
+
+def test_delivery_after_the_loan_is_boarded_is_a_timing_violation(client):
+    """Reg Z 1026.17(b): the disclosure is made before consummation. A boarded loan is
+    this system's consummation event."""
+    session = _with_session(
+        StubSession(disclosure=_disclosure("approved"), consummated=True)
+    )
+    response = _transition(client, {"to_status": "delivered"})
+
+    assert response.status_code == 409
+    assert "TILA timing" in response.json()["detail"]
+    assert session.commits == 0
+    assert not any(
+        sql.strip().upper().startswith("UPDATE") for sql, _ in session.statements
+    )
+
+
+def test_a_concurrent_transition_loses_rather_than_double_applying(client):
+    """Two officers acting at once: the guarded UPDATE matches zero rows for the loser,
+    which must surface as a conflict instead of an exception from the freeze trigger."""
+    _with_session(StubSession(disclosure=_disclosure("approved"), update_rowcount=0))
+    response = _transition(client, {"to_status": "delivered"})
+
+    assert response.status_code == 409
+    assert "concurrently" in response.json()["detail"]
+
+
+def test_the_transition_is_guarded_on_the_status_it_read(client):
+    session = _with_session(StubSession(disclosure=_disclosure("draft")))
+    _transition(client, {"to_status": "in_review"})
+
+    sql = next(
+        sql for sql, _ in session.statements if sql.strip().upper().startswith("UPDATE")
+    )
+    assert "disclosures.status = " in sql, (
+        "UPDATE must be conditional on the old status"
+    )
+
+
+def test_delivered_has_no_outgoing_transition_at_all():
+    """Asserted on the table itself, not only through the routes: an empty set here is
+    what makes the freeze trigger a backstop rather than the only guard."""
+    assert router_mod.LEGAL_TRANSITIONS["delivered"] == set()
+
+
+def test_the_status_vocabulary_matches_the_ddl_check_constraint():
+    """A status the router can write but the CHECK constraint rejects would be a 500 in
+    production and a green test suite here."""
+    from pathlib import Path
+
+    schema = (
+        Path(__file__).resolve().parents[3] / "db" / "init" / "001_schema.sql"
+    ).read_text()
+    assert "CHECK (status IN ('draft', 'in_review', 'approved', 'delivered'))" in schema
+
+    reachable = set(router_mod.LEGAL_TRANSITIONS) | {
+        target
+        for targets in router_mod.LEGAL_TRANSITIONS.values()
+        for target in targets
+    }
+    assert reachable == {"draft", "in_review", "approved", "delivered"}

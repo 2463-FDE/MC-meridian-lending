@@ -19,14 +19,20 @@ from the KG" is a code-structure requirement, not just a schema one). Rebuilding
 with SQLAlchemy joins would put a second definition of the chain in application code, free
 to drift from the one the auditor reads.
 
+**The lifecycle is a whitelist, and `delivered` is terminal.** draft -> in_review ->
+approved -> delivered, with a reject returning to draft and routing by reason code. The
+DDL enforces the same shape one layer down (status CHECK, the delivered_at coupling, the
+freeze trigger) so a direct SQL edit cannot do what this router refuses.
+
 Internal-only, and idempotent per offer (uq_disclosures_offer), mirroring the offer write
 path: a retry or a concurrent POST must not produce two regulated records for one offer.
 """
 
+from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -34,7 +40,13 @@ from .. import apr as apr_mod
 from .. import fingerprint, models, rules
 from ..database import get_session
 from ..logging_config import get_logger
-from ..schemas import DisclosureIn, DisclosureOut, ProvenanceOut
+from ..schemas import (
+    DisclosureIn,
+    DisclosureOut,
+    ProvenanceOut,
+    TransitionIn,
+    TransitionOut,
+)
 from .offers import _require_internal_caller
 
 log = get_logger("disclosure")
@@ -223,6 +235,49 @@ def read_provenance(
     return _provenance_out(row)
 
 
+_PROVENANCE_BY_APPLICATION_SQL = text(
+    """
+    SELECT disclosure_id, disclosure_status, disclosed_apr, compute_snapshot,
+           fee_schedule_version, apr_method_version, content_fingerprint, delivered_at,
+           offer_id, offer_apr, offer_created_at,
+           decision_event_id, decision_outcome, policy_band, decided_at,
+           application_id, applicant_id
+    FROM v_disclosure_provenance
+    WHERE application_id = :application_id
+    ORDER BY disclosure_id DESC NULLS LAST, offer_id DESC
+    LIMIT 1
+    """
+)
+
+
+@router.get(
+    "/applications/{application_id}/disclosure/provenance",
+    response_model=ProvenanceOut,
+)
+def read_provenance_by_application(
+    application_id: int,
+    session: Session = Depends(get_session),
+    x_internal_service: str | None = Header(default=None, alias="X-Internal-Service"),
+):
+    """The same chain, entered from the application — what the officer's screen has.
+
+    `uq_offers_app` and `uq_disclosures_offer` make at most one of each per application
+    today, so the ORDER BY is a tiebreak against a future re-issue, not a policy: newest
+    first, and a row with a disclosure beats one without.
+    """
+    _require_internal_caller(x_internal_service)
+    row = (
+        session.execute(
+            _PROVENANCE_BY_APPLICATION_SQL, {"application_id": application_id}
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="no offer for this application")
+    return _provenance_out(row)
+
+
 def _provenance_out(row) -> ProvenanceOut:
     missing = [edge for edge in _CHAIN_EDGES if row.get(edge) is None]
     return ProvenanceOut(
@@ -258,6 +313,135 @@ def _text_or_none(value):
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle (spec D6). The DDL already carries the status vocabulary, the delivered_at
+# coupling, and the freeze-on-delivery trigger; this is the machine that drives them.
+# ---------------------------------------------------------------------------
+
+# Whitelist, not a blacklist: an unlisted pair is illegal. `delivered` has no outgoing
+# edge at all — the borrower has seen the document, and the database trigger enforces the
+# same thing one layer down if this check is ever bypassed.
+LEGAL_TRANSITIONS = {
+    "draft": {"in_review"},
+    "in_review": {"approved", "draft"},
+    "approved": {"delivered", "draft"},
+    "delivered": set(),
+}
+
+# A reject is a return to `draft` — the document is not deliverable and the work goes
+# back somewhere. WHERE it goes is the reason code's job (spec D5, stage 6).
+REJECT_ROUTES = {
+    # Presentational: the numbers stand, the maker re-renders.
+    "wording": "assemble",
+    "formatting": "assemble",
+    # Substantive: re-rendering cannot fix a wrong loan. Terminal exit to decisioning.
+    "wrong_terms": "decisioning",
+    "wrong_rate": "decisioning",
+    "ineligible": "decisioning",
+}
+
+# Reg Z 1026.17(b): the disclosure is made BEFORE consummation. A boarded loan is this
+# system's consummation event, so delivering afterwards is a timing violation, not a
+# late notification.
+_CONSUMMATED_SQL = text(
+    """
+    SELECT 1 FROM loans l
+    JOIN offers o ON o.app_id = l.app_id
+    WHERE o.id = :offer_id
+    LIMIT 1
+    """
+)
+
+
+@router.post("/disclosures/{disclosure_id}/transition", response_model=TransitionOut)
+def transition_disclosure(
+    disclosure_id: int,
+    body: TransitionIn,
+    session: Session = Depends(get_session),
+    x_internal_service: str | None = Header(default=None, alias="X-Internal-Service"),
+):
+    """Drive draft -> in_review -> approved -> delivered (spec D6).
+
+    Three things are refused rather than accommodated: an illegal transition, a reject
+    with no routable reason code, and a delivery after the loan has already been boarded.
+    """
+    _require_internal_caller(x_internal_service)
+
+    row = session.get(models.Disclosure, disclosure_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="disclosure not found")
+
+    current = row.status
+    target = body.to_status
+    if target not in LEGAL_TRANSITIONS.get(current, set()):
+        raise HTTPException(
+            status_code=409,
+            detail=f"illegal transition {current} -> {target}",
+        )
+
+    routed_to = None
+    if target == "draft":
+        routed_to = REJECT_ROUTES.get(body.reason_code or "")
+        if routed_to is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "a reject needs a routable reason_code, one of "
+                    f"{', '.join(sorted(REJECT_ROUTES))}"
+                ),
+            )
+
+    values = {"status": target}
+    if target == "delivered":
+        _refuse_if_already_consummated(session, row.offer_id)
+        # The only write of delivered_at, and the only status that sets it. The DDL check
+        # constraint asserts the same coupling from the other side.
+        values["delivered_at"] = datetime.now(timezone.utc)
+
+    # Guarded on the status we read: two officers acting at once must not both win. The
+    # loser gets a 409 rather than a trigger exception from an UPDATE on a row that moved
+    # underneath it.
+    result = session.execute(
+        update(models.Disclosure)
+        .where(
+            models.Disclosure.id == disclosure_id,
+            models.Disclosure.status == current,
+        )
+        .values(**values)
+    )
+    if result.rowcount == 0:
+        session.rollback()
+        raise HTTPException(
+            status_code=409, detail="disclosure changed status concurrently; re-read it"
+        )
+    # The session expires on commit, so reading `row` below re-reads what was written
+    # rather than reporting the pre-transition state back to the caller.
+    session.commit()
+
+    log.info(
+        "disclosure transition id=%s %s -> %s reason=%s routed_to=%s",
+        disclosure_id,
+        current,
+        target,
+        body.reason_code or "",
+        routed_to or "",
+    )
+    return TransitionOut(**_disclosure_out(row).model_dump(), routed_to=routed_to)
+
+
+def _refuse_if_already_consummated(session: Session, offer_id: int) -> None:
+    consummated = session.execute(_CONSUMMATED_SQL, {"offer_id": offer_id}).first()
+    if consummated:
+        log.error("refusing delivery after consummation offer_id=%s", offer_id)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "TILA timing: the loan is already boarded; the disclosure had to be "
+                "delivered before consummation"
+            ),
+        )
 
 
 def _refuse_if_offer_disagrees(offer: models.Offer, computed: dict) -> None:

@@ -78,6 +78,24 @@ class DisclosureOut(BaseModel):
     delivered_at: str | None = None
 
 
+class TransitionIn(BaseModel):
+    """A compliance action on a disclosure (spec D6).
+
+    `reason_code` is required on a reject and is what routes the rework — wording and
+    formatting go back to the maker, wrong terms go back to decisioning. An unrouted
+    reject would leave a regulated document in draft with nobody owning the next step.
+    """
+
+    to_status: str
+    reason_code: str | None = None
+
+
+class TransitionOut(DisclosureOut):
+    """The disclosure after the transition, plus where a reject sends the work."""
+
+    routed_to: str | None = None
+
+
 class ProvenanceOut(BaseModel):
     """One walk of the FK-as-graph chain: disclosure -> offer -> decision_event ->
     application -> applicant (ADR 0012, spec D3).

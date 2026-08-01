@@ -227,3 +227,125 @@ class TestGatherBindsServerSide:
         _stub_db(monkeypatch, application=False)
         with pytest.raises(disclosure_coordinator.ApplicationNotFound):
             disclosure_coordinator.gather_disclosure_context(999)
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle proxy (spec D6). The status machine itself lives in disclosure-service; what
+# origination owns is who may drive it and whether a refusal reaches the officer intact.
+# ---------------------------------------------------------------------------
+
+BORROWER = {"X-User-Role": "borrower", "X-User-Id": "3"}
+
+
+class _Resp:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+@pytest.fixture
+def lifecycle(monkeypatch):
+    """Stub the two downstream calls and record what was sent."""
+    sent = {"gets": [], "posts": []}
+    state = {
+        "chain": {**COMPLETE_CHAIN, "disclosure_status": "draft"},
+        "chain_status": 200,
+        "transition": (200, {"disclosure_id": 5, "status": "in_review"}),
+    }
+
+    def fake_get(_base, path):
+        sent["gets"].append(path)
+        return _Resp(state["chain_status"], state["chain"])
+
+    def fake_post(_base, path, payload):
+        sent["posts"].append((path, payload))
+        return _Resp(*state["transition"])
+
+    monkeypatch.setattr(main.clients, "get", fake_get)
+    monkeypatch.setattr(main.clients, "post_raw", fake_post)
+    monkeypatch.setattr(main.authz, "require_officer_or_owner", lambda *a, **k: None)
+    return sent, state
+
+
+def test_read_disclosure_returns_the_chain(client, lifecycle):
+    sent, _ = lifecycle
+    response = client.get("/applications/1/disclosure", headers=OFFICER)
+
+    assert response.status_code == 200
+    assert response.json()["disclosure_id"] == 5
+    assert sent["gets"] == ["/applications/1/disclosure/provenance"]
+
+
+def test_transition_is_officer_only_not_officer_or_owner(client, lifecycle):
+    """Every other disclosure route admits the borrower because it is their document.
+    A borrower approving their own TILA disclosure would make the hold ceremonial."""
+    sent, _ = lifecycle
+    response = client.post(
+        "/applications/1/disclosure/transition",
+        json={"to_status": "in_review"},
+        headers=BORROWER,
+    )
+
+    assert response.status_code == 403
+    assert sent["posts"] == [], "must not reach the lifecycle at all"
+
+
+def test_transition_resolves_the_disclosure_id_server_side(client, lifecycle):
+    """The caller names an application, never a disclosure id — that binding is what makes
+    the authorization check mean anything."""
+    sent, _ = lifecycle
+    response = client.post(
+        "/applications/1/disclosure/transition",
+        json={"to_status": "in_review", "disclosure_id": 999},
+        headers=OFFICER,
+    )
+
+    assert response.status_code == 200
+    assert sent["posts"][0][0] == "/disclosures/5/transition"
+    assert "disclosure_id" not in sent["posts"][0][1]
+
+
+def test_transition_forwards_a_downstream_refusal_verbatim(client, lifecycle):
+    """An illegal transition is an answer the officer must read, not an outage."""
+    _, state = lifecycle
+    state["transition"] = (409, {"detail": "illegal transition delivered -> draft"})
+    response = client.post(
+        "/applications/1/disclosure/transition",
+        json={"to_status": "draft", "reason_code": "wording"},
+        headers=OFFICER,
+    )
+
+    assert response.status_code == 409
+    assert "illegal transition" in response.json()["detail"]
+
+
+def test_transition_when_there_is_no_disclosure_yet(client, lifecycle):
+    _, state = lifecycle
+    state["chain"] = {**COMPLETE_CHAIN, "disclosure_id": None}
+    response = client.post(
+        "/applications/1/disclosure/transition",
+        json={"to_status": "in_review"},
+        headers=OFFICER,
+    )
+    assert response.status_code == 404
+
+
+def test_a_downstream_outage_is_502_not_a_refusal(client, lifecycle, monkeypatch):
+    import httpx
+
+    def explode(*_a, **_k):
+        raise httpx.ConnectError("no route to host")
+
+    monkeypatch.setattr(main.clients, "get", explode)
+    response = client.get("/applications/1/disclosure", headers=OFFICER)
+    assert response.status_code == 502
+
+
+def test_a_downstream_500_is_not_reported_as_a_client_error(client, lifecycle):
+    _, state = lifecycle
+    state["chain_status"] = 500
+    response = client.get("/applications/1/disclosure", headers=OFFICER)
+    assert response.status_code == 502
