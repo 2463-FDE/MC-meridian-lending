@@ -253,12 +253,36 @@ def test_apr_relates_to_the_note_rate_as_the_fee_dictates(v):
         assert disclosed == note_rate
 
 
-def test_the_add_on_method_would_fail_this_gate():
-    """Regression marker: the shipped-for-months value must not pass.
+def _add_on_apr(v: Vector) -> Decimal:
+    """The method this gate exists to reject: annualize the finance charge over the FULL
+    initial balance, ignoring that the loan amortizes. Reproduced here so the gate can be
+    shown to catch it, rather than asserted to."""
+    principal = Decimal(v.principal)
+    n = v.term_months
+    payment = _level_payment(principal, Decimal(v.rate_pct), n)
+    fee = (principal * Decimal(v.fee_pct)).quantize(CENT, rounding=ROUND_HALF_UP)
+    financed = principal - fee
+    interest = payment * n - principal
+    return (((interest + fee) / financed) / (Decimal(n) / 12) * 100).quantize(
+        Decimal("0.001"), rounding=ROUND_HALF_UP
+    )
 
-    5.041% was `compute_apr(18000, 7.99, 48)` before the fix. Asserting it fails the gate
-    documents what this file is for, and fails loudly if someone reintroduces the formula.
+
+@pytest.mark.parametrize("v", VECTORS, ids=IDS)
+def test_the_add_on_method_breaches_every_vector(v):
+    """Demonstrates the gate would have caught the historical defect, on the whole book.
+
+    `make prove` cannot show this: adding a gate changes no source, so there is no parent
+    state to roll back to. Instead the old method is reproduced and run against each
+    vector. It breaches by 1.4pp to 10.2pp — every case far outside the 0.125pp tolerance,
+    the worst being 25000 @ 24.99% x 60m (16.304% vs 26.527%). Longer terms and higher
+    rates distort most, because those are exactly the loans where "the borrower holds the
+    full balance for the full term" is furthest from true.
+
+    This also fails loudly if anyone reintroduces the formula.
     """
-    add_on_result = Decimal("5.041")
-    vector = next(v for v in VECTORS if v.principal == "18000")
-    assert abs(add_on_result - Decimal(vector.apr)) > TOLERANCE
+    breach = abs(_add_on_apr(v) - Decimal(v.apr))
+    assert breach > TOLERANCE, (
+        f"add-on APR {_add_on_apr(v)} is within tolerance of {v.apr} — this vector no "
+        f"longer discriminates between the methods and should be replaced"
+    )
