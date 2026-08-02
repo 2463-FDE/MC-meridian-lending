@@ -48,7 +48,13 @@ Term: {term_months} months
 Note rate: {note_rate_pct}%
 Verification: PASSED ({checks_passed} deterministic checks)
 
-Return JSON matching the required schema."""
+Return ONLY a JSON object, with no markdown fence and no commentary, with exactly these \
+keys and no others:
+
+{{
+  "summary": "<one or two sentences for the officer>",
+  "officer_action": "review_and_send" or "hold_for_compliance"
+}}"""
 
 register(
     PromptTemplate(

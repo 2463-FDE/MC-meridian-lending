@@ -362,3 +362,22 @@ def test_the_internal_policy_band_is_not_proxied_to_the_borrower(client, lifecyc
     assert "policy_band" not in body
     # The outcome stays: the borrower already knows they were approved.
     assert body["decision_outcome"] == "approve"
+
+
+def test_every_disclosure_prompt_shows_its_schema_to_the_model():
+    """A schema used only to validate is a schema the model never sees.
+
+    Both disclosure prompts declared OUTPUT_SCHEMA and asked for "JSON matching the
+    required schema" — with no schema in the message. On Bedrock the maker invented its
+    own shape and the checker omitted `summary`; each surfaced as a 503. FakeAdapter's
+    canned responses always matched, so no test could see it.
+    """
+    from app.prompts import get_prompt
+    import app.prompts.disclosure_assemble  # noqa: F401  (registers)
+    import app.prompts.disclosure_narrate  # noqa: F401
+
+    for name in ("disclosure_assemble", "disclosure_narrate"):
+        template = get_prompt(name)
+        rendered = template.user_template
+        for key in template.output_schema["required"]:
+            assert f'"{key}"' in rendered, f"{name} never shows the model {key!r}"
