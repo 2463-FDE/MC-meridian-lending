@@ -1,10 +1,29 @@
 """Pydantic request/response models for the LOS API."""
 
+import re
 from typing import Generic, Optional, TypeVar
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 T = TypeVar("T")
+
+# 9 bare digits or fully-dashed ###-##-####, nothing else. The alternation forces the
+# dashes all-or-nothing: an independently-optional \d{3}-?\d{2}-?\d{4} would accept
+# partially-dashed junk like 412-559980 / 41255-9980, which would then reach storage and
+# KYC (whose stub verifies any non-empty SSN). Reject at the API boundary so malformed
+# SSNs never hit storage or the log redactor, whose separator handling this branch hardens
+# (fix/redactor-ssn-separator-blindspots). Mirrors the apply-form client check; the client
+# gate is UX, this is the enforced one.
+_SSN_RE = re.compile(r"^(?:\d{9}|\d{3}-\d{2}-\d{4})$")
+
+# Anchored NANP allowlist mirroring the labeled-phone redactor (redactor.py rule 5a:
+# \+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}). A digit-count-only check accepted
+# junk wrappers the redactor does not mask -- "abc5555550123" and "555::::123::::4567"
+# both carry 10 digits but sit outside the redactor's narrow shape, so once labeled they
+# survive redaction into logs/provider payloads/storage (PR review). Anchoring to the
+# redactor's own pattern makes every accepted value one the redactor can mask, holding
+# the boundary invariant that junk does not pass.
+_PHONE_RE = re.compile(r"^\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}$")
 
 
 class ApplicationIn(BaseModel):
@@ -27,6 +46,44 @@ class ApplicationIn(BaseModel):
     employer: Optional[str] = None
     job_title: Optional[str] = None
     employment_years: Optional[float] = Field(default=None, ge=0)
+
+    @field_validator("ssn")
+    @classmethod
+    def _validate_ssn(cls, v: Optional[str]) -> Optional[str]:
+        # Optional: entity applicants carry an EIN, not an SSN (see _entity_requires_ein),
+        # so only a present, non-blank value is format-checked. Rejects the whitespace/
+        # separator noise the redactor would otherwise have to absorb downstream.
+        # NORMALIZE by returning the stripped value: matching _SSN_RE against v.strip()
+        # while returning the raw v let a padded-but-valid SSN (" 412559980 ") pass and
+        # be preserved by model_dump(), forwarding/storing a malformed SSN and leaving
+        # the labeled value for the log redactor to catch. Strip here so the boundary
+        # invariant holds and only a canonical SSN leaves this validator.
+        if v is None:
+            return v
+        v = v.strip()
+        if v and not _SSN_RE.match(v):
+            raise ValueError("ssn must be 9 digits, optionally as ###-##-####")
+        return v
+
+    @field_validator("phone")
+    @classmethod
+    def _validate_phone(cls, v: Optional[str]) -> Optional[str]:
+        # Optional; when present match the anchored _PHONE_RE allowlist so
+        # (555) 555-0123, 555-555-0123, and 5555550123 all pass but junk does not.
+        # A digit-count-only check accepted values the labeled-phone redactor cannot
+        # mask ("abc5555550123", "555::::123::::4567" both have 10 digits but fall
+        # outside the redactor's NANP shape), opening a PII leak path once such a value
+        # is labeled downstream (PR review). Anchor to the redactor's own pattern so
+        # accepted values are always maskable. NORMALIZE by returning the stripped value:
+        # the earlier check ignored surrounding whitespace, so " 5555550123 " passed and
+        # model_dump() preserved the padding, forwarding/storing a malformed phone.
+        # Strip so only the padding is removed; internal formatting is left intact.
+        if v is None:
+            return v
+        v = v.strip()
+        if v and not _PHONE_RE.match(v):
+            raise ValueError("phone must be 10 digits in a standard US format")
+        return v
 
     @model_validator(mode="after")
     def _entity_requires_ein(self) -> "ApplicationIn":

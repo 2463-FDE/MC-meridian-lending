@@ -109,6 +109,107 @@ This document tracks known issues, their business/compliance impact, and mitigat
 
 ---
 
+### D17: Offer-replay schedule uses a divergent APR default (0 vs 7.99)
+
+| Field | Value |
+|---|---|
+| **ID** | D17 |
+| **Finding** | `_offer_response_from_persisted` defaults a null persisted APR two different ways in one response: the disclosure box uses `row["apr"] or 0`, but the display amortization schedule uses `row["apr"] or 7.99`. A null-APR offer row would be disclosed as 0% APR alongside a schedule computed at 7.99%. |
+| **Location** | `services/disclosure-service/app/routers/offers.py` (`_offer_response_from_persisted`, lines ~54 and ~66). |
+| **Risk** | **Low.** Not reachable today: `accept_offer` (origination) rejects a null-APR offer before boarding, and `build_offer` always writes a non-null APR. Cosmetic inconsistency copied from the pre-existing GET read path; would only surface on a hand-corrupted/legacy null-APR row. |
+| **Current Impact** | None observed. Defensive-default mismatch only. |
+| **Mitigation Path** | Pick one default for both fields (0), or drop the schedule's `7.99` magic fallback and render an empty schedule when APR is null. Trivial, deferred until the offer read/replay path is next touched. |
+| **Status** | Open; accepted residual (display-only, not reachable). |
+
+---
+
+### D18: Fresh-insert vs replay offer schedule can differ by a cent
+
+| Field | Value |
+|---|---|
+| **ID** | D18 |
+| **Finding** | The first (fresh-insert) `POST /offers` returns the true `amortization(body.principal, …)` schedule; an idempotent retry returns a schedule reconstructed from the stored disclosure box (principal backed out via `amount_financed / (1 - 0.03)`, term via `round(total/monthly)`). Float round-trip is exact at tested values but can drift a cent on individual schedule rows. |
+| **Location** | `services/disclosure-service/app/routers/offers.py` (`_offer_response_from_persisted` reconstruction vs the fresh-insert branch of `create_offer`). |
+| **Risk** | **Low.** Display schedule only — the disclosure box (APR/finance charge/payment/total the borrower accepts and `accept_offer` boards) comes straight from the persisted row and is byte-identical across first call and replay. Same float family as D2. |
+| **Current Impact** | Per-row cent drift possible between an original response and its retry; regulated totals unaffected. |
+| **Mitigation Path** | Subsumed by D2 (Decimal money migration): once principal/term are stored (or money is fixed-point), the back-out reconstruction goes away and both paths render the identical schedule. No standalone fix. |
+| **Status** | Open; accepted residual (tracked under D2). |
+
+---
+
+## Teeth review 2026-07-19 — attribution + new entries
+
+Adversarial full-branch review of `main` @ `2ecdb27`. **Attribution:** every Critical/High
+finding is **pre-existing brownfield** (baseline `e8bb2fa`/`d59f331`/`60d1c37` or the 7-service
+decompose `4c464b8`), in the servicing/payment/schema layers our features never touched. The one
+finding in code our features introduced (redactor separator blind spots, Week-1 PII work
+`73ef737`) was **fixed** on `fix/redactor-ssn-separator-blindspots` — see D22. Everything else is
+logged here as pre-existing debt; not fixed, out of scope for "parts we touched".
+
+### D8: Servicing service enforces NO authorization (IDOR + no maker-checker)
+
+| Field | Value |
+|---|---|
+| **ID** | D8 (referenced in `servicing-service/app/main.py` comments; entry created 2026-07-19) |
+| **Finding** | `servicing-service` has no authz module at all. Gateway `/lss/*` and `/payments` proxies do session-auth only (no role check). Two consequences: **(a) IDOR** — any authenticated user reads or mutates any loan by walking serial ids; **(b) no role/maker-checker** — a borrower can move money on any account. |
+| **Location** | Reads: `servicing-service/app/routers/loans.py` (`GET /loans/{id}` L55–66, `GET /loans/{id}/payments` L78–91), `main.py` (`GET /accounts/{id}/balance` L88–94). Mutations: `main.py` `adjust-balance` L101–105, `waive-fee` L112–116, `apply-payment` L79–85. Gateway: `main.py` `/lss` L421–425, `/payments` L457–464. |
+| **Trigger** | Log in as borrower `maria`; `GET /lss/loans/{1,2,3…}` enumerates every borrower's loan/balance/payment history; `POST /lss/accounts/1/adjust-balance {"new_balance":0}` zeroes a stranger's balance; `.../waive-fee` waives any fee. All succeed. |
+| **Risk** | **Critical.** Cross-customer PII disclosure + unauthenticated-in-effect money mutation. |
+| **Attribution** | **Pre-existing** (baseline `d59f331` servicing). Related to **ADR 0010** (officer-or-owner authz), which we implemented on origination only and explicitly deferred for servicing pending an applicant identity/signup flow that does not exist. Not our feature's code; the deferral is documented in ADR 0010. |
+| **Mitigation Path** | Extend ADR-0010 `require_officer_or_owner` (plus a role gate + second-approver on money moves) to servicing. Needs the identity flow ADR 0010 is blocked on. Own PR/ADR. |
+| **Status** | Open; documented; **not fixed (parts-we-touched scope excludes servicing).** Blocks production. |
+
+### D19: Payment charge has no idempotency key (double-charge on retry)
+
+| Field | Value |
+|---|---|
+| **ID** | D19 |
+| **Finding** | The `payments` table has no idempotency key / unique charge reference, and `charge()` inserts a row then calls `apply_payment` with no dedupe. A retried/double-submitted `POST /payments` inserts a second row and debits the balance twice. |
+| **Location** | `db/init/001_schema.sql` payments DDL ("no idempotency_key, no unique(charge_ref)"); `payment-service/app/payments.py` L74–79 and `servicing-service/app/payments.py` L74–77; call site `main.py` L68. |
+| **Trigger** | Client timeout + retry, or double-click, on a card charge → two `payments` rows, balance debited twice, no key to collapse them. |
+| **Risk** | **High.** Duplicate customer charges; compounded by D2 (no ledger to reconstruct). |
+| **Attribution** | **Pre-existing** (baseline `60d1c37` servicing/payments). Not touched by our features. |
+| **Mitigation Path** | Add `idempotency_key` column + unique index; require callers to pass one; replay the prior result on conflict (same pattern our decision/offer/loan boarding already use). Own PR. |
+| **Status** | Open; documented; not fixed (out of scope). |
+
+### D20: `audit_logs` is mutable + seeded with a plaintext PAN
+
+| Field | Value |
+|---|---|
+| **ID** | D20 |
+| **Finding** | `audit_logs` is an ordinary table — `UPDATE`/`DELETE` allowed, ships a `deleted_at` soft-delete column, no append-only trigger (contrast `decision_events`, which has one). App code can silently tombstone/alter audit rows. Separately, the seed writes a plaintext PAN into `audit_logs.detail`. |
+| **Location** | `db/init/001_schema.sql` L124–132 (table + "ordinary, mutable table" comment); `db/init/002_seed.sql` L79 (`'charge req pan=4111111111111111 amount=250.00'`). |
+| **Trigger** | Any `db.query("DELETE FROM audit_logs WHERE …")` / `UPDATE audit_logs …` succeeds unresisted (proven reachable by the same helper used for `UPDATE applications`). |
+| **Risk** | **High.** README claims "SOX-controlled with full audit" — the audit trail is forgeable, and it already contains raw cardholder data (compounds D13). |
+| **Attribution** | **Pre-existing** (baseline `e8bb2fa` schema + seed). We added the append-only `decision_events` alongside (ADR 0009) but deliberately did not convert `audit_logs`. |
+| **Mitigation Path** | Add the `decision_events`-style `BEFORE UPDATE OR DELETE OR TRUNCATE` trigger to `audit_logs`; scrub the seeded PAN. Own PR. |
+| **Status** | Open; documented; not fixed (out of scope). |
+
+### D21: Postgres and Redis host-published in the base compose
+
+| Field | Value |
+|---|---|
+| **ID** | D21 |
+| **Finding** | Backend app ports (8001–8006) are correctly `expose`-only, but `postgres:5432` and `redis:6379` are published to the host in the base `docker-compose.yml`. Anyone on host/LAN with DB creds bypasses all app-layer authz and can read/write data or read session/resume keys directly. |
+| **Location** | `docker-compose.yml` postgres `ports: 5432:5432` (L10–11), redis `ports: 6379:6379` (L23–24). |
+| **Risk** | **Medium.** Direct-datastore exposure behind the gateway trust boundary. |
+| **Attribution** | **Pre-existing** (baseline compose). Already noted as a deferred lower-priority item in the KB. |
+| **Mitigation Path** | Drop the `ports:` on postgres/redis (keep `expose`); use a one-off admin container or SSH tunnel for local DB access. Own PR. |
+| **Status** | Open; documented; not fixed (out of scope). |
+
+### D22: Redactor missed unlabeled SSN with dot/slash/tab/multi-space separators — FIXED
+
+| Field | Value |
+|---|---|
+| **ID** | D22 |
+| **Finding** | The flat log redactor only caught unlabeled SSN in dash (`3a`) or single-space (`3a-bis`) form; unlabeled dotted `412.55.9981`, slashed `412/55/9981`, tabbed `412\t55\t9981`, and multi-space `412  55  9981` slipped into log lines. Labeled SSN with a two-char separator run (`"ssn":"412  55  9981"`) also slipped 3b (single optional separator). Distinct from D14 (encoded PII) — this is raw-separator grouping. |
+| **Location** | `services/*/app/redactor.py` passes `3a-bis` and `3b` (canonical: `gateway/app/redactor.py`). |
+| **Attribution** | **OURS** — introduced by the Week-1 PII redactor (`73ef737`). The one teeth finding in code our features touched. |
+| **Fix** | Generalized `3a-bis` to a consistent non-dash separator (`([./])…\1`) OR whitespace run (`[ \t]{1,2}`), and widened `3b`'s separators from `?` to `{0,3}`. Edited the canonical gateway copy, resynced all 7 via `scripts/sync_redactor.sh` (redactor-drift stays green), added regression tests in `origination-service/tests/test_redactor.py` (unlabeled dot/slash/tab/double-space + labeled run + version/IPv4/phone false-positive guards). Kept the deliberate bare-9-digit non-redaction (documented tradeoff). |
+| **Status** | **Fixed** on `fix/redactor-ssn-separator-blindspots` (77 redactor tests pass). |
+
+---
+
 ## Summary by Severity
 
 | Severity | Finding | Status | Week 1 Action |
@@ -119,7 +220,14 @@ This document tracks known issues, their business/compliance impact, and mitigat
 | **High** | D2: Float money math | Open | Document, flag, schedule migration to Decimal (Week 2+). |
 | **Medium** | D14: Encoded PII bypasses log redaction | Deferred | The log redactor matches literal shapes only, so percent-encoded (email=maria%40example.com, ssn=412%2D55%2D9981) and unicode-escaped (@) PII in uvicorn access-log query strings is not masked. Payload vector closed by allowlist logging; no sensitive route accepts PII via query/path today, so exposure is a client-crafted query param. Follow-up: bounded URL-decode + \uXXXX-unescape normalization pass in the (CI-synced) redactor, with regression tests for encoded email/SSN/phone. Not done now to avoid a byte-altering change to the shared redactor for a low-exposure case. |
 | **Low** | D15: `redactor.py` duplicated per service (no shared package) | Mitigated | `services/*/app/redactor.py` is a near-identical copy in each of the 7 services — no shared module. Drift risk (a fix in one not reaching the others) is held closed by the **blocking** `redactor-drift` CI job, which fails the build if any copy diverges from the canonical; copies are resynced with `scripts/sync_redactor.sh`, never hand-edited. So this is a maintainability/structure cost, not an open leak path. Follow-up: extract a shared internal package (e.g. `libs/redaction`) so the copies collapse to one import; deferred because the CI gate already prevents divergence and a shared package adds packaging/build wiring across 7 services (YAGNI until a 2nd shared util appears). |
+| **Low** | D17: Offer-replay schedule APR default 0 vs 7.99 | Open (residual) | Null-APR offer row would disclose 0% APR beside a 7.99%-computed schedule (`_offer_response_from_persisted`). Not reachable — `accept_offer` rejects null-APR, `build_offer` always writes one. Display-only; unify the default when next touched. |
+| **Low** | D18: Fresh-insert vs replay offer schedule cent drift | Open (residual) | Retry returns a schedule reconstructed from the stored disclosure box (principal backed out via `amount_financed/0.97`, term via `round(total/monthly)`); float round-trip can drift a cent per row vs the fresh-insert response. Disclosure totals unaffected. Subsumed by D2. |
 | **Low** | D16: RAG eval index is in-memory only (pgvector deferred) | Deferred (by design) | The `rag_eval` harness rebuilds an in-memory exact-cosine index each run and keeps no persistent vector store (ADR 0007 rule 6). Correct at the current 9-chunk corpus — brute-force cosine is microseconds and a vector DB would add latency for zero benefit. **Phase 2 trigger — build a `PgVectorIndex` behind the existing `Index` contract (`add`/`search`/`__len__`) when ANY holds:** (1) corpus grows past ~hundreds of chunks (brute-force starts to hurt); (2) vectors must persist/share across runs or processes; (3) more than one service queries the same vectors. Scoped in `docs/PHASE1-BEDROCK-PGVECTOR.md` § Phase 2. When triggered it is **its own PR**: `pgvector/pgvector:pg16` image, `CREATE EXTENSION vector` + schema migration, DB wiring into the (currently DB-free) harness, and an **ADR 0007 rule 6 amendment** with a PII re-review of the persistent store. Not started; the `Index` seam is the readiness, so no code carries the cost until then. The Bedrock embedding backend (Phase 1) is already built + smoke-tested and is independent of this. |
+| **Critical** | D8: Servicing enforces no authz (IDOR + no maker-checker) | Open (pre-existing) | Teeth 2026-07-19. Any authenticated user reads/mutates any loan (serial-id IDOR) and moves money on any account — servicing has no authz module. Related to ADR 0010 (implemented origination-only, servicing deferred pending identity). Not our feature's code; own PR/ADR. |
+| **High** | D19: Payment double-charge (no idempotency key) | Open (pre-existing) | Teeth 2026-07-19. Retried `POST /payments` inserts a 2nd row + debits balance twice; no idempotency key / unique charge ref. Add key + unique index + replay-on-conflict. Own PR. |
+| **High** | D20: `audit_logs` mutable + seeded plaintext PAN | Open (pre-existing) | Teeth 2026-07-19. No append-only trigger (has `deleted_at`), rows UPDATE/DELETE-able; seed writes raw PAN into `detail`. Forgeable "audit" contradicts README SOX claim. Add append-only trigger + scrub seed. Own PR. |
+| **Medium** | D21: Postgres/Redis host-published in base compose | Open (pre-existing) | Teeth 2026-07-19. `5432`/`6379` published to host bypass app-layer authz. Drop `ports:` (keep `expose`). Own PR. |
+| **Medium** | D22: Redactor missed unlabeled dot/slash/tab/multi-space SSN | **Fixed** | Teeth 2026-07-19. **The one finding in code our features introduced** (Week-1 redactor). Generalized `3a-bis` + widened `3b`; resynced 7 copies; regression tests added. Fixed on `fix/redactor-ssn-separator-blindspots`. |
 
 ---
 
