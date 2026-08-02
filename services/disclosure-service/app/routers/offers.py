@@ -41,6 +41,44 @@ def _require_internal_caller(x_internal_service: str | None) -> None:
         )
 
 
+# The note rate the LOS applies server-side. Only the fallback for a legacy offer with no
+# disclosure record — a real one carries its own rate in compute_snapshot.
+_FALLBACK_NOTE_RATE_PCT = 7.99
+
+
+def _schedule_inputs(row, amount_financed: float) -> tuple:
+    """Principal and NOTE rate for the display schedule.
+
+    Prefers the disclosure's `compute_snapshot`: those are the values the disclosed figures
+    were actually derived from, so the schedule and the TILA box cannot disagree. Falls back
+    to inverting amount_financed with the current fee rate only for offers that predate the
+    disclosures table.
+    """
+    offer_id = row.get("id") if hasattr(row, "get") else row["id"]
+    if offer_id is not None:
+        snapshots = db.query(
+            "SELECT compute_snapshot FROM disclosures WHERE offer_id = %s", (offer_id,)
+        )
+        snapshot = snapshots[0].get("compute_snapshot") if snapshots else None
+        if snapshot:
+            try:
+                return (
+                    int(snapshot["principal_cents"]) / 100,
+                    float(snapshot["note_rate_pct"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                # A malformed snapshot falls through to the inversion rather than raising:
+                # the schedule is a display aid, and refusing to render the offer at all
+                # would be a worse answer than rendering it the legacy way.
+                log.warning("unusable compute_snapshot for offer_id=%s", offer_id)
+    principal = (
+        round(amount_financed / (1 - rules.get_fee_schedule().origination_fee_pct), 2)
+        if amount_financed
+        else 0.0
+    )
+    return principal, _FALLBACK_NOTE_RATE_PCT
+
+
 def _offer_response_from_persisted(row, application_id: int) -> OfferResponse:
     """Build an OfferResponse from a PERSISTED offers row (the create_offer replay paths and
     the GET read path). The disclosure numbers come straight from the stored row -- never
@@ -51,24 +89,30 @@ def _offer_response_from_persisted(row, application_id: int) -> OfferResponse:
     from total/monthly, and reuse the stored APR as the schedule rate. Float math throughout
     (D1); the origination fee comes from the one versioned schedule (rules.py).
 
-    Latent hazard, unchanged by that switch: inverting a STORED amount_financed with the
-    CURRENT fee rate is only correct while the rate has not moved. It is correct today (the
-    old hardcoded 0.03 equals the published 0.030), and it stops being an inference at all
-    once `disclosures.compute_snapshot` persists the principal and fee actually used (spec D3).
+    The schedule rate is the NOTE rate, never the APR. The APR carries the origination fee
+    and is therefore higher than the rate interest actually accrues at, so amortizing at it
+    produces a schedule that contradicts the disclosed figures in the same response — on
+    15000/7.99/36 the rows summed to 17442.72 against a disclosed total of payments of
+    16919.15, and showed a 484.52 payment against a disclosed 469.98. The fresh-insert path
+    below always passed the note rate; only this replay/read path did not, so an offer showed
+    one schedule when created and a different one when read back, which is what the portal
+    displays. Found by the teeth pass, reproduced live.
+
+    `disclosures.compute_snapshot` is the source for principal and note rate when a
+    disclosure exists — the values actually used, recorded at compute time. That closes the
+    inference this docstring used to flag: backing principal out of a STORED amount_financed
+    with the CURRENT fee rate is only correct while the rate has not moved. Legacy offers
+    (no disclosure row) still take the inversion, because for them there is nothing better.
     """
     apr = row["apr"] or 0
     finance_charge = row["finance_charge"] or 0
     monthly_payment = row["monthly_payment"] or 0.0
     total_of_payments = row["total_of_payments"] or 0.0
     amount_financed = row["amount_financed"] or 0.0
-    principal = (
-        round(amount_financed / (1 - rules.get_fee_schedule().origination_fee_pct), 2)
-        if amount_financed
-        else 0.0
-    )
     term_months = round(total_of_payments / monthly_payment) if monthly_payment else 0
+    principal, note_rate_pct = _schedule_inputs(row, amount_financed)
     rows = (
-        schedule.amortization(principal, row["apr"] or 7.99, term_months)
+        schedule.amortization(principal, note_rate_pct, term_months)
         if term_months
         else []
     )

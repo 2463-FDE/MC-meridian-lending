@@ -153,3 +153,69 @@ def test_offer_conflict_without_retrievable_offer_is_409(monkeypatch):
         "/offers", json=BODY, headers={"X-Internal-Service": TOKEN}
     )
     assert resp.status_code == 409
+
+
+class TestScheduleRate:
+    """The display schedule must amortize at the NOTE rate, never the APR.
+
+    The APR carries the origination fee, so it is above the rate interest actually accrues
+    at. Amortizing at it produced a schedule that contradicted the disclosed figures in the
+    SAME response: on 15000/7.99/36 the rows summed to 17442.72 against a disclosed total of
+    payments of 16919.15, with a 484.52 payment shown against a disclosed 469.98. The
+    fresh-insert path always passed the note rate; only the replay/read path did not, so an
+    offer showed one schedule when created and another when read back — and the read path is
+    what the portal displays. Found by the teeth pass, reproduced against the live stack.
+    """
+
+    OFFER_ROW = {
+        "id": 190,
+        "apr": 10.072,
+        "finance_charge": 2369.15,
+        "monthly_payment": 469.98,
+        "amount_financed": 14550.0,
+        "total_of_payments": 16919.15,
+    }
+    SNAPSHOT = {
+        "principal_cents": 1500000,
+        "note_rate_pct": "7.99",
+        "term_months": 36,
+        "fee_pct": "0.03",
+    }
+
+    def _response(self, monkeypatch, rows):
+        from app.routers import offers as mod
+
+        monkeypatch.setattr(mod.db, "query", lambda *a, **k: rows)
+        return mod._offer_response_from_persisted(dict(self.OFFER_ROW), 7303)
+
+    def test_the_schedule_reconciles_with_the_disclosed_payment(self, monkeypatch):
+        resp = self._response(monkeypatch, [{"compute_snapshot": self.SNAPSHOT}])
+        assert resp.schedule, "expected a rendered schedule"
+        assert resp.schedule[0].payment == self.OFFER_ROW["monthly_payment"]
+
+    def test_the_schedule_is_not_amortized_at_the_apr(self, monkeypatch):
+        """The exact regression: at the APR the first payment was 484.52."""
+        resp = self._response(monkeypatch, [{"compute_snapshot": self.SNAPSHOT}])
+        assert resp.schedule[0].payment != 484.52
+
+    def test_the_snapshot_supplies_principal_rather_than_an_inversion(self, monkeypatch):
+        """`compute_snapshot` records the principal actually used, so the schedule no
+        longer depends on the current fee rate matching the one the offer was priced at."""
+        from app.routers import offers as mod
+
+        monkeypatch.setattr(
+            mod.db, "query", lambda *a, **k: [{"compute_snapshot": self.SNAPSHOT}]
+        )
+        principal, note_rate = mod._schedule_inputs(dict(self.OFFER_ROW), 14550.0)
+        assert principal == 15000.0
+        assert note_rate == 7.99
+
+    def test_a_legacy_offer_with_no_disclosure_still_renders(self, monkeypatch):
+        """Nothing better exists for a pre-ADR-0012 offer, so the inversion stays as the
+        fallback rather than the schedule disappearing."""
+        from app.routers import offers as mod
+
+        monkeypatch.setattr(mod.db, "query", lambda *a, **k: [])
+        principal, note_rate = mod._schedule_inputs(dict(self.OFFER_ROW), 14550.0)
+        assert principal == 15000.0
+        assert note_rate == mod._FALLBACK_NOTE_RATE_PCT
