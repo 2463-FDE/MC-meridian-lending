@@ -47,6 +47,32 @@ This document tracks known issues, their business/compliance impact, and mitigat
 
 ---
 
+### D3: Unlocked read-modify-write on `balances` — concurrent applies lose money
+
+*(Entry created 2026-08-02, Week 5. **D3 was already cited four times in service code** —
+`servicing-service/app/balance.py:5`, `app/main.py:83`, and the two payment docstrings — but
+had no entry in this log. It has one now, with a measurement.)*
+
+| Field | Value |
+|---|---|
+| **ID** | D3 |
+| **Finding** | `balance.apply_payment` reads the balance, computes the new value in Python, then writes it back — no lock, no transaction around the pair. Concurrent applies to the same loan read the same opening value and overwrite one another, so captured money never reaches the loan. |
+| **Location** | `services/servicing-service/app/balance.py:23-31`; the three steps are labelled `# READ`, `# MODIFY`, `# WRITE` in the source. Reached via `app/main.py:80-85` (`apply-payment`, the endpoint `payment-service` calls) and `app/payments.py:79`. |
+| **Trigger** | Any two concurrent balance mutations on one loan — two payments, or a payment and a fee waiver (the case the `balance.py` docstring already names). |
+| **Measured** | **2026-08-02, `scripts/repro_double_charge.py` against the live stack.** Loan 4471, one $100.00 intent sent 8 ways concurrently: 8 `payments` rows, **$800.00 captured, $600.00 credited** — $200.00 taken and never applied. Non-deterministic (a 5-way run lost one application, the 8-way run lost two). Every request returned `200`. |
+| **Risk** | **High.** Money is captured and not credited: the borrower is charged and still owes the amount. `reconciliation.py:14` sums the `payments` table so the aggregate gap is arithmetically visible, but with no ledger (D2) nothing can attribute it to a customer afterwards — part of why the "charged twice" tickets were dismissible as confusion. |
+| **Attribution** | **Pre-existing** (baseline servicing). Named in the `balance.py` docstring since the baseline; never entered in this log and never measured until Week 5. |
+| **Mitigation Path** | Make the mutation a single atomic statement — `UPDATE balances SET balance = balance - :amount WHERE loan_id = :id` — committed in the same transaction as an append-only `payment_applications` row unique on `payment_id`. Specified as **D3d** in `docs/spec-payments-week5.md`; decided in **ADR 0013**. Distinct from the idempotency key: the key collapses duplicate *intents*, but two genuinely distinct concurrent payments still race. |
+| **Status** | Open. **Fix specified (ADR 0013, Week 5); not built** — spec-only week. |
+
+**Bookkeeping note:** the D-numbers used in service code and the ones defined in this log
+have drifted. Code cites `D3`, `D4`, `D7`, `D11`, `D12`, and `D14`; this log defines `D14`
+as *"Encoded PII bypasses log redaction"* while `servicing-service/app/main.py:83` uses
+`D14` for *"no payment waterfall"*. D3 is reconciled here. The remaining collisions are left
+alone — renumbering live code comments is a separate mechanical change.
+
+---
+
 ### D5: Plaintext PAN/CVV/SSN in Logs
 
 | Field | Value |
@@ -105,7 +131,9 @@ This document tracks known issues, their business/compliance impact, and mitigat
 | | 3. Re-tokenize all historical data (data migration, potential customer re-auth for PCI audit). |
 | | 4. Update charge logic to use tokenized card. |
 | | **Week 2–3 candidate** if board prioritizes PCI compliance. Otherwise, deferred to Q2. |
-| **Status** | Open; **documented as debt; no fix in scope for Week 1.** Will block production deployment until addressed. |
+| **Week 5 design** | Specified in `docs/spec-payments-week5.md` D4 and decided in **ADR 0013**, which **supersedes ADR 0003**. Three points matter. (1) The CVV column is *dropped and purged*, not merely unwritten — retaining sensitive authentication data after authorization is a flat prohibition, so the remediation is a deletion. (2) The purge migration must **rewrite the table** (`VACUUM FULL`, or `pg_repack` to avoid downtime): Postgres `DROP COLUMN` only marks the attribute dropped and the preceding `UPDATE ... SET pan = NULL` leaves the old row versions as dead tuples, so without a rewrite every PAN is still recoverable from the data files. (3) Browser-side tokenization means the PAN never reaches a Meridian server, so the self-serve form *shrinks* assessment scope instead of growing it. Retained instead: `card_token`, `card_brand`, `card_last4`, expiry. Held by a new blocking CI job, `no-sad-gate`. |
+| **Not covered** | WAL segments, replicas, and backups taken before the rewrite still contain cardholder data; that needs its own retention action. Historical card *tokens* are not recoverable — re-tokenizing the back book is a separate migration. |
+| **Status** | Open. **Fix specified (ADR 0013, Week 5); not built** — spec-only week. Will block production deployment until addressed. |
 
 ---
 
@@ -157,7 +185,8 @@ logged here as pre-existing debt; not fixed, out of scope for "parts we touched"
 | **Risk** | **Critical.** Cross-customer PII disclosure + unauthenticated-in-effect money mutation. |
 | **Attribution** | **Pre-existing** (baseline `d59f331` servicing). Related to **ADR 0010** (officer-or-owner authz), which we implemented on origination only and explicitly deferred for servicing pending an applicant identity/signup flow that does not exist. Not our feature's code; the deferral is documented in ADR 0010. |
 | **Mitigation Path** | Extend ADR-0010 `require_officer_or_owner` (plus a role gate + second-approver on money moves) to servicing. Needs the identity flow ADR 0010 is blocked on. Own PR/ADR. |
-| **Status** | Open; documented; **not fixed (parts-we-touched scope excludes servicing).** Blocks production. |
+| **Week 5 split** | This entry conflates two problems with very different costs, and ADR 0013 separates them. **(a) `apply-payment` is an internal endpoint left publicly routed.** `servicing-service/app/main.py:80` reduces a balance, is reachable through the gateway on session auth alone, has no `X-Internal-Service` gate, and never checks that a payment was captured — so a caller can credit a balance with no card and no `payments` row. That is money creation, and it is **not an authorization model problem**: `kyc-service/app/routers/kyc.py`, `decision-service/app/routers/decisions.py`, and `disclosure-service/app/routers/offers.py` each already require the header. Specified as spec D3a — hours of work, no identity model needed. **(b) The rest is genuine RBAC** — ownership on reads, officer-only on `adjust-balance` / `waive-fee` — and stays deferred under ADR 0010. Self-serve payments do not require it, because the `pay:loan:{id}` capability token (spec D6) makes ownership an invariant of the credential rather than a per-request lookup. |
+| **Status** | Open. (a) specified in ADR 0013, not built; (b) still deferred pending ADR 0010's identity flow. Blocks production. |
 
 ### D19: Payment charge has no idempotency key (double-charge on retry)
 
@@ -169,8 +198,9 @@ logged here as pre-existing debt; not fixed, out of scope for "parts we touched"
 | **Trigger** | Client timeout + retry, or double-click, on a card charge → two `payments` rows, balance debited twice, no key to collapse them. |
 | **Risk** | **High.** Duplicate customer charges; compounded by D2 (no ledger to reconstruct). |
 | **Attribution** | **Pre-existing** (baseline `60d1c37` servicing/payments). Not touched by our features. |
-| **Mitigation Path** | Add `idempotency_key` column + unique index; require callers to pass one; replay the prior result on conflict (same pattern our decision/offer/loan boarding already use). Own PR. |
-| **Status** | Open; documented; not fixed (out of scope). |
+| **Measured** | **2026-08-02, Week 5, `scripts/repro_double_charge.py`.** Two sequential POSTs of one $100.00 intent: 2 rows, $200.00 captured. Eight concurrent POSTs of the same intent: 8 rows, $800.00 captured, all returning `200`. The client's "customers are just confused" reading does not survive the reproduction. |
+| **Mitigation Path** | Client-minted `Idempotency-Key`, a **partial unique index** on `payments.idempotency_key`, and an insert-first write (`ON CONFLICT DO NOTHING`) that claims the key *before* the processor is contacted. The constraint rather than application code is the enforcement point, because two handlers write this table (see D23). Full design: `docs/spec-payments-week5.md` D1–D2; decided in **ADR 0013**. |
+| **Status** | Open. **Fix specified (ADR 0013, Week 5); not built** — spec-only week. |
 
 ### D20: `audit_logs` is mutable + seeded with a plaintext PAN
 
@@ -210,6 +240,22 @@ logged here as pre-existing debt; not fixed, out of scope for "parts we touched"
 
 ---
 
+## Week 5 payments scoping — new entry
+
+### D23: The charge handler exists twice, writing the same table
+
+| Field | Value |
+|---|---|
+| **ID** | D23 |
+| **Finding** | ADR 0004's decomposition copied the payment handler into `payment-service` and left the original routed in `servicing-service`. Both are live, both insert into the same `payments` table, and both carry the identical `# No idempotency check` comment. |
+| **Location** | `services/payment-service/app/payments.py:76` and `services/servicing-service/app/payments.py:75` (the INSERTs); routes at `payment-service/app/routers/payments.py:19` and `servicing-service/app/main.py:60`. The two `_redacted_charge_req` helpers are kept byte-identical by hand, with a docstring asking future editors not to let them diverge. |
+| **Risk** | **Medium.** Not a correctness risk on its own; it is a *fix-propagation* risk. Any control implemented in application code in one service silently does not apply to the other — which is the specific reason ADR 0013 puts idempotency enforcement in a database constraint rather than in a service. Divergence has precedent: `redactor.py` needed a blocking CI job (D15) for the same reason. |
+| **Attribution** | **Ours by omission** — the ADR 0004 decomposition (`4c464b8`) copied rather than moved, and nothing since removed the original. |
+| **Mitigation Path** | Retire the `servicing-service` charge path once `payment-service` is the sole writer, leaving servicing with `apply-payment` only. Until then the unique index from ADR 0013 binds both. Own PR. |
+| **Status** | Open; documented Week 5; not fixed (out of scope for a spec week). Correctness risk covered by the constraint; maintenance cost remains. |
+
+---
+
 ## Summary by Severity
 
 | Severity | Finding | Status | Week 1 Action |
@@ -228,6 +274,17 @@ logged here as pre-existing debt; not fixed, out of scope for "parts we touched"
 | **High** | D20: `audit_logs` mutable + seeded plaintext PAN | Open (pre-existing) | Teeth 2026-07-19. No append-only trigger (has `deleted_at`), rows UPDATE/DELETE-able; seed writes raw PAN into `detail`. Forgeable "audit" contradicts README SOX claim. Add append-only trigger + scrub seed. Own PR. |
 | **Medium** | D21: Postgres/Redis host-published in base compose | Open (pre-existing) | Teeth 2026-07-19. `5432`/`6379` published to host bypass app-layer authz. Drop `ports:` (keep `expose`). Own PR. |
 | **Medium** | D22: Redactor missed unlabeled dot/slash/tab/multi-space SSN | **Fixed** | Teeth 2026-07-19. **The one finding in code our features introduced** (Week-1 redactor). Generalized `3a-bis` + widened `3b`; resynced 7 copies; regression tests added. Fixed on `fix/redactor-ssn-separator-blindspots`. |
+| **High** | D3: Unlocked read-modify-write on `balances` loses concurrent applies | Open — **fix specified, not built** | Week 5. Cited in code four times since the baseline, never logged and never measured. **Measured 2026-08-02:** 8 concurrent applies captured $800.00 and credited $600.00 — $200 taken, never applied. Fix is an atomic `UPDATE balances SET balance = balance - :amount` in one transaction with an append-only `payment_applications` row (ADR 0013, spec D3d). **Not fixed by the idempotency key** — distinct defect. |
+| **Medium** | D23: The charge handler exists twice, writing the same `payments` table | Open (ours by omission) | Week 5. ADR 0004 copied the handler into `payment-service` and left the original routed in `servicing-service`; both INSERT into `payments`, both carry the same "no idempotency check" comment. Fix-propagation risk, same shape as D15. It is the reason ADR 0013 enforces idempotency with a DB constraint rather than in service code. Retire the servicing charge path; own PR. |
+
+**Week 5 status changes (2026-08-02, spec-only — designs recorded, nothing built):**
+**D19** measured and design recorded (client-minted key + partial unique index + insert-first
+claim before the processor call). **D13** design recorded, superseding ADR 0003 — CVV dropped
+and purged, PAN tokenized in the browser, purge migration must rewrite the table or the bytes
+survive. **D8** split into (a) a missing `X-Internal-Service` gate on `apply-payment`, which
+is money creation and is not an authorization model problem, and (b) genuine RBAC, which
+stays deferred. **D2** narrowed: the atomicity half is now D3 with a fix specified; the float
+columns and the ledger stay open.
 
 ---
 
