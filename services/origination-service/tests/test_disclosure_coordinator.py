@@ -39,7 +39,10 @@ def _document(figures=None) -> str:
         {
             "heading": "Truth in Lending Disclosure",
             "figures": figures or FIGURES,
-            "payment_terms": "48 monthly payments.",
+            # Digit-free: the prose fields carry no figures (see the maker prompt) —
+            # a restated amount is both an unchecked second copy and, concatenated
+            # with its neighbours, a Luhn-valid run the PII leak guard masks.
+            "payment_terms": "Equal monthly payments, due the same day each month.",
             "prepayment": "No penalty for early payoff.",
         }
     )
@@ -283,3 +286,73 @@ def test_the_maker_is_given_figures_as_exact_strings():
     rendered = coordinator.client.adapter.calls[0].messages[0]["content"]
     for value in FIGURES.values():
         assert value in rendered
+
+
+class TestProseFieldsCarryNoDigits:
+    """Found by running the maker against a real model on Bedrock, not FakeAdapter.
+
+    Haiku wrote a borrower summary restating four money figures in one sentence. The PII
+    leak guard runs the redactor over the model's output, and the redactor's PAN scan is
+    deliberately separator-free within a single quoted value — so the concatenated digits
+    of "17460.00 ... 3628.71 ... 21088.71 ... 439.35" formed an 18-digit run that passed
+    Luhn and was masked as a card number. `guard_output` then rejected the whole document
+    and the endpoint returned 503.
+
+    Roughly one in ten such runs is Luhn-valid, so the failure is intermittent: the same
+    loan renders on one attempt and fails on the next. Canned FakeAdapter responses never
+    produced prose with enough figures to collide.
+    """
+
+    def test_the_schema_forbids_digits_in_the_prose_fields(self):
+        from app.prompts.disclosure_assemble import OUTPUT_SCHEMA
+
+        props = OUTPUT_SCHEMA["properties"]
+        for field in ("payment_terms", "prepayment"):
+            assert props[field].get("pattern") == r"^\D*$", field
+
+    def test_a_restated_figure_in_prose_fails_the_document(self):
+        """The contract is enforced, not merely requested in the prompt."""
+        document = json.dumps(
+            {
+                "heading": "Truth in Lending Disclosure",
+                "figures": dict(FIGURES),
+                "payment_terms": "You will make 48 monthly payments of 439.35.",
+                "prepayment": "No penalty for early payoff.",
+            }
+        )
+        coordinator, calls = _coordinator([document, _narration()])
+
+        with pytest.raises(Exception) as excinfo:
+            coordinator.run(1)
+        assert "pattern" in str(excinfo.value)
+        assert calls["persist"] == 0, "a rejected document must never be persisted"
+
+    def test_the_exact_output_that_broke_the_live_run_is_masked_as_a_pan(self):
+        """The collision itself, pinned, in the shape it actually occurred.
+
+        The PAN scan runs per QUOTED value, which is why the model's JSON is the trigger
+        and a bare sentence is not: the quotes delimit one field, and the whole field's
+        digits are Luhn-checked as a single run. If the heuristic ever stops globbing
+        these, this test says so rather than the digit-free rule quietly becoming cargo
+        cult.
+        """
+        from app.redactor import PiiRedactor
+
+        output = json.dumps(
+            {
+                "borrower_summary": (
+                    "You are borrowing 17460.00. You will pay a finance charge of "
+                    "3628.71. The total amount you will pay back is 21088.71."
+                )
+            }
+        )
+        assert PiiRedactor.redact(output) != output
+        assert "(PAN)" in PiiRedactor.redact(output)
+
+    def test_an_individual_figure_is_not_masked(self):
+        """The constraint is about several figures sharing one value, not about digits
+        being dangerous — `figures` must survive the same guard untouched."""
+        from app.redactor import PiiRedactor
+
+        for value in FIGURES.values():
+            assert PiiRedactor.redact(value) == value

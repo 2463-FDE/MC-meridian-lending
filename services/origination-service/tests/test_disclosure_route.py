@@ -39,7 +39,7 @@ def _document(figures=None) -> str:
         {
             "heading": "Truth in Lending Disclosure",
             "figures": figures or FIGURES,
-            "payment_terms": "48 monthly payments.",
+            "payment_terms": "Equal monthly payments.",
             "prepayment": "No penalty.",
         }
     )
