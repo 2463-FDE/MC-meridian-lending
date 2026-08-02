@@ -111,19 +111,48 @@ export default function UnderwritingDetailPage() {
   const [actionBusy, setActionBusy] = useState(false);
   const [assistant, setAssistant] = useState<AssistantResult | null>(null);
 
+  // Route generation. Next.js reuses this page component across /underwriting/[appId]
+  // navigations, so a request can outlive the application it was fired from. Each handler
+  // captures this counter when it starts and compares on completion: anything from before
+  // the last navigation is dropped. Generations rather than appIds, so navigating away and
+  // BACK to the same application still discards the earlier in-flight call.
+  const routeGenRef = useRef(0);
+
+  // Per-application state reset. Every value below describes ONE application, so without
+  // this the previous applicant's decision, assistant card, offer and boarded loan id stay
+  // on the next applicant's screen (PR review). The idempotency keys reset with them: a key
+  // identifies one attempt on one page. Declared BEFORE the load effect so the generation
+  // is bumped before load captures it; the key refs are declared further down but exist by
+  // the time any effect body runs.
+  useEffect(() => {
+    routeGenRef.current += 1;
+    setDecision(null);
+    setAssistant(null);
+    setOffer(null);
+    setBoardedLoanId(null);
+    setActionMsg(null);
+    setActionErr(null);
+    setActionBusy(false);
+    decisionKeyRef.current = null;
+    assistantKeyRef.current = null;
+  }, [appId]);
+
   const load = useCallback(async () => {
     if (!appId) return;
+    const gen = routeGenRef.current;
     setLoading(true);
     setError(null);
     try {
       const a = (await apiGet(`/los/applications/${appId}`)) as Application;
+      if (routeGenRef.current !== gen) return;
       setApp(a);
       if (a.offer) setOffer(a.offer);
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setError(errMsg(err, "Could not load this application."));
       setApp(null);
     } finally {
-      setLoading(false);
+      if (routeGenRef.current === gen) setLoading(false);
     }
   }, [appId]);
 
@@ -141,6 +170,7 @@ export default function UnderwritingDetailPage() {
 
   async function runDecision() {
     if (!appId) return;
+    const gen = routeGenRef.current;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
@@ -151,13 +181,20 @@ export default function UnderwritingDetailPage() {
         undefined,
         { "Idempotency-Key": decisionKeyRef.current }
       )) as DecisionResult;
+      if (routeGenRef.current !== gen) return;
       setDecision(res);
       setApp((prev) => (prev ? { ...prev, decision: res.decision } : prev));
+      // A manual decision supersedes whatever the assistant last reported: that card's
+      // summary, principal reasons, decided_at and outcome describe an EARLIER decision
+      // event. Leaving it would put two record-backed but conflicting outcomes on one
+      // screen. Explain repopulates it from the current record on demand (PR review).
+      setAssistant(null);
       setActionMsg(`Decision recorded: ${res.decision}.`);
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setActionErr(errMsg(err, "Could not run a decision."));
     } finally {
-      setActionBusy(false);
+      if (routeGenRef.current === gen) setActionBusy(false);
     }
   }
 
@@ -167,22 +204,26 @@ export default function UnderwritingDetailPage() {
   // the refreshed result -- the operational counterpart to the borrower's retry.
   async function recheckKyc() {
     if (!appId) return;
+    const gen = routeGenRef.current;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
     try {
       await apiPost(`/los/applications/${appId}/recheck-kyc`, undefined);
       await load();
+      if (routeGenRef.current !== gen) return;
       setActionMsg("Identity verification re-run.");
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setActionErr(errMsg(err, "Could not re-run identity verification."));
     } finally {
-      setActionBusy(false);
+      if (routeGenRef.current === gen) setActionBusy(false);
     }
   }
 
   async function makeOffer() {
     if (!app || !appId) return;
+    const gen = routeGenRef.current;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
@@ -193,13 +234,15 @@ export default function UnderwritingDetailPage() {
         annual_rate_pct: OFFER_RATE_PCT,
         term_months: app.term_months,
       })) as { app_id: string | number; disclosure?: Offer; offer?: Offer };
+      if (routeGenRef.current !== gen) return;
       const disc = res.disclosure ?? res.offer ?? null;
       setOffer(disc);
       setActionMsg("Offer generated.");
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setActionErr(errMsg(err, "Could not generate an offer."));
     } finally {
-      setActionBusy(false);
+      if (routeGenRef.current === gen) setActionBusy(false);
     }
   }
 
@@ -211,6 +254,13 @@ export default function UnderwritingDetailPage() {
   // confirmed success, so a later intentional run re-scores current state instead of
   // replaying the recorded event. 503 = LLM feature off or provider unavailable.
   const assistantKeyRef = useRef<string | null>(null);
+
+  // An assistant response must describe the application it was requested for. Checked
+  // before ANY state write, the assistant card included: a mismatched application_id means
+  // the record belongs to another applicant and can never be shown on this screen.
+  function isForApplication(res: AssistantResult, expectedAppId: string): boolean {
+    return String(res.application_id) === String(expectedAppId);
+  }
 
   // One mapping from an assistant result onto the primary decision panel, used by BOTH
   // Run and Explain. Both report the same append-only decision record, so the panel must
@@ -235,6 +285,8 @@ export default function UnderwritingDetailPage() {
 
   async function runAssistant() {
     if (!appId) return;
+    const requestAppId = appId;
+    const gen = routeGenRef.current;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
@@ -245,6 +297,13 @@ export default function UnderwritingDetailPage() {
         undefined,
         { "Idempotency-Key": assistantKeyRef.current }
       )) as AssistantResult;
+      if (routeGenRef.current !== gen) return;
+      if (!isForApplication(res, requestAppId)) {
+        setActionErr(
+          "The AI assistant returned a result for a different application — the decision panel was not updated."
+        );
+        return;
+      }
       setAssistant(res);
       // Fail closed on a 200 that carries no recorded outcome: an assistant run IS a
       // regulated decision, so a response missing the outcome is not a success. Leave the
@@ -269,14 +328,17 @@ export default function UnderwritingDetailPage() {
       assistantKeyRef.current = null;
       setActionMsg("AI assistant ran the decision.");
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setActionErr(errMsg(err, "The AI assistant is unavailable."));
     } finally {
-      setActionBusy(false);
+      if (routeGenRef.current === gen) setActionBusy(false);
     }
   }
 
   async function explainAssistant() {
     if (!appId) return;
+    const requestAppId = appId;
+    const gen = routeGenRef.current;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
@@ -284,6 +346,13 @@ export default function UnderwritingDetailPage() {
       const res = (await apiGet(
         `/los/assistant/decisions/${appId}`
       )) as AssistantResult;
+      if (routeGenRef.current !== gen) return;
+      if (!isForApplication(res, requestAppId)) {
+        setActionErr(
+          "The AI assistant returned a result for a different application — the decision panel was not updated."
+        );
+        return;
+      }
       setAssistant(res);
       // Explain is read-only but NOT stale-safe on its own: the GET reports the CURRENT
       // recorded decision (assistant.py _validated_final fetches the record unscoped for
@@ -302,14 +371,16 @@ export default function UnderwritingDetailPage() {
       }
       setActionMsg("AI assistant explained the recorded decision (no re-score).");
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setActionErr(errMsg(err, "The AI assistant is unavailable."));
     } finally {
-      setActionBusy(false);
+      if (routeGenRef.current === gen) setActionBusy(false);
     }
   }
 
   async function acceptAndBoard() {
     if (!appId) return;
+    const gen = routeGenRef.current;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
@@ -317,12 +388,14 @@ export default function UnderwritingDetailPage() {
       const res = (await apiPost(`/los/applications/${appId}/accept`)) as {
         loan_id: string | number;
       };
+      if (routeGenRef.current !== gen) return;
       setBoardedLoanId(res.loan_id);
       setActionMsg(`Boarded to servicing as loan #${String(res.loan_id)}.`);
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setActionErr(errMsg(err, "Could not accept and board this application."));
     } finally {
-      setActionBusy(false);
+      if (routeGenRef.current === gen) setActionBusy(false);
     }
   }
 
