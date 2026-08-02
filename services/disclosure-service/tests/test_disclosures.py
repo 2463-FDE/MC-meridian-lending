@@ -456,7 +456,7 @@ def test_transition_unknown_disclosure_is_not_found(client):
     ],
 )
 def test_the_happy_path_transitions_are_allowed(client, current, target):
-    _with_session(StubSession(disclosure=_disclosure(current)))
+    _with_session(StubSession(disclosure=_disclosure(current), provenance_row=CHAIN_ROW))
     response = _transition(client, {"to_status": target})
     assert response.status_code == 200, response.text
     assert response.json()["status"] == target
@@ -488,7 +488,9 @@ def test_illegal_transitions_are_refused(client, current, target):
 
 
 def test_delivering_sets_delivered_at_exactly_once(client):
-    session = _with_session(StubSession(disclosure=_disclosure("approved")))
+    session = _with_session(
+        StubSession(disclosure=_disclosure("approved"), provenance_row=CHAIN_ROW)
+    )
     response = _transition(client, {"to_status": "delivered"})
 
     assert response.status_code == 200
@@ -556,7 +558,11 @@ def test_delivery_after_the_loan_is_boarded_is_a_timing_violation(client):
     """Reg Z 1026.17(b): the disclosure is made before consummation. A boarded loan is
     this system's consummation event."""
     session = _with_session(
-        StubSession(disclosure=_disclosure("approved"), consummated=True)
+        StubSession(
+            disclosure=_disclosure("approved"),
+            consummated=True,
+            provenance_row=CHAIN_ROW,
+        )
     )
     response = _transition(client, {"to_status": "delivered"})
 
@@ -571,7 +577,13 @@ def test_delivery_after_the_loan_is_boarded_is_a_timing_violation(client):
 def test_a_concurrent_transition_loses_rather_than_double_applying(client):
     """Two officers acting at once: the guarded UPDATE matches zero rows for the loser,
     which must surface as a conflict instead of an exception from the freeze trigger."""
-    _with_session(StubSession(disclosure=_disclosure("approved"), update_rowcount=0))
+    _with_session(
+        StubSession(
+            disclosure=_disclosure("approved"),
+            update_rowcount=0,
+            provenance_row=CHAIN_ROW,
+        )
+    )
     response = _transition(client, {"to_status": "delivered"})
 
     assert response.status_code == 409
@@ -626,3 +638,54 @@ def test_the_orm_metadata_has_no_unresolvable_foreign_keys():
     for table in models.Base.metadata.tables.values():
         for foreign_key in table.foreign_keys:
             foreign_key.column  # resolves, or raises NoReferencedTableError
+
+
+def test_delivery_refuses_an_incomplete_provenance_chain(client):
+    """The pipeline gates on this at stage 5 and the UI disables the button, but the
+    lifecycle endpoint is reachable without either. Delivery is the irreversible step and
+    the row freezes the moment it lands, so the server must enforce it too."""
+    session = _with_session(
+        StubSession(
+            disclosure=_disclosure("approved"),
+            provenance_row={**CHAIN_ROW, "application_id": None, "applicant_id": None},
+        )
+    )
+    response = _transition(client, {"to_status": "delivered"})
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "provenance chain is incomplete" in detail
+    assert "application_id" in detail and "applicant_id" in detail
+    assert session.commits == 0
+    assert not any(
+        sql.strip().upper().startswith("UPDATE") for sql, _ in session.statements
+    )
+
+
+def test_delivery_proceeds_when_the_chain_is_whole(client):
+    session = _with_session(
+        StubSession(disclosure=_disclosure("approved"), provenance_row=CHAIN_ROW)
+    )
+    response = _transition(client, {"to_status": "delivered"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "delivered"
+    assert session.commits == 1
+
+
+@pytest.mark.parametrize("target", ["in_review", "approved", "draft"])
+def test_only_delivery_pays_for_the_chain_check(client, target):
+    """The check is a query; running it on every transition would cost a read per click
+    for a rule that only matters at the irreversible step."""
+    current = {"in_review": "draft", "approved": "in_review", "draft": "in_review"}[
+        target
+    ]
+    session = _with_session(
+        StubSession(disclosure=_disclosure(current), provenance_row=CHAIN_ROW)
+    )
+    _transition(
+        client,
+        {"to_status": target, "reason_code": "wording" if target == "draft" else None},
+    )
+
+    assert not any("v_disclosure_provenance" in sql for sql, _ in session.statements)

@@ -395,6 +395,7 @@ def transition_disclosure(
 
     values = {"status": target}
     if target == "delivered":
+        _refuse_if_chain_incomplete(session, disclosure_id)
         _refuse_if_already_consummated(session, row.offer_id)
         # The only write of delivered_at, and the only status that sets it. The DDL check
         # constraint asserts the same coupling from the other side.
@@ -429,6 +430,40 @@ def transition_disclosure(
         routed_to or "",
     )
     return TransitionOut(**_disclosure_out(row).model_dump(), routed_to=routed_to)
+
+
+def _refuse_if_chain_incomplete(session: Session, disclosure_id: int) -> None:
+    """Delivery is the irreversible step, so the chain is checked here too.
+
+    The pipeline already gates on this at stage 5, but the lifecycle is reachable without
+    it — a disclosure whose offer carries no `app_id` walks to a NULL application and
+    applicant. Leaving the check only in the pipeline (and in the UI, which disables the
+    button) would mean the API enforces less than the screen does, and the row that
+    escapes is frozen the moment it is written.
+    """
+    row = (
+        session.execute(_PROVENANCE_SQL, {"disclosure_id": disclosure_id})
+        .mappings()
+        .first()
+    )
+    missing = (
+        [edge for edge in _CHAIN_EDGES if row.get(edge) is None]
+        if row is not None
+        else list(_CHAIN_EDGES)
+    )
+    if missing:
+        log.error(
+            "refusing delivery of disclosure_id=%s: incomplete chain missing=%s",
+            disclosure_id,
+            ",".join(missing),
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "provenance chain is incomplete ("
+                f"{', '.join(missing)}); refusing to deliver"
+            ),
+        )
 
 
 def _refuse_if_already_consummated(session: Session, offer_id: int) -> None:

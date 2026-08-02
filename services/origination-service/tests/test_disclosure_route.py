@@ -349,3 +349,16 @@ def test_a_downstream_500_is_not_reported_as_a_client_error(client, lifecycle):
     state["chain_status"] = 500
     response = client.get("/applications/1/disclosure", headers=OFFICER)
     assert response.status_code == 502
+
+
+def test_the_internal_policy_band_is_not_proxied_to_the_borrower(client, lifecycle):
+    """Every other route exposing `policy_band` is officer-only (`/assistant/*`); this one
+    admits the owning borrower. Proxying the view verbatim would make an internal
+    underwriting attribute borrower-visible for the first time."""
+    _, state = lifecycle
+    state["chain"] = {**COMPLETE_CHAIN, "policy_band": "A", "decision_outcome": "approve"}
+    body = client.get("/applications/1/disclosure", headers=OFFICER).json()
+
+    assert "policy_band" not in body
+    # The outcome stays: the borrower already knows they were approved.
+    assert body["decision_outcome"] == "approve"

@@ -227,7 +227,14 @@ def read_disclosure(
     owner, or token-holder only (ADR 0010).
     """
     authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
-    return _read_chain(app_id)
+    chain = _read_chain(app_id)
+    # `policy_band` is the internal underwriting band. Every other route that exposes it
+    # (`/assistant/*`) is officer-only; this one admits the owning borrower, so proxying
+    # the view verbatim would make an internal risk attribute borrower-visible for the
+    # first time. The disclosed figures and the chain itself are theirs to see; the band
+    # they were scored into is not, and nothing on this screen uses it.
+    chain.pop("policy_band", None)
+    return chain
 
 
 @app.post("/applications/{app_id}/disclosure/transition")
