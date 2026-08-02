@@ -9,10 +9,12 @@ Two providers are supported (`provider`): `"anthropic"` (direct API, needs
 `CLAUDE_API_KEY`) and `"bedrock"` (Claude on Amazon Bedrock, needs AWS
 credentials — see `BedrockAdapter`, not `CLAUDE_API_KEY`).
 """
+
 import os
 from dataclasses import dataclass, field
 
 from .errors import LLMConfigError
+from .logging_setup import get_llm_logger
 
 # Haiku 4.5 — fastest/cheapest, appropriate for loan summarization (ADR 0005).
 _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
@@ -21,6 +23,32 @@ _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 _DEFAULT_BEDROCK_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 _PROVIDERS = ("anthropic", "bedrock")
+
+# Opt-in trace-content flag. OFF unless the value is exactly "true" (case-insensitive,
+# surrounding whitespace ignored) — see trace_content_enabled.
+_TRACE_CONTENT_ENV = "LLM_TRACE_CONTENT"
+
+
+def trace_content_enabled() -> bool:
+    """True when prompt/response CONTENT may be exported to LangSmith.
+
+    Off by default, and deliberately not part of `LLMConfig`: the trace strippers in
+    `client.py` / `transport.py` are module-level functions handed to `@traceable` at
+    import time and receive only the traced call's arguments, so there is no config
+    object to thread through them. Reading the environment at call time also means a
+    test can flip the flag without rebuilding a client.
+
+    **Only the exact string "true" enables it.** `1`, `yes`, `on`, and a typo all read as
+    off. A flag that governs whether customer lending content leaves the building should
+    fail closed on anything it does not positively recognize — the opposite convention
+    (anything non-empty is true) turns `LLM_TRACE_CONTENT=false` into an export.
+
+    Non-production only. The prompt body keeps the business facts the model needs
+    (`build_request` redacts identity PII but deliberately preserves loan amount, income,
+    employment tenure, purpose, history), so enabling this ships customer lending content
+    to a third-party telemetry vendor. Use it against synthetic applicants.
+    """
+    return os.getenv(_TRACE_CONTENT_ENV, "").strip().lower() == "true"
 
 
 @dataclass(frozen=True)
@@ -40,12 +68,12 @@ class LLMConfig:
     api_key: str = field(repr=False)
     provider: str = "anthropic"
     model: str = _DEFAULT_MODEL
-    timeout: float = 30.0            # seconds, enforced on every call
-    max_retries: int = 3            # attempts for transient (429/5xx) failures
-    max_tokens: int = 1024          # response cap sent to the provider
-    temperature: float = 0.0        # deterministic summaries
-    token_budget: int = 20_000      # per-request ceiling; refuse if exceeded
-    aws_region: str | None = None   # bedrock only; None lets boto3 resolve it
+    timeout: float = 30.0  # seconds, enforced on every call
+    max_retries: int = 3  # attempts for transient (429/5xx) failures
+    max_tokens: int = 1024  # response cap sent to the provider
+    temperature: float = 0.0  # deterministic summaries
+    token_budget: int = 20_000  # per-request ceiling; refuse if exceeded
+    aws_region: str | None = None  # bedrock only; None lets boto3 resolve it
 
     def redacted(self) -> dict:
         """Config safe to log — never includes the credential."""
@@ -138,6 +166,16 @@ def load_llm_config() -> LLMConfig:
         )
 
     default_model = _DEFAULT_BEDROCK_MODEL if provider == "bedrock" else _DEFAULT_MODEL
+    if trace_content_enabled():
+        # Loud at boot, once, on the redacting logger. A deploy that exports customer
+        # lending content to a third party must not do so silently — the whole point of
+        # the flag is that someone chose it, so the log line is the evidence they did.
+        get_llm_logger().warning(
+            "%s=true: prompt and response CONTENT will be exported to LangSmith. "
+            "Non-production only; use synthetic applicants.",
+            _TRACE_CONTENT_ENV,
+        )
+
     return LLMConfig(
         api_key=api_key,
         provider=provider,

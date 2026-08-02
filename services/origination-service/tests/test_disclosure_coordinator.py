@@ -340,6 +340,39 @@ def test_graph_invocation_suppresses_langsmith_tracing(monkeypatch):
     assert False in seen, "run() never suppressed tracing for the graph invocation"
 
 
+def test_graph_suppression_is_not_relaxed_by_the_trace_content_flag(monkeypatch):
+    """`LLM_TRACE_CONTENT=true` opens up the `llm.transport` span — the prompt as sent and
+    the reply as received. It must NOT reach this guard. Graph state is a different and
+    much larger surface: every node's `DisclosureState`, on every transition, including
+    the figures the borrower's document is built from. Spec D4 requires the suppression as
+    a control, so it stays unconditional rather than one env var away from off. Without
+    this test, a later "make the flag consistent" change would silently widen it."""
+    import contextlib
+
+    from app import disclosure_coordinator as mod
+
+    monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+
+    real_tracing_context = mod.tracing_context
+    seen = []
+
+    @contextlib.contextmanager
+    def spy(*, enabled=None, **kwargs):
+        seen.append(enabled)
+        with real_tracing_context(enabled=enabled, **kwargs):
+            yield
+
+    monkeypatch.setattr(mod, "tracing_context", spy)
+
+    coordinator, _ = _coordinator([_document(), _narration()])
+    coordinator.run(1)
+
+    assert seen and all(e is False for e in seen), (
+        f"graph tracing was enabled with LLM_TRACE_CONTENT=true (saw {seen})"
+    )
+
+
 def test_the_maker_is_given_figures_as_exact_strings():
     """A float reaching the prompt would be reformatted somewhere in the chain, and the
     maker would faithfully copy the reformatted value — the gate would then block a

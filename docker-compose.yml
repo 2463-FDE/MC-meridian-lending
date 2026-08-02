@@ -50,6 +50,10 @@ services:
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-2463-FDE}
+      # Adds prompt/response CONTENT to the traces above. Non-production only —
+      # the prompt keeps loan amount, income, employment tenure and purpose by
+      # design. Default "false", and only the exact string "true" enables it.
+      LLM_TRACE_CONTENT: ${LLM_TRACE_CONTENT:-false}
     # Internal-only (PR review): NOT host-published. The gateway (:8000) is the sole
     # trust boundary — downstream services trust the forwarded X-User-Role/X-User-Id,
     # so a direct host hit on this port would let a caller forge officer identity and

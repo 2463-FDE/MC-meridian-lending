@@ -50,6 +50,14 @@ document — would ship to LangSmith unredacted. `run()` wraps the invoke in
 `langsmith.run_helpers.tracing_context(enabled=False)`, which is checked ahead of the env
 var (`langsmith.utils.tracing_is_enabled`) and suppresses the tracer for this call
 regardless of the global setting.
+
+`LLM_TRACE_CONTENT` does **not** reach this guard. That flag opens up the `llm.transport`
+span — the prompt as sent and the reply as received — which is what a person debugging a
+prompt actually wants. Graph state is a different and larger surface: every node's
+`DisclosureState`, including figures the borrower's document is built from, on every node
+transition. Spec D4 requires this suppression as a control, so it stays unconditional
+rather than becoming one env var away from off. If per-node visibility is ever genuinely
+needed, that is its own decision with its own flag, not a widening of this one.
 """
 
 from __future__ import annotations

@@ -27,6 +27,7 @@ from app.llm.adapter import CompletionRequest
 from app.llm.errors import LLMError, LLMHTTPError, LLMTimeoutError
 from app.llm.request_builder import build_request, estimate_tokens, redact_json
 from app.llm.client import _trace_complete_inputs, _trace_complete_outputs
+from app.llm.config import trace_content_enabled
 from app.llm.transport import (
     _trace_transport_inputs,
     _trace_transport_outputs,
@@ -1507,3 +1508,153 @@ def test_redactor_catches_spaced_ssn():
     out = PiiRedactor.redact("applicant SSN 412 55 9981 on file")
     assert "412 55 9981" not in out
     assert "9981" in out  # last-4 preserved for audit
+
+
+# --- LLM_TRACE_CONTENT: opt-in trace content, fail-closed ------------------
+
+
+def test_trace_content_disabled_by_default(monkeypatch):
+    # The default is what runs in production. Assert it directly rather than relying on
+    # the surrounding tests happening not to set the variable.
+    monkeypatch.delenv("LLM_TRACE_CONTENT", raising=False)
+    assert trace_content_enabled() is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "false", "False", "0", "no", "off", "1", "yes", "on", "TRU", "true1", " "],
+)
+def test_trace_content_only_the_exact_string_true_enables(monkeypatch, value):
+    # Fail closed on anything not positively recognized. "1"/"yes"/"on" are included on
+    # purpose: under the common "any non-empty value is true" convention they would all
+    # enable content export, and so would the typo `LLM_TRACE_CONTENT=false`.
+    monkeypatch.setenv("LLM_TRACE_CONTENT", value)
+    assert trace_content_enabled() is False
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "True", "  true  "])
+def test_trace_content_true_is_case_and_whitespace_tolerant(monkeypatch, value):
+    monkeypatch.setenv("LLM_TRACE_CONTENT", value)
+    assert trace_content_enabled() is True
+
+
+def test_transport_trace_exports_prompt_when_flag_on(monkeypatch):
+    # The point of the flag: the prompt as actually sent is visible. This is the
+    # post-build_request payload, so identity PII is already redacted here.
+    monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
+    req = _req(
+        system="You are an underwriting assistant.",
+        messages=[{"role": "user", "content": '{"requested_amount": 42000}'}],
+    )
+    traced = _trace_transport_inputs({"req": req, "max_retries": 2})
+    assert traced["system"] == "You are an underwriting assistant."
+    assert traced["messages"] == [
+        {"role": "user", "content": '{"requested_amount": 42000}'}
+    ]
+    # operational metadata is unchanged, so cost/latency accounting still works
+    assert traced["model"] == "m" and traced["max_retries"] == 2
+
+
+def test_transport_trace_exports_raw_text_when_flag_on(monkeypatch):
+    monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    out = call_with_retry(
+        adapter, _req(), max_retries=0, sleep=lambda _: None, rng=lambda: 0.0
+    )
+    traced = _trace_transport_outputs(out)
+    assert traced["text"] == GOOD_SUMMARY
+    # usage metadata must survive alongside the text, or the span loses its cost
+    assert traced["usage_metadata"]["total_tokens"] == (
+        out.input_tokens + out.output_tokens
+    )
+
+
+def test_complete_output_trace_exports_validated_body_when_flag_on(monkeypatch):
+    monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
+    validated = {"summary": "Applicant requests $42,000.", "risk_flags": []}
+    traced = _trace_complete_outputs(validated)
+    assert traced["result"] == validated
+    assert traced["result_type"] == "dict"
+
+
+def test_complete_input_trace_stays_stripped_even_with_flag_on(monkeypatch):
+    # The asymmetry that matters: complete() receives PRE-redaction variables, so the
+    # flag must not open this span. The same content post-redaction is on llm.transport.
+    monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
+    traced = _trace_complete_inputs(
+        {
+            "prompt_name": "loan_summary",
+            "variables": {"applicant": "Jane Smith", "ssn": "412-55-9981"},
+        }
+    )
+    assert traced == {"prompt_name": "loan_summary"}
+    blob = json.dumps(traced)
+    assert "Jane Smith" not in blob and "412-55-9981" not in blob
+
+
+def test_idempotency_key_never_traced_even_with_flag_on(monkeypatch):
+    # The flag governs CONTENT. The idempotency_key omission is about a caller-supplied
+    # identifier making traces linkable to customer records — a separate concern that the
+    # flag must not relax.
+    monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
+    customer_key = "APP-2026-0042|maria.gomez@example.com"
+    req = _req(idempotency_key=customer_key)
+    transport = _trace_transport_inputs({"req": req, "max_retries": 1})
+    assert "idempotency_key" not in transport
+    assert customer_key not in json.dumps(transport)
+    root = _trace_complete_inputs(
+        {"prompt_name": "loan_summary", "idempotency_key": customer_key}
+    )
+    assert "idempotency_key" not in root
+
+
+class _CaptureHandler(logging.Handler):
+    """Collect records emitted on a specific logger, whatever its handlers do.
+
+    `logging_config.get_logger` sets `propagate = False` (so the service owns its
+    handlers and records do not double-print through uvicorn's root config), which makes
+    `caplog` blind to them. `capsys`/`capfd` are no better here: the StreamHandler bound
+    `sys.stderr` when the "llm" logger was first built, so whichever test triggered that
+    fixed the stream for the rest of the session. Both fixtures report "nothing was
+    logged" for a line that WAS logged — a false green on a security-relevant warning.
+    Attaching to the logger under test is the assertion that actually holds.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+def _boot_warnings(monkeypatch, **env) -> list[str]:
+    """Run load_llm_config() and return the WARNING messages the llm logger emitted."""
+    monkeypatch.setenv("CLAUDE_API_KEY", "k")
+    for key, value in env.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    handler = _CaptureHandler()
+    logger = logging.getLogger("llm")
+    logger.addHandler(handler)
+    try:
+        load_llm_config()
+    finally:
+        logger.removeHandler(handler)
+    return [
+        r.getMessage() for r in handler.records if r.levelno >= logging.WARNING
+    ]
+
+
+def test_trace_content_flag_warns_at_boot(monkeypatch):
+    # A deploy that exports customer content to a third party must not do it silently.
+    # The flag is a choice someone made; the log line is the evidence they made it.
+    messages = _boot_warnings(monkeypatch, LLM_TRACE_CONTENT="true")
+    assert any("LLM_TRACE_CONTENT" in m for m in messages), messages
+
+
+def test_no_boot_warning_when_flag_off(monkeypatch):
+    messages = _boot_warnings(monkeypatch, LLM_TRACE_CONTENT=None)
+    assert not any("LLM_TRACE_CONTENT" in m for m in messages), messages
