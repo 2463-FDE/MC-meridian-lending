@@ -2,13 +2,19 @@
 
 **Owner:** Dana (VP Lending Ops)
 **Date:** 2026-08-01
-**Status:** Draft — approved for build on `feature/disclosure-week4`. Three decisions still
-open (see *Open Decisions*); none blocks D1/D2, all block D3's migration shape.
+**Status:** Built — D1–D9 implemented on `feature/disclosure-week4` (PR #12). All four design
+decisions are settled (see *Open Decisions*, which records the reasoning and the rejected
+alternatives). What remains outstanding is not a design decision but two **client answers** —
+APR method of record and tolerance regime (see *Client Questions*); both can still change D1
+and D3, which is why ADR 0012 stays *Proposed* rather than *Accepted*.
+**Governs:** this spec governs implementation until ADR 0012 is accepted. ADR 0012 is written
+*from* this spec (deliverable D8); where the two ever disagree, the spec is authoritative and
+the ADR is the defect.
 **Source brief:** Dana — "Once an app is approved, generating the offer and the disclosure
 documents is still totally manual. Can you automate it — produce the offer and the TILA
 disclosures right after approval? The numbers look basically right to me. The fee and APR
 rules are scattered around the code a bit, but it works."
-**Related:** ADR 0012 (this week, pending), ADR 0002 (single shared DB), ADR 0005 (LLM
+**Related:** ADR 0012 (this week, proposed), ADR 0002 (single shared DB), ADR 0005 (LLM
 client), ADR 0006 (logging redaction), ADR 0008/0009 (decision events, append-only),
 ADR 0010 (ownership authz), ADR 0011 (mandatory KYC), Reg Z / 12 CFR 1026 App. J.
 
@@ -30,6 +36,44 @@ This week therefore delivers **correctness first, automation second**:
 4. A coordinated maker-checker multi-agent assembly pipeline that formats the document from
    numbers it is not allowed to compute, gated by a deterministic recompute + tolerance check.
 5. TILA test vectors as a blocking CI gate.
+
+## Minimum Build Slice
+
+The critical path, in dependency order. Everything below this list is either detail on one of
+these steps or a safeguard that only makes sense once the step it protects exists. Anyone
+picking this up should build in exactly this order — each step is landable and testable on its
+own, and each one is a prerequisite for the next.
+
+1. **Externalized fee loader, fail-closed** (D2). Everything downstream reads a fee; until
+   there is one authoritative rate the APR cannot be verified against anything. Fails closed
+   with no default — a silently defaulted fee moves a regulated number.
+   → `a865a4a`
+2. **Decimal actuarial APR + finance charge, using that loaded fee** (D1). The headline
+   defect. Depends on step 1 for its input.
+   → `0df7c76`
+3. **TILA vectors as a blocking CI job** (D7). Immediately after the math, not at the end of
+   the week: the original defect survived because the money test ran under `|| true`, so the
+   gate is part of the fix rather than a report on it. Expectations are pinned literals from
+   an independent solve — never regenerated from `compute_apr`.
+   → `faad1b8`, `97b08d8`
+4. **`disclosures` table + `offers.decision_event_id` + provenance view** (D3). The record the
+   pipeline writes into and the edge that makes it traceable. Needs the math settled first,
+   because the row stores a `compute_snapshot` of the inputs the figures came from.
+   → `5b567d6`, `8c468dd`
+5. **Deterministic verify gate before persistence** (D4/D5). Recompute-and-compare in plain
+   Python, owning every pass/fail. The assembly agents may only run behind it. Do not wire an
+   LLM into this flow before the gate exists — the gate is the control, the agents are the
+   convenience.
+   → `702c1fe`, `5ed1429`, `b386bff`
+6. **Thin frontend action + status, last** (D9). A button that triggers a pipeline whose
+   numbers are not yet verified is a liability, not a demo.
+   → `371e976`, `8ca880e`
+
+Steps 3 and 4 landed in that order because the gate protects the math, not the schema; the
+dependency runs 1 → 2 → {3, 4} → 5 → 6, with 3 and 4 independent of each other.
+
+Deliverables D6 (compliance hold / delivery lifecycle) and D8 (this ADR) attach to steps 5 and
+6 and are not on the critical path.
 
 ## Problem Statement
 
@@ -533,8 +577,8 @@ LangGraph pin resolution ──────────────────�
 
 ### Scope lock
 
-The intent is that ADR 0012 is written **once, from this spec, after the four open decisions
-are pinned** — not drafted now and amended later. That is why the decisions above are recorded
+The intent is that ADR 0012 is written **once, from this spec, after all four decisions are
+pinned** — not drafted early and amended later. That is why the decisions above are recorded
 here with their rationale and their rejected alternatives: the spec is the working document
 and absorbs the churn; the ADR is the settled record. If a decision changes after the ADR
 lands, it gets a superseding ADR, not an edit.

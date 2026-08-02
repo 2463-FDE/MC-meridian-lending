@@ -1,10 +1,14 @@
 # ADR 0012: Decimal Minor Units, Externalized Rule Config, and FK-as-Graph Provenance for TILA Disclosures
 
-- **Status:** **Proposed** — approved for build on `feature/disclosure-week4`. Two client
-  answers (APR method of record, tolerance regime) can still change D1/D3.
+- **Status:** **Proposed** — built and merged-pending on `feature/disclosure-week4` (PR #12).
+  Deliberately not *Accepted*: two client answers (APR method of record, tolerance regime) can
+  still change D1/D3. Accept once Dana answers; if either answer differs from what shipped, it
+  gets a superseding ADR, not an edit.
 - **Date:** 2026-08-01
 - **Author:** Claude Code
-- **Related:** `docs/spec-disclosure-week4.md` (source of truth), ADR 0002 (single shared DB),
+- **Related:** `docs/spec-disclosure-week4.md` — the source of truth, and it **governs
+  implementation until this ADR is accepted**; this ADR is written from it (spec deliverable
+  D8), so where the two disagree the spec is authoritative. ADR 0002 (single shared DB),
   ADR 0005 (LLM client guards), ADR 0006 (logging redaction), ADR 0008/0009 (append-only
   `decision_events`, LLM-never-scores), ADR 0010 (ownership authz), ADR 0011 (mandatory KYC),
   debt D2 (float money), Reg Z / 12 CFR 1026 App. J
