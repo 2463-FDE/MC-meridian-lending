@@ -125,6 +125,32 @@ def test_a_blocked_run_returns_the_typed_reason(client, monkeypatch):
     assert detail["reason"] == disclosure_coordinator.BlockReason.NOT_APPROVED
 
 
+def test_a_downstream_refusal_is_forwarded_verbatim_not_502(client, monkeypatch):
+    """`clients.post()` raises the same `httpx.HTTPStatusError` for "the service is down"
+    and "the service looked at this and said no" (a recompute disagreement). Collapsing
+    both into a generic 502 tells the officer the wrong thing — `_downstream` already
+    makes this distinction for the lifecycle proxy; the pipeline's own internal POSTs
+    need it too."""
+    _stub_db(monkeypatch)
+    monkeypatch.setattr(
+        disclosure_coordinator.LangGraphDisclosureCoordinator,
+        "_default_persist",
+        staticmethod(
+            lambda payload: (_ for _ in ()).throw(
+                disclosure_coordinator.DownstreamRefused(
+                    409,
+                    "recomputed disclosure disagrees with the persisted offer on apr; "
+                    "refusing to persist",
+                )
+            )
+        ),
+    )
+    response = client.post("/applications/1/disclosure", headers=OFFICER)
+
+    assert response.status_code == 409
+    assert "recomputed disclosure disagrees" in response.json()["detail"]
+
+
 def test_an_application_with_no_decision_event_cannot_produce_a_disclosure(
     client, monkeypatch
 ):
@@ -356,7 +382,11 @@ def test_the_internal_policy_band_is_not_proxied_to_the_borrower(client, lifecyc
     admits the owning borrower. Proxying the view verbatim would make an internal
     underwriting attribute borrower-visible for the first time."""
     _, state = lifecycle
-    state["chain"] = {**COMPLETE_CHAIN, "policy_band": "A", "decision_outcome": "approve"}
+    state["chain"] = {
+        **COMPLETE_CHAIN,
+        "policy_band": "A",
+        "decision_outcome": "approve",
+    }
     body = client.get("/applications/1/disclosure", headers=OFFICER).json()
 
     assert "policy_band" not in body

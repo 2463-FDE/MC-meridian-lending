@@ -172,6 +172,16 @@ def generate_disclosure(
         result = coordinator.run(app_id)
     except disclosure_coordinator.ApplicationNotFound:
         raise HTTPException(status_code=404, detail="application not found")
+    except disclosure_coordinator.DownstreamRefused as exc:
+        # The service answered and said no (a recompute disagreement, a missing offer) —
+        # an answer the officer needs to read, not the generic "unavailable" below.
+        log.warning(
+            "disclosure pipeline refused app_id=%s status=%s detail=%s",
+            app_id,
+            exc.status_code,
+            exc.detail,
+        )
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except LLMError as exc:
         log.error(
             "disclosure pipeline LLM failure app_id=%s: %s", app_id, type(exc).__name__
