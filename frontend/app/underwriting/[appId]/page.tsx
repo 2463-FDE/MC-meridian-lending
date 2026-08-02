@@ -49,6 +49,34 @@ interface Application {
   offer?: Offer;
 }
 
+// One walk of the provenance chain, as v_disclosure_provenance returns it (ADR 0012).
+// Every field is optional because a legacy offer genuinely has a partial chain — the view
+// reports that rather than hiding it, and so does this screen.
+interface Provenance {
+  disclosure_id?: number | null;
+  disclosure_status?: string | null;
+  disclosed_apr?: string | null;
+  fee_schedule_version?: string | null;
+  apr_method_version?: string | null;
+  content_fingerprint?: string | null;
+  delivered_at?: string | null;
+  offer_id?: number | null;
+  decision_event_id?: number | null;
+  decision_outcome?: string | null;
+  application_id?: number | null;
+  applicant_id?: number | null;
+  chain_complete?: boolean;
+  missing_edges?: string[];
+}
+
+const REJECT_REASONS = [
+  { value: "wording", label: "Wording — send back to the assembler" },
+  { value: "formatting", label: "Formatting — send back to the assembler" },
+  { value: "wrong_terms", label: "Wrong terms — back to decisioning" },
+  { value: "wrong_rate", label: "Wrong rate — back to decisioning" },
+  { value: "ineligible", label: "Not eligible — back to decisioning" },
+];
+
 interface DecisionResult {
   app_id: string | number;
   decision: string;
@@ -89,6 +117,21 @@ export default function UnderwritingDetailPage() {
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  const [provenance, setProvenance] = useState<Provenance | null>(null);
+  const [rejectReason, setRejectReason] = useState(REJECT_REASONS[0].value);
+
+  // A 404 here means "no disclosure yet", which is the normal state before the pipeline
+  // has run — not an error worth showing.
+  const loadDisclosure = useCallback(async () => {
+    if (!appId) return;
+    try {
+      setProvenance(
+        (await apiGet(`/los/applications/${appId}/disclosure`)) as Provenance
+      );
+    } catch {
+      setProvenance(null);
+    }
+  }, [appId]);
 
   const load = useCallback(async () => {
     if (!appId) return;
@@ -108,7 +151,8 @@ export default function UnderwritingDetailPage() {
 
   useEffect(() => {
     load();
-  }, [load]);
+    loadDisclosure();
+  }, [load, loadDisclosure]);
 
   // Idempotency key for the officer decision action. Generated once per page mount
   // and reused across retries (a timeout retry or second click replays the recorded
@@ -182,6 +226,47 @@ export default function UnderwritingDetailPage() {
     }
   }
 
+  async function generateDisclosure() {
+    if (!appId) return;
+    setActionBusy(true);
+    setActionErr(null);
+    setActionMsg(null);
+    try {
+      await apiPost(`/los/applications/${appId}/disclosure`);
+      await loadDisclosure();
+      setActionMsg("Disclosure generated and held for compliance review.");
+    } catch (err) {
+      // A 422 here is the verification gate refusing the document, not an outage. The
+      // reason it carries is the whole point of the gate, so it is shown verbatim.
+      setActionErr(errMsg(err, "Could not generate a disclosure."));
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function transitionDisclosure(toStatus: string, reasonCode?: string) {
+    if (!appId) return;
+    setActionBusy(true);
+    setActionErr(null);
+    setActionMsg(null);
+    try {
+      const res = (await apiPost(
+        `/los/applications/${appId}/disclosure/transition`,
+        { to_status: toStatus, reason_code: reasonCode ?? null }
+      )) as { status?: string; routed_to?: string | null };
+      await loadDisclosure();
+      setActionMsg(
+        res.routed_to
+          ? `Disclosure rejected; the work goes back to ${res.routed_to}.`
+          : `Disclosure is now ${String(res.status || toStatus).replace(/_/g, " ")}.`
+      );
+    } catch (err) {
+      setActionErr(errMsg(err, "Could not update the disclosure."));
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   async function acceptAndBoard() {
     if (!appId) return;
     setActionBusy(true);
@@ -227,6 +312,7 @@ export default function UnderwritingDetailPage() {
     (typeof app?.applicant === "string" ? app.applicant : "") ||
     "Applicant";
   const currentDecision = decision?.decision || app?.decision || null;
+  const disclosureStatus = provenance?.disclosure_status || null;
 
   return (
     <main className="wrap">
@@ -420,6 +506,150 @@ export default function UnderwritingDetailPage() {
               </div>
             </div>
           </div>
+        ) : null}
+      </div>
+
+      {/* TILA disclosure — generation, compliance hold, delivery (spec D4/D6/D9) */}
+      <h2>TILA disclosure</h2>
+      <div className="card">
+        <div className="spread" style={{ marginBottom: 16 }}>
+          <div>
+            <div className="card-title" style={{ marginBottom: 8 }}>
+              Document status
+            </div>
+            {disclosureStatus ? (
+              <StatusChip status={disclosureStatus} />
+            ) : (
+              <span className="muted">Not generated yet.</span>
+            )}
+            {provenance?.delivered_at ? (
+              <p className="hint" style={{ marginTop: 10 }}>
+                Delivered {shortDate(provenance.delivered_at)}.
+              </p>
+            ) : null}
+          </div>
+          <button
+            className="btn-ghost"
+            onClick={generateDisclosure}
+            disabled={actionBusy || !!disclosureStatus}
+            title={
+              disclosureStatus
+                ? "A disclosure already exists for this application."
+                : undefined
+            }
+          >
+            {actionBusy ? "Working…" : "Generate disclosure"}
+          </button>
+        </div>
+
+        {provenance && provenance.chain_complete === false ? (
+          <div className="alert alert-warn">
+            <strong>Incomplete provenance chain.</strong> Missing:{" "}
+            {(provenance.missing_edges || []).join(", ") || "unknown"}. This
+            disclosure cannot be traced end to end and must not be delivered.
+          </div>
+        ) : null}
+
+        {provenance?.disclosure_id ? (
+          <>
+            <div className="dl">
+              <div className="dl-row">
+                <dt>Disclosed APR</dt>
+                <dd>
+                  {provenance.disclosed_apr
+                    ? `${provenance.disclosed_apr}%`
+                    : "—"}
+                </dd>
+              </div>
+              <div className="dl-row">
+                <dt>Provenance</dt>
+                <dd>
+                  disclosure #{provenance.disclosure_id} → offer #
+                  {provenance.offer_id ?? "—"} → decision event #
+                  {provenance.decision_event_id ?? "—"} → application #
+                  {provenance.application_id ?? "—"} → applicant #
+                  {provenance.applicant_id ?? "—"}
+                </dd>
+              </div>
+              <div className="dl-row">
+                <dt>Rules applied</dt>
+                <dd>
+                  fees {provenance.fee_schedule_version || "—"} · APR{" "}
+                  {provenance.apr_method_version || "—"}
+                </dd>
+              </div>
+              <div className="dl-row">
+                <dt>Fingerprint</dt>
+                <dd>
+                  <code>{provenance.content_fingerprint || "—"}</code>
+                </dd>
+              </div>
+            </div>
+
+            <div
+              style={{
+                display: "flex",
+                gap: 8,
+                alignItems: "center",
+                flexWrap: "wrap",
+                marginTop: 16,
+              }}
+            >
+              {disclosureStatus === "draft" ? (
+                <button
+                  onClick={() => transitionDisclosure("in_review")}
+                  disabled={actionBusy}
+                >
+                  Send to compliance
+                </button>
+              ) : null}
+              {disclosureStatus === "in_review" ? (
+                <button
+                  onClick={() => transitionDisclosure("approved")}
+                  disabled={actionBusy}
+                >
+                  Approve
+                </button>
+              ) : null}
+              {disclosureStatus === "approved" ? (
+                <button
+                  onClick={() => transitionDisclosure("delivered")}
+                  disabled={actionBusy || provenance.chain_complete === false}
+                >
+                  Deliver to borrower
+                </button>
+              ) : null}
+              {disclosureStatus === "in_review" ||
+              disclosureStatus === "approved" ? (
+                <>
+                  <select
+                    value={rejectReason}
+                    onChange={(e) => setRejectReason(e.target.value)}
+                    disabled={actionBusy}
+                  >
+                    {REJECT_REASONS.map((r) => (
+                      <option key={r.value} value={r.value}>
+                        {r.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="secondary"
+                    onClick={() => transitionDisclosure("draft", rejectReason)}
+                    disabled={actionBusy}
+                  >
+                    Reject
+                  </button>
+                </>
+              ) : null}
+              {disclosureStatus === "delivered" ? (
+                <p className="hint" style={{ margin: 0 }}>
+                  Delivered disclosures are frozen — the record of what the
+                  borrower was shown cannot be edited.
+                </p>
+              ) : null}
+            </div>
+          </>
         ) : null}
       </div>
 
