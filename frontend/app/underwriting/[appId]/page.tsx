@@ -212,6 +212,27 @@ export default function UnderwritingDetailPage() {
   // replaying the recorded event. 503 = LLM feature off or provider unavailable.
   const assistantKeyRef = useRef<string | null>(null);
 
+  // One mapping from an assistant result onto the primary decision panel, used by BOTH
+  // Run and Explain. Both report the same append-only decision record, so the panel must
+  // show the same record-derived facts either way; a single copy is what keeps the two
+  // paths from drifting apart on regulated fields. Everything here is record-derived
+  // (recorded facts win, ADR 0009 §5). Reason parity: DecisionOut.reason is the FIRST
+  // principal reason; score parity: DecisionOut.score is an int. Returns false when the
+  // response carries no recorded outcome so the caller can fail closed rather than
+  // half-update the panel.
+  function applyRecordedDecision(res: AssistantResult): boolean {
+    const outcome = res.outcome;
+    if (!outcome) return false;
+    setApp((prev) => (prev ? { ...prev, decision: outcome } : prev));
+    setDecision({
+      app_id: res.application_id,
+      decision: outcome,
+      score: typeof res.score === "number" ? Math.round(res.score) : undefined,
+      adverse_action_reason: res.principal_reasons?.[0]?.reason,
+    });
+    return true;
+  }
+
   async function runAssistant() {
     if (!appId) return;
     setActionBusy(true);
@@ -231,26 +252,16 @@ export default function UnderwritingDetailPage() {
       // key so a retry replays that attempt instead of recording a second event.
       // (PR #11 review; the server already refuses an unrecorded decision, this is the
       // client-side backstop for a drifted contract or a proxy-mangled body.)
-      if (!res.outcome) {
+      //
+      // On success this REPLACES the standard-decision state with THIS run's recorded
+      // facts rather than clearing it: blanking them hid fields officers rely on, while
+      // leaving them would show a PRIOR run's data beside a fresh outcome.
+      if (!applyRecordedDecision(res)) {
         setActionErr(
           "The AI assistant returned no recorded outcome — the decision panel was not updated."
         );
         return;
       }
-      setApp((prev) => (prev ? { ...prev, decision: res.outcome } : prev));
-      // REPLACE the standard-decision state with THIS run's recorded facts rather than
-      // clearing it. Both paths write the same append-only decision event, so the primary
-      // panel must show the assistant run's score and adverse-action reason exactly as it
-      // does for Run decision -- blanking them hid fields officers rely on, while leaving
-      // them would show a PRIOR run's data beside a fresh outcome. Everything here is
-      // record-derived (recorded facts win, ADR 0009 §5). Reason parity: DecisionOut.reason
-      // is the FIRST principal reason; score parity: DecisionOut.score is an int.
-      setDecision({
-        app_id: res.application_id,
-        decision: res.outcome,
-        score: typeof res.score === "number" ? Math.round(res.score) : undefined,
-        adverse_action_reason: res.principal_reasons?.[0]?.reason,
-      });
       // Rotate the idempotency key after a confirmed success so a later intentional
       // "Run AI assistant" click re-scores current state rather than replaying this
       // recorded event. A failed run leaves the key set (the catch below does not
@@ -274,6 +285,21 @@ export default function UnderwritingDetailPage() {
         `/los/assistant/decisions/${appId}`
       )) as AssistantResult;
       setAssistant(res);
+      // Explain is read-only but NOT stale-safe on its own: the GET reports the CURRENT
+      // recorded decision (assistant.py _validated_final fetches the record unscoped for
+      // this task), so it can legitimately return a newer outcome than whatever this tab
+      // last put in the panel -- e.g. an officer's earlier Run decision here, another
+      // decision event recorded elsewhere, then Explain. Without this sync the assistant
+      // card would show the latest recorded outcome while the primary panel kept the old
+      // score and adverse-action reason: a user-visible contradiction on regulated
+      // decision facts. Same fail-closed rule as Run -- no recorded outcome means the
+      // panel is left alone and the officer is told, never half-updated (PR review).
+      if (!applyRecordedDecision(res)) {
+        setActionErr(
+          "The AI assistant returned no recorded outcome — the decision panel was not updated."
+        );
+        return;
+      }
       setActionMsg("AI assistant explained the recorded decision (no re-score).");
     } catch (err) {
       setActionErr(errMsg(err, "The AI assistant is unavailable."));
