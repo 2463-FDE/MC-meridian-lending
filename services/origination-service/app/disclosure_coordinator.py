@@ -39,6 +39,17 @@ forbids is a second, ad-hoc definition of the traversal, and there is exactly on
 LangGraph is orchestration only (ADR 0012). Checkpointing is deliberately not wired:
 persisted graph state would hold applicant data at rest, and this pipeline is a single
 synchronous run with nothing to resume.
+
+**The graph invocation itself is untraced, on purpose.** `app/llm/client.py` strips
+content from its own `llm.complete` span via `process_inputs`/`process_outputs` — but a
+compiled `StateGraph` is a `Runnable`, and LangChain's callback-manager configuration
+attaches a `LangChainTracer` to ANY `Runnable.invoke()` the moment `LANGCHAIN_TRACING_V2`
+/ `LANGSMITH_TRACING` is set, independent of that decorator. Traced without a guard, each
+node's raw `DisclosureState` — principal, term_months, figures, the maker's assembled
+document — would ship to LangSmith unredacted. `run()` wraps the invoke in
+`langsmith.run_helpers.tracing_context(enabled=False)`, which is checked ahead of the env
+var (`langsmith.utils.tracing_is_enabled`) and suppresses the tracer for this call
+regardless of the global setting.
 """
 
 from __future__ import annotations
@@ -47,6 +58,7 @@ import os
 from typing import Any, Callable, Protocol, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from langsmith.run_helpers import tracing_context
 
 from . import clients, db
 from .llm import ClaudeClient
@@ -73,6 +85,17 @@ FIGURE_FIELDS = (
     "monthly_payment",
 )
 
+# Decimal places each disclosed figure is rendered to. Money is cents; the APR carries
+# THREE, because that is what `disclosures.apr` stores (NUMERIC(9,3)) and what the offer
+# row holds. Rendering it to two disclosed 9.58 in the borrower-facing document against
+# 9.584 in the authoritative record — one number with two spellings, in a single response.
+#
+# The gate could not catch it: the truncation happened while building the figures the gate
+# compares AGAINST, so both sides were truncated identically and stage 4a saw agreement.
+# Found on the first live model run that reached stage 5.
+FIGURE_PLACES = {"apr": 3}
+_DEFAULT_PLACES = 2
+
 
 class BlockReason:
     """Typed failure reasons. Only RENDER_MISMATCH is retryable — see module docstring."""
@@ -87,6 +110,24 @@ class BlockReason:
 
 
 RETRYABLE = frozenset({BlockReason.RENDER_MISMATCH})
+
+# Served when the checker's output fails validation or the leak guard. Stage 4b is
+# commentary on a verdict stage 4a already reached, so it must not be able to veto a
+# document that passed every deterministic check — before this, an unusable narration
+# raised and the route turned it into a 503, discarding a verified disclosure that was one
+# stage from being persisted (found live 2026-08-01: the model answered with its own
+# invented key names).
+#
+# `hold_for_compliance` rather than `review_and_send` because the brief is what tells the
+# officer what they are looking at. Without one, a human should look before sending.
+NARRATION_UNAVAILABLE = {
+    "summary": (
+        "Narration unavailable for this disclosure. The figures were computed "
+        "deterministically and matched the rendered document, and the record was written; "
+        "only the officer brief is missing. Read the document before sending."
+    ),
+    "officer_action": "hold_for_compliance",
+}
 
 
 class Coordinator(Protocol):
@@ -114,6 +155,7 @@ class DisclosureState(TypedDict, total=False):
     figures: dict
     document: dict
     narration: dict
+    narration_degraded: bool
     disclosure: dict
     provenance: dict
     attempts: int
@@ -121,6 +163,34 @@ class DisclosureState(TypedDict, total=False):
     blocked: bool
     reason: str
     detail: str
+
+
+class DownstreamRefused(RuntimeError):
+    """disclosure-service answered with a 4xx: a refusal, not an outage.
+
+    `clients.post()` raises the same `httpx.HTTPStatusError` for "the service is down" and
+    "the service looked at this and said no" (a recompute disagreement, a not-found offer).
+    The route collapses that exception to a generic 502, which tells the officer the wrong
+    thing. `main.py`'s own `_downstream` already makes this distinction for the lifecycle
+    proxy; the pipeline's two internal POSTs need the same treatment.
+    """
+
+    def __init__(self, status_code: int, detail):
+        super().__init__(f"disclosure-service refused ({status_code}): {detail}")
+        self.status_code = status_code
+        self.detail = detail
+
+
+def _post_or_raise(base_url: str, path: str, payload: dict) -> dict:
+    resp = clients.post_raw(base_url, path, payload)
+    if 400 <= resp.status_code < 500:
+        try:
+            detail = resp.json().get("detail", "disclosure request refused")
+        except ValueError:
+            detail = "disclosure request refused"
+        raise DownstreamRefused(resp.status_code, detail)
+    resp.raise_for_status()
+    return resp.json()
 
 
 class ApplicationNotFound(RuntimeError):
@@ -233,7 +303,12 @@ class LangGraphDisclosureCoordinator:
             }
         )
         disclosure = offer.get("disclosure", offer)
-        figures = {field: _as_text(disclosure.get(field)) for field in FIGURE_FIELDS}
+        figures = {
+            field: _as_text(
+                disclosure.get(field), FIGURE_PLACES.get(field, _DEFAULT_PLACES)
+            )
+            for field in FIGURE_FIELDS
+        }
         if any(value is None for value in figures.values()):
             missing = [k for k, v in figures.items() if v is None]
             return _blocked(BlockReason.NUMBER_WRONG, f"missing={','.join(missing)}")
@@ -265,15 +340,29 @@ class LangGraphDisclosureCoordinator:
         return {"blocked": False, "reason": "", "checks_passed": len(FIGURE_FIELDS)}
 
     def _narrate(self, state: DisclosureState) -> dict:
-        """Stage 4b. Checker: frame a verdict the gate already reached."""
+        """Stage 4b. Checker: frame a verdict the gate already reached.
+
+        Cannot fail the run. An unusable brief degrades to `NARRATION_UNAVAILABLE` and the
+        pipeline continues to stage 5, because the record — not the prose — is the
+        deliverable. `fallback` covers validation and leak-guard rejections only; a
+        transport failure or an exhausted token budget still raises, since those say the
+        model was never reached and the officer should see an outage.
+        """
         narration = self.client.complete(
             "disclosure_narrate",
             application_id=state["application_id"],
             term_months=state["term_months"],
             note_rate_pct=state["annual_rate"],
             checks_passed=state["checks_passed"],
+            fallback=NARRATION_UNAVAILABLE,
         )
-        return {"narration": narration}
+        degraded = narration is NARRATION_UNAVAILABLE
+        if degraded:
+            log.warning(
+                "disclosure narration degraded app_id=%s: serving the canned brief",
+                state["application_id"],
+            )
+        return {"narration": dict(narration), "narration_degraded": degraded}
 
     def _persist(self, state: DisclosureState) -> dict:
         """Stage 5. Write the authoritative record, close the edge, then read the chain back.
@@ -365,11 +454,11 @@ class LangGraphDisclosureCoordinator:
 
     @staticmethod
     def _default_compute_offer(payload: dict) -> dict:
-        return clients.post(DISCLOSURE_URL, "/offers", payload)
+        return _post_or_raise(DISCLOSURE_URL, "/offers", payload)
 
     @staticmethod
     def _default_persist(payload: dict) -> dict:
-        return clients.post(DISCLOSURE_URL, "/disclosures", payload)
+        return _post_or_raise(DISCLOSURE_URL, "/disclosures", payload)
 
     @staticmethod
     def _default_read_provenance(disclosure_id: int) -> dict:
@@ -380,7 +469,12 @@ class LangGraphDisclosureCoordinator:
     # ---- Coordinator -----------------------------------------------------------
 
     def run(self, application_id: int) -> dict:
-        final = self._graph.invoke({"application_id": application_id, "attempts": 0})
+        # See module docstring: suppresses per-node LangSmith tracing of raw graph state
+        # regardless of the global LANGCHAIN_TRACING_V2 / LANGSMITH_TRACING setting.
+        with tracing_context(enabled=False):
+            final = self._graph.invoke(
+                {"application_id": application_id, "attempts": 0}
+            )
         if final.get("blocked"):
             reason = final.get("reason")
             if reason in RETRYABLE:
@@ -401,13 +495,16 @@ class LangGraphDisclosureCoordinator:
             "status": "ok",
             "document": final.get("document"),
             "narration": final.get("narration"),
+            # Surfaced so the officer's view can say the brief is canned rather than
+            # present it as the model's read of the document.
+            "narration_degraded": final.get("narration_degraded", False),
             "disclosure": final.get("disclosure"),
             "provenance": final.get("provenance"),
             "attempts": final.get("attempts", 0),
         }
 
 
-def _as_text(value: Any) -> str | None:
+def _as_text(value: Any, places: int = _DEFAULT_PLACES) -> str | None:
     """Figures cross into the prompt as exact strings — never floats.
 
     A float here would be reformatted by str() at some point in the chain and the maker
@@ -419,5 +516,5 @@ def _as_text(value: Any) -> str | None:
     if isinstance(value, str):
         return value
     if isinstance(value, float):
-        return f"{value:.2f}"
+        return f"{value:.{places}f}"
     return str(value)

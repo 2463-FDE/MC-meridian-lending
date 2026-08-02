@@ -10,9 +10,11 @@ import json
 import pytest
 
 from app.disclosure_coordinator import (
+    FIGURE_PLACES,
     MAX_ASSEMBLE_ATTEMPTS,
     BlockReason,
     LangGraphDisclosureCoordinator,
+    _as_text,
 )
 from app.llm import ClaudeClient, FakeAdapter
 from app.llm.config import LLMConfig
@@ -196,6 +198,37 @@ def test_the_checker_never_runs_on_a_failed_gate():
     assert not any("brief the officer" in p.lower() for p in prompts_used)
 
 
+def test_a_rejected_narration_still_persists_the_verified_record():
+    """Stage 4b cannot fail the run — found live, 2026-08-01.
+
+    The real model answered the checker prompt with its own invented key names, the
+    validator rejected the completion, and the pipeline 503'd — discarding a document whose
+    figures had already passed the deterministic gate at 4a. Narration is commentary on a
+    verdict already reached; it must not be able to veto the record.
+
+    The canned brief chooses `hold_for_compliance`, not `review_and_send`: an unexplained
+    document is one a human should look at before sending.
+    """
+    unusable = json.dumps({"action": "review_and_send", "key_terms": "48 months"})
+    coordinator, calls = _coordinator([_document(), unusable])
+    result = coordinator.run(1)
+
+    assert result["status"] == "ok"
+    assert result["narration_degraded"] is True
+    assert result["narration"]["officer_action"] == "hold_for_compliance"
+    assert "unavailable" in result["narration"]["summary"].lower()
+    assert calls == {"compute": 1, "persist": 1, "provenance": 1}
+
+
+def test_a_healthy_narration_is_not_flagged_as_degraded():
+    """The degraded flag is the UI's signal, so a good run must not raise it."""
+    coordinator, _ = _coordinator([_document(), _narration()])
+    result = coordinator.run(1)
+
+    assert result["narration_degraded"] is False
+    assert result["narration"]["officer_action"] == "review_and_send"
+
+
 def test_missing_figure_from_compute_blocks_without_calling_the_maker():
     coordinator, calls = _coordinator(
         [], offer={"offer_id": 11, "disclosure": {"apr": "9.584"}}
@@ -356,3 +389,48 @@ class TestProseFieldsCarryNoDigits:
 
         for value in FIGURES.values():
             assert PiiRedactor.redact(value) == value
+
+
+class TestFigureRendering:
+    """One number, one spelling. Found on the first live run that reached stage 5."""
+
+    def test_the_apr_reaches_the_maker_with_three_decimals(self):
+        """The offer's APR is a float; rendering it to two decimals disclosed 9.58 in the
+        document against 9.584 in the authoritative record — in the same response.
+
+        Stage 4a could not catch it, because the truncation happened while building the
+        figures the gate compares AGAINST: both sides were truncated identically, so the
+        gate saw agreement and passed on the first attempt.
+        """
+        coordinator, _ = _coordinator(
+            [_document(), _narration()],
+            offer={
+                "offer_id": 11,
+                "disclosure": {
+                    "apr": 9.584,
+                    "finance_charge": 3628.71,
+                    "amount_financed": 17460.0,
+                    "total_of_payments": 21088.71,
+                    "monthly_payment": 439.35,
+                },
+            },
+        )
+        rendered = coordinator._compute(
+            {
+                "application_id": 1,
+                "principal": 18000.0,
+                "annual_rate": 7.99,
+                "term_months": 48,
+            }
+        )["figures"]
+
+        assert rendered["apr"] == "9.584", "the APR must not lose its third decimal"
+
+    def test_money_still_renders_to_cents(self):
+        assert _as_text(439.3, FIGURE_PLACES.get("monthly_payment", 2)) == "439.30"
+        assert _as_text(21088.7, 2) == "21088.70"
+
+    def test_a_string_figure_is_passed_through_untouched(self):
+        """disclosure-service may hand back an exact decimal string; reformatting it would
+        reintroduce the drift this helper exists to prevent."""
+        assert _as_text("9.584", 2) == "9.584"
