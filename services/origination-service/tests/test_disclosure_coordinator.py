@@ -309,6 +309,37 @@ def test_checkpointing_is_not_wired():
     assert coordinator._graph.checkpointer is None
 
 
+def test_graph_invocation_suppresses_langsmith_tracing(monkeypatch):
+    """A compiled StateGraph is a plain LangChain `Runnable`. Invoking it without a guard
+    lets LangChain's callback-manager auto-attach a `LangChainTracer` to it the moment
+    LANGCHAIN_TRACING_V2 / LANGSMITH_TRACING is set — independent of the `process_inputs`
+    /`process_outputs` stripping `app/llm/client.py` applies to its own span — and ship
+    each node's raw `DisclosureState` (principal, figures, the maker's assembled document)
+    to LangSmith unredacted. `run()` must suppress tracing for the graph invocation
+    regardless of the global setting; this asserts it actually does, the same way
+    `test_checkpointing_is_not_wired` asserts the checkpointer is off rather than trusting
+    a default."""
+    import contextlib
+
+    from app import disclosure_coordinator as mod
+
+    real_tracing_context = mod.tracing_context
+    seen = []
+
+    @contextlib.contextmanager
+    def spy(*, enabled=None, **kwargs):
+        seen.append(enabled)
+        with real_tracing_context(enabled=enabled, **kwargs):
+            yield
+
+    monkeypatch.setattr(mod, "tracing_context", spy)
+
+    coordinator, _ = _coordinator([_document(), _narration()])
+    coordinator.run(1)
+
+    assert False in seen, "run() never suppressed tracing for the graph invocation"
+
+
 def test_the_maker_is_given_figures_as_exact_strings():
     """A float reaching the prompt would be reformatted somewhere in the chain, and the
     maker would faithfully copy the reformatted value — the gate would then block a
