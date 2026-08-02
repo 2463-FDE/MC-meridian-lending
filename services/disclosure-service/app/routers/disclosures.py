@@ -104,6 +104,8 @@ def create_disclosure(
     if existing is not None:
         return _disclosure_out(existing)
 
+    _refuse_if_decision_event_mismatched(session, body.decision_event_id, offer)
+
     schedule = rules.get_fee_schedule()
     payment = apr_mod.monthly_payment(
         body.principal, body.annual_rate, body.term_months
@@ -475,6 +477,44 @@ def _refuse_if_already_consummated(session: Session, offer_id: int) -> None:
             detail=(
                 "TILA timing: the loan is already boarded; the disclosure had to be "
                 "delivered before consummation"
+            ),
+        )
+
+
+_DECISION_EVENT_APP_SQL = text(
+    "SELECT app_id FROM decision_events WHERE id = :decision_event_id"
+)
+
+
+def _refuse_if_decision_event_mismatched(
+    session: Session, decision_event_id: int, offer: models.Offer
+) -> None:
+    """The FK proves `decision_event_id` exists; it does not prove it is THIS offer's.
+
+    Without this, any internal caller supplying a valid-but-wrong-applicant decision
+    event mints a disclosure whose provenance view reports `chain_complete: true` —
+    indistinguishable from a correct chain, and worse than the partial-chain case the
+    view already handles, because it is silent rather than flagged.
+    """
+    row = session.execute(
+        _DECISION_EVENT_APP_SQL, {"decision_event_id": decision_event_id}
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="decision event not found")
+    if row[0] != offer.app_id:
+        log.error(
+            "refusing disclosure for offer_id=%s: decision_event_id=%s belongs to "
+            "app_id=%s, not this offer's app_id=%s",
+            offer.id,
+            decision_event_id,
+            row[0],
+            offer.app_id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "decision_event_id does not belong to this offer's application; "
+                "refusing to persist"
             ),
         )
 

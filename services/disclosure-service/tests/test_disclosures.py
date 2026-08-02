@@ -35,6 +35,9 @@ GOOD_INPUTS = dict(
 )
 
 
+_UNSET = object()
+
+
 class StubResult:
     def __init__(self, row, rowcount=0):
         self._row = row
@@ -58,6 +61,7 @@ class StubSession:
         disclosure=None,
         consummated=False,
         update_rowcount=1,
+        decision_event_app_id=_UNSET,
     ):
         self.offer = offer
         self.existing = existing
@@ -65,6 +69,10 @@ class StubSession:
         self.disclosure = disclosure
         self.consummated = consummated
         self.update_rowcount = update_rowcount
+        # Default: the decision event belongs to this offer's own application, so tests
+        # that don't care about the identity check are unaffected. Pass an explicit
+        # app_id (or None, for "no such decision event") to exercise it.
+        self.decision_event_app_id = decision_event_app_id
         self.statements = []
         self.added = []
         self.commits = 0
@@ -82,6 +90,13 @@ class StubSession:
             return StubResult(None, rowcount=self.update_rowcount)
         if "FROM loans" in sql:
             return StubResult((1,) if self.consummated else None)
+        if "FROM decision_events" in sql:
+            app_id = (
+                self.decision_event_app_id
+                if self.decision_event_app_id is not _UNSET
+                else (self.offer.app_id if self.offer is not None else None)
+            )
+            return StubResult(None if app_id is None else (app_id,))
         return StubResult(self.provenance_row)
 
     def get(self, model, _pk):
@@ -142,6 +157,30 @@ def test_unknown_offer_is_not_found(client):
         "/disclosures", json=GOOD_INPUTS, headers={"X-Internal-Service": TOKEN}
     )
     assert response.status_code == 404
+
+
+def test_refuses_a_decision_event_from_a_different_application(client):
+    """The FK on decision_event_id proves the row exists; it does not prove it belongs to
+    THIS offer's application. Without this check, any internal caller supplying a
+    valid-but-wrong-applicant decision event mints a disclosure whose provenance view
+    would report chain_complete: true — indistinguishable from a correct chain, and worse
+    than the partial-chain case the view already handles because it is silent."""
+    session = _with_session(StubSession(offer=_offer(), decision_event_app_id=999))
+    response = client.post(
+        "/disclosures", json=GOOD_INPUTS, headers={"X-Internal-Service": TOKEN}
+    )
+    assert response.status_code == 409
+    assert "does not belong" in response.json()["detail"]
+    assert session.added == [], "must not persist a disclosure with a mismatched chain"
+
+
+def test_refuses_a_decision_event_that_does_not_exist(client):
+    session = _with_session(StubSession(offer=_offer(), decision_event_app_id=None))
+    response = client.post(
+        "/disclosures", json=GOOD_INPUTS, headers={"X-Internal-Service": TOKEN}
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "decision event not found"
 
 
 def test_persists_minor_units_derived_from_inputs(client):
@@ -456,7 +495,9 @@ def test_transition_unknown_disclosure_is_not_found(client):
     ],
 )
 def test_the_happy_path_transitions_are_allowed(client, current, target):
-    _with_session(StubSession(disclosure=_disclosure(current), provenance_row=CHAIN_ROW))
+    _with_session(
+        StubSession(disclosure=_disclosure(current), provenance_row=CHAIN_ROW)
+    )
     response = _transition(client, {"to_status": target})
     assert response.status_code == 200, response.text
     assert response.json()["status"] == target
