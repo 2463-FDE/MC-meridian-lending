@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import StatusChip from "../../../components/StatusChip";
 import { apiGet, apiPost, getUser } from "../../../lib/api";
 import { usd, pct, shortDate } from "../../../lib/format";
@@ -36,6 +36,9 @@ interface PaymentRow {
   masked_pan?: string | null;
 }
 
+// Named so the initial value and the per-loan reset cannot drift apart.
+const DEFAULT_PAY_AMOUNT = "250.00";
+
 function errMsg(err: unknown, fallback: string): string {
   if (err && typeof err === "object" && "detail" in err) {
     return String((err as { detail: unknown }).detail) || fallback;
@@ -56,7 +59,7 @@ export default function LoanDetailPage() {
   const [showSchedule, setShowSchedule] = useState(false);
 
   // action panels
-  const [payAmount, setPayAmount] = useState("250.00");
+  const [payAmount, setPayAmount] = useState(DEFAULT_PAY_AMOUNT);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
@@ -73,18 +76,49 @@ export default function LoanDetailPage() {
     setCanRepActions(role === "csr" || role === "admin");
   }, []);
 
+  // Route generation. Next.js reuses this page component across /servicing/[loanId]
+  // navigations, so a request can outlive the loan it was fired from. Each handler captures
+  // this counter when it starts and compares on completion: anything from before the last
+  // navigation is dropped. Generations rather than loanIds, so navigating away and BACK to
+  // the same loan still discards the earlier in-flight call.
+  const routeGenRef = useRef(0);
+
+  // Per-loan state reset. Everything below describes ONE account, so without this the
+  // previous borrower's balance, schedule, payment history and action result stay on the
+  // next account's screen, and the money-action inputs stay pre-filled with the amounts
+  // typed against the previous loan (PR review sweep of the same defect found on the
+  // underwriting detail page). Declared BEFORE the load effect so the generation is bumped
+  // before loadAll captures it.
+  useEffect(() => {
+    routeGenRef.current += 1;
+    setLoan(null);
+    setSchedule([]);
+    setPayments([]);
+    setShowSchedule(false);
+    setActionMsg(null);
+    setActionErr(null);
+    setActionBusy(false);
+    setError(null);
+    setPayAmount(DEFAULT_PAY_AMOUNT);
+    setNewBalance("");
+    setWaiveAmount("");
+  }, [loanId]);
+
   const loadAll = useCallback(async () => {
     if (!loanId) return;
+    const gen = routeGenRef.current;
     setLoading(true);
     setError(null);
     try {
       // Load loan first; schedule/payments are best-effort (tolerate failures).
       const l = (await apiGet(`/lss/loans/${loanId}`)) as Loan;
+      if (routeGenRef.current !== gen) return;
       setLoan(l);
       const [sch, pay] = await Promise.allSettled([
         apiGet(`/lss/loans/${loanId}/schedule`),
         apiGet(`/lss/loans/${loanId}/payments`),
       ]);
+      if (routeGenRef.current !== gen) return;
       if (sch.status === "fulfilled") {
         setSchedule((sch.value as { schedule?: ScheduleRow[] })?.schedule ?? []);
       }
@@ -92,10 +126,11 @@ export default function LoanDetailPage() {
         setPayments((pay.value as { items?: PaymentRow[] })?.items ?? []);
       }
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setError(errMsg(err, "Could not load this loan."));
       setLoan(null);
     } finally {
-      setLoading(false);
+      if (routeGenRef.current === gen) setLoading(false);
     }
   }, [loanId]);
 
@@ -103,13 +138,16 @@ export default function LoanDetailPage() {
     loadAll();
   }, [loadAll]);
 
-  // Refresh only balance + payment history after an action.
-  const refreshBalanceAndHistory = useCallback(async () => {
+  // Refresh only balance + payment history after an action. Takes the caller's route
+  // generation so a refresh started before a navigation cannot write another loan's
+  // balance onto the account now on screen.
+  const refreshBalanceAndHistory = useCallback(async (gen: number) => {
     if (!loanId) return;
     const [bal, pay] = await Promise.allSettled([
       apiGet(`/lss/accounts/${loanId}/balance`),
       apiGet(`/lss/loans/${loanId}/payments`),
     ]);
+    if (routeGenRef.current !== gen) return;
     if (bal.status === "fulfilled") {
       const b = bal.value as { balance?: number; past_due?: number };
       setLoan((prev) =>
@@ -128,6 +166,7 @@ export default function LoanDetailPage() {
   }, [loanId]);
 
   async function makePayment() {
+    const gen = routeGenRef.current;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
@@ -140,16 +179,19 @@ export default function LoanDetailPage() {
         amount: parseFloat(payAmount || "0"),
         method: "card",
       });
+      if (routeGenRef.current !== gen) return;
       setActionMsg(`Payment of ${usd(payAmount)} submitted.`);
-      await refreshBalanceAndHistory();
+      await refreshBalanceAndHistory(gen);
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setActionErr(errMsg(err, "Payment failed."));
     } finally {
-      setActionBusy(false);
+      if (routeGenRef.current === gen) setActionBusy(false);
     }
   }
 
   async function adjustBalance() {
+    const gen = routeGenRef.current;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
@@ -158,16 +200,19 @@ export default function LoanDetailPage() {
       await apiPost(`/lss/accounts/${loanId}/adjust-balance`, {
         new_balance: parseFloat(newBalance || "0"),
       });
+      if (routeGenRef.current !== gen) return;
       setActionMsg(`Balance adjusted to ${usd(newBalance)}.`);
-      await refreshBalanceAndHistory();
+      await refreshBalanceAndHistory(gen);
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setActionErr(errMsg(err, "Balance adjustment failed."));
     } finally {
-      setActionBusy(false);
+      if (routeGenRef.current === gen) setActionBusy(false);
     }
   }
 
   async function waiveFee() {
+    const gen = routeGenRef.current;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
@@ -176,12 +221,14 @@ export default function LoanDetailPage() {
       await apiPost(`/lss/accounts/${loanId}/waive-fee`, {
         amount: parseFloat(waiveAmount || "0"),
       });
+      if (routeGenRef.current !== gen) return;
       setActionMsg(`Fee of ${usd(waiveAmount)} waived.`);
-      await refreshBalanceAndHistory();
+      await refreshBalanceAndHistory(gen);
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setActionErr(errMsg(err, "Fee waiver failed."));
     } finally {
-      setActionBusy(false);
+      if (routeGenRef.current === gen) setActionBusy(false);
     }
   }
 
