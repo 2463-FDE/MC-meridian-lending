@@ -360,7 +360,10 @@ def test_graph_suppression_is_not_relaxed_by_the_trace_content_flag(monkeypatch)
     @contextlib.contextmanager
     def spy(*, enabled=None, **kwargs):
         seen.append(enabled)
-        with real_tracing_context(enabled=enabled, **kwargs):
+        # Always delegate SUPPRESSED, whatever was requested: the assertion is about what
+        # the coordinator asks for, and letting enabled=True through would make the suite
+        # attempt a real LangSmith ingest (401s in CI, exports in a keyed environment).
+        with real_tracing_context(enabled=False, **kwargs):
             yield
 
     monkeypatch.setattr(mod, "tracing_context", spy)
@@ -368,7 +371,9 @@ def test_graph_suppression_is_not_relaxed_by_the_trace_content_flag(monkeypatch)
     coordinator, _ = _coordinator([_document(), _narration()])
     coordinator.run(1)
 
-    assert seen and all(e is False for e in seen), (
+    # The GRAPH invocation is the outermost entry and must be suppressed. The model calls
+    # nested inside it re-enable on purpose (see _complete) — that is not this guard.
+    assert seen and seen[0] is False, (
         f"graph tracing was enabled with LLM_TRACE_CONTENT=true (saw {seen})"
     )
 
@@ -498,3 +503,91 @@ class TestFigureRendering:
         """disclosure-service may hand back an exact decimal string; reformatting it would
         reintroduce the drift this helper exists to prevent."""
         assert _as_text("9.584", 2) == "9.584"
+
+
+def test_llm_calls_are_traced_even_though_graph_state_is_not(monkeypatch):
+    """The graph suppression is context-wide, so before `_complete` existed it also
+    swallowed the client's own llm.complete / llm.transport spans — the disclosure pipeline
+    produced no traces at all, not even token count or cost. Assert the model call runs
+    with tracing RE-ENABLED while the graph invocation around it stays suppressed."""
+    import contextlib
+
+    from app import disclosure_coordinator as mod
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+
+    real_tracing_context = mod.tracing_context
+    events = []
+
+    @contextlib.contextmanager
+    def spy(*, enabled=None, **kwargs):
+        events.append(("enter", enabled))
+        # Delegate suppressed regardless — see the note in the flag test above.
+        with real_tracing_context(enabled=False, **kwargs):
+            yield
+        events.append(("exit", enabled))
+
+    monkeypatch.setattr(mod, "tracing_context", spy)
+
+    coordinator, _ = _coordinator([_document(), _narration()])
+    coordinator.run(1)
+
+    # The graph invoke is suppressed...
+    assert ("enter", False) in events
+    # ...and each model call re-enables inside it (assemble + narrate).
+    assert events.count(("enter", True)) == 2, events
+    # Ordering: the re-enable happens INSIDE the suppression, never replacing it.
+    first_false = events.index(("enter", False))
+    assert all(
+        i > first_false for i, e in enumerate(events) if e == ("enter", True)
+    ), events
+
+
+def test_llm_tracing_not_forced_on_when_operator_did_not_enable_it(monkeypatch):
+    """`tracing_context(enabled=True)` sets a context variable checked AHEAD of the
+    environment, so re-enabling unconditionally would turn tracing on for a deployment that
+    never asked for it — and the client would start posting to a LangSmith it holds no key
+    for. Gate on the env var the operator actually sets."""
+    import contextlib
+
+    from app import disclosure_coordinator as mod
+
+    monkeypatch.delenv("LANGSMITH_TRACING", raising=False)
+    monkeypatch.delenv("LANGCHAIN_TRACING_V2", raising=False)
+
+    real_tracing_context = mod.tracing_context
+    seen = []
+
+    @contextlib.contextmanager
+    def spy(*, enabled=None, **kwargs):
+        seen.append(enabled)
+        with real_tracing_context(enabled=False, **kwargs):
+            yield
+
+    monkeypatch.setattr(mod, "tracing_context", spy)
+
+    coordinator, _ = _coordinator([_document(), _narration()])
+    coordinator.run(1)
+
+    assert True not in seen, f"tracing was force-enabled with no env var set: {seen}"
+
+
+@pytest.mark.parametrize(
+    "env,expected",
+    [
+        ({"LANGSMITH_TRACING": "true"}, True),
+        ({"LANGCHAIN_TRACING_V2": "true"}, True),
+        ({"LANGSMITH_TRACING": "TRUE"}, True),
+        ({"LANGSMITH_TRACING": "false"}, False),
+        ({"LANGSMITH_TRACING": "1"}, False),
+        ({}, False),
+    ],
+)
+def test_tracing_requested_reads_either_env_var(monkeypatch, env, expected):
+    from app import disclosure_coordinator as mod
+
+    for name in ("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    assert mod._tracing_requested() is expected

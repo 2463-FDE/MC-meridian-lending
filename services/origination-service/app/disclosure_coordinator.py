@@ -58,6 +58,14 @@ prompt actually wants. Graph state is a different and larger surface: every node
 transition. Spec D4 requires this suppression as a control, so it stays unconditional
 rather than becoming one env var away from off. If per-node visibility is ever genuinely
 needed, that is its own decision with its own flag, not a widening of this one.
+
+**The model calls inside the graph ARE traced** (`_complete`). The suppression above is
+context-wide, so it originally swallowed the client's own `llm.complete` / `llm.transport`
+spans too — this pipeline emitted nothing at all, not even token count or cost, and a
+LangSmith project holding Week 3's `decision_assistant` runs and no disclosure runs looked
+like broken tracing config rather than a guard overreaching. `_complete` re-enables tracing
+for the duration of each client call, so the LLM spans come back while every node
+transition stays suppressed.
 """
 
 from __future__ import annotations
@@ -75,6 +83,20 @@ from .logging_config import get_logger
 log = get_logger("origination")
 
 DISCLOSURE_URL = os.getenv("DISCLOSURE_URL", "http://disclosure-service:8005")
+
+# The env vars LangChain/LangSmith read to decide whether tracing is on at all.
+_TRACING_ENV = ("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2")
+
+
+def _tracing_requested() -> bool:
+    """True when the operator turned tracing on, read straight from the environment.
+
+    Read here rather than via `langsmith.utils.tracing_is_enabled()`, which consults the
+    context variable first and therefore reports False inside `run()`'s suppression — the
+    exact place this is called from. See `_complete`.
+    """
+    return any(os.getenv(name, "").strip().lower() == "true" for name in _TRACING_ENV)
+
 
 # Bounded: the maker gets this many attempts at rendering before the run blocks. Two,
 # because a third attempt at the same prompt has never been the difference between a
@@ -322,9 +344,34 @@ class LangGraphDisclosureCoordinator:
             return _blocked(BlockReason.NUMBER_WRONG, f"missing={','.join(missing)}")
         return {"figures": figures, "offer_id": offer.get("offer_id")}
 
+    def _complete(self, prompt_name: str, **kwargs):
+        """Call the model with LangSmith tracing restored for the duration of the call.
+
+        `run()` suppresses tracing for the whole graph invocation so raw `DisclosureState`
+        never reaches LangSmith. That suppression is context-wide, so it also swallowed the
+        `llm.complete` / `llm.transport` spans the client creates for its own calls: the
+        disclosure pipeline produced NO traces at all — not even token count or cost —
+        while the decision-assistant path, which runs no graph, traced normally. The
+        symptom was a LangSmith project containing only `decision_assistant` runs, and it
+        read like the tracing config was broken rather than like a guard doing its job too
+        well.
+
+        Re-enabling here restores those spans without restoring graph state: the context
+        manager covers only the client call, and every node transition around it stays
+        suppressed. What the restored spans actually carry is still decided by the
+        strippers in `app/llm` — metadata only, unless `LLM_TRACE_CONTENT=true`.
+
+        Gated on the operator having asked for tracing. `tracing_context(enabled=True)`
+        sets a context variable that is checked AHEAD of the environment, so passing True
+        unconditionally would turn tracing on for a deployment that never enabled it, and
+        the client would start posting to a LangSmith it has no key for.
+        """
+        with tracing_context(enabled=_tracing_requested()):
+            return self.client.complete(prompt_name, **kwargs)
+
     def _assemble(self, state: DisclosureState) -> dict:
         """Stage 3. Maker: format the document from figures it is given."""
-        document = self.client.complete(
+        document = self._complete(
             "disclosure_assemble",
             **state["figures"],
             term_months=state["term_months"],
@@ -356,7 +403,7 @@ class LangGraphDisclosureCoordinator:
         transport failure or an exhausted token budget still raises, since those say the
         model was never reached and the officer should see an outage.
         """
-        narration = self.client.complete(
+        narration = self._complete(
             "disclosure_narrate",
             application_id=state["application_id"],
             term_months=state["term_months"],
