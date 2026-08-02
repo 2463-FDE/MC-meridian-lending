@@ -208,3 +208,21 @@ def test_health_ok_when_schedule_loads(monkeypatch):
     response = TestClient(fastapi_app).get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_the_repo_fallback_survives_the_container_layout(monkeypatch):
+    """The image copies the package to /app/app, so rules.py has three ancestors, not the
+    four the checkout has. Indexing parents[3] blindly there raised IndexError at IMPORT
+    time: disclosure-service crash-looped on `make up` while every unit test stayed green,
+    because tests run from the checkout. Found by the smoke, not by CI.
+    """
+    monkeypatch.setattr(rules, "__file__", "/app/app/rules.py")
+    assert rules._repo_path() == rules._CONTAINER_PATH
+
+
+def test_the_repo_fallback_still_finds_the_checkout_policy_file(monkeypatch):
+    """The fallback must not become a no-op: local runs and tests without the container
+    mount depend on it resolving to the real policies/ directory."""
+    monkeypatch.delenv("FEE_SCHEDULE_PATH", raising=False)
+    assert rules._repo_path().name == "fee_schedule.json"
+    assert rules._repo_path().exists()

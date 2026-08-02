@@ -23,7 +23,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _CONTAINER_PATH = Path("/app/policies/fee_schedule.json")
-_REPO_PATH = Path(__file__).resolve().parents[3] / "policies" / "fee_schedule.json"
+
+
+def _repo_path() -> Path:
+    """The checkout location: app/ -> disclosure-service/ -> services/ -> repo root.
+
+    Computed lazily and defensively rather than as a module constant. In the image the
+    package lives at /app/app, which has three ancestors, not four — indexing blindly
+    there is an IndexError at IMPORT time, so the service never starts and every unit
+    test still passes, because tests run from the checkout. Found by the `make up` smoke.
+    """
+    here = Path(__file__).resolve()
+    if len(here.parents) <= 3:
+        return _CONTAINER_PATH
+    return here.parents[3] / "policies" / "fee_schedule.json"
 
 
 class RulesConfigError(RuntimeError):
@@ -56,7 +69,7 @@ def _resolve_path() -> Path:
     override = os.getenv("FEE_SCHEDULE_PATH")
     if override:
         return Path(override)
-    return _CONTAINER_PATH if _CONTAINER_PATH.exists() else _REPO_PATH
+    return _CONTAINER_PATH if _CONTAINER_PATH.exists() else _repo_path()
 
 
 def load_fee_schedule(path: Path | None = None) -> FeeSchedule:

@@ -612,3 +612,17 @@ def test_the_status_vocabulary_matches_the_ddl_check_constraint():
         for target in targets
     }
     assert reachable == {"draft", "in_review", "approved", "delivered"}
+
+
+def test_the_orm_metadata_has_no_unresolvable_foreign_keys():
+    """SQLAlchemy resolves every FK in the metadata when it sorts tables for a flush.
+
+    `applications` and `decision_events` are owned by other services and are not mapped
+    here, so a ForeignKey pointing at them raises NoReferencedTableError on the first
+    INSERT — a 500 on the disclosure write path that no stub-session test can see, because
+    nothing in this suite flushes. Found by the `make up` smoke; asserted here so it stays
+    found. The constraints themselves live in the DDL, where the database enforces them.
+    """
+    for table in models.Base.metadata.tables.values():
+        for foreign_key in table.foreign_keys:
+            foreign_key.column  # resolves, or raises NoReferencedTableError
