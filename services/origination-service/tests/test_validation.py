@@ -190,3 +190,30 @@ def test_dob_padding_stripped_at_boundary():
     # Parity with the ssn/phone validators: date.fromisoformat rejects surrounding
     # whitespace outright, so strip before parsing and store the canonical value.
     assert _app(dob=" 1990-04-22 ").dob == "1990-04-22"
+
+
+@pytest.mark.parametrize("dob", ["", "   ", "\t\n"])
+def test_dob_blank_normalized_to_none(dob):
+    # A blank DOB used to survive as "" and reach the applicants.dob DATE column, where
+    # Postgres raises "invalid input syntax for type date" inside the intake transaction --
+    # a 500 for a request the boundary claims to validate. Blank means absent (dob is
+    # optional for entity applicants), so normalize to None and store SQL NULL.
+    assert _app(dob=dob).dob is None
+
+
+@pytest.mark.parametrize(
+    "dob",
+    [
+        # date.fromisoformat is not a shape check. Python 3.11+ parses the ISO basic form
+        # and week dates, and the validator returned the raw string, so these left the
+        # boundary unnormalized: Postgres coerces "19900422" (storing a value that never
+        # matched the promised shape) and rejects "2021-W01-1" with a 500.
+        "19900422",
+        "2021-W01-1",
+        "1990-W01",
+        "1990-04-22T00:00:00",
+    ],
+)
+def test_dob_non_canonical_iso_rejected(dob):
+    with pytest.raises(ValidationError):
+        _app(dob=dob)

@@ -31,6 +31,16 @@ _SSN_RE = re.compile(r"^(?:\d{9}|\d{3}-\d{2}-\d{4})$")
 # the boundary invariant that junk does not pass.
 _PHONE_RE = re.compile(r"^\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}$")
 
+# Canonical YYYY-MM-DD only. date.fromisoformat is NOT a shape check: since Python 3.11 it
+# accepts most of ISO 8601, including the basic form "19900422" and week dates "2021-W01-1"
+# / "1990-W01". _validate_dob returns the raw string, so those reach the applicants.dob
+# DATE column verbatim -- Postgres coerces the basic form (storing a value that never
+# matched the documented shape) and rejects the week form with "invalid input syntax for
+# type date", which surfaces as a 500 inside the intake transaction instead of a 422 (PR
+# review). Gate on the shape first so only the shape the error message and the apply form
+# promise can reach fromisoformat.
+_DOB_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 
 class ApplicationIn(BaseModel):
     name: str = Field(min_length=1)
@@ -94,12 +104,23 @@ class ApplicationIn(BaseModel):
             return v
         v = v.strip()
         if not v:
-            return v
+            # Blank means absent, not malformed -- dob is optional (entity applicants carry
+            # an EIN instead). Return None so it lands as SQL NULL: an empty string reaches
+            # the applicants.dob DATE column as "" and Postgres raises "invalid input syntax
+            # for type date", which is a 500 inside the intake transaction rather than the
+            # 422 this validator exists to produce (PR review). None is also what the KYC
+            # call already expects for a missing DOB (routers/applications.py::run_kyc).
+            return None
+        if not _DOB_RE.fullmatch(v):
+            # Shape gate ahead of fromisoformat: rejects the 5-digit year, a 3-digit year,
+            # single-digit month/day, and the ISO variants fromisoformat would otherwise
+            # accept and hand on unnormalized (see _DOB_RE).
+            raise ValueError("dob must be a calendar date as YYYY-MM-DD")
         try:
             parsed = date.fromisoformat(v)
         except ValueError:
-            # Covers the 5-digit year, a 3-digit year, single-digit month/day, and any
-            # non-ISO shape. The DATE column would coerce several of these; we do not.
+            # Right shape, impossible date: month 13, February 30. The DATE column would
+            # reject these too, but as a 500 rather than a 422.
             raise ValueError("dob must be a calendar date as YYYY-MM-DD") from None
         if parsed.year < _DOB_MIN_YEAR:
             raise ValueError(f"dob year must be {_DOB_MIN_YEAR} or later")
