@@ -1534,6 +1534,7 @@ def test_trace_content_only_the_exact_string_true_enables(monkeypatch, value):
 
 @pytest.mark.parametrize("value", ["true", "TRUE", "True", "  true  "])
 def test_trace_content_true_is_case_and_whitespace_tolerant(monkeypatch, value):
+    monkeypatch.setenv("ENVIRONMENT", "development")
     monkeypatch.setenv("LLM_TRACE_CONTENT", value)
     assert trace_content_enabled() is True
 
@@ -1541,6 +1542,7 @@ def test_trace_content_true_is_case_and_whitespace_tolerant(monkeypatch, value):
 def test_transport_trace_exports_prompt_when_flag_on(monkeypatch):
     # The point of the flag: the prompt as actually sent is visible. This is the
     # post-build_request payload, so identity PII is already redacted here.
+    monkeypatch.setenv("ENVIRONMENT", "development")
     monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
     req = _req(
         system="You are an underwriting assistant.",
@@ -1556,6 +1558,7 @@ def test_transport_trace_exports_prompt_when_flag_on(monkeypatch):
 
 
 def test_transport_trace_exports_raw_text_when_flag_on(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "development")
     monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
     adapter = FakeAdapter(response=GOOD_SUMMARY)
     out = call_with_retry(
@@ -1570,6 +1573,7 @@ def test_transport_trace_exports_raw_text_when_flag_on(monkeypatch):
 
 
 def test_complete_output_trace_exports_validated_body_when_flag_on(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "development")
     monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
     validated = {"summary": "Applicant requests $42,000.", "risk_flags": []}
     traced = _trace_complete_outputs(validated)
@@ -1580,6 +1584,7 @@ def test_complete_output_trace_exports_validated_body_when_flag_on(monkeypatch):
 def test_complete_input_trace_stays_stripped_even_with_flag_on(monkeypatch):
     # The asymmetry that matters: complete() receives PRE-redaction variables, so the
     # flag must not open this span. The same content post-redaction is on llm.transport.
+    monkeypatch.setenv("ENVIRONMENT", "development")
     monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
     traced = _trace_complete_inputs(
         {
@@ -1596,6 +1601,7 @@ def test_idempotency_key_never_traced_even_with_flag_on(monkeypatch):
     # The flag governs CONTENT. The idempotency_key omission is about a caller-supplied
     # identifier making traces linkable to customer records — a separate concern that the
     # flag must not relax.
+    monkeypatch.setenv("ENVIRONMENT", "development")
     monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
     customer_key = "APP-2026-0042|maria.gomez@example.com"
     req = _req(idempotency_key=customer_key)
@@ -1631,6 +1637,7 @@ class _CaptureHandler(logging.Handler):
 def _boot_warnings(monkeypatch, **env) -> list[str]:
     """Run load_llm_config() and return the WARNING messages the llm logger emitted."""
     monkeypatch.setenv("CLAUDE_API_KEY", "k")
+    monkeypatch.setenv("ENVIRONMENT", "development")
     for key, value in env.items():
         if value is None:
             monkeypatch.delenv(key, raising=False)
@@ -1658,3 +1665,67 @@ def test_trace_content_flag_warns_at_boot(monkeypatch):
 def test_no_boot_warning_when_flag_off(monkeypatch):
     messages = _boot_warnings(monkeypatch, LLM_TRACE_CONTENT=None)
     assert not any("LLM_TRACE_CONTENT" in m for m in messages), messages
+
+
+# --- LLM_TRACE_CONTENT: the environment gate (PR review) -------------------
+
+
+@pytest.mark.parametrize("environment", ["production", "staging", "prod", "", "PRODUCTION"])
+def test_trace_content_refused_outside_development(monkeypatch, environment):
+    # The flag alone left regulated lending content one stray environment variable away
+    # from a third-party sink, with a startup warning as the only protection. ENVIRONMENT
+    # defaults to "production", so anything that is not positively "development" is closed.
+    monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
+    monkeypatch.setenv("ENVIRONMENT", environment)
+    assert trace_content_enabled() is False
+
+
+def test_trace_content_refused_when_environment_unset(monkeypatch):
+    # Unset must behave as production, not as "unknown, so allow".
+    monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    assert trace_content_enabled() is False
+
+
+def test_boot_refuses_when_trace_content_set_outside_development(monkeypatch):
+    # Silently ignoring the flag would leave an operator believing they had content
+    # traces; honouring it would export customer lending content. Fail loud instead.
+    monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("CLAUDE_API_KEY", "k")
+    with pytest.raises(LLMConfigError) as exc:
+        load_llm_config()
+    assert "LLM_TRACE_CONTENT" in str(exc.value)
+
+
+def test_boot_allows_trace_content_in_development(monkeypatch):
+    monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("CLAUDE_API_KEY", "k")
+    assert load_llm_config().provider == "anthropic"
+
+
+def test_trace_hooks_stay_metadata_only_in_production(monkeypatch):
+    # The end-to-end property the gate exists for: with the flag set but the deployment
+    # not development, no span carries prompt or response content.
+    monkeypatch.setenv("LLM_TRACE_CONTENT", "true")
+    monkeypatch.setenv("ENVIRONMENT", "production")
+
+    req = _req(
+        system="You are an underwriting assistant. Applicant income is 87000.",
+        messages=[{"role": "user", "content": '{"annual_income": 87000}'}],
+    )
+    traced_in = _trace_transport_inputs({"req": req, "max_retries": 1})
+    assert "system" not in traced_in and "messages" not in traced_in
+    assert "87000" not in json.dumps(traced_in)
+
+    adapter = FakeAdapter(response=GOOD_SUMMARY)
+    out = call_with_retry(
+        adapter, _req(), max_retries=0, sleep=lambda _: None, rng=lambda: 0.0
+    )
+    assert "text" not in _trace_transport_outputs(out)
+
+    body = {"summary": "Applicant requests $42,000.", "risk_flags": []}
+    traced_out = _trace_complete_outputs(body)
+    assert "result" not in traced_out
+    assert "42,000" not in json.dumps(traced_out)

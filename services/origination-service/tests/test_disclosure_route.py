@@ -411,3 +411,47 @@ def test_every_disclosure_prompt_shows_its_schema_to_the_model():
         rendered = template.user_template
         for key in template.output_schema["required"]:
             assert f'"{key}"' in rendered, f"{name} never shows the model {key!r}"
+
+
+# --- generate is officer-only (PR review) ---------------------------------
+
+TOKEN_ONLY = {"X-Application-Token": "a-valid-continuation-token"}
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        BORROWER,
+        TOKEN_ONLY,
+        {"X-User-Role": "borrower", "X-User-Id": "3", **TOKEN_ONLY},
+        {},
+    ],
+    ids=["borrower", "token-only", "borrower-with-token", "anonymous"],
+)
+def test_generate_is_officer_only(client, headers):
+    """A borrower holding a valid continuation token could previously generate and read a
+    draft TILA disclosure — document, officer narration and all — while its status was
+    still `draft`, which is exactly what the spec D6 compliance hold exists to withhold.
+    The hold is only a control if the held document is unreadable until an officer
+    releases it. Note the fixture stubs require_officer_or_owner, NOT require_officer, so
+    this exercises the real gate."""
+    response = client.post("/applications/1/disclosure", headers=headers)
+    assert response.status_code == 403, response.text
+    body = response.text
+    # Nothing of the document leaks through the refusal itself.
+    for figure in ("apr", "finance_charge", "officer_action", "narration"):
+        assert figure not in body
+
+
+def test_borrower_can_still_read_status_and_chain(client, monkeypatch):
+    """Narrowing generate must not shut the borrower out of their own disclosure: the read
+    path still admits officer, owner and token-holder, and returns status + provenance
+    (never the document body)."""
+    monkeypatch.setattr(
+        main, "_read_chain", lambda app_id: {"disclosure_id": 5, "disclosure_status": "draft"}
+    )
+    response = client.get("/applications/1/disclosure", headers=BORROWER)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["disclosure_status"] == "draft"
+    assert "document" not in payload and "narration" not in payload

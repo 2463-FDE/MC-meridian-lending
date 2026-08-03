@@ -28,6 +28,24 @@ _PROVIDERS = ("anthropic", "bedrock")
 # surrounding whitespace ignored) — see trace_content_enabled.
 _TRACE_CONTENT_ENV = "LLM_TRACE_CONTENT"
 
+# ...AND the deployment is a development one. "development" is the only non-production
+# ENVIRONMENT value this repo uses — `app/config.py` defaults ENVIRONMENT to "production"
+# and gates continuation-token keys on it, `app/authz.py` gates the dev internal-token
+# path on it, and decision-service gates synthetic credit on it. Matching that vocabulary
+# rather than inventing a second one ("staging", "test") keeps one answer to "is this a
+# real deployment".
+_TRACE_CONTENT_ENVIRONMENT = "development"
+
+
+def _environment() -> str:
+    """The deployment environment, read at call time.
+
+    Read here rather than imported from `app.config` (which snapshots it at import) so it
+    tracks the process environment the same way the flag does, and so a test can set both
+    together.
+    """
+    return os.getenv("ENVIRONMENT", "production").strip().lower()
+
 
 def trace_content_enabled() -> bool:
     """True when prompt/response CONTENT may be exported to LangSmith.
@@ -43,12 +61,25 @@ def trace_content_enabled() -> bool:
     fail closed on anything it does not positively recognize — the opposite convention
     (anything non-empty is true) turns `LLM_TRACE_CONTENT=false` into an export.
 
-    Non-production only. The prompt body keeps the business facts the model needs
-    (`build_request` redacts identity PII but deliberately preserves loan amount, income,
-    employment tenure, purpose, history), so enabling this ships customer lending content
-    to a third-party telemetry vendor. Use it against synthetic applicants.
+    **Requires ENVIRONMENT=development as well as the flag** (PR review). The prompt body
+    keeps the business facts the model needs — `build_request` redacts identity PII but
+    deliberately preserves loan amount, income, employment tenure, purpose and history —
+    so this exports regulated customer lending content to a third-party telemetry vendor.
+    A flag alone made that one stray environment variable away in production, with a
+    startup warning as the only protection; a warning is a record of an incident, not a
+    control. ENVIRONMENT defaults to "production", so the gate is closed unless a
+    deployment positively declares itself a development one.
+
+    `load_llm_config` additionally REFUSES TO BOOT when the flag is set outside
+    development, so the misconfiguration is loud rather than silently ignored. This
+    function still re-checks the environment instead of trusting that: it is called per
+    trace, from processes and tests that may never have called `load_llm_config`, and the
+    export is the thing that must fail closed.
     """
-    return os.getenv(_TRACE_CONTENT_ENV, "").strip().lower() == "true"
+    return (
+        os.getenv(_TRACE_CONTENT_ENV, "").strip().lower() == "true"
+        and _environment() == _TRACE_CONTENT_ENVIRONMENT
+    )
 
 
 @dataclass(frozen=True)
@@ -166,6 +197,23 @@ def load_llm_config() -> LLMConfig:
         )
 
     default_model = _DEFAULT_BEDROCK_MODEL if provider == "bedrock" else _DEFAULT_MODEL
+    # Refuse to boot when the trace-content flag is set outside a development deployment
+    # (PR review). Silently ignoring it would leave an operator believing they had tracing
+    # content while the export was closed; honouring it would turn regulated lending
+    # content into third-party telemetry on a single stray variable. Fail loud, in the
+    # same place this function already rejects a missing key and out-of-range numerics.
+    if (
+        os.getenv(_TRACE_CONTENT_ENV, "").strip().lower() == "true"
+        and _environment() != _TRACE_CONTENT_ENVIRONMENT
+    ):
+        raise LLMConfigError(
+            f"{_TRACE_CONTENT_ENV}=true requires ENVIRONMENT={_TRACE_CONTENT_ENVIRONMENT} "
+            f"(got {_environment()!r}). It exports prompt and response content — loan "
+            "amount, income, employment tenure, purpose — to LangSmith, and is not "
+            "permitted outside a development deployment. Unset it, or set "
+            f"ENVIRONMENT={_TRACE_CONTENT_ENVIRONMENT} if this really is one."
+        )
+
     if trace_content_enabled():
         # Loud at boot, once, on the redacting logger. A deploy that exports customer
         # lending content to a third party must not do so silently — the whole point of

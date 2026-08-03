@@ -148,23 +148,33 @@ def assistant_explain(
 def generate_disclosure(
     app_id: int,
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
-    x_application_token: str | None = Header(default=None, alias="X-Application-Token"),
     client: ClaudeClient = Depends(get_llm_client),
 ):
     """Generate the TILA disclosure for an approved application (ADR 0012, spec D4).
 
-    Same authorization posture as `make_offer`, because this persists a regulated document
-    for the application: officer, owning borrower, or the applicant holding this
-    application's continuation token (ADR 0010), and a passing KYC (ADR 0011). Loan terms
-    are bound server-side from the stored application — the caller supplies nothing but
-    the id.
+    Officer-only, like `transition_disclosure` and unlike the rest of the disclosure
+    routes (PR review). This previously took `make_offer`'s officer-OR-owner posture on
+    the grounds that it persists a regulated document for the application — but it also
+    RETURNS that document, plus the officer narration, in the response. A borrower holding
+    a valid continuation token could therefore generate and read a draft TILA disclosure
+    while its status was still `draft`, which is precisely the state the spec D6 compliance
+    hold exists to keep from reaching them; the officer's `review_and_send` /
+    `hold_for_compliance` verdict was borrower-visible along with it. The hold is only a
+    control if the held document is unreadable until an officer releases it.
+
+    The borrower is not shut out of their own disclosure: `read_disclosure` still admits
+    officer, owner, and token-holder, and returns the status and provenance chain. What
+    they cannot do is mint the document or read its body before an officer has moved it
+    past `draft`.
+
+    Loan terms are bound server-side from the stored application — the caller supplies
+    nothing but the id.
 
     A blocked run returns 422 with the typed reason rather than a 500: "the gate refused
     this document" is a result, not a failure, and the officer needs to see which check
     stopped it.
     """
-    authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
+    authz.require_officer(x_user_role)
     kyc_gate.require_kyc_passed(app_id)
 
     coordinator = disclosure_coordinator.build_coordinator(client)
