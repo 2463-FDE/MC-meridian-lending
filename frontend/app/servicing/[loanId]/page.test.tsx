@@ -106,6 +106,37 @@ describe("loan detail — per-loan state scoping", () => {
     ).toBe("250.00");
   });
 
+  it("hides the previous borrower while the next loan is still loading", async () => {
+    let resolveLoan2: (value: unknown) => void = () => {};
+    const pendingLoan2 = new Promise((resolve) => {
+      resolveLoan2 = resolve;
+    });
+    apiGet.mockImplementation((path: string) => {
+      if (path === "/lss/loans/1") return Promise.resolve(LOAN_1);
+      if (path === "/lss/loans/2") return pendingLoan2;
+      if (path.endsWith("/schedule")) return Promise.resolve({ schedule: [] });
+      if (path.endsWith("/payments")) return Promise.resolve({ items: [] });
+      return Promise.reject(new Error(`unexpected GET ${path}`));
+    });
+
+    const view = render(<LoanDetailPage />);
+    await screen.findByText("Maria Alvarez");
+
+    // Navigate to loan 2 and hold its load open.
+    routeLoanId = "2";
+    view.rerender(<LoanDetailPage />);
+
+    // Loan 1's borrower and balance must not sit under loan 2's header.
+    expect(screen.queryByText("Maria Alvarez")).toBeNull();
+    expect(screen.queryByText("$9,000.00")).toBeNull();
+    expect(screen.getByText(/Loading loan #2/)).toBeTruthy();
+
+    await act(async () => {
+      resolveLoan2(LOAN_2);
+    });
+    await screen.findByText("Dan Brown");
+  });
+
   it("drops an in-flight payment confirmation after the route moves to another loan", async () => {
     let resolvePayment: (value: unknown) => void = () => {};
     const pending = new Promise((resolve) => {
