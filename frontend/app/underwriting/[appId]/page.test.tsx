@@ -11,6 +11,7 @@
 // Both assert on what the officer actually sees, not on internal state.
 
 import type { ReactNode } from "react";
+import { useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   act,
@@ -20,6 +21,19 @@ import {
   screen,
 } from "@testing-library/react";
 import UnderwritingDetailPage from "./page";
+
+// Records the DOM of every commit, before the browser would paint it. useLayoutEffect
+// fires after React writes the commit to the DOM but ahead of paint, so each frame it
+// captures is something an officer could have seen. That is the difference this probe
+// exists to measure: a reset performed in useEffect runs AFTER paint, so asserting on
+// the settled DOM (what rerender leaves behind) cannot tell whether a stale frame was
+// shown on the way there. No dependency array, so it runs on every commit.
+function PaintProbe({ frames }: { frames: string[] }) {
+  useLayoutEffect(() => {
+    frames.push(document.body.textContent ?? "");
+  });
+  return null;
+}
 
 // The live route param. The mock reads it on every call, so assigning to it and
 // re-rendering models a client-side navigation to another application.
@@ -140,6 +154,53 @@ describe("underwriting detail — assistant panel", () => {
 
     expect(screen.queryByText(ASSISTANT_SUMMARY)).toBeNull();
     expect(screen.queryByText(/Limited credit history/)).toBeNull();
+  });
+
+  it("never commits the previous applicant beside the new application number", async () => {
+    const frames: string[] = [];
+    let resolveApp2: (value: unknown) => void = () => {};
+    const pendingApp2 = new Promise((resolve) => {
+      resolveApp2 = resolve;
+    });
+    apiGet.mockImplementation((path: string) => {
+      if (path === "/los/applications/1") {
+        return Promise.resolve({ ...APP_1, decision: "declined" });
+      }
+      if (path === "/los/applications/2") return pendingApp2;
+      return Promise.reject(new Error(`unexpected GET ${path}`));
+    });
+
+    const view = render(
+      <>
+        <UnderwritingDetailPage />
+        <PaintProbe frames={frames} />
+      </>
+    );
+    await screen.findAllByText("Maria Alvarez");
+
+    // Only the frames produced by the navigation itself are under test.
+    frames.length = 0;
+    routeAppId = "2";
+    view.rerender(
+      <>
+        <UnderwritingDetailPage />
+        <PaintProbe frames={frames} />
+      </>
+    );
+
+    // No committed frame may pair application 1's applicant or decision with
+    // application 2's header.
+    const leaked = frames.filter(
+      (f) =>
+        f.includes("Application #2") &&
+        (f.includes("Maria Alvarez") || f.includes("Declined"))
+    );
+    expect(leaked).toEqual([]);
+
+    await act(async () => {
+      resolveApp2(APP_2);
+    });
+    await screen.findAllByText("Dan Brown");
   });
 
   it("hides the previous applicant while the next application is still loading", async () => {

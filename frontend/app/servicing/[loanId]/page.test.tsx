@@ -9,6 +9,7 @@
 //     another, and its confirmation landed on the new account.
 
 import type { ReactNode } from "react";
+import { useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   act,
@@ -38,6 +39,18 @@ vi.mock("../../../lib/api", () => ({
   apiPost: (...args: unknown[]) => apiPost(...args),
   getUser: () => getUser(),
 }));
+
+// Records the DOM of every commit, before the browser would paint it. useLayoutEffect
+// fires after React writes the commit to the DOM but ahead of paint, so each frame it
+// captures is something a CSR could have seen. A reset performed in useEffect runs AFTER
+// paint, so asserting only on the settled DOM cannot tell whether a stale frame was shown
+// on the way there. No dependency array, so it runs on every commit.
+function PaintProbe({ frames }: { frames: string[] }) {
+  useLayoutEffect(() => {
+    frames.push(document.body.textContent ?? "");
+  });
+  return null;
+}
 
 const LOAN_1 = {
   id: 1,
@@ -104,6 +117,52 @@ describe("loan detail — per-loan state scoping", () => {
     expect(
       (screen.getAllByRole("spinbutton")[0] as HTMLInputElement).value
     ).toBe("250.00");
+  });
+
+  it("never commits the previous borrower beside the new loan number", async () => {
+    const frames: string[] = [];
+    let resolveLoan2: (value: unknown) => void = () => {};
+    const pendingLoan2 = new Promise((resolve) => {
+      resolveLoan2 = resolve;
+    });
+    apiGet.mockImplementation((path: string) => {
+      if (path === "/lss/loans/1") return Promise.resolve(LOAN_1);
+      if (path === "/lss/loans/2") return pendingLoan2;
+      if (path.endsWith("/schedule")) return Promise.resolve({ schedule: [] });
+      if (path.endsWith("/payments")) return Promise.resolve({ items: [] });
+      return Promise.reject(new Error(`unexpected GET ${path}`));
+    });
+
+    const view = render(
+      <>
+        <LoanDetailPage />
+        <PaintProbe frames={frames} />
+      </>
+    );
+    await screen.findByText("Maria Alvarez");
+
+    // Only the frames produced by the navigation itself are under test.
+    frames.length = 0;
+    routeLoanId = "2";
+    view.rerender(
+      <>
+        <LoanDetailPage />
+        <PaintProbe frames={frames} />
+      </>
+    );
+
+    // No committed frame may pair loan 1's borrower or balance with loan 2's header.
+    const leaked = frames.filter(
+      (f) =>
+        f.includes("Loan #2") &&
+        (f.includes("Maria Alvarez") || f.includes("$9,000.00"))
+    );
+    expect(leaked).toEqual([]);
+
+    await act(async () => {
+      resolveLoan2(LOAN_2);
+    });
+    await screen.findByText("Dan Brown");
   });
 
   it("hides the previous borrower while the next loan is still loading", async () => {

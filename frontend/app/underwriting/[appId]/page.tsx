@@ -118,22 +118,38 @@ export default function UnderwritingDetailPage() {
   // BACK to the same application still discards the earlier in-flight call.
   const routeGenRef = useRef(0);
 
+  // Idempotency key for the officer decision action. Generated once per attempt on one
+  // page and reused across retries (a timeout retry or second click replays the recorded
+  // decision instead of re-pulling credit and appending a second regulated event —
+  // parity with the borrower path, PR review). Not derived from appId: an officer may
+  // deliberately re-decide in a fresh session (page reload = new key = new decision),
+  // whereas a borrower's post-submit inputs never change, so their key is stable.
+  const decisionKeyRef = useRef<string | null>(null);
+
+  // AI decisioning assistant idempotency key (ADR 0009 §5). Held only across retries of a
+  // single in-flight attempt and rotated after a confirmed success, so a later intentional
+  // run re-scores current state instead of replaying the recorded event.
+  const assistantKeyRef = useRef<string | null>(null);
+
   // Per-application state reset. Every value below describes ONE application, so without
-  // this the previous applicant's decision, assistant card, offer and boarded loan id stay
-  // on the next applicant's screen (PR review). The idempotency keys reset with them: a key
-  // identifies one attempt on one page. Declared BEFORE the load effect so the generation
-  // is bumped before load captures it; the key refs are declared further down but exist by
-  // the time any effect body runs.
+  // this the previous applicant's name, contact details, KYC rows, decision, assistant
+  // card, offer and boarded loan id stay on the next applicant's screen (PR review). The
+  // idempotency keys reset with them: a key identifies one attempt on one page.
   //
-  // `app` is cleared here too, matching the servicing reset. Clearing only the derived
-  // panels is not enough: the render falls back to the loading screen on `loading && !app`,
-  // so leaving the previous Application object in place keeps that applicant's name,
-  // contact details, KYC rows and `app.decision` on screen under the next application's
-  // header for as long as the next load takes (PR review).
-  useEffect(() => {
+  // This runs DURING render, not in an effect. A passive effect runs after the browser
+  // paints, so the first commit for the new appId would pair the previous applicant's
+  // regulated facts with the new application number in the header before the reset ever
+  // fired — a real frame on screen, invisible to any assertion made after effects flush
+  // (PR review). Adjusting state during render makes React re-run this component with the
+  // cleared state and commit only that, so no frame shows one applicant under another's
+  // id. Placed above the load effect, so the generation is bumped before load captures it.
+  const [routeAppId, setRouteAppId] = useState(appId);
+  if (appId !== routeAppId) {
+    setRouteAppId(appId);
     routeGenRef.current += 1;
     setApp(null);
     setLoading(true);
+    setError(null);
     setDecision(null);
     setAssistant(null);
     setOffer(null);
@@ -143,7 +159,7 @@ export default function UnderwritingDetailPage() {
     setActionBusy(false);
     decisionKeyRef.current = null;
     assistantKeyRef.current = null;
-  }, [appId]);
+  }
 
   const load = useCallback(async () => {
     if (!appId) return;
@@ -167,14 +183,6 @@ export default function UnderwritingDetailPage() {
   useEffect(() => {
     load();
   }, [load]);
-
-  // Idempotency key for the officer decision action. Generated once per page mount
-  // and reused across retries (a timeout retry or second click replays the recorded
-  // decision instead of re-pulling credit and appending a second regulated event —
-  // parity with the borrower path, PR review). Not derived from appId: an officer may
-  // deliberately re-decide in a fresh session (page reload = new key = new decision),
-  // whereas a borrower's post-submit inputs never change, so their key is stable.
-  const decisionKeyRef = useRef<string | null>(null);
 
   async function runDecision() {
     if (!appId) return;
@@ -257,12 +265,10 @@ export default function UnderwritingDetailPage() {
   // AI decisioning assistant (ADR 0009 §5). "Run" drives the agent loop: its score
   // tool performs the SAME regulated decision + append-only record as Run decision, then
   // the model narrates the recorded outcome (narration validated against the record —
-  // recorded facts win). "Explain" is read-only and never re-scores. The idempotency
-  // key is held only across retries of a single in-flight attempt and rotated after a
-  // confirmed success, so a later intentional run re-scores current state instead of
-  // replaying the recorded event. 503 = LLM feature off or provider unavailable.
-  const assistantKeyRef = useRef<string | null>(null);
-
+  // recorded facts win). "Explain" is read-only and never re-scores. 503 = LLM feature
+  // off or provider unavailable. The idempotency key it uses is assistantKeyRef, declared
+  // with the other per-application state above.
+  //
   // An assistant response must describe the application it was requested for. Checked
   // before ANY state write, the assistant card included: a mismatched application_id means
   // the record belongs to another applicant and can never be shown on this screen.

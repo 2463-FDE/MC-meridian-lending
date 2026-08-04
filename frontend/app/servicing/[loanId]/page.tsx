@@ -84,14 +84,23 @@ export default function LoanDetailPage() {
   const routeGenRef = useRef(0);
 
   // Per-loan state reset. Everything below describes ONE account, so without this the
-  // previous borrower's balance, schedule, payment history and action result stay on the
-  // next account's screen, and the money-action inputs stay pre-filled with the amounts
+  // previous borrower's name, balance, schedule, payment history and action result stay on
+  // the next account's screen, and the money-action inputs stay pre-filled with the amounts
   // typed against the previous loan (PR review sweep of the same defect found on the
-  // underwriting detail page). Declared BEFORE the load effect so the generation is bumped
-  // before loadAll captures it.
-  useEffect(() => {
+  // underwriting detail page).
+  //
+  // This runs DURING render, not in an effect. A passive effect runs after the browser
+  // paints, so the first commit for the new loanId would pair the previous borrower's name
+  // and balance with the new loan number in the header before the reset ever fired (PR
+  // review sweep). Adjusting state during render makes React re-run this component with the
+  // cleared state and commit only that. Placed above the load effect, so the generation is
+  // bumped before loadAll captures it.
+  const [routeLoanId, setRouteLoanId] = useState(loanId);
+  if (loanId !== routeLoanId) {
+    setRouteLoanId(loanId);
     routeGenRef.current += 1;
     setLoan(null);
+    setLoading(true);
     setSchedule([]);
     setPayments([]);
     setShowSchedule(false);
@@ -102,7 +111,7 @@ export default function LoanDetailPage() {
     setPayAmount(DEFAULT_PAY_AMOUNT);
     setNewBalance("");
     setWaiveAmount("");
-  }, [loanId]);
+  }
 
   const loadAll = useCallback(async () => {
     if (!loanId) return;
