@@ -59,12 +59,63 @@
 -- A fresh db/init volume (and the seed, whose dobs are 1971-1992 plus NULL for the entity)
 -- satisfies this cleanly. Re-running the migration is a no-op: only duplicate_object is
 -- swallowed, so an existing constraint is fine while a violating row still raises.
+--
+-- SAME-NAME DRIFT (PR review): the constraint is declared twice -- here and in
+-- db/init/001_schema.sql, which is what a fresh `make up` volume gets -- so "a constraint with
+-- this name exists" and "the readable-range guard is in force" are not the same statement. A
+-- name-only skip would silently accept a drifted or hand-created constraint with a weaker
+-- expression, and origination-service /health would report ready over a column that still
+-- takes a dob Python cannot represent. So the duplicate path compares the EXISTING definition
+-- against the intended one and RAISES on any difference: an operator sees the mismatch instead
+-- of a NOTICE that reads like success. Comparison ignores case, whitespace and parentheses
+-- because pg_get_constraintdef re-renders from the parse tree (DATE '0001-01-01' comes back as
+-- '0001-01-01'::date with the deparser's own parens); it does not ignore the bound literals.
+-- Mirrors config.py::_normalize_constraint_def -- keep the three declarations in step.
+-- One deparser detail the comparison has to account for: pg_get_constraintdef appends a
+-- trailing NOT VALID to the definition of an unvalidated constraint, so a constraint whose
+-- EXPRESSION is correct but which was added NOT VALID would otherwise fail the definition
+-- comparison and be reported as drift -- sending the operator to DROP it when the correct
+-- action is ALTER TABLE ... VALIDATE CONSTRAINT. The suffix is stripped before comparing so
+-- each state gets its own message; convalidated is still checked, just separately.
 DO $$
+DECLARE
+    expected TEXT := lower(regexp_replace(
+        'CHECK (dob IS NULL OR (dob >= ''0001-01-01''::date AND dob <= ''9999-12-31''::date))',
+        '[[:space:]()]', '', 'g'));
+    raw_def TEXT;
+    normalized TEXT;
+    validated BOOLEAN;
 BEGIN
     ALTER TABLE applicants
         ADD CONSTRAINT ck_applicants_dob_readable
         CHECK (dob IS NULL OR (dob >= DATE '0001-01-01' AND dob <= DATE '9999-12-31'));
 EXCEPTION
     WHEN duplicate_object THEN
-        RAISE NOTICE 'ck_applicants_dob_readable already present, skipping';
+        SELECT pg_get_constraintdef(c.oid),
+               regexp_replace(
+                   lower(regexp_replace(pg_get_constraintdef(c.oid),
+                                        '[[:space:]()]', '', 'g')),
+                   'notvalid$', ''),
+               c.convalidated
+          INTO raw_def, normalized, validated
+          FROM pg_constraint c
+          JOIN pg_class t ON t.oid = c.conrelid
+         WHERE c.conname = 'ck_applicants_dob_readable'
+           AND t.relname = 'applicants'
+           AND c.contype = 'c';
+        IF normalized IS DISTINCT FROM expected THEN
+            RAISE EXCEPTION 'ck_applicants_dob_readable already exists on applicants with a '
+                            'different definition: %. Expected the readable-range check '
+                            '(dob IS NULL OR dob BETWEEN 0001-01-01 AND 9999-12-31). Review '
+                            'the existing constraint, then DROP and re-run this migration.',
+                            coalesce(raw_def, '<not a CHECK constraint on applicants>');
+        ELSIF NOT validated THEN
+            RAISE EXCEPTION 'ck_applicants_dob_readable exists but is NOT VALID, so the rows '
+                            'already stored were never checked. Run '
+                            'ALTER TABLE applicants VALIDATE CONSTRAINT '
+                            'ck_applicants_dob_readable (repair any violating row first -- see '
+                            'the inspect/UPDATE queries above).';
+        ELSE
+            RAISE NOTICE 'ck_applicants_dob_readable already present, skipping';
+        END IF;
 END $$;
