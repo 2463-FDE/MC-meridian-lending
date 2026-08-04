@@ -373,6 +373,14 @@ jobs:
           npm ci || npm install
           npm run build
 
+      # Blocking, like the other control gates: these are regression tests for
+      # per-route state leaking one applicant's or borrower's regulated facts onto
+      # another's screen. A build-only job would let that class back in silently.
+      - name: Test
+        run: |
+          cd frontend
+          npm test
+
   secret-scan:
     # Secret literals must never re-enter the tracked tree. Runs the same scan
     # documented in docs/security-remediation-2026-07.md and BLOCKS the build on
