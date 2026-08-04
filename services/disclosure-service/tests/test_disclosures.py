@@ -12,6 +12,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from app import fingerprint, models
 from app.database import get_session
@@ -62,9 +63,16 @@ class StubSession:
         consummated=False,
         update_rowcount=1,
         decision_event_app_id=_UNSET,
+        winner=None,
+        commit_error=None,
     ):
         self.offer = offer
         self.existing = existing
+        # The concurrent-insert race: `existing` answers the pre-compute replay lookup,
+        # `winner` answers the post-IntegrityError one, so one stub can play both sides.
+        self.winner = winner
+        self.commit_error = commit_error
+        self.scalar_calls = 0
         self.provenance_row = provenance_row
         self.disclosure = disclosure
         self.consummated = consummated
@@ -105,7 +113,8 @@ class StubSession:
         return self.offer
 
     def scalar(self, _stmt):
-        return self.existing
+        self.scalar_calls += 1
+        return self.existing if self.scalar_calls == 1 else self.winner
 
     def add(self, row):
         row.id = 99
@@ -115,6 +124,8 @@ class StubSession:
 
     def commit(self):
         self.commits += 1
+        if self.commit_error is not None and self.commits == 1:
+            raise self.commit_error
 
     def refresh(self, _row):
         pass
@@ -285,6 +296,85 @@ def test_replay_returns_the_persisted_record_without_recomputing(client):
 def test_closes_the_provenance_edge_on_a_legacy_offer(client):
     session = _with_session(StubSession(offer=_offer(decision_event_id=None)))
     client.post("/disclosures", json=GOOD_INPUTS, headers={"X-Internal-Service": TOKEN})
+    assert session.offer.decision_event_id == 7
+
+
+def _persisted_disclosure(**overrides):
+    row = models.Disclosure(
+        **{
+            "id": 5,
+            "offer_id": 1,
+            "decision_event_id": 7,
+            "status": "draft",
+            "apr": Decimal("9.584"),
+            "finance_charge_cents": 362871,
+            "amount_financed_cents": 1746000,
+            "monthly_payment_cents": 43935,
+            "total_of_payments_cents": 2108871,
+            "compute_snapshot": {},
+            "fee_schedule_version": "2024-11",
+            "apr_method_version": "actuarial-regz-appj-1",
+            "content_fingerprint": "fp-1",
+            **overrides,
+        }
+    )
+    row.delivered_at = None
+    return row
+
+
+def test_the_edge_and_the_record_commit_together(client):
+    """One transaction, not two. The edge write used to follow the insert's commit, which
+    is the window that leaves a persisted disclosure with an open edge."""
+    session = _with_session(StubSession(offer=_offer(decision_event_id=None)))
+    response = client.post(
+        "/disclosures", json=GOOD_INPUTS, headers={"X-Internal-Service": TOKEN}
+    )
+    assert response.status_code == 201, response.text
+    assert session.offer.decision_event_id == 7
+    assert session.commits == 1, "the provenance edge must not commit separately"
+
+
+def test_replay_repairs_an_edge_a_crashed_write_left_open(client):
+    """The replay path returns before any compute, so it is also the only path a
+    half-written record can ever reach again. Without a repair here the offer edge stays
+    NULL forever, `v_disclosure_provenance` keeps reporting the chain incomplete for a
+    disclosure that exists, and delivery cannot proceed without hand-written SQL.
+
+    The repair source is the persisted disclosure (decision event 3 below), not the
+    request body (7) — the body is not revalidated on this path."""
+    session = _with_session(
+        StubSession(
+            offer=_offer(decision_event_id=None),
+            existing=_persisted_disclosure(decision_event_id=3),
+        )
+    )
+    response = client.post(
+        "/disclosures", json=GOOD_INPUTS, headers={"X-Internal-Service": TOKEN}
+    )
+    assert response.status_code == 201, response.text
+    assert session.added == [], "a replay must not persist a second record"
+    assert session.offer.decision_event_id == 3
+    assert session.commits == 1
+
+
+def test_the_concurrent_loser_repairs_the_edge_before_replaying(client):
+    """The loser rolls back, which discards its own edge write too. It has to close the
+    edge from the winner's record, or the race reproduces the same open edge the crash
+    window does."""
+    session = _with_session(
+        StubSession(
+            offer=_offer(decision_event_id=None),
+            winner=_persisted_disclosure(id=11, decision_event_id=7),
+            commit_error=IntegrityError(
+                "insert", {}, Exception("uq_disclosures_offer")
+            ),
+        )
+    )
+    response = client.post(
+        "/disclosures", json=GOOD_INPUTS, headers={"X-Internal-Service": TOKEN}
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["disclosure_id"] == 11
     assert session.offer.decision_event_id == 7
 
 

@@ -102,6 +102,18 @@ def create_disclosure(
         select(models.Disclosure).where(models.Disclosure.offer_id == body.offer_id)
     )
     if existing is not None:
+        # Repair the offer edge here, not only on the fresh-insert path. The edge write
+        # used to happen after the disclosure was already committed, so a crash between
+        # the two left it NULL — and every retry short-circuits on this line, so nothing
+        # ever closed it again. The provenance view joins through
+        # `offers.decision_event_id`, so the chain stayed incomplete for a disclosure that
+        # exists and delivery stayed blocked short of hand-written SQL.
+        #
+        # The source is the persisted disclosure's own decision event, not the request
+        # body's: that value was validated against the offer's application when the record
+        # was written, and this path does not revalidate.
+        if _close_provenance_edge(offer, existing.decision_event_id):
+            session.commit()
         return _disclosure_out(existing)
 
     _refuse_if_decision_event_mismatched(session, body.decision_event_id, offer)
@@ -159,25 +171,28 @@ def create_disclosure(
         ),
     )
     session.add(row)
+    # Close the provenance edge inside the SAME transaction as the insert. `create_offer`
+    # never writes `offers.decision_event_id`, so this is the only place it gets set; doing
+    # it in a second commit meant the record could exist with its edge still open.
+    _close_provenance_edge(offer, body.decision_event_id)
     try:
         session.commit()
     except IntegrityError:
         # Concurrent POST: the loser replays the winner's record rather than inserting a
-        # second regulated document. Same posture as the offer write path.
+        # second regulated document. Same posture as the offer write path. The rollback
+        # discards this transaction's edge write too, so the loser has to close it again
+        # from the winner's record — otherwise the winner's own crash window reopens here.
         session.rollback()
         winner = session.scalar(
             select(models.Disclosure).where(models.Disclosure.offer_id == body.offer_id)
         )
         if winner is None:
             raise
+        if _close_provenance_edge(offer, winner.decision_event_id):
+            session.commit()
         return _disclosure_out(winner)
 
     session.refresh(row)
-    # Close the provenance edge on the offer if it is still open (legacy rows, and offers
-    # created before the coordinator started supplying it).
-    if offer.decision_event_id is None:
-        offer.decision_event_id = body.decision_event_id
-        session.commit()
     log.info(
         "disclosure persisted id=%s offer_id=%s fingerprint=%s",
         row.id,
@@ -479,6 +494,19 @@ def _refuse_if_already_consummated(session: Session, offer_id: int) -> None:
                 "delivered before consummation"
             ),
         )
+
+
+def _close_provenance_edge(offer: models.Offer, decision_event_id: int | None) -> bool:
+    """Point the offer at its decision event when that edge is still open.
+
+    Idempotent by construction: an offer that already carries an edge is left alone, so
+    every path through this endpoint can call it. Returns whether it changed anything, so
+    the replay paths know whether a commit is owed.
+    """
+    if offer.decision_event_id is not None or decision_event_id is None:
+        return False
+    offer.decision_event_id = decision_event_id
+    return True
 
 
 _DECISION_EVENT_APP_SQL = text(
