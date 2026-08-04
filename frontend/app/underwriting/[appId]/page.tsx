@@ -56,6 +56,26 @@ interface DecisionResult {
   adverse_action_reason?: string;
 }
 
+interface AssistantReason {
+  code: string;
+  reason: string;
+}
+
+interface AssistantResult {
+  application_id: string | number;
+  record_status?: string;
+  outcome?: string;
+  // Model score from the persisted decision record (null on legacy records that never
+  // captured drivers) -- same fact the manual Run decision panel shows.
+  score?: number;
+  policy_band?: string;
+  principal_reasons?: AssistantReason[];
+  decided_by?: string;
+  decided_at?: string;
+  summary?: string;
+  narration_validated?: boolean;
+}
+
 const OFFER_RATE_PCT = 7.99;
 
 function errMsg(err: unknown, fallback: string): string {
@@ -89,20 +109,74 @@ export default function UnderwritingDetailPage() {
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  const [assistant, setAssistant] = useState<AssistantResult | null>(null);
+
+  // Route generation. Next.js reuses this page component across /underwriting/[appId]
+  // navigations, so a request can outlive the application it was fired from. Each handler
+  // captures this counter when it starts and compares on completion: anything from before
+  // the last navigation is dropped. Generations rather than appIds, so navigating away and
+  // BACK to the same application still discards the earlier in-flight call.
+  const routeGenRef = useRef(0);
+
+  // Idempotency key for the officer decision action. Generated once per attempt on one
+  // page and reused across retries (a timeout retry or second click replays the recorded
+  // decision instead of re-pulling credit and appending a second regulated event —
+  // parity with the borrower path, PR review). Not derived from appId: an officer may
+  // deliberately re-decide in a fresh session (page reload = new key = new decision),
+  // whereas a borrower's post-submit inputs never change, so their key is stable.
+  const decisionKeyRef = useRef<string | null>(null);
+
+  // AI decisioning assistant idempotency key (ADR 0009 §5). Held only across retries of a
+  // single in-flight attempt and rotated after a confirmed success, so a later intentional
+  // run re-scores current state instead of replaying the recorded event.
+  const assistantKeyRef = useRef<string | null>(null);
+
+  // Per-application state reset. Every value below describes ONE application, so without
+  // this the previous applicant's name, contact details, KYC rows, decision, assistant
+  // card, offer and boarded loan id stay on the next applicant's screen (PR review). The
+  // idempotency keys reset with them: a key identifies one attempt on one page.
+  //
+  // This runs DURING render, not in an effect. A passive effect runs after the browser
+  // paints, so the first commit for the new appId would pair the previous applicant's
+  // regulated facts with the new application number in the header before the reset ever
+  // fired — a real frame on screen, invisible to any assertion made after effects flush
+  // (PR review). Adjusting state during render makes React re-run this component with the
+  // cleared state and commit only that, so no frame shows one applicant under another's
+  // id. Placed above the load effect, so the generation is bumped before load captures it.
+  const [routeAppId, setRouteAppId] = useState(appId);
+  if (appId !== routeAppId) {
+    setRouteAppId(appId);
+    routeGenRef.current += 1;
+    setApp(null);
+    setLoading(true);
+    setError(null);
+    setDecision(null);
+    setAssistant(null);
+    setOffer(null);
+    setBoardedLoanId(null);
+    setActionMsg(null);
+    setActionErr(null);
+    setActionBusy(false);
+    decisionKeyRef.current = null;
+    assistantKeyRef.current = null;
+  }
 
   const load = useCallback(async () => {
     if (!appId) return;
+    const gen = routeGenRef.current;
     setLoading(true);
     setError(null);
     try {
       const a = (await apiGet(`/los/applications/${appId}`)) as Application;
+      if (routeGenRef.current !== gen) return;
       setApp(a);
       if (a.offer) setOffer(a.offer);
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setError(errMsg(err, "Could not load this application."));
       setApp(null);
     } finally {
-      setLoading(false);
+      if (routeGenRef.current === gen) setLoading(false);
     }
   }, [appId]);
 
@@ -110,16 +184,9 @@ export default function UnderwritingDetailPage() {
     load();
   }, [load]);
 
-  // Idempotency key for the officer decision action. Generated once per page mount
-  // and reused across retries (a timeout retry or second click replays the recorded
-  // decision instead of re-pulling credit and appending a second regulated event —
-  // parity with the borrower path, PR review). Not derived from appId: an officer may
-  // deliberately re-decide in a fresh session (page reload = new key = new decision),
-  // whereas a borrower's post-submit inputs never change, so their key is stable.
-  const decisionKeyRef = useRef<string | null>(null);
-
   async function runDecision() {
     if (!appId) return;
+    const gen = routeGenRef.current;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
@@ -130,13 +197,20 @@ export default function UnderwritingDetailPage() {
         undefined,
         { "Idempotency-Key": decisionKeyRef.current }
       )) as DecisionResult;
+      if (routeGenRef.current !== gen) return;
       setDecision(res);
       setApp((prev) => (prev ? { ...prev, decision: res.decision } : prev));
+      // A manual decision supersedes whatever the assistant last reported: that card's
+      // summary, principal reasons, decided_at and outcome describe an EARLIER decision
+      // event. Leaving it would put two record-backed but conflicting outcomes on one
+      // screen. Explain repopulates it from the current record on demand (PR review).
+      setAssistant(null);
       setActionMsg(`Decision recorded: ${res.decision}.`);
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setActionErr(errMsg(err, "Could not run a decision."));
     } finally {
-      setActionBusy(false);
+      if (routeGenRef.current === gen) setActionBusy(false);
     }
   }
 
@@ -146,22 +220,26 @@ export default function UnderwritingDetailPage() {
   // the refreshed result -- the operational counterpart to the borrower's retry.
   async function recheckKyc() {
     if (!appId) return;
+    const gen = routeGenRef.current;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
     try {
       await apiPost(`/los/applications/${appId}/recheck-kyc`, undefined);
       await load();
+      if (routeGenRef.current !== gen) return;
       setActionMsg("Identity verification re-run.");
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setActionErr(errMsg(err, "Could not re-run identity verification."));
     } finally {
-      setActionBusy(false);
+      if (routeGenRef.current === gen) setActionBusy(false);
     }
   }
 
   async function makeOffer() {
     if (!app || !appId) return;
+    const gen = routeGenRef.current;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
@@ -172,18 +250,151 @@ export default function UnderwritingDetailPage() {
         annual_rate_pct: OFFER_RATE_PCT,
         term_months: app.term_months,
       })) as { app_id: string | number; disclosure?: Offer; offer?: Offer };
+      if (routeGenRef.current !== gen) return;
       const disc = res.disclosure ?? res.offer ?? null;
       setOffer(disc);
       setActionMsg("Offer generated.");
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setActionErr(errMsg(err, "Could not generate an offer."));
     } finally {
-      setActionBusy(false);
+      if (routeGenRef.current === gen) setActionBusy(false);
+    }
+  }
+
+  // AI decisioning assistant (ADR 0009 §5). "Run" drives the agent loop: its score
+  // tool performs the SAME regulated decision + append-only record as Run decision, then
+  // the model narrates the recorded outcome (narration validated against the record —
+  // recorded facts win). "Explain" is read-only and never re-scores. 503 = LLM feature
+  // off or provider unavailable. The idempotency key it uses is assistantKeyRef, declared
+  // with the other per-application state above.
+  //
+  // An assistant response must describe the application it was requested for. Checked
+  // before ANY state write, the assistant card included: a mismatched application_id means
+  // the record belongs to another applicant and can never be shown on this screen.
+  function isForApplication(res: AssistantResult, expectedAppId: string): boolean {
+    return String(res.application_id) === String(expectedAppId);
+  }
+
+  // One mapping from an assistant result onto the primary decision panel, used by BOTH
+  // Run and Explain. Both report the same append-only decision record, so the panel must
+  // show the same record-derived facts either way; a single copy is what keeps the two
+  // paths from drifting apart on regulated fields. Everything here is record-derived
+  // (recorded facts win, ADR 0009 §5). Reason parity: DecisionOut.reason is the FIRST
+  // principal reason; score parity: DecisionOut.score is an int. Returns false when the
+  // response carries no recorded outcome so the caller can fail closed rather than
+  // half-update the panel.
+  function applyRecordedDecision(res: AssistantResult): boolean {
+    const outcome = res.outcome;
+    if (!outcome) return false;
+    setApp((prev) => (prev ? { ...prev, decision: outcome } : prev));
+    setDecision({
+      app_id: res.application_id,
+      decision: outcome,
+      score: typeof res.score === "number" ? Math.round(res.score) : undefined,
+      adverse_action_reason: res.principal_reasons?.[0]?.reason,
+    });
+    return true;
+  }
+
+  async function runAssistant() {
+    if (!appId) return;
+    const requestAppId = appId;
+    const gen = routeGenRef.current;
+    setActionBusy(true);
+    setActionErr(null);
+    setActionMsg(null);
+    if (!assistantKeyRef.current) assistantKeyRef.current = crypto.randomUUID();
+    try {
+      const res = (await apiPost(
+        `/los/assistant/decisions/${appId}`,
+        undefined,
+        { "Idempotency-Key": assistantKeyRef.current }
+      )) as AssistantResult;
+      if (routeGenRef.current !== gen) return;
+      if (!isForApplication(res, requestAppId)) {
+        setActionErr(
+          "The AI assistant returned a result for a different application — the decision panel was not updated."
+        );
+        return;
+      }
+      setAssistant(res);
+      // Fail closed on a 200 that carries no recorded outcome: an assistant run IS a
+      // regulated decision, so a response missing the outcome is not a success. Leave the
+      // existing decision state untouched, report the failure, and keep the idempotency
+      // key so a retry replays that attempt instead of recording a second event.
+      // (PR #11 review; the server already refuses an unrecorded decision, this is the
+      // client-side backstop for a drifted contract or a proxy-mangled body.)
+      //
+      // On success this REPLACES the standard-decision state with THIS run's recorded
+      // facts rather than clearing it: blanking them hid fields officers rely on, while
+      // leaving them would show a PRIOR run's data beside a fresh outcome.
+      if (!applyRecordedDecision(res)) {
+        setActionErr(
+          "The AI assistant returned no recorded outcome — the decision panel was not updated."
+        );
+        return;
+      }
+      // Rotate the idempotency key after a confirmed success so a later intentional
+      // "Run AI assistant" click re-scores current state rather than replaying this
+      // recorded event. A failed run leaves the key set (the catch below does not
+      // reset it) so a retry of the same attempt still replays, not double-records.
+      assistantKeyRef.current = null;
+      setActionMsg("AI assistant ran the decision.");
+    } catch (err) {
+      if (routeGenRef.current !== gen) return;
+      setActionErr(errMsg(err, "The AI assistant is unavailable."));
+    } finally {
+      if (routeGenRef.current === gen) setActionBusy(false);
+    }
+  }
+
+  async function explainAssistant() {
+    if (!appId) return;
+    const requestAppId = appId;
+    const gen = routeGenRef.current;
+    setActionBusy(true);
+    setActionErr(null);
+    setActionMsg(null);
+    try {
+      const res = (await apiGet(
+        `/los/assistant/decisions/${appId}`
+      )) as AssistantResult;
+      if (routeGenRef.current !== gen) return;
+      if (!isForApplication(res, requestAppId)) {
+        setActionErr(
+          "The AI assistant returned a result for a different application — the decision panel was not updated."
+        );
+        return;
+      }
+      setAssistant(res);
+      // Explain is read-only but NOT stale-safe on its own: the GET reports the CURRENT
+      // recorded decision (assistant.py _validated_final fetches the record unscoped for
+      // this task), so it can legitimately return a newer outcome than whatever this tab
+      // last put in the panel -- e.g. an officer's earlier Run decision here, another
+      // decision event recorded elsewhere, then Explain. Without this sync the assistant
+      // card would show the latest recorded outcome while the primary panel kept the old
+      // score and adverse-action reason: a user-visible contradiction on regulated
+      // decision facts. Same fail-closed rule as Run -- no recorded outcome means the
+      // panel is left alone and the officer is told, never half-updated (PR review).
+      if (!applyRecordedDecision(res)) {
+        setActionErr(
+          "The AI assistant returned no recorded outcome — the decision panel was not updated."
+        );
+        return;
+      }
+      setActionMsg("AI assistant explained the recorded decision (no re-score).");
+    } catch (err) {
+      if (routeGenRef.current !== gen) return;
+      setActionErr(errMsg(err, "The AI assistant is unavailable."));
+    } finally {
+      if (routeGenRef.current === gen) setActionBusy(false);
     }
   }
 
   async function acceptAndBoard() {
     if (!appId) return;
+    const gen = routeGenRef.current;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
@@ -191,12 +402,14 @@ export default function UnderwritingDetailPage() {
       const res = (await apiPost(`/los/applications/${appId}/accept`)) as {
         loan_id: string | number;
       };
+      if (routeGenRef.current !== gen) return;
       setBoardedLoanId(res.loan_id);
       setActionMsg(`Boarded to servicing as loan #${String(res.loan_id)}.`);
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setActionErr(errMsg(err, "Could not accept and board this application."));
     } finally {
-      setActionBusy(false);
+      if (routeGenRef.current === gen) setActionBusy(false);
     }
   }
 
@@ -361,6 +574,79 @@ export default function UnderwritingDetailPage() {
             {actionBusy ? "Working…" : "Run decision"}
           </button>
         </div>
+      </div>
+
+      {/* AI decisioning assistant */}
+      <h2>AI decisioning assistant</h2>
+      <div className="card">
+        <div className="spread">
+          <div>
+            <div className="card-title" style={{ marginBottom: 8 }}>
+              LLM assistant
+            </div>
+            <p className="hint" style={{ margin: 0 }}>
+              The assistant scores through the deterministic model tool, then narrates
+              the recorded outcome. The LLM never sets the score.
+            </p>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={runAssistant} disabled={actionBusy}>
+              {actionBusy ? "Working…" : "Run AI assistant"}
+            </button>
+            <button
+              className="btn-ghost"
+              onClick={explainAssistant}
+              disabled={actionBusy}
+            >
+              {actionBusy ? "Working…" : "Explain"}
+            </button>
+          </div>
+        </div>
+
+        {assistant ? (
+          <div style={{ marginTop: 16 }}>
+            <div className="spread" style={{ marginBottom: 10 }}>
+              {assistant.outcome ? (
+                <StatusChip status={assistant.outcome} />
+              ) : (
+                <span className="muted">No recorded decision.</span>
+              )}
+              {assistant.narration_validated ? (
+                <span className="chip chip-green">
+                  ✓ narration validated against record
+                </span>
+              ) : (
+                <span className="chip chip-amber">
+                  ⚠ narration diverged — showing recorded facts
+                </span>
+              )}
+            </div>
+            {assistant.summary ? (
+              <p style={{ marginTop: 0 }}>{assistant.summary}</p>
+            ) : null}
+            {assistant.principal_reasons &&
+            assistant.principal_reasons.length > 0 ? (
+              <ul className="hint" style={{ marginTop: 8 }}>
+                {assistant.principal_reasons.map((r) => (
+                  <li key={r.code}>
+                    <strong>{r.code}</strong>: {r.reason}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {assistant.decided_by || assistant.decided_at ? (
+              <p className="hint" style={{ marginTop: 8 }}>
+                Recorded by {assistant.decided_by || "—"}
+                {assistant.decided_at
+                  ? ` at ${shortDate(assistant.decided_at)}`
+                  : ""}
+                {assistant.policy_band
+                  ? ` · policy band ${assistant.policy_band}`
+                  : ""}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       {/* Offer */}
