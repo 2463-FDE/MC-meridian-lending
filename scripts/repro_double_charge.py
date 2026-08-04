@@ -20,7 +20,7 @@ Usage:
     python3 scripts/repro_double_charge.py                     # run, then clean up
     python3 scripts/repro_double_charge.py --keep              # leave the rows for inspection
     python3 scripts/repro_double_charge.py --parallel 5
-    python3 scripts/repro_double_charge.py --cleanup-only      # remove rows from a --keep run
+    python3 scripts/repro_double_charge.py --cleanup-only --since-id 118 --restore-balance 24800.00
 
 Requires the stack up (`make up`) and PROCESSOR_API_KEY set, or payment-service fails closed
 at /health and refuses every charge. Note that no processor is actually contacted: the only
@@ -28,6 +28,9 @@ outbound call in `charge()` is the servicing apply hop (payment-service/app/paym
 
 Writes real rows to the local dev database and moves a real balance. Cleanup is on by
 default and deletes only the ids this run created, then restores the opening balance.
+`--cleanup-only` cleans up after a `--keep` run and needs both numbers that run printed: the
+high-water id and the opening balance. It refuses without them, because deleting the rows
+without restoring the balance leaves the loan debited with no payment behind it.
 """
 
 from __future__ import annotations
@@ -201,22 +204,41 @@ def main() -> int:
     ap.add_argument(
         "--cleanup-only",
         action="store_true",
-        help="delete rows for this loan above the recorded high-water id",
+        help="clean up a prior --keep run: needs --since-id and --restore-balance",
     )
     ap.add_argument(
         "--since-id",
         type=int,
-        default=0,
-        help="with --cleanup-only: delete rows with id > this",
+        default=None,
+        help="with --cleanup-only: delete rows with id > this (required)",
+    )
+    ap.add_argument(
+        "--restore-balance",
+        type=float,
+        default=None,
+        help="with --cleanup-only: the opening balance the --keep run reported (required)",
     )
     args = ap.parse_args()
 
     if args.cleanup_only:
+        # PR review: this used to DELETE and return, skipping cleanup()'s balance restore.
+        # The documented use is cleaning up after --keep, and that run has already moved the
+        # balance -- so deleting the rows alone leaves the loan debited with no payment
+        # behind it, and the next run reads that as its opening balance and reports lost-update
+        # arithmetic that is silently wrong. Both halves or neither.
+        #
+        # --since-id is required for the same reason it is not optional in spirit: its old
+        # default of 0 made a bare --cleanup-only delete EVERY payment row for the loan,
+        # seeded history included.
+        if args.since_id is None or args.restore_balance is None:
+            sys.exit(
+                "--cleanup-only needs --since-id and --restore-balance. Deleting the rows "
+                "without restoring the balance leaves the loan debited with no payment "
+                "behind it, and an unbounded --since-id would take the seeded history with "
+                "it. The --keep run printed both numbers."
+            )
         doomed = {i for i in payment_ids(args.loan_id) if i > args.since_id}
-        psql(
-            f"DELETE FROM payments WHERE id IN ({','.join(str(i) for i in doomed) or '0'});"
-        )
-        print(f"removed {len(doomed)} row(s) for loan {args.loan_id}")
+        cleanup(args.loan_id, doomed, args.restore_balance)
         return 0
 
     token = login(args.user, args.password)
@@ -285,9 +307,18 @@ def main() -> int:
 
     created = payment_ids(args.loan_id) - ids_before_all
     if args.keep:
+        # Print the cleanup invocation rather than the raw numbers: --cleanup-only now
+        # requires both, and reconstructing the high-water id from the created ids by hand
+        # is where an operator gets it wrong and deletes seeded rows.
+        high_water = max(ids_before_all, default=0)
         print(
             f"\n--keep: left {len(created)} row(s) {sorted(created)}; "
             f"opening balance was {opening_all}"
+        )
+        print(
+            f"        clean up with: python3 scripts/repro_double_charge.py "
+            f"--cleanup-only --loan-id {args.loan_id} --since-id {high_water} "
+            f"--restore-balance {opening_all}"
         )
     else:
         cleanup(args.loan_id, created, opening_all)
