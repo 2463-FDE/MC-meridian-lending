@@ -124,8 +124,16 @@ export default function UnderwritingDetailPage() {
   // identifies one attempt on one page. Declared BEFORE the load effect so the generation
   // is bumped before load captures it; the key refs are declared further down but exist by
   // the time any effect body runs.
+  //
+  // `app` is cleared here too, matching the servicing reset. Clearing only the derived
+  // panels is not enough: the render falls back to the loading screen on `loading && !app`,
+  // so leaving the previous Application object in place keeps that applicant's name,
+  // contact details, KYC rows and `app.decision` on screen under the next application's
+  // header for as long as the next load takes (PR review).
   useEffect(() => {
     routeGenRef.current += 1;
+    setApp(null);
+    setLoading(true);
     setDecision(null);
     setAssistant(null);
     setOffer(null);

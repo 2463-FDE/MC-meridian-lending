@@ -142,6 +142,40 @@ describe("underwriting detail — assistant panel", () => {
     expect(screen.queryByText(/Limited credit history/)).toBeNull();
   });
 
+  it("hides the previous applicant while the next application is still loading", async () => {
+    let resolveApp2: (value: unknown) => void = () => {};
+    const pendingApp2 = new Promise((resolve) => {
+      resolveApp2 = resolve;
+    });
+    apiGet.mockImplementation((path: string) => {
+      // Application 1 carries a recorded decision, the regulated fact that must not
+      // survive the navigation. Application 2's load never settles.
+      if (path === "/los/applications/1") {
+        return Promise.resolve({ ...APP_1, decision: "declined" });
+      }
+      if (path === "/los/applications/2") return pendingApp2;
+      return Promise.reject(new Error(`unexpected GET ${path}`));
+    });
+
+    const view = render(<UnderwritingDetailPage />);
+    await screen.findAllByText("Maria Alvarez");
+    expect(screen.getByText("Declined")).toBeTruthy();
+
+    // Navigate to application 2 and hold its load open.
+    routeAppId = "2";
+    view.rerender(<UnderwritingDetailPage />);
+
+    // Application 1's applicant and decision must not sit under application 2's header.
+    expect(screen.queryAllByText("Maria Alvarez")).toHaveLength(0);
+    expect(screen.queryByText("Declined")).toBeNull();
+    expect(screen.getByText(/Loading application #2/)).toBeTruthy();
+
+    await act(async () => {
+      resolveApp2(APP_2);
+    });
+    await screen.findAllByText("Dan Brown");
+  });
+
   it("drops an in-flight assistant response after navigating away and back", async () => {
     let resolveAssistant: (value: unknown) => void = () => {};
     const pending = new Promise((resolve) => {
