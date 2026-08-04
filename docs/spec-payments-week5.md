@@ -130,12 +130,30 @@ from a client bug that reused a key with different parameters.
 | First use | Process normally; `201` |
 | Replay — same key, same fingerprint, prior request terminal | **The original status code and body, byte for byte**, plus `Idempotent-Replay: true`. That header is the only difference, so a client ignoring it sees an identical result. |
 | Replay — same key, **different** fingerprint | `422`, no second row, no processor call. This is a client defect, not a retry. Follows `draft-ietf-httpapi-idempotency-key-header`. |
-| Concurrent — same key, prior request still `processing` | `409` with `Retry-After`. Exactly one processor call happens. |
-| Same key after the retention window | Treated as a new payment |
+| Concurrent — same key, prior request not yet terminal (`processing`, or ACH `submitted`) | `409` with `Retry-After`. Exactly one processor call happens. |
+| Same key after the retention window, prior request terminal | Treated as a new payment |
+| Same key after the retention window, prior request **not** terminal | `409`, as above. The window releases a finished payment's key; it is not a timeout on the payment itself. |
 
 **Retention.** Keys are honoured for `PAYMENT_IDEMPOTENCY_TTL_HOURS`, default **24**. A
 customer clicking "pay" the next day is a new intent, not a retry. Configurable, so a
 different answer from Dana (Q5) costs a config change.
+
+Expiry is a state transition on the row, not a property of the index — a unique index cannot
+be time-scoped, because `now()` is not immutable and cannot appear in its predicate. The
+insert stamps `idempotency_expires_at = now() + PAYMENT_IDEMPOTENCY_TTL_HOURS`. Once that
+passes **and the payment has reached a terminal state** (D5), the key is **retired**:
+`idempotency_key` is set to `NULL`, which drops the row out of the partial index
+(`WHERE idempotency_key IS NOT NULL`) and frees the value for reuse. An intent still in flight
+keeps its key however old it is — an ACH payment is `submitted` for days, and releasing its
+key would let a second payment claim it while the first is still live. The payment row is
+never deleted or archived; only the key it holds is released, so the charge history stays
+intact and a retired row is the same shape as the pre-migration rows the partial index already
+tolerates. D2 defines when the transition fires and what makes it safe under concurrency.
+
+The cost of this follows from the row above and is deliberate: past the window, a genuinely
+late retry of the *same* intent is charged again, because the system has by then given up the
+evidence that would tell it from a new payment. That is what "treated as a new payment" means.
+`PAYMENT_IDEMPOTENCY_TTL_HOURS` is the lever if Dana wants that window wider.
 
 **Replay bodies are derived, not stored.** The response is reconstructed deterministically
 from the persisted row. No response-snapshot column — it would be a second source of truth
@@ -154,12 +172,13 @@ table today, and a support engineer with `psql` is a third.
 
 ```sql
 ALTER TABLE payments
-  ADD COLUMN IF NOT EXISTS idempotency_key     TEXT,
-  ADD COLUMN IF NOT EXISTS request_fingerprint TEXT,
-  ADD COLUMN IF NOT EXISTS status              TEXT NOT NULL DEFAULT 'captured',
-  ADD COLUMN IF NOT EXISTS processor_ref       TEXT,
-  ADD COLUMN IF NOT EXISTS amount_minor        BIGINT,
-  ADD COLUMN IF NOT EXISTS updated_at          TIMESTAMPTZ;
+  ADD COLUMN IF NOT EXISTS idempotency_key        TEXT,
+  ADD COLUMN IF NOT EXISTS idempotency_expires_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS request_fingerprint    TEXT,
+  ADD COLUMN IF NOT EXISTS status                 TEXT NOT NULL DEFAULT 'captured',
+  ADD COLUMN IF NOT EXISTS processor_ref          TEXT,
+  ADD COLUMN IF NOT EXISTS amount_minor           BIGINT,
+  ADD COLUMN IF NOT EXISTS updated_at             TIMESTAMPTZ;
 
 CREATE UNIQUE INDEX IF NOT EXISTS payments_idempotency_key_uniq
   ON payments (idempotency_key) WHERE idempotency_key IS NOT NULL;
@@ -170,14 +189,31 @@ the partial index leaves those legacy `NULL` keys untouched and non-conflicting.
 follows the ADR 0012 precedent — integer minor units for anything this design adds. The
 existing float `amount` column is left alone (D2 stays open elsewhere).
 
+`idempotency_expires_at` is what makes D1's retention window enforceable rather than a claim.
+The index is deliberately unconditional on time: it cannot carry a `now()` predicate, so the
+window has to be a column the retirement transition below reads. Without that column the index
+is permanent, the second request in R6 conflicts forever, and the contract's last row is
+unimplementable — the defect this revision closes.
+
 **Claim the key before contacting the processor.** The write is insert-first, never
 read-check-then-insert:
 
 ```
-1. INSERT ... (idempotency_key, request_fingerprint, status='processing')
+1. INSERT ... (idempotency_key, idempotency_expires_at, request_fingerprint,
+               status='processing')
    ON CONFLICT (idempotency_key) DO NOTHING
    RETURNING id
-2. zero rows  -> a duplicate exists. Read it and branch per D1's table.
+2. zero rows  -> a row already holds this key. Read it.
+   2a. its idempotency_expires_at <= now() AND its status is terminal (D5)
+       -> the key is expired. Retire it in one statement:
+         UPDATE payments SET idempotency_key = NULL
+          WHERE idempotency_key = $1
+            AND idempotency_expires_at <= now()
+            AND status IN ('captured','failed','settled','returned')
+       Then retry step 1 exactly once. If that retry also conflicts, another caller
+       claimed the freed key first -> fall through to 2b against the new row.
+   2b. otherwise -> a live key, or an expired one on an intent still in flight.
+       Branch per D1's table.
 3. one row    -> we own this intent. Call the processor (passing the key).
 4. UPDATE the row to its terminal status + processor_ref.
 5. Apply to servicing (D3).
@@ -188,10 +224,46 @@ cannot proceed to step 3, so **the processor is contacted once**. This is the pr
 amount of application-level checking provides, and it is why the constraint is the design
 rather than a backstop.
 
+The same holds at the expiry boundary, which is the point of doing retirement this way rather
+than by reading the timestamp and deciding in the service. Step 2a's `UPDATE` is a single
+statement whose `WHERE` stops matching the moment the key is `NULL`, so concurrent
+expired-key requests serialize on that row: under `READ COMMITTED`, the second one re-evaluates
+its predicate against the committed row, matches nothing, and updates zero rows. Exactly one
+caller can therefore go on to win step 1. The losers land in 2b and get D1's concurrent answer
+— the same `409` a live key produces. Retirement frees the key without opening a window in
+which two requests each believe they own it. The retry is bounded at one, so no request can
+loop.
+
+**Only a terminal intent releases its key.** The status condition in 2a is not defensive
+padding. An ACH payment sits `submitted` for days (D5), routinely outliving a 24-hour window,
+and a `processing` row can outlive it after a crash. Retiring the key of either one would do
+two things wrong at once: it would free the key for a *new* payment while the original intent
+is still live, reintroducing exactly the duplicate charge this deliverable closes; and it would
+destroy the value the stuck-row reaper resolves that row by, since the key is what it queries
+the processor with. So an unfinished intent keeps its key past the window and answers 2b —
+`409`, not a new charge. The window governs how long a *finished* payment's key stays claimable
+for replay, not how long the system is willing to wait for the payment.
+
 **Stuck-row resolution.** A crash between steps 3 and 4 leaves `processing`. A reaper
 resolves rows older than `PAYMENT_PROCESSING_TIMEOUT_MINUTES` by querying the processor for
 that idempotency key — the third use of the same value. Rows terminal-but-unapplied
 (see D3) are retried by the same job.
+
+The same job retires expired keys in bulk, under the same terminal-only condition as step 2a
+and for the same reason — it must not strip the key off a row it is itself about to resolve
+by that key:
+
+```sql
+UPDATE payments SET idempotency_key = NULL
+ WHERE idempotency_key IS NOT NULL
+   AND idempotency_expires_at <= now()
+   AND status IN ('captured','failed','settled','returned');
+```
+
+Ordering within the job follows from that: resolve stuck rows first, retire keys second, so a
+row that reaches a terminal status in this pass has its key released in the same pass rather
+than a cycle later. Step 2a is then an optimization for whichever request arrives first, not
+the only thing keeping keys from being held past their window by clients that never retry.
 
 ### D3. The cross-service apply hop
 
@@ -523,12 +595,22 @@ units.
 | R3 | `POST` key `K` amount `25000`; then key `K` amount `50000` | `422`; still 1 row; still 1 processor call; balance moved once |
 | R4 | `POST` with no `Idempotency-Key` | `400`; 0 rows; 0 processor calls |
 | R5 | `POST` with `Idempotency-Key: not-a-uuid` | `400`; 0 rows; 0 processor calls |
-| R6 | `POST` key `K`; wait past `PAYMENT_IDEMPOTENCY_TTL_HOURS`; `POST` key `K` again | 2 rows; 2 processor calls; treated as distinct payments |
+| R6 | `POST` key `K`; age its `idempotency_expires_at` past `now()`; `POST` key `K` again | 2 rows; 2 processor calls; treated as distinct payments. The first row survives with `idempotency_key` `NULL` and its `payment_applications` row intact — the key is retired, the payment is not |
+| R6b | Key `K` expired; **N** simultaneous `POST`s with `K` | 1 new row; 1 processor call; the rest get D1's concurrent answer. Retirement must not open a window where two requests both own the key |
+| R6c | ACH key `K` still `submitted`, `idempotency_expires_at` aged past `now()`; `POST` key `K` again | `409` + `Retry-After`; **no** new row; **no** processor call; `K` still on the original row. An unfinished intent does not release its key just because the window passed |
 | R7 | `POST` key `K` while an earlier `K` is still `processing` | `409` + `Retry-After`; no second processor call |
 | R8 | Row left `processing` past the timeout; reaper runs | Resolved from the processor by key; terminal status; exactly one application row |
+| R9 | Reaper runs over an expired key on a terminal row and an expired key on a `submitted` row | Terminal row's key retired to `NULL`, its status and application row unchanged, a subsequent `POST` with that key inserts; the `submitted` row **keeps** its key, so the stuck-row path can still resolve it by that value |
 
 R2 must run against real concurrency — two connections issued in parallel. A sequential
 approximation passes trivially and proves nothing.
+
+R6 ages the timestamp rather than sleeping: the window is a column, so the test controls it
+directly and does not wait 24 hours. R6b and R6c are the vectors that keep R6 honest, one on
+each side. R6b separates "expired keys become reusable" from "the unique index is now
+advisory", and must run against real concurrency for the same reason R2 does. R6c is the
+opposite failure — retirement reaching an intent that has not finished, which would both
+re-open the duplicate charge and strip the value the reaper resolves the row by.
 
 ### Cross-service apply
 
