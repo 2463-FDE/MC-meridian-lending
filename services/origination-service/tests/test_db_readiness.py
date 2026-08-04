@@ -336,6 +336,124 @@ def test_probe_fails_when_continuation_token_expires_at_column_missing(monkeypat
     assert err == "schema_not_ready:applications.continuation_token_expires_at"
 
 
+class _DobConstraintMissingCursor:
+    """Every earlier rung satisfied, but migration 0011's ck_applicants_dob_readable absent --
+    a volume on which an out-of-range applicants.dob can still be stored, and on which any
+    already-stored one is unproven (PR review)."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "pg_constraint" in self._last:
+            return None
+        return (1,)
+
+
+class _DobConstraintMissingConn:
+    def cursor(self):
+        return _DobConstraintMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_dob_readable_constraint_missing(monkeypatch):
+    # PR review: applicants.dob is a DATE reaching year 294276 while Python's date stops at
+    # 9999, so an out-of-range value stores fine and then raises during ORM hydration. Because
+    # Application.applicant is lazy="joined", that breaks the officer list and the detail view
+    # over ONE row. Readiness must fail on a volume without the constraint that both prevents
+    # a new one and proves no existing row violates it.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _DobConstraintMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:ck_applicants_dob_readable"
+
+
+class _DobConstraintNotValidatedCursor:
+    """The constraint exists under the right name but was added NOT VALID -- installed for
+    future writes while explicitly NOT checking the rows already stored."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "pg_constraint" in self._last:
+            # Models a real NOT VALID constraint: a convalidated-filtered lookup finds
+            # nothing, while a name-only lookup still matches the row.
+            return None if "convalidated" in self._last else (1,)
+        return (1,)
+
+
+class _DobConstraintNotValidatedConn:
+    def cursor(self):
+        return _DobConstraintNotValidatedCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_dob_constraint_is_not_validated(monkeypatch):
+    # The reason no separate row-scanner exists is that a VALIDATED check cannot be created
+    # while a violating row is present, so the constraint's presence proves the stored rows
+    # are readable. ADD CONSTRAINT ... NOT VALID breaks exactly that inference: it guards new
+    # writes and leaves an existing unreadable dob in place. Readiness must therefore require
+    # convalidated -- a name-only lookup would report ready on the one volume this rung exists
+    # to catch.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _DobConstraintNotValidatedConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:ck_applicants_dob_readable"
+
+
+# --- ck_applicants_dob_readable must live in the CANONICAL init schema ---------------
+# Same rung as the disclosure-service uq_offers_app regression: nothing applies
+# db/migrations/ on `make up`, so a constraint that exists only in migration 0011 is absent
+# on a default deploy -- leaving the readiness rung permanently unhealthy and the DATE column
+# unguarded. It must be declared by db/init/001_schema.sql too.
+
+
+def test_dob_readable_constraint_is_in_canonical_init_schema():
+    from pathlib import Path
+
+    schema = Path(__file__).resolve().parents[3] / "db" / "init" / "001_schema.sql"
+    text = schema.read_text()
+    assert "uq_loans_app" in text, "parity anchor missing -- test path is wrong"
+    assert "ck_applicants_dob_readable" in text, (
+        "ck_applicants_dob_readable is not declared by db/init/001_schema.sql -- a default "
+        "`make up` deploy runs with no storage guard on applicants.dob, so an out-of-range "
+        "date can still break the officer queue during ORM hydration"
+    )
+
+
 def test_probe_false_when_database_url_unset(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", "")
     ok, err = config.database_reachable()

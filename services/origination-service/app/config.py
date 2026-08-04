@@ -190,6 +190,31 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
                 return False, (
                     "schema_not_ready:applications.continuation_token_expires_at"
                 )
+            # PR review: applicants.dob is a DATE that reaches year 294276, while Python's
+            # date stops at 9999 -- so an out-of-range value stores fine and then raises
+            # "year N is out of range" during row hydration. models.Application.applicant is
+            # lazy="joined", so that happens on the officer list and the detail view alike,
+            # taking the queue down over ONE row. Migration 0011's CHECK constraint is what
+            # keeps such a value out of storage, and because a VALIDATED check cannot be
+            # created while a violating row exists, its presence also proves the existing
+            # rows are readable. A volume predating 0011 is therefore both unguarded and
+            # unproven -- fail readiness loud, naming the constraint, same as the rungs above.
+            # convalidated is load-bearing, not defensive noise: ADD CONSTRAINT ... NOT VALID
+            # installs the guard for future writes while explicitly NOT checking the rows
+            # already there. Such a constraint appears in pg_constraint, so a name-only lookup
+            # would report ready on exactly the volume this rung exists to catch -- one holding
+            # an unreadable dob. Matching on the table and contype too keeps a same-named
+            # constraint elsewhere in the database from satisfying the check.
+            cur.execute(
+                "SELECT 1 FROM pg_constraint c "
+                "JOIN pg_class t ON t.oid = c.conrelid "
+                "WHERE c.conname = 'ck_applicants_dob_readable' "
+                "AND t.relname = 'applicants' "
+                "AND c.contype = 'c' "
+                "AND c.convalidated"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:ck_applicants_dob_readable"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__
