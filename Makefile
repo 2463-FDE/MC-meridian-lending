@@ -1,4 +1,4 @@
-.PHONY: up down logs build seed ps test fmt
+.PHONY: up down logs build seed ps test fmt prove
 
 up:
 	docker compose up -d --build
@@ -29,3 +29,9 @@ test:
 
 config:
 	docker compose config -q && echo "compose config OK"
+
+# Prove the tests in a fix commit actually catch the bug: they must FAIL with the
+# source rolled back to the parent commit and PASS with the fix applied.
+# Default proves HEAD; override with `make prove REF=<sha>`.
+prove:
+	./scripts/prove_test.sh $(REF)
