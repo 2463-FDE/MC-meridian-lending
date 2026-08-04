@@ -16,6 +16,7 @@ venv/
 frontend/.next/
 frontend/out/
 frontend/build/
+*.tsbuildinfo
 
 # misc
 .DS_Store
