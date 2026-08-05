@@ -46,7 +46,8 @@ capability-token pattern (ADR 0010 Phase B, `db/migrations/0008`+`0009`); swappi
 from `application:{id}` to `pay:loan:{id}` inherits the hashing, expiry, and cookie
 indirection rather than rebuilding them.
 
-Deliverables are documents: this spec, ADR 0013, and executable test vectors. Nothing is
+Deliverables are documents: this spec, ADR 0013, and the test vectors they specify — measured
+red where a live run can show it, committed as executable tests in the build week. Nothing is
 built this week.
 
 ## Problem Statement
@@ -289,11 +290,13 @@ CREATE TABLE IF NOT EXISTS payment_applications (
 Append-only, enforced by the same `BEFORE UPDATE OR DELETE OR TRUNCATE` trigger pattern
 already used for `decision_events`.
 
-`apply_payment` inserts here with `ON CONFLICT (payment_id) DO NOTHING` **before** mutating
-the balance; zero rows returned means this payment was already applied, so it returns the
-current balance and moves nothing. The `payment_id` that `payment-service` already sends and
-servicing currently ignores (`servicing-service/app/main.py:80-85`) becomes the dedupe key —
-the cheap half of the cross-service problem was already plumbed.
+`apply_payment` inserts here **before** mutating the balance, and the row it inserts is read
+out of `payments` rather than taken off the request: the write is an `INSERT ... SELECT` over
+the referenced payment with `ON CONFLICT (payment_id) DO NOTHING`. Zero rows means the payment
+was already applied *or* is not eligible to apply, and D3d below separates those two. The
+`payment_id` that `payment-service` already sends and servicing currently ignores
+(`servicing-service/app/main.py:80-85`) becomes both the dedupe key and the row the loan and
+the amount are read from — the cheap half of the cross-service problem was already plumbed.
 
 This is the **ledger seam** required by the scoping doc §3.4: applications are events, they
 add no new mutable money column, and a future ledger reads this table rather than
@@ -317,23 +320,69 @@ wins. Required instead:
 ```sql
 BEGIN;
   INSERT INTO payment_applications (loan_id, payment_id, amount_minor)
-       VALUES (:loan_id, :payment_id, :amount_minor)
+  SELECT p.loan_id, p.id, p.amount_minor
+    FROM payments p
+   WHERE p.id = :payment_id
+     AND p.loan_id = :loan_id           -- the path's loan is a claim to check, not an input
+     AND p.amount_minor IS NOT NULL
+     AND p.status IN ('captured', 'settled')
   ON CONFLICT (payment_id) DO NOTHING
-    RETURNING id;                       -- zero rows => already applied, commit and return
+    RETURNING loan_id, amount_minor;    -- zero rows => already applied, or ineligible
 
   UPDATE balances
-     SET balance = balance - :amount    -- computed by the database, never read-then-write
-   WHERE loan_id = :loan_id;
+     SET balance = balance - (:applied_amount_minor / 100.0)  -- what the INSERT returned
+   WHERE loan_id = :applied_loan_id                           -- likewise
+    RETURNING loan_id;                  -- zero rows => no balances row, ROLLBACK
 COMMIT;
 ```
 
-Two properties matter and neither is optional:
+Four properties matter and none is optional:
 
 1. The `UPDATE` computes from the stored value inside the statement, so concurrent updates
    serialize on the row lock instead of overwriting each other.
 2. The application record and the balance movement share one transaction, so the record
    cannot exist without the movement or vice versa. Today they are two unrelated writes
    in two services.
+3. **Nothing the caller sends is a source of truth.** The request body carries a `payment_id`
+   and nothing else — `amount` is removed from `ApplyPaymentIn`
+   (`servicing-service/app/main.py:74-77`) and from the body the one caller sends
+   (`payment-service/app/payments.py:96`, `json={"amount": ..., "payment_id": ...}`), and the
+   path's `loan_id` becomes a predicate the `SELECT` has to match rather than a value any
+   write uses. The loan credited and the amount credited both come out of the `payments` row.
+   Without this, an internal or reaper caller applies payment A to loan B, or credits an
+   amount that was never captured, and the append-only table makes either permanent.
+4. **Each statement must affect exactly one row, and zero is a rollback.** Zero from the
+   `INSERT` is two different facts and the code has to tell them apart before answering:
+   either a `payment_applications` row already exists for this `payment_id` (already applied
+   — commit, move nothing, return the current balance), or the `SELECT` matched nothing (no
+   such payment, the payment belongs to a different loan, `amount_minor` is `NULL`, or the
+   status is not one that credits — `ROLLBACK`, refuse, move nothing). Telling the two apart
+   takes one read of `payment_applications` by `payment_id`; `payments.loan_id` being `NULL`
+   needs no separate predicate, since a `NULL` cannot equal the path's loan. Zero from the
+   `UPDATE` means the loan has no `balances` row: `ROLLBACK`. `balances.loan_id` is the
+   primary key (`db/init/001_schema.sql:106`), so more than one row is impossible and zero is
+   the case that matters — without the check, the application row records an apply that moved
+   no money while `UNIQUE (payment_id)` blocks the correct retry for good.
+
+The `/ 100.0` is the single place minor units meet the float column.
+`payment_applications.amount_minor` is the integer of record; `balances.balance` stays
+`DOUBLE PRECISION` until D2 converts it, and the conversion sits at that one write instead of
+spreading along the path.
+
+Restricting the status to `captured` and `settled` is also what makes an ACH `submitted`
+payment move no balance (acceptance criterion 8) a property of the write rather than of the
+caller's discipline.
+
+**(e) Both apply paths go through the record.** `balance.apply_payment` has two callers, not
+one: the endpoint above, and servicing's own charge handler calling it in-process
+(`servicing-service/app/payments.py:79` — the second of the two duplicate handlers). Convert
+only the endpoint and that handler still moves a balance with no `payment_applications` row
+and no lock, so the record is not the record of *every* apply and A6 stays red for anything
+posted to servicing directly. The transaction in D3(d) therefore belongs inside
+`balance.apply_payment`, keyed on a `payment_id` every caller supplies: servicing's handler
+captures the id with `INSERT ... RETURNING id` (it currently discards it,
+`servicing-service/app/payments.py:73-77`) and passes it in. Consolidating the two handlers
+stays out of scope — sharing the write is not the same as merging the routes.
 
 **Not in scope here:** converting `balances.balance` off `DOUBLE PRECISION`, and the ledger
 itself. This is the minimum that stops captured money going unapplied while D2 waits.
@@ -540,7 +589,10 @@ hands to the build week. Criteria 16–21 are what this week itself must deliver
    call.
 4. A missing or malformed key is refused (`400`) with no row and no processor call.
 5. Applying the same `payment_id` twice moves the balance once and leaves exactly one
-   `payment_applications` row.
+   `payment_applications` row. The application credits only the loan and the amount recorded
+   on that `payments` row, so a `payment_id` presented against a different loan, a payment
+   whose status does not credit, and a loan with no `balances` row are each refused and leave
+   no application row behind.
 6. **N distinct payments applied concurrently move the balance by exactly their sum.** No
    lost updates. The application record and the balance movement commit together or not at
    all.
@@ -566,11 +618,12 @@ hands to the build week. Criteria 16–21 are what this week itself must deliver
 16. All work on `feature/payments-week5` off `main`.
 17. ADR 0013 committed, superseding ADR 0003, with 3+ options per decision area and
     rejection reasons.
-18. Test vectors committed as executable tests that **fail against the current code** — the
-    concurrency and duplicate-charge vectors must be demonstrated red on `main` before any
-    fix exists. A vector that cannot fail proves nothing. R1, R2, A1, A3, A6, and T3 are the
-    named minimum; R1, R2, and A6 are **already demonstrated red** by
-    `scripts/repro_double_charge.py`.
+18. Test vectors specified below, with the concurrency and duplicate-charge ones **measured
+    red against `main`** rather than asserted. `scripts/repro_double_charge.py` is that
+    measurement, committed and runnable: R1, R2, and A6 are demonstrated red by a live run.
+    Committing them as executable tests — together with A1, A3, and T3 — is the build week's
+    first task and is **not** delivered on this branch. A vector that cannot fail proves
+    nothing, so each is written and watched fail before the fix it covers exists.
 19. `docs/scoping-payments-week5.md` and this spec cite `main` for every claim about current
     state, with `file:line`, and the reproduction is committed and runnable.
 20. `docs/debt-log.md` updated: D19 and D13 addressed-by-design; D8 partly addressed
@@ -623,6 +676,16 @@ re-open the duplicate charge and strip the value the reaper resolves the row by.
 | A5 | `UPDATE` or `DELETE` on `payment_applications` | Refused by the append-only trigger |
 | A6 | **Lost update** — N distinct payments applied concurrently to one loan | Balance moves by exactly the sum; N application rows. Red on `main`: an 8-way run credits $600 of $800 captured. |
 | A7 | Application insert succeeds, balance update fails | Transaction rolls back; neither the row nor the movement persists |
+| A8 | `POST /accounts/{loan B}/apply-payment` with a `payment_id` belonging to loan A | Refused; no application row; **neither** loan's balance moves |
+| A9 | `apply-payment` for a loan with no `balances` row | Refused; transaction rolls back; no application row, so the retry after the balance row exists still applies |
+| A10 | `apply-payment` for a payment whose status is `processing`, `submitted`, `failed`, or `returned` | Refused; no application row; balance unchanged |
+| A11 | `apply-payment` body carrying an `amount` field | Rejected as an unknown field; no application row; balance unchanged |
+| A12 | `POST /payments` against **servicing** directly (the second charge handler), which applies in-process | Balance moves and leaves exactly one `payment_applications` row, same as the endpoint path |
+
+A8–A11 are the D3d derivation vectors: A8 and A11 prove the caller cannot choose the loan or
+the amount, A9 proves a missing `balances` row does not leave a permanent application row that
+`UNIQUE (payment_id)` would then block the retry on, A10 proves the crediting statuses. A12 is
+D3e — the in-process apply path, which is the one a fix applied only at the endpoint misses.
 
 A6 is the vector for D3d and is the one the reproduction found. It is distinct from R2:
 R2 sends **one** intent N times (idempotency), A6 sends **N** genuine payments concurrently
@@ -675,9 +738,10 @@ cannot see what a live volume does.
   tolerated `|| true` backend matrix — a duplicate charge is a money defect, and the Week 4
   precedent (`tila-vectors-gate`) exists because a money test under `|| true` let a
   regulatory defect ship.
-- **`make prove`** for every regression test: the source is rolled back to the parent commit
-  and the test must FAIL without the fix and PASS with it. Acceptance criterion 17 requires
-  R1, R2, A1, A3, and T3 to be demonstrated red on `main` first.
+- **`make prove`** for every regression test the build week commits: the source is rolled back
+  to the parent commit and the test must FAIL without the fix and PASS with it. Acceptance
+  criterion 18 names R1, R2, A1, A3, A6, and T3 as the minimum to be demonstrated red on
+  `main` first; R1, R2, and A6 already are, by live run of the reproduction.
 - **Live stack:** the migration chain applied to a **populated** pre-migration volume, not a
   fresh one — T6, the append-only trigger, and the partial unique index against legacy NULL
   keys are all only observable there.
@@ -702,4 +766,6 @@ existing tickets · Q7 delivery channel · Q8 link lifetime.
 
 ## Status
 
-Spec complete. Next: ADR 0013, then the executable test vectors.
+Spec complete. ADR 0013 committed. The executable test vectors are the build week's first
+task (criterion 18); the red evidence this week rests on `scripts/repro_double_charge.py`,
+which has been run live.

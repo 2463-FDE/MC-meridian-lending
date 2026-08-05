@@ -72,10 +72,16 @@ concurrent identical requests cannot both reach the processor. A replay returns 
 status and body with an `Idempotent-Replay: true` header; a reused key with a different
 fingerprint returns `422`; an in-flight duplicate returns `409` with `Retry-After`.
 
-We will also make the balance mutation atomic: a single `UPDATE balances SET balance =
-balance - :amount`, committed in the same transaction as an append-only
-`payment_applications` record that is unique on `payment_id`. This is a separate fix from
-the idempotency key and neither substitutes for the other.
+We will also make the balance mutation atomic, and derive what it moves from the payment
+rather than from the request: one `UPDATE balances SET balance = balance - :amount` where the
+amount is the one recorded on the referenced payment, committed in the same transaction as an
+append-only `payment_applications`
+record that is unique on `payment_id` and is itself written by `INSERT ... SELECT` over that
+row. The caller supplies a `payment_id` and nothing else that a write reads — the loan
+credited and the amount credited both come out of the row, and either statement affecting no
+row rolls the transaction back, so an append-only record never outlives a movement that did
+not happen. This is a separate fix from the idempotency key and neither substitutes for the
+other.
 
 #### Options considered
 
