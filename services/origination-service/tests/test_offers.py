@@ -175,7 +175,7 @@ _APPROVED_WITH_OFFER = {
     # (Reg Z 1026.17(b)). The happy path carries a delivered one; the tests below vary it.
     "disclosure_status": "delivered",
     "disclosure_delivered_at": "2026-08-04T00:00:00+00:00",
-    # And the delivered flag has to stand over a document that exists — migration 0012
+    # And the delivered flag has to stand over a document that exists — migration 0013
     # leaves already-delivered rows at document_body NULL and they are frozen against a
     # backfill, so `delivered` alone does not prove one was ever recorded.
     "disclosure_has_document": True,

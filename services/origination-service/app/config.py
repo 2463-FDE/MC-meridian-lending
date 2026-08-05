@@ -259,7 +259,7 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             ):
                 return False, "schema_not_ready:ck_applicants_dob_readable:definition"
             # `accept_offer` reads disclosures.document_body: `delivered` is a claim about a
-            # document, and migration 0012 leaves already-delivered rows at NULL, so the
+            # document, and migration 0013 leaves already-delivered rows at NULL, so the
             # boarding gate has to see whether one was recorded. A volume that ran 0011 but
             # not 0012 has the table and not the column, so that SELECT would 500 the
             # boarding path while /health read fine — the same class as the rungs above, and
@@ -273,9 +273,9 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             )
             if cur.fetchone() is None:
                 return False, "schema_not_ready:disclosures.document_body"
-            # accept_offer's boarding INSERT writes loans.note_rate (migration 0013): servicing
+            # accept_offer's boarding INSERT writes loans.note_rate (migration 0014): servicing
             # must amortize at the note rate, not the disclosed APR. A volume that has the loans
-            # table but not this column (predating 0013) would 500 the boarding INSERT while
+            # table but not this column (predating 0014) would 500 the boarding INSERT while
             # /health read fine — the same class as the rungs above. The type is asserted, not
             # just the name: ADD COLUMN IF NOT EXISTS swallows a same-named column of any type.
             cur.execute(

@@ -302,7 +302,7 @@ in the generating call's HTTP response, so the compliance reviewer who approves 
 (a different session, and under maker-checker a different person) could not read it at all.
 `accept_offer` then treats the row as boardable, so a loan could be consummated behind a
 delivery marker over content no human had read. The document is now persisted on the row it
-describes (`disclosures.document_body`, migration 0012), its figures are checked against this
+describes (`disclosures.document_body`, migration 0013), its figures are checked against this
 service's own recomputation before it can be stored, delivery is refused when it is absent,
 and the officer screen renders it above the review controls. It is deliberately NOT an input
 to `content_fingerprint` — see acceptance 4 below, which it must not disturb.
@@ -323,7 +323,7 @@ rejects any UPDATE of it.
 
 *Amended at review:* the boarding gate checks the document too, not just the delivered flag.
 `accept_offer` read `status = 'delivered'` plus `delivered_at` and treated the pair as
-sufficient. Migration 0012 leaves ALREADY-DELIVERED rows at `document_body` NULL and
+sufficient. Migration 0013 leaves ALREADY-DELIVERED rows at `document_body` NULL and
 `trg_disclosures_freeze_delivered` blocks their repair, so a row delivered on a volume that ran
 0011 before 0012 carries both markers over content that does not exist — and boarding on it
 funds a loan whose borrower-facing TILA document nobody can produce. The boarding query now
@@ -558,7 +558,7 @@ ADR 0012 can be written once, from a record of what was actually weighed.
    references, never caller-supplied parameters" house rule — plus a migration, a readiness
    rung, and a proven-red regression (replay after rate drift still persists the original
    offer's disclosure). Kept off this branch, which already carries the `loans.note_rate`
-   schema change (migration 0013), so the two schema changes get their own review surface.
+   schema change (migration 0014), so the two schema changes get their own review surface.
    Tracked so it is not lost.
 
 4. **Ruleset — SETTLED: property, not node.** Version strings (`fee_schedule_version`,

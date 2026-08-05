@@ -335,7 +335,7 @@ def read_document(
     if row is None:
         raise HTTPException(status_code=404, detail="disclosure not found")
     if row.document_body is None:
-        # 404, not 204: rows written before migration 0012 legitimately have none, and the
+        # 404, not 204: rows written before migration 0013 legitimately have none, and the
         # officer's screen needs to tell "nothing recorded" apart from "recorded and empty".
         raise HTTPException(
             status_code=404, detail="no document recorded for this disclosure"

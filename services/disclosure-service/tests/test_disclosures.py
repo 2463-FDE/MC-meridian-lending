@@ -547,7 +547,7 @@ def test_replay_repairs_an_edge_a_crashed_write_left_open(client):
 
 
 def test_replay_records_a_document_the_row_never_got(client):
-    """The regeneration path migration 0012 promises, which did not exist.
+    """The regeneration path migration 0013 promises, which did not exist.
 
     0012 added `document_body` nullable and said a disclosure written before it "becomes
     undeliverable until regenerated". Regeneration could not reach the row: this endpoint
@@ -831,7 +831,7 @@ def test_reads_back_the_stored_document(client):
 
 
 def test_a_disclosure_with_no_document_reports_none_recorded(client):
-    """404 rather than 204: rows written before migration 0012 legitimately have none, and
+    """404 rather than 204: rows written before migration 0013 legitimately have none, and
     the officer's screen needs "nothing recorded" apart from "recorded and empty"."""
     _with_session(StubSession(disclosure=_disclosure(document_body=None)))
     response = _read_document(client)
@@ -867,7 +867,7 @@ def _disclosure(status="draft", delivered_at=None, document_body=_UNSET):
         content_fingerprint="fp-1:abc",
         # A recorded document by default: it is what the pipeline writes, so a lifecycle
         # test that did not opt out is testing the normal row. Pass None to exercise a row
-        # written before migration 0012.
+        # written before migration 0013.
         document_body=(GOOD_DOCUMENT if document_body is _UNSET else document_body),
     )
     row.delivered_at = delivered_at

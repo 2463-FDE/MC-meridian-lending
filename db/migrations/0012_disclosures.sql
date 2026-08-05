@@ -1,4 +1,4 @@
--- 0011_disclosures.sql — ADR 0012 / spec D3: disclosure provenance chain (FK-as-graph).
+-- 0012_disclosures.sql — ADR 0012 / spec D3: disclosure provenance chain (FK-as-graph).
 --
 -- Compose mounts db/init/* only, so this file exists for volumes that were already
 -- initialized before ADR 0012. The DDL below is IDENTICAL to what db/init/001_schema.sql

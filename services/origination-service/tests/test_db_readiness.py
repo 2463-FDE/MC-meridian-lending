@@ -547,12 +547,12 @@ def test_dob_readable_constraint_is_in_canonical_init_schema():
 
 class _DocumentBodyMissingCursor:
     """Every earlier rung present but disclosures.document_body absent -- a volume that ran
-    migration 0011 (the table) and not 0012 (the column). `accept_offer` selects it to decide
+    migration 0012 (the table) and not 0013 (the column). `accept_offer` selects it to decide
     whether the delivered disclosure actually has a stored document, so that SELECT would 500
     the boarding path while /health looked fine.
 
     The ck_applicants_dob_readable rung runs BEFORE this one, so answering it with the
-    canonical definition is what makes this fake the 0011-not-0012 volume the docstring
+    canonical definition is what makes this fake the 0012-not-0013 volume the docstring
     claims: without that, the probe would fail one rung earlier and the assertion below
     would pass for the wrong reason."""
 

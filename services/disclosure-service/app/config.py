@@ -134,7 +134,7 @@ _SCHEMA_OBJECTS = (
         # Idempotent disclosure writes depend on uq_disclosures_offer being a UNIQUE index on
         # exactly disclosures(offer_id): it is what makes POST /disclosures one-per-offer under a
         # retry or a concurrent race. Both declaration sites use CREATE UNIQUE INDEX IF NOT EXISTS
-        # (db/init/001_schema.sql, migration 0011), which is SKIPPED when a same-named index
+        # (db/init/001_schema.sql, migration 0012), which is SKIPPED when a same-named index
         # already exists of ANY shape -- so a name-only pg_indexes lookup reports ready over a
         # non-unique or wrong-column index, and the invariant is silently gone: concurrent creates
         # persist duplicate regulated records and provenance reads go ambiguous. Assert the

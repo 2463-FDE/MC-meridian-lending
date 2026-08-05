@@ -1,4 +1,4 @@
--- 0013_loans_note_rate.sql — board servicing at the NOTE rate, not the disclosed APR.
+-- 0014_loans_note_rate.sql — board servicing at the NOTE rate, not the disclosed APR.
 --
 -- Compose mounts db/init/* only, so this file exists for volumes already initialized
 -- before this change. The column below is IDENTICAL to what db/init/001_schema.sql now

@@ -1,13 +1,13 @@
--- 0012_disclosures_document_body.sql — spec D6: delivery requires a recorded document.
+-- 0013_disclosures_document_body.sql — spec D6: delivery requires a recorded document.
 --
 -- Compose mounts db/init/* only, so this file exists for volumes that were already
 -- initialized before this change. The column below is IDENTICAL to what
 -- db/init/001_schema.sql now declares. Change both or neither.
 --
--- 0011 also carries the column, in its CREATE TABLE. The two are not redundant and the
--- split is the same one 0011 itself describes: 0011 declares the table as it now stands, so
+-- 0012 also carries the column, in its CREATE TABLE. The two are not redundant and the
+-- split is the same one 0012 itself describes: 0012 declares the table as it now stands, so
 -- a volume that has never had `disclosures` gets the column with the table; this file adds
--- it to a volume where 0011 already ran and created the table without it. Both statements
+-- it to a volume where 0012 already ran and created the table without it. Both statements
 -- are idempotent, so applying them in order on any volume converges on the same shape.
 --
 -- WHY: before this, `approved -> delivered` wrote a status and a timestamp and nothing

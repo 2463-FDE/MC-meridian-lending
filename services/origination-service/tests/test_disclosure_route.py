@@ -367,7 +367,7 @@ def test_read_document_resolves_the_disclosure_id_server_side(client, lifecycle)
 
 
 def test_read_document_forwards_none_recorded_as_a_404(client, lifecycle):
-    """A row written before migration 0012 has no document. That is an answer the screen
+    """A row written before migration 0013 has no document. That is an answer the screen
     needs — it means delivery will be refused — not an outage."""
     _, state = lifecycle
     state["document"] = (404, {"detail": "no document recorded for this disclosure"})

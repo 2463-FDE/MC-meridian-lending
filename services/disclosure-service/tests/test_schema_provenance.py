@@ -1,7 +1,7 @@
 """Guards on the ADR 0012 provenance DDL that do NOT need a database.
 
 Honest scope: these are text and wiring checks. The DDL's actual behaviour — the freeze
-trigger, the check constraints, the unique index, the view's LEFT JOINs, and migration 0011
+trigger, the check constraints, the unique index, the view's LEFT JOINs, and migration 0012
 applying to a populated volume — was verified by applying both files to a throwaway
 postgres:16-alpine (matching docker-compose.yml). That verification is not reproduced in
 CI because no job here runs Postgres; the `make up` smoke step is where it recurs.
@@ -20,9 +20,9 @@ from app import config
 
 REPO = Path(__file__).resolve().parents[3]
 INIT_SQL = (REPO / "db" / "init" / "001_schema.sql").read_text()
-MIGRATION_SQL = (REPO / "db" / "migrations" / "0011_disclosures.sql").read_text()
+MIGRATION_SQL = (REPO / "db" / "migrations" / "0012_disclosures.sql").read_text()
 DOCUMENT_MIGRATION_SQL = (
-    REPO / "db" / "migrations" / "0012_disclosures_document_body.sql"
+    REPO / "db" / "migrations" / "0013_disclosures_document_body.sql"
 ).read_text()
 
 # Objects the provenance chain needs. Named here so a dropped statement fails loudly.
@@ -67,7 +67,7 @@ def test_init_and_migration_ddl_are_identical():
 def test_offers_decision_event_id_is_nullable():
     """`ADD COLUMN ... NOT NULL` fails against a table that already holds rows.
 
-    Nullability is what makes migration 0011 safe on a populated volume; the invariant is
+    Nullability is what makes migration 0012 safe on a populated volume; the invariant is
     enforced at the write path instead. If someone tightens this, the migration breaks in
     production and passes on a fresh dev volume — the worst possible split.
     """
@@ -123,8 +123,8 @@ def test_readiness_gate_covers_every_new_object():
 
 
 def test_document_body_is_declared_in_init_and_in_its_migration():
-    """Two declaration sites, same column. 0011 carries it in the CREATE TABLE (a volume
-    that never had the table); 0012 adds it to a volume where 0011 already ran without it.
+    """Two declaration sites, same column. 0012 carries it in the CREATE TABLE (a volume
+    that never had the table); 0013 adds it to a volume where 0012 already ran without it.
     A column present in only one place is e0716da again."""
     assert "document_body           JSONB," in INIT_SQL
     assert "document_body           JSONB," in MIGRATION_SQL
