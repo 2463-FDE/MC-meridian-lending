@@ -83,14 +83,25 @@ class DisclosureDocument(BaseModel):
     `extra="forbid"` mirrors the assembler's `additionalProperties: False`: an unexpected
     field means the two shapes have drifted, and storing it would put an unvalidated field
     inside a regulated record.
+
+    The prose contract is mirrored here too, not only in the assembler
+    (`origination-service` `prompts/disclosure_assemble.py` OUTPUT_SCHEMA): `payment_terms`
+    and `prepayment` carry NO digits (`^\\D*$`), with the same length caps. That check runs
+    in the caller, and this is the authoritative persistence boundary — `create_disclosure`
+    only compares `figures` against the recomputed outputs, so without the constraint here
+    any internal caller, coordinator change, or replay/backfill could persist prose that
+    restates a stale or conflicting number while the figure gate still passes, then move the
+    document to `delivered`. A digit-run in prose also defeats the redactor's PAN check on a
+    borrower-facing field. Enforced at parse so both the fresh POST and the replay/backfill
+    path (both read `document` off this model) are refused identically.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    heading: str
+    heading: str = Field(max_length=120)
     figures: DocumentFigures
-    payment_terms: str
-    prepayment: str
+    payment_terms: str = Field(max_length=600, pattern=r"^\D*$")
+    prepayment: str = Field(max_length=300, pattern=r"^\D*$")
 
 
 class DisclosureIn(BaseModel):

@@ -411,6 +411,58 @@ def test_an_unexpected_document_field_is_refused(client):
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        # A sentence restating the loan terms: the failure mode the assembler's
+        # `^\D*$` pattern exists to prevent, and the figure gate does not see prose.
+        ("payment_terms", "You will make 48 monthly payments of 439.35."),
+        ("prepayment", "Repay early; there is no penalty of 0."),
+        # A single digit is enough — the concatenated digits of restated figures are a
+        # 13-19 digit run and roughly one in ten is Luhn-valid (a card number in prose).
+        ("payment_terms", "Payment number 1 is due next month."),
+        ("prepayment", "See section 4 for details."),
+    ],
+)
+def test_refuses_prose_that_carries_digits(client, field, value):
+    """The prose contract is enforced at THIS boundary, not only in the assembler.
+
+    `create_disclosure` compares only `figures` against the recomputed outputs, so without
+    a constraint on the prose fields an internal caller, coordinator change, or replay could
+    persist a `payment_terms`/`prepayment` restating a stale or conflicting number while the
+    figure gate still passes — then deliver it. Refused at parse (422)."""
+    document = {**GOOD_DOCUMENT, field: value}
+    session = _with_session(StubSession(offer=_offer()))
+    response = client.post(
+        "/disclosures",
+        json=_inputs(document=document),
+        headers={"X-Internal-Service": TOKEN},
+    )
+    assert response.status_code == 422, response.text
+    assert session.added == [], "must not persist prose that carries digits"
+
+
+def test_the_backfill_path_also_refuses_prose_that_carries_digits(client):
+    """The replay/backfill path reads `document` off the same model, so the same parse-time
+    constraint refuses it — a backfill is not a way in for prose the fresh path would reject.
+    """
+    existing = _persisted_disclosure()
+    session = _with_session(StubSession(offer=_offer(), existing=existing))
+    response = client.post(
+        "/disclosures",
+        json=_inputs(
+            document={
+                **GOOD_DOCUMENT,
+                "payment_terms": "You will make 48 monthly payments of 439.35.",
+            }
+        ),
+        headers={"X-Internal-Service": TOKEN},
+    )
+    assert response.status_code == 422, response.text
+    assert existing.document_body is None
+    assert session.commits == 0
+
+
 def test_the_caller_cannot_supply_a_regulated_number():
     """ADR 0012's invariant, enforced by the request schema rather than by convention.
 
