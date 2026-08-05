@@ -8,6 +8,12 @@
 #
 # Usage: scripts/prove_test.sh [FIX_REF]   (default HEAD)
 #
+# Exit codes — PROVEN is the only success, and only step 1 can earn it:
+#   0  PROVEN    tests failed at the parent and pass at FIX_REF
+#   1  REJECTED  tests passed without the fix, or fail with it
+#   2  ABORT     could not run (dirty tree, no parent, no test file in the commit)
+#   3  UNPROVEN  FIX_REF changes no source, so no rollback happened and nothing was proved
+#
 # Runner scope: pytest under services/<svc>/ only. Non-Python tests never enter the set
 # (the diff below filters to '*.py'), so a frontend-only fix aborts as "changes no test
 # file". A .py test OUTSIDE services/<svc>/ — rag_eval/tests/ today — used to be skipped
@@ -59,11 +65,13 @@ if [ ${#tests[@]} -eq 0 ]; then
 fi
 
 # Refuse a commit this runner cannot fully execute. Skipping a test file and still
-# printing PROVEN would make the gate report a pass it never verified.
+# printing PROVEN would make the gate report a pass it never verified. Service tests run
+# from their own directory (imports are `app.*`, relative to the service); any other Python
+# test runs from the repo root, which is what repo-level suites like scripts/tests expect.
 for t in "${tests[@]}"; do
   case "$t" in
-    services/*/*) ;;
-    *) echo "ABORT: $t is not under services/<svc>/ — this runner is pytest-only and cannot execute it. Prove it by hand or extend the runner." >&2
+    services/*/*|*.py) ;;
+    *) echo "ABORT: $t is not a Python test — this runner is pytest-only and cannot execute it. Prove it by hand or extend the runner." >&2
        exit 2 ;;
   esac
 done
@@ -77,7 +85,11 @@ run_tests() {   # 0 if every changed test file passes, 1 if any fails/errors
         rel="${t#"$svc"/}"
         ( cd "$svc" && $PY -m pytest "$rel" -q ) || overall=1
         ;;
-      *) echo "ERROR: $t not under services/<svc>/ — cannot run; failing closed." >&2; overall=1 ;;
+      # Repo-level tests (scripts/tests/...) run from the repo root instead. They exist
+      # because some things under test are repo-level, not service-level -- this script
+      # among them. Still pytest, still fails closed if pytest itself cannot collect them.
+      *.py) ( $PY -m pytest "$t" -q ) || overall=1 ;;
+      *) echo "ERROR: $t is not a Python test — cannot run; failing closed." >&2; overall=1 ;;
     esac
   done
   return $overall
@@ -120,13 +132,25 @@ verdict=0
 case "$fail_step" in
   BAD)  echo "FAIL: test(s) pass even without the fix — not a real regression test."; verdict=1 ;;
   GOOD) echo "OK:   test(s) fail on $PARENT (bug reproduced)." ;;
-  skip) echo "NOTE: fail-step skipped — no source change, cannot prove the test catches the bug." ;;
+  # PR review: this used to print NOTE and leave the verdict at zero, so a commit touching
+  # only tests reported PROVEN — the one word this script exists to withhold — while no
+  # rollback had been attempted at all. Nothing was disproved here, but nothing was proved
+  # either, and a green step 2 alone is exactly the "test that proves nothing" the header
+  # promises to reject. Its own exit status, so a caller can tell "cannot prove" apart from
+  # "disproved" without parsing stdout.
+  skip) echo "FAIL: fail-step skipped — $FIX changes no source, so nothing was rolled back"
+        echo "      and the test(s) cannot be shown to catch anything."; verdict=3 ;;
 esac
 if [ "$pass_step" = BAD ]; then
+  # A real disproof outranks "could not prove": report REJECTED, not UNPROVEN.
   echo "FAIL: test(s) fail with the fix applied."; verdict=1
 else
   echo "OK:   test(s) pass on $FIX (fix works)."
 fi
 
-[ $verdict -eq 0 ] && echo "PROVEN" || echo "REJECTED"
+case $verdict in
+  0) echo "PROVEN" ;;
+  3) echo "UNPROVEN" ;;
+  *) echo "REJECTED" ;;
+esac
 exit $verdict

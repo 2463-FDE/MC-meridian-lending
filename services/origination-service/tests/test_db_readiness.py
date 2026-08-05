@@ -619,3 +619,55 @@ def test_probe_single_flight_under_concurrent_misses(monkeypatch):
 
     assert calls["n"] == 1  # exactly one probe despite 8 concurrent misses
     assert results == [(True, None)] * 8
+
+
+# --- readiness rungs must be satisfiable by this repository's own DDL -------------------
+#
+# PR review: a rung was added for ck_applicants_dob_readable while the CHECK constraint and
+# its migration lived on a different branch. Every database built from this repository then
+# reported schema_not_ready:ck_applicants_dob_readable forever -- /health unhealthy with no
+# shipped migration that could satisfy it. A readiness gate naming an object the repo never
+# creates is not a gate, it is an outage.
+#
+# The probe's own error strings are the list of things it demands, so parse them out rather
+# than maintaining a second hand-written copy that can drift from the SQL above it.
+
+import pathlib
+import re
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+_INIT_SCHEMA = _REPO_ROOT / "db" / "init" / "001_schema.sql"
+_CONFIG_SRC = pathlib.Path(config.__file__)
+
+
+def _required_objects() -> list[str]:
+    """Every `schema_not_ready:<object>` the probe can return, as written in config.py."""
+    src = _CONFIG_SRC.read_text()
+    # The literals are split across adjacent string chunks in places, so match the token
+    # inside whatever quoting it lands in rather than assuming one string per rung.
+    return sorted(set(re.findall(r"schema_not_ready:([A-Za-z0-9_.]+)", src)))
+
+
+def test_probe_names_at_least_the_known_rungs():
+    # Guards the parser itself: if the extraction silently returned nothing, the parity
+    # test below would pass vacuously and prove the opposite of what it claims.
+    found = _required_objects()
+    assert "uq_loans_app" in found
+    assert "applications.continuation_token" in found
+    assert len(found) >= 4
+
+
+def test_every_readiness_rung_exists_in_the_init_schema():
+    schema = _INIT_SCHEMA.read_text()
+    missing = []
+    for obj in _required_objects():
+        # `table.column` rungs name a column; bare rungs name a constraint or index. Either
+        # way the identifier has to appear in the authoritative DDL, or no database this
+        # repo builds can ever satisfy the rung.
+        identifier = obj.split(".")[-1]
+        if not re.search(rf"\b{re.escape(identifier)}\b", schema):
+            missing.append(obj)
+    assert not missing, (
+        "readiness rungs name objects absent from db/init/001_schema.sql, so a fresh "
+        f"database can never report ready: {missing}"
+    )
