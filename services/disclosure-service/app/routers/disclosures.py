@@ -616,6 +616,10 @@ def _repair_missing_document(
     The document is checked against the persisted figures before it is stored, exactly as
     the fresh-insert path checks it against the freshly computed ones — a backfill must not
     be the way an unchecked document gets in.
+
+    A backfill onto a row already past `draft` (`in_review`/`approved`) also resets it to
+    `draft`: the review that advanced it approved a row with no document, so the late
+    document has to re-enter review rather than ride an approval it was never part of.
     """
     if row.document_body is not None or document is None:
         return False
@@ -627,6 +631,21 @@ def _repair_missing_document(
         return False
     _refuse_if_document_disagrees(document, _persisted_outputs(row))
     row.document_body = document.model_dump()
+    # A document arriving after the row already advanced past draft means whatever review
+    # happened approved an EMPTY disclosure — no human saw this content. Send it back to
+    # draft so it must re-enter review before delivery; preserving `in_review`/`approved`
+    # here lets the next `approved -> delivered` deliver a document nobody read (the delivery
+    # guard only checks that *a* document now exists, not that it is the one reviewed). A
+    # draft row stays draft: nothing was reviewed yet, so there is no review to invalidate.
+    # Written on the same `row` in the same transaction the caller commits, so the document
+    # and the status reset are atomic.
+    if row.status != "draft":
+        log.warning(
+            "backfilled a document onto %s disclosure_id=%s; resetting to draft for re-review",
+            row.status,
+            row.id,
+        )
+        row.status = "draft"
     log.info("recorded a missing document on disclosure_id=%s", row.id)
     return True
 

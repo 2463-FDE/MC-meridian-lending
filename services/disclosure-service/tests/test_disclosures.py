@@ -688,6 +688,43 @@ def test_a_delivered_row_is_not_backfilled(client):
     assert session.commits == 0
 
 
+def test_a_backfill_onto_a_reviewed_row_resets_it_to_draft(client):
+    """Maker-checker: a document arriving after the row advanced past draft means the
+    reviewer approved an empty disclosure and never saw this content. The backfill sends it
+    back through review — otherwise `approved -> delivered` sees "some document exists" and
+    delivers one no human read. Preserving `approved` here is the bypass. A draft row stays
+    draft (nothing was reviewed yet); this only fires on `in_review`/`approved`."""
+    existing = _persisted_disclosure(status="approved", document_body=None)
+    session = _with_session(StubSession(offer=_offer(), existing=existing))
+    response = client.post(
+        "/disclosures",
+        json=_inputs(document=GOOD_DOCUMENT),
+        headers={"X-Internal-Service": TOKEN},
+    )
+    assert response.status_code == 201, response.text
+    assert existing.document_body == GOOD_DOCUMENT
+    assert existing.status == "draft", (
+        "the late document must re-enter review, not deliver"
+    )
+    assert session.commits == 1
+
+
+def test_a_backfill_onto_a_draft_row_leaves_it_in_draft(client):
+    """The reset only invalidates a review that happened. A draft row was never reviewed, so
+    backfilling it is the ordinary repair and its status is unchanged."""
+    existing = _persisted_disclosure(status="draft", document_body=None)
+    session = _with_session(StubSession(offer=_offer(), existing=existing))
+    response = client.post(
+        "/disclosures",
+        json=_inputs(document=GOOD_DOCUMENT),
+        headers={"X-Internal-Service": TOKEN},
+    )
+    assert response.status_code == 201, response.text
+    assert existing.document_body == GOOD_DOCUMENT
+    assert existing.status == "draft"
+    assert session.commits == 1
+
+
 def test_the_concurrent_loser_repairs_the_edge_before_replaying(client):
     """The loser rolls back, which discards its own edge write too. It has to close the
     edge from the winner's record, or the race reproduces the same open edge the crash
