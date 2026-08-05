@@ -131,8 +131,26 @@ _SCHEMA_OBJECTS = (
         "SELECT 1 FROM information_schema.tables WHERE table_name = 'disclosures'",
     ),
     (
+        # Idempotent disclosure writes depend on uq_disclosures_offer being a UNIQUE index on
+        # exactly disclosures(offer_id): it is what makes POST /disclosures one-per-offer under a
+        # retry or a concurrent race. Both declaration sites use CREATE UNIQUE INDEX IF NOT EXISTS
+        # (db/init/001_schema.sql, migration 0011), which is SKIPPED when a same-named index
+        # already exists of ANY shape -- so a name-only pg_indexes lookup reports ready over a
+        # non-unique or wrong-column index, and the invariant is silently gone: concurrent creates
+        # persist duplicate regulated records and provenance reads go ambiguous. Assert the
+        # DEFINITION -- indisunique, the table, and that the sole key column is offer_id -- same
+        # posture as origination's ck_applicants_dob_readable rung. Missing and wrong-definition
+        # fold to one schema_not_ready:uq_disclosures_offer label, as the document_body type rung
+        # below does; the query returns a row only when the index is exactly right.
         "uq_disclosures_offer",
-        "SELECT 1 FROM pg_indexes WHERE indexname = 'uq_disclosures_offer'",
+        "SELECT 1 FROM pg_index i "
+        "JOIN pg_class c ON c.oid = i.indexrelid "
+        "JOIN pg_class t ON t.oid = i.indrelid "
+        "JOIN pg_namespace n ON n.oid = t.relnamespace "
+        "WHERE c.relname = 'uq_disclosures_offer' AND t.relname = 'disclosures' "
+        "AND n.nspname = 'public' AND i.indisunique AND i.indnkeyatts = 1 "
+        "AND (SELECT a.attname FROM pg_attribute a "
+        "WHERE a.attrelid = i.indrelid AND a.attnum = i.indkey[0]) = 'offer_id'",
     ),
     (
         # Without the freeze trigger a delivered disclosure is silently editable, which is
@@ -173,12 +191,26 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
-            # Idempotent offer writes depend on the uq_offers_app unique index (PR review):
-            # on a dirty volume the 0010 migration can fail to create it (pre-existing
-            # duplicate offers), which would silently re-allow duplicate regulated TILA
-            # disclosures while /health looks green. Fail readiness loudly instead. Mirrors
-            # origination's uq_loans_app readiness rung.
-            cur.execute("SELECT 1 FROM pg_indexes WHERE indexname = 'uq_offers_app'")
+            # Idempotent offer writes depend on uq_offers_app being a UNIQUE index on
+            # offers(app_id) (PR review): on a dirty volume the 0010 migration can fail to
+            # create it (pre-existing duplicate offers), and CREATE UNIQUE INDEX IF NOT EXISTS
+            # then skips a same-named index of any shape -- silently re-allowing duplicate
+            # regulated TILA disclosures while /health looks green. Assert the DEFINITION
+            # (indisunique + table + sole key column app_id), not the name, so a non-unique or
+            # wrong-column stand-in fails readiness. The declared index is partial
+            # (WHERE app_id IS NOT NULL); indisunique holds for a partial unique index, and the
+            # predicate is not asserted here because a non-partial unique index over app_id is a
+            # stronger guard, not a weaker one. Mirrors origination's uq_loans_app rung.
+            cur.execute(
+                "SELECT 1 FROM pg_index i "
+                "JOIN pg_class c ON c.oid = i.indexrelid "
+                "JOIN pg_class t ON t.oid = i.indrelid "
+                "JOIN pg_namespace n ON n.oid = t.relnamespace "
+                "WHERE c.relname = 'uq_offers_app' AND t.relname = 'offers' "
+                "AND n.nspname = 'public' AND i.indisunique AND i.indnkeyatts = 1 "
+                "AND (SELECT a.attname FROM pg_attribute a "
+                "WHERE a.attrelid = i.indrelid AND a.attnum = i.indkey[0]) = 'app_id'"
+            )
             if cur.fetchone() is None:
                 return False, "schema_not_ready:uq_offers_app"
             # ADR 0012 provenance objects. Migration 0011 is hand-applied (compose mounts
