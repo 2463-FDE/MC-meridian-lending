@@ -534,6 +534,33 @@ ADR 0012 can be written once, from a record of what was actually weighed.
    moving the boarding gate onto delivery evidence) that warrants its own review and test
    surface rather than riding this branch. Tracked so it is not lost.
 
+   *Followup PR (flagged in Week 4 review):* a reviewer traced the disclosure pipeline's
+   persist step and confirmed a source-of-truth split — stage 2 (`compute`) replays an
+   existing offer *from the stored row* (`create_offer` is idempotent per app;
+   `_offer_response_from_persisted`), but stage 5 (`persist`) recomputes from the current
+   run's inputs: `state["principal"]`, `state["annual_rate"]` (= `POLICY_RATE_PCT`, a
+   module constant read fresh each run), `state["term_months"]`. `create_disclosure` then
+   recomputes from that body and refuses (`_refuse_if_offer_disagrees`, 1¢ band) when the
+   result disagrees with the stored offer. So an offer created at one policy rate, left
+   without a disclosure (a pipeline run that stopped between `compute` and `persist`), and
+   re-disclosed after a `POLICY_RATE_PCT` redeploy dead-ends at a permanent 409 — the
+   offer can never be disclosed or boarded, curable today only by hand SQL on a regulated
+   table. **This fails closed:** it refuses a *wrong* disclosure, so no divergent artifact
+   ever reaches a borrower — the harm is an operational dead-end, not a compliance breach,
+   and reachability is narrow (needs an orphan offer *and* a rate/term/principal change in
+   between). Curing it is deferred to its own PR because it is a schema + API change: the
+   `offers` table stores outputs only (apr, finance_charge, monthly_payment,
+   amount_financed, total_of_payments — `db/init/001_schema.sql:87`), so the original note
+   rate is unrecoverable at disclosure-creation time (`compute_snapshot` lives on the
+   not-yet-existing `disclosures` row). The fix persists the offer's compute inputs on the
+   offers row at creation and has `create_disclosure` recompute from *that stored row*
+   rather than the caller body — the "derive a money write from the stored row it
+   references, never caller-supplied parameters" house rule — plus a migration, a readiness
+   rung, and a proven-red regression (replay after rate drift still persists the original
+   offer's disclosure). Kept off this branch, which already carries the `loans.note_rate`
+   schema change (migration 0013), so the two schema changes get their own review surface.
+   Tracked so it is not lost.
+
 4. **Ruleset — SETTLED: property, not node.** Version strings (`fee_schedule_version`,
    `apr_method_version`) on the disclosure row, plus a versioned committed policy file. Content
    is recoverable from git by version; integrity is covered by `content_fingerprint`. A
