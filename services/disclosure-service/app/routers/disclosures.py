@@ -114,7 +114,9 @@ def create_disclosure(
         # The source is the persisted disclosure's own decision event, not the request
         # body's: that value was validated against the offer's application when the record
         # was written, and this path does not revalidate.
-        if _close_provenance_edge(offer, existing.decision_event_id):
+        repaired = _repair_missing_document(existing, body.document)
+        edge_closed = _close_provenance_edge(offer, existing.decision_event_id)
+        if repaired or edge_closed:
             session.commit()
         return _disclosure_out(existing)
 
@@ -572,6 +574,63 @@ def _refuse_if_already_consummated(session: Session, offer_id: int) -> None:
         )
 
 
+def _persisted_outputs(row: models.Disclosure) -> dict:
+    """The figures already on the record, in the shape `_refuse_if_document_disagrees` reads.
+
+    The PERSISTED numbers, never a recomputation: a document being backfilled onto an
+    existing row has to agree with the record that row already is, and the replay path
+    deliberately does not recompute (a rules change between attempts must not swap the
+    borrower's disclosure).
+    """
+    return {
+        "apr": row.apr,
+        "finance_charge_cents": row.finance_charge_cents,
+        "amount_financed_cents": row.amount_financed_cents,
+        "monthly_payment_cents": row.monthly_payment_cents,
+        "total_of_payments_cents": row.total_of_payments_cents,
+    }
+
+
+def _repair_missing_document(
+    row: models.Disclosure, document: DisclosureDocument | None
+) -> bool:
+    """Record the document on an existing row that has none. Returns whether it wrote.
+
+    Migration 0012 added `document_body` nullable and says a disclosure written before it
+    "becomes undeliverable until regenerated" — but regeneration could not reach the row:
+    this endpoint short-circuits on the replay above before the document is looked at, so
+    the pipeline could assemble a valid document, POST it, get a 201, and leave
+    `document_body` still NULL. `_refuse_if_no_document` then blocks delivery and
+    `accept_offer` blocks boarding, with no API path back short of hand-written SQL on a
+    regulated table. Same dead end for any row written by a caller that omitted the
+    document.
+
+    Three cases are left alone rather than repaired. A row that already HAS a document is
+    frozen against replacement — that is the idempotency guarantee, and swapping the
+    borrower's document on a retry is the failure it exists to prevent. A caller that sends
+    no document has nothing to repair with. A DELIVERED row is immutable
+    (`trg_disclosures_freeze_delivered` raises on any UPDATE), so attempting the write would
+    turn a legitimate replay into a 500; a legacy delivered row keeps its NULL, which is the
+    honest record that nothing was captured.
+
+    The document is checked against the persisted figures before it is stored, exactly as
+    the fresh-insert path checks it against the freshly computed ones — a backfill must not
+    be the way an unchecked document gets in.
+    """
+    if row.document_body is not None or document is None:
+        return False
+    if row.status == "delivered":
+        log.warning(
+            "not backfilling a document onto delivered disclosure_id=%s: the row is frozen",
+            row.id,
+        )
+        return False
+    _refuse_if_document_disagrees(document, _persisted_outputs(row))
+    row.document_body = document.model_dump()
+    log.info("recorded a missing document on disclosure_id=%s", row.id)
+    return True
+
+
 def _close_provenance_edge(offer: models.Offer, decision_event_id: int | None) -> bool:
     """Point the offer at its decision event when that edge is still open.
 
@@ -599,7 +658,34 @@ def _refuse_if_decision_event_mismatched(
     event mints a disclosure whose provenance view reports `chain_complete: true` —
     indistinguishable from a correct chain, and worse than the partial-chain case the
     view already handles, because it is silent rather than flagged.
+
+    Two checks, because same-application is the weaker of the two. An offer that carries its
+    own authorizing event (written by `create_offer` since this change) must be disclosed
+    against THAT event: `decision_events` is append-only and a re-decision adds a row, so
+    the latest event for an application is not necessarily the one that authorized an offer
+    made earlier — and `uq_offers_app` means the offer is never regenerated under the newer
+    one. Accepting any same-application event let the chain name the wrong decision while
+    still reporting `chain_complete: true`. An offer with no edge predates this and falls
+    back to the same-application check, which is all its data supports.
     """
+    if offer.decision_event_id is not None:
+        if decision_event_id != offer.decision_event_id:
+            log.error(
+                "refusing disclosure for offer_id=%s: decision_event_id=%s is not the "
+                "offer's authorizing event %s",
+                offer.id,
+                decision_event_id,
+                offer.decision_event_id,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "decision_event_id is not the event that authorized this offer "
+                    f"(offer cites {offer.decision_event_id}); refusing to persist"
+                ),
+            )
+        return
+
     row = session.execute(
         _DECISION_EVENT_APP_SQL, {"decision_event_id": decision_event_id}
     ).first()

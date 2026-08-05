@@ -205,6 +205,14 @@ requirement, not just a schema one.
 5. `disclosures.decision_event_id` and `disclosures.offer_id` are `NOT NULL` — the table is new,
    so no legacy rows constrain it. `offers.decision_event_id` is nullable in the DDL but the
    write path refuses to create an offer without one (see *Backward Compatibility*).
+
+   *Amended at review:* `create_offer` **records** the authorizing event with the offer rather
+   than refusing without one. Refusing is not enforceable against this stack: `db/init/002_seed.sql`
+   seeds `decisions` rows for apps 4471/5582/6011/6014 with no `decision_events` (that table
+   arrived in migration 0004), so the demo's approved applications would lose the offer path
+   entirely. The offer keeps the edge nullable for exactly those rows, and `create_disclosure`
+   closes one for them the same-application way. `create_disclosure` requires an exact match
+   against the offer's edge whenever the offer carries one — see D6.
 6. On a volume that already holds `offers` rows, the migration applies cleanly, those rows keep
    their existing values, and the provenance view still returns them as a partial chain.
 
@@ -302,9 +310,21 @@ to `content_fingerprint` — see acceptance 4 below, which it must not disturb.
 This is not the delivery channel, which stays out of scope: it makes `delivered` a statement
 about content that exists and has been read, not a statement about transport.
 
+*Amended at review:* a disclosure written before `document_body` existed is repairable by
+re-running the pipeline. Migration 0012 says such a row "becomes undeliverable until
+regenerated", but regeneration could not reach it: `create_disclosure` short-circuits on the
+idempotent replay before the document is looked at, so the pipeline assembled a valid document,
+POSTed it, got a 201, and left `document_body` NULL — with delivery refused, boarding blocked,
+and no API path back short of hand-written SQL on a regulated table. The replay now records a
+document on a row that has none, checked against the figures already on that row rather than a
+recomputation. A row that already has one is never overwritten (that is the idempotency
+guarantee), and a `delivered` row is left alone because `trg_disclosures_freeze_delivered`
+rejects any UPDATE of it.
+
 **Acceptance:** illegal transitions rejected; `delivered_at` set only on the delivery path;
 delivery refused when no document is recorded; a document whose figures disagree with the
-recomputed record is refused rather than persisted; no lifecycle edge rewrites the document.
+recomputed record is refused rather than persisted; no lifecycle edge rewrites the document; a
+replay records a missing document and never replaces a recorded one.
 
 ### D7. TILA test vectors — blocking CI gate
 
@@ -439,6 +459,16 @@ ADR 0012 can be written once, from a record of what was actually weighed.
    value, and `ADD COLUMN ... NOT NULL` would fail against them. The constraint is therefore
    enforced for new rows only, following the partial-index precedent migration 0010 set for
    legacy `app_id`-less rows.
+
+   *Amended at review:* the edge is written by `create_offer`, at offer creation. The
+   implementation first closed it at disclosure time instead, from whichever `decision_events`
+   row was latest by then — and `decision_events` is append-only, so a re-decision between the
+   offer and its disclosure re-parented the offer to an event that did not authorize its terms
+   while `v_disclosure_provenance` still reported `chain_complete: true`. Creation is the only
+   moment the authorizing event is known rather than inferred, because `uq_offers_app` means the
+   offer is never regenerated under the newer decision. `create_disclosure` therefore requires
+   the disclosed event to equal the offer's, and closes the edge itself only for an offer that
+   carries none.
 
    **Roadmap trigger:** *when the decision engine can emit `counteroffer`, offer cardinality
    moves from per-application to per-decision-event.* That change is: drop `uq_offers_app`, add

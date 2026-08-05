@@ -85,6 +85,17 @@ read through its own officer-only route, not through the provenance view: the vi
 definition of the chain, and origination's proxy of it admits the owning borrower, who must not
 see a held draft's body.
 
+*Amended at review, 2026-08-05:* `offers.decision_event_id` is written when the offer is
+created, not when its disclosure is. Closing it at disclosure time meant taking whichever
+`decision_events` row was latest by then, and that table is append-only: a re-decision between
+the offer and its disclosure re-parented the offer to an event that did not authorize its terms,
+and the view reported the result as a complete chain — a wrong edge reads as sound provenance,
+where a missing edge reads as the partial chain it is. Creation is the only moment the
+authorizing decision is known rather than inferred, because `uq_offers_app` means the offer is
+never regenerated under the newer decision. `create_disclosure` requires the disclosed event to
+equal the offer's and closes the edge itself only for an offer that carries none — a legacy row,
+whose data supports nothing stronger than the same-application check.
+
 **D5 — Multi-agent is maker-checker; the LLM never computes a regulated number.** Assemble
 (maker) formats from given numbers; a deterministic **system** gate recomputes and checks
 tolerance, fee consistency, and provenance; Narrate (checker) frames the verdict and does no

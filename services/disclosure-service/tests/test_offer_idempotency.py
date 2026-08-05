@@ -27,6 +27,7 @@ def _persisted_from_insert_params(offer_id, params):
         "monthly_payment": params[3],
         "amount_financed": params[4],
         "total_of_payments": params[5],
+        "decision_event_id": params[6],
     }
 
 
@@ -54,7 +55,9 @@ def test_offer_generation_idempotent_on_retry(monkeypatch):
 
     assert r1.status_code == 200 and r2.status_code == 200
     assert r1.json()["offer_id"] == r2.json()["offer_id"] == 501
-    assert state["inserts"] == 1  # retry replayed the offer, no second regulated disclosure
+    assert (
+        state["inserts"] == 1
+    )  # retry replayed the offer, no second regulated disclosure
 
 
 def test_replay_returns_persisted_terms_not_drifted_request(monkeypatch):
@@ -79,13 +82,23 @@ def test_replay_returns_persisted_terms_not_drifted_request(monkeypatch):
 
     first = client.post(
         "/offers",
-        json={"application_id": 7, "principal": 15000, "term_months": 36, "annual_rate": 7.99},
+        json={
+            "application_id": 7,
+            "principal": 15000,
+            "term_months": 36,
+            "annual_rate": 7.99,
+        },
         headers={"X-Internal-Service": TOKEN},
     )
     # retry after a rate/principal drift -- much larger loan at a much higher rate
     retry = client.post(
         "/offers",
-        json={"application_id": 7, "principal": 30000, "term_months": 12, "annual_rate": 19.99},
+        json={
+            "application_id": 7,
+            "principal": 30000,
+            "term_months": 12,
+            "annual_rate": 19.99,
+        },
         headers={"X-Internal-Service": TOKEN},
     )
 
@@ -125,11 +138,15 @@ def test_offer_concurrent_race_replays_winners_offer(monkeypatch):
             # first (pre-insert) check misses; the post-conflict lookup finds the winner
             return [] if calls["select"] == 1 else [winner]
         if s.startswith("INSERT INTO OFFERS"):
-            raise pg_errors.UniqueViolation("duplicate key value violates uq_offers_app")
+            raise pg_errors.UniqueViolation(
+                "duplicate key value violates uq_offers_app"
+            )
         return []
 
     monkeypatch.setattr(offers_router.db, "query", _q)
-    resp = TestClient(app).post("/offers", json=BODY, headers={"X-Internal-Service": TOKEN})
+    resp = TestClient(app).post(
+        "/offers", json=BODY, headers={"X-Internal-Service": TOKEN}
+    )
     assert resp.status_code == 200
     assert resp.json()["offer_id"] == 777  # the winner's offer, not a second insert
     assert resp.json()["apr"] == 8.5  # winner's PERSISTED terms, not the request's
@@ -145,7 +162,9 @@ def test_offer_conflict_without_retrievable_offer_is_409(monkeypatch):
         if s.startswith("SELECT") and "FROM OFFERS" in s:
             return []  # never finds an offer, even after the conflict
         if s.startswith("INSERT INTO OFFERS"):
-            raise pg_errors.UniqueViolation("duplicate key value violates uq_offers_app")
+            raise pg_errors.UniqueViolation(
+                "duplicate key value violates uq_offers_app"
+            )
         return []
 
     monkeypatch.setattr(offers_router.db, "query", _q)
@@ -153,6 +172,99 @@ def test_offer_conflict_without_retrievable_offer_is_409(monkeypatch):
         "/offers", json=BODY, headers={"X-Internal-Service": TOKEN}
     )
     assert resp.status_code == 409
+
+
+class TestAuthorizingDecisionEvent:
+    """The offer records WHICH decision authorized it, at creation.
+
+    Left to disclosure time, the provenance edge was closed from whichever decision event
+    was latest by then. `decision_events` is append-only and `uq_offers_app` makes the offer
+    permanent, so a re-decision between the offer and its disclosure re-parented the offer
+    to an event that did not produce its terms — and `v_disclosure_provenance`, which joins
+    the decision through `offers.decision_event_id`, reported that chain as complete. Wrong
+    and silent, rather than partial and flagged.
+    """
+
+    def _db(self, monkeypatch, state, decision_app_id=7):
+        def _q(sql, params=None):
+            s = sql.strip().upper()
+            if "FROM DECISION_EVENTS" in s:
+                return [{"app_id": decision_app_id}] if decision_app_id else []
+            if s.startswith("SELECT") and "FROM OFFERS" in s:
+                return [state["offer"]] if state["offer"] is not None else []
+            if s.startswith("INSERT INTO OFFERS"):
+                state["inserts"] += 1
+                state["offer"] = _persisted_from_insert_params(501, params)
+                return [{"id": 501}]
+            return []
+
+        monkeypatch.setattr(offers_router.config, "INTERNAL_SERVICE_TOKEN", TOKEN)
+        monkeypatch.setattr(offers_router.db, "query", _q)
+        return TestClient(app)
+
+    def test_the_authorizing_event_is_written_with_the_offer(self, monkeypatch):
+        state = {"offer": None, "inserts": 0}
+        client = self._db(monkeypatch, state)
+        resp = client.post(
+            "/offers",
+            json={**BODY, "decision_event_id": 42},
+            headers={"X-Internal-Service": TOKEN},
+        )
+        assert resp.status_code == 200, resp.text
+        assert state["offer"]["decision_event_id"] == 42
+        assert resp.json()["decision_event_id"] == 42
+
+    def test_a_replay_echoes_the_persisted_offers_event(self, monkeypatch):
+        """The retry is answered with the event the STORED offer cites, so the disclosure
+        that follows cites it too — not whichever event the retry happened to carry."""
+        state = {"offer": None, "inserts": 0}
+        client = self._db(monkeypatch, state)
+        client.post(
+            "/offers",
+            json={**BODY, "decision_event_id": 42},
+            headers={"X-Internal-Service": TOKEN},
+        )
+        retry = client.post(
+            "/offers",
+            json={**BODY, "decision_event_id": 99},
+            headers={"X-Internal-Service": TOKEN},
+        )
+        assert retry.status_code == 200, retry.text
+        assert retry.json()["decision_event_id"] == 42
+        assert state["inserts"] == 1
+
+    def test_a_decision_event_from_another_application_is_refused(self, monkeypatch):
+        state = {"offer": None, "inserts": 0}
+        client = self._db(monkeypatch, state, decision_app_id=999)
+        resp = client.post(
+            "/offers",
+            json={**BODY, "decision_event_id": 42},
+            headers={"X-Internal-Service": TOKEN},
+        )
+        assert resp.status_code == 409
+        assert "does not belong" in resp.json()["detail"]
+        assert state["inserts"] == 0
+
+    def test_a_decision_event_that_does_not_exist_is_refused(self, monkeypatch):
+        state = {"offer": None, "inserts": 0}
+        client = self._db(monkeypatch, state, decision_app_id=None)
+        resp = client.post(
+            "/offers",
+            json={**BODY, "decision_event_id": 42},
+            headers={"X-Internal-Service": TOKEN},
+        )
+        assert resp.status_code == 404
+        assert state["inserts"] == 0
+
+    def test_an_offer_with_no_decision_event_still_persists(self, monkeypatch):
+        """An application decided before `decision_events` existed keeps the old shape: the
+        offer carries no edge and `create_disclosure` closes one the same-application way."""
+        state = {"offer": None, "inserts": 0}
+        client = self._db(monkeypatch, state)
+        resp = client.post("/offers", json=BODY, headers={"X-Internal-Service": TOKEN})
+        assert resp.status_code == 200, resp.text
+        assert state["offer"]["decision_event_id"] is None
+        assert resp.json()["decision_event_id"] is None
 
 
 class TestScheduleRate:
@@ -198,7 +310,9 @@ class TestScheduleRate:
         resp = self._response(monkeypatch, [{"compute_snapshot": self.SNAPSHOT}])
         assert resp.schedule[0].payment != 484.52
 
-    def test_the_snapshot_supplies_principal_rather_than_an_inversion(self, monkeypatch):
+    def test_the_snapshot_supplies_principal_rather_than_an_inversion(
+        self, monkeypatch
+    ):
         """`compute_snapshot` records the principal actually used, so the schedule no
         longer depends on the current fee rate matching the one the offer was priced at."""
         from app.routers import offers as mod

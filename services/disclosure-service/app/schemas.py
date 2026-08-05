@@ -4,10 +4,20 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class OfferIn(BaseModel):
+    """Inputs for the offer the borrower is shown.
+
+    `decision_event_id` is the decision that AUTHORIZES this offer, recorded on the row at
+    creation because that is the only moment it is known without inference. Optional so an
+    offer for an application that predates `decision_events` still persists; when it is
+    absent the offer carries no provenance edge and `create_disclosure` closes one the old
+    way (same-application only).
+    """
+
     application_id: int
     principal: float = Field(gt=0, le=50000)
     term_months: int = Field(default=48, ge=12, le=60)
     annual_rate: float = Field(default=7.99, gt=0, le=35)
+    decision_event_id: int | None = None
 
 
 class ScheduleRow(BaseModel):
@@ -34,6 +44,10 @@ class OfferOut(BaseModel):
 
 
 class OfferResponse(BaseModel):
+    """The persisted offer. `decision_event_id` is echoed back so the caller disclosing this
+    offer sends the event that authorized IT, not whichever event is latest by then — after
+    a re-decision those differ, and `uq_offers_app` means the offer is never regenerated."""
+
     offer_id: int
     application_id: int
     apr: float
@@ -42,6 +56,7 @@ class OfferResponse(BaseModel):
     total_of_payments: float
     disclosure: Disclosure
     schedule: list[ScheduleRow] = []
+    decision_event_id: int | None = None
 
 
 class DocumentFigures(BaseModel):

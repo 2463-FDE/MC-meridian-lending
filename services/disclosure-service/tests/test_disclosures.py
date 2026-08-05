@@ -8,6 +8,7 @@ accepting them, refuses when its recomputation disagrees with the stored offer, 
 rather than duplicating.
 """
 
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -212,6 +213,37 @@ def test_refuses_a_decision_event_that_does_not_exist(client):
     )
     assert response.status_code == 404
     assert response.json()["detail"] == "decision event not found"
+
+
+def test_refuses_a_decision_event_that_is_not_the_offers_authorizing_one(client):
+    """Same application is the weaker check. `decision_events` is append-only, so a
+    re-decision adds a row and the latest event for an application is not necessarily the
+    one that authorized an offer made earlier — and `uq_offers_app` means that offer is
+    never regenerated under the newer one. Accepting any same-application event let the
+    chain name the wrong decision while still reporting chain_complete: true.
+    """
+    session = _with_session(StubSession(offer=_offer(decision_event_id=3)))
+    response = client.post(
+        "/disclosures",
+        json=_inputs(decision_event_id=7),
+        headers={"X-Internal-Service": TOKEN},
+    )
+    assert response.status_code == 409
+    assert "not the event that authorized this offer" in response.json()["detail"]
+    assert session.added == [], (
+        "must not persist a disclosure citing the wrong decision"
+    )
+
+
+def test_accepts_the_decision_event_the_offer_itself_cites(client):
+    session = _with_session(StubSession(offer=_offer(decision_event_id=7)))
+    response = client.post(
+        "/disclosures",
+        json=_inputs(decision_event_id=7),
+        headers={"X-Internal-Service": TOKEN},
+    )
+    assert response.status_code == 201, response.text
+    assert session.added[0].decision_event_id == 7
 
 
 def test_persists_minor_units_derived_from_inputs(client):
@@ -512,6 +544,92 @@ def test_replay_repairs_an_edge_a_crashed_write_left_open(client):
     assert session.added == [], "a replay must not persist a second record"
     assert session.offer.decision_event_id == 3
     assert session.commits == 1
+
+
+def test_replay_records_a_document_the_row_never_got(client):
+    """The regeneration path migration 0012 promises, which did not exist.
+
+    0012 added `document_body` nullable and said a disclosure written before it "becomes
+    undeliverable until regenerated". Regeneration could not reach the row: this endpoint
+    short-circuits on the replay above before the document is looked at, so the pipeline
+    assembled a valid document, POSTed it, got a 201 — and `document_body` stayed NULL.
+    `_refuse_if_no_document` then blocks delivery and `accept_offer` blocks boarding, with
+    no API path back short of hand-written SQL on a regulated table.
+    """
+    existing = _persisted_disclosure()
+    session = _with_session(StubSession(offer=_offer(), existing=existing))
+    response = client.post(
+        "/disclosures",
+        json=_inputs(document=GOOD_DOCUMENT),
+        headers={"X-Internal-Service": TOKEN},
+    )
+    assert response.status_code == 201, response.text
+    assert session.added == [], "a repair must not persist a second record"
+    assert existing.document_body == GOOD_DOCUMENT
+    assert session.commits == 1
+
+
+def test_a_backfilled_document_is_checked_against_the_persisted_figures(client):
+    """The backfill is not a way in for an unchecked document. Compared against the
+    figures already ON the row, not a recomputation — the replay path deliberately does not
+    recompute, and the document has to agree with the record it is being attached to."""
+    existing = _persisted_disclosure()
+    session = _with_session(StubSession(offer=_offer(), existing=existing))
+    response = client.post(
+        "/disclosures",
+        json=_inputs(
+            document={
+                **GOOD_DOCUMENT,
+                "figures": {**GOOD_DOCUMENT["figures"], "monthly_payment": "439.34"},
+            }
+        ),
+        headers={"X-Internal-Service": TOKEN},
+    )
+    assert response.status_code == 409
+    assert "monthly_payment" in response.json()["detail"]
+    assert existing.document_body is None
+    assert session.commits == 0
+
+
+def test_a_replay_never_replaces_a_document_that_is_already_recorded(client):
+    """The idempotency guarantee: a retry returns the borrower's document, it does not swap
+    it for a freshly rendered one."""
+    existing = _persisted_disclosure()
+    existing.document_body = GOOD_DOCUMENT
+    other = {
+        **GOOD_DOCUMENT,
+        "heading": "A different heading entirely",
+    }
+    session = _with_session(
+        StubSession(offer=_offer(decision_event_id=7), existing=existing)
+    )
+    response = client.post(
+        "/disclosures",
+        json=_inputs(document=other),
+        headers={"X-Internal-Service": TOKEN},
+    )
+    assert response.status_code == 201, response.text
+    assert existing.document_body == GOOD_DOCUMENT
+    assert session.commits == 0, "nothing changed, so nothing is written"
+
+
+def test_a_delivered_row_is_not_backfilled(client):
+    """`trg_disclosures_freeze_delivered` raises on any UPDATE of a delivered row, so
+    attempting the write would turn a legitimate replay into a 500. A legacy delivered row
+    keeps its NULL — the honest record that nothing was captured."""
+    existing = _persisted_disclosure(status="delivered")
+    existing.delivered_at = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    session = _with_session(
+        StubSession(offer=_offer(decision_event_id=7), existing=existing)
+    )
+    response = client.post(
+        "/disclosures",
+        json=_inputs(document=GOOD_DOCUMENT),
+        headers={"X-Internal-Service": TOKEN},
+    )
+    assert response.status_code == 201, response.text
+    assert existing.document_body is None
+    assert session.commits == 0
 
 
 def test_the_concurrent_loser_repairs_the_edge_before_replaying(client):

@@ -79,6 +79,8 @@ def _coordinator(
 
     def compute_offer(payload):
         calls["compute"] += 1
+        if record is not None:
+            record["compute"] = payload
         return (
             offer
             if offer is not None
@@ -121,6 +123,49 @@ def test_approved_application_runs_the_full_pipeline():
     assert result["disclosure"] == {"disclosure_id": 5, "status": "draft"}
     assert result["provenance"]["chain_complete"] is True
     assert calls == {"compute": 1, "persist": 1, "provenance": 1}
+
+
+def test_the_offer_is_created_against_the_decision_that_authorizes_it():
+    """Stage 2 sends the decision event down with the offer, so the edge is recorded at
+    creation rather than inferred at disclosure time."""
+    record = {}
+    coordinator, _ = _coordinator([_document(), _narration()], record=record)
+    assert coordinator.run(1)["status"] == "ok"
+    assert record["compute"]["decision_event_id"] == 7
+
+
+def test_the_disclosure_cites_the_offers_own_decision_event_not_the_latest():
+    """Stage 0 reads the LATEST decision event; the offer may have been authorized by an
+    earlier one.
+
+    `create_offer` is idempotent per application and `uq_offers_app` makes the offer
+    permanent, so after a re-decision this run replays an offer written under the older
+    event. Citing stage 0's newer event would name a decision that did not produce these
+    terms, and the provenance view — which joins the decision through the offer — would
+    report that chain complete. disclosure-service refuses the mismatch outright, so
+    sending the wrong one also blocks the run.
+    """
+    record = {}
+    coordinator, _ = _coordinator(
+        [_document(), _narration()],
+        offer={"offer_id": 11, "decision_event_id": 3, "disclosure": dict(FIGURES)},
+        record=record,
+    )
+    assert coordinator.run(1)["status"] == "ok"
+    assert record["persist"]["decision_event_id"] == 3
+
+
+def test_a_legacy_offer_without_an_edge_falls_back_to_the_gathered_event():
+    """An offer written before the edge existed carries none; the run still proceeds and
+    disclosure-service closes it the old way (same-application only)."""
+    record = {}
+    coordinator, _ = _coordinator(
+        [_document(), _narration()],
+        offer={"offer_id": 11, "decision_event_id": None, "disclosure": dict(FIGURES)},
+        record=record,
+    )
+    assert coordinator.run(1)["status"] == "ok"
+    assert record["persist"]["decision_event_id"] == 7
 
 
 def test_the_document_is_persisted_with_the_record_it_describes():

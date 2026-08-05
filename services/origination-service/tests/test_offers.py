@@ -39,11 +39,15 @@ def _disclosure_resp():
     }
 
 
-def _offer_db(app_row, outcome):
+def _offer_db(app_row, outcome, decision_event_id=7):
     """SQL-aware db.query stub for make_offer: the applications SELECT returns app_row
-    (or [] if None); the decisions SELECT returns the given outcome (or [] if None)."""
+    (or [] if None); the decisions SELECT returns the given outcome (or [] if None); the
+    decision_events SELECT returns the authorizing event id (or [] when it is None, which
+    is an application decided before decision_events existed)."""
 
     def _q(sql, params=None):
+        if "FROM decision_events" in sql:
+            return [{"id": decision_event_id}] if decision_event_id is not None else []
         if "FROM decisions" in sql:
             return [{"outcome": outcome}] if outcome is not None else []
         return [app_row] if app_row else []
@@ -79,6 +83,55 @@ def test_offer_binds_to_stored_application_ignores_caller_money_fields(monkeypat
     assert (
         fwd["annual_rate"] == offers.POLICY_RATE_PCT
     )  # server policy, not caller 0.01
+
+
+def test_offer_carries_its_authorizing_decision_event(monkeypatch):
+    """The offer row records WHICH decision authorized it, at creation.
+
+    Left to disclosure time, the edge was closed from whichever decision event was latest
+    then. `decision_events` is append-only and `uq_offers_app` means the offer is never
+    regenerated, so a re-decision in between re-parented the offer to an event that did not
+    produce its terms — and the provenance view reported that chain as complete.
+    """
+    capture = {}
+    monkeypatch.setattr(
+        offers.db,
+        "query",
+        _offer_db({"amount": 5000.0, "term_months": 36}, "approve", 42),
+    )
+
+    def _post(base, path, payload):
+        capture["payload"] = payload
+        return _disclosure_resp()
+
+    monkeypatch.setattr(offers.clients, "post", _post)
+    resp = TestClient(app).post(
+        "/offer", json={"app_id": 1}, headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 200
+    assert capture["payload"]["decision_event_id"] == 42
+
+
+def test_offer_for_an_application_with_no_decision_event_carries_no_edge(monkeypatch):
+    """An application decided before `decision_events` existed still gets its offer; the
+    edge stays open, which is what its data supports."""
+    capture = {}
+    monkeypatch.setattr(
+        offers.db,
+        "query",
+        _offer_db({"amount": 5000.0, "term_months": 36}, "approve", None),
+    )
+
+    def _post(base, path, payload):
+        capture["payload"] = payload
+        return _disclosure_resp()
+
+    monkeypatch.setattr(offers.clients, "post", _post)
+    resp = TestClient(app).post(
+        "/offer", json={"app_id": 1}, headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 200
+    assert capture["payload"]["decision_event_id"] is None
 
 
 def test_offer_404_when_application_missing(monkeypatch):

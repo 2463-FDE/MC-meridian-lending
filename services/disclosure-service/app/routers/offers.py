@@ -79,6 +79,44 @@ def _schedule_inputs(row, amount_financed: float) -> tuple:
     return principal, _FALLBACK_NOTE_RATE_PCT
 
 
+_PERSISTED_OFFER_COLUMNS = (
+    "id, apr, finance_charge, monthly_payment, amount_financed, total_of_payments, "
+    "decision_event_id"
+)
+
+
+def _require_decision_event_for_application(
+    decision_event_id: int, application_id: int
+) -> None:
+    """The FK proves the event exists; it does not prove it is THIS application's.
+
+    Same posture as `create_disclosure`'s guard one table down. Writing a foreign
+    application's event onto the offer would make `v_disclosure_provenance` — which joins
+    the decision through `offers.decision_event_id` — report a whole chain to the wrong
+    applicant.
+    """
+    rows = db.query(
+        "SELECT app_id FROM decision_events WHERE id = %s", (decision_event_id,)
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="decision event not found")
+    if rows[0]["app_id"] != application_id:
+        log.error(
+            "refusing offer for application_id=%s: decision_event_id=%s belongs to "
+            "app_id=%s",
+            application_id,
+            decision_event_id,
+            rows[0]["app_id"],
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "decision_event_id does not belong to this application; "
+                "refusing to persist"
+            ),
+        )
+
+
 def _offer_response_from_persisted(row, application_id: int) -> OfferResponse:
     """Build an OfferResponse from a PERSISTED offers row (the create_offer replay paths and
     the GET read path). The disclosure numbers come straight from the stored row -- never
@@ -132,6 +170,10 @@ def _offer_response_from_persisted(row, application_id: int) -> OfferResponse:
         total_of_payments=total_of_payments,
         disclosure=disclosure,
         schedule=[ScheduleRow(**r) for r in rows],
+        # Echoed from the STORED row, never from the request: a replay is answered with the
+        # event that authorized the persisted offer, which is what the disclosure must cite.
+        # `.get`, because a legacy offer row predates the column being selected at all.
+        decision_event_id=row.get("decision_event_id"),
     )
 
 
@@ -157,19 +199,30 @@ def create_offer(
     # race: the loser catches UniqueViolation and replays the winner's persisted offer. Mirrors
     # accept_offer's idempotent loan boarding (origination).
     existing = db.query(
-        "SELECT id, apr, finance_charge, monthly_payment, amount_financed, "
-        "total_of_payments FROM offers WHERE app_id = %s ORDER BY id LIMIT 1",
+        f"SELECT {_PERSISTED_OFFER_COLUMNS} FROM offers WHERE app_id = %s "
+        "ORDER BY id LIMIT 1",
         (body.application_id,),
     )
     if existing:
         return _offer_response_from_persisted(existing[0], body.application_id)
+    # The authorizing decision is recorded WITH the offer. Deferring it to disclosure time
+    # meant the edge was closed from whichever decision event was latest by then, so a
+    # re-decision between the offer and its disclosure silently re-parented the offer to an
+    # event that did not authorize it — and `v_disclosure_provenance` then reported that
+    # chain as complete. `uq_offers_app` makes the offer permanent, so the moment it is
+    # written is the only moment its authorizing event is known rather than inferred.
+    if body.decision_event_id is not None:
+        _require_decision_event_for_application(
+            body.decision_event_id, body.application_id
+        )
     o = offer_mod.build_offer(body.principal, body.annual_rate, body.term_months)
     rows = schedule.amortization(body.principal, body.annual_rate, body.term_months)
     # persist via raw psycopg2 (matches origination's write path) — float money columns
     try:
         inserted = db.query(
             "INSERT INTO offers (app_id, apr, finance_charge, monthly_payment, "
-            "amount_financed, total_of_payments) VALUES (%s, %s, %s, %s, %s, %s) "
+            "amount_financed, total_of_payments, decision_event_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
             "RETURNING id",
             (
                 body.application_id,
@@ -178,6 +231,7 @@ def create_offer(
                 o["monthly_payment"],
                 o["amount_financed"],
                 o["total_of_payments"],
+                body.decision_event_id,
             ),
         )
         offer_id = inserted[0]["id"]
@@ -185,8 +239,8 @@ def create_offer(
         # A concurrent create won the race and inserted first; replay its persisted offer
         # instead of a second one (one offer per app_id, enforced by uq_offers_app).
         won = db.query(
-            "SELECT id, apr, finance_charge, monthly_payment, amount_financed, "
-            "total_of_payments FROM offers WHERE app_id = %s ORDER BY id LIMIT 1",
+            f"SELECT {_PERSISTED_OFFER_COLUMNS} FROM offers WHERE app_id = %s "
+            "ORDER BY id LIMIT 1",
             (body.application_id,),
         )
         if not won:
@@ -213,6 +267,7 @@ def create_offer(
         total_of_payments=o["total_of_payments"],
         disclosure=disclosure,
         schedule=[ScheduleRow(**r) for r in rows],
+        decision_event_id=body.decision_event_id,
     )
 
 
@@ -247,6 +302,7 @@ def get_offer(
             "monthly_payment": offer.monthly_payment,
             "amount_financed": offer.amount_financed,
             "total_of_payments": offer.total_of_payments,
+            "decision_event_id": offer.decision_event_id,
         },
         application_id,
     )

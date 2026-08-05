@@ -330,6 +330,9 @@ class LangGraphDisclosureCoordinator:
                 "principal": state["principal"],
                 "annual_rate": state["annual_rate"],
                 "term_months": state["term_months"],
+                # `DisclosureState` is total=False; stage 0 always sets this or blocks the
+                # run, so `.get` is for the unit tests that drive this node in isolation.
+                "decision_event_id": state.get("decision_event_id"),
             }
         )
         disclosure = offer.get("disclosure", offer)
@@ -342,7 +345,20 @@ class LangGraphDisclosureCoordinator:
         if any(value is None for value in figures.values()):
             missing = [k for k, v in figures.items() if v is None]
             return _blocked(BlockReason.NUMBER_WRONG, f"missing={','.join(missing)}")
-        return {"figures": figures, "offer_id": offer.get("offer_id")}
+        # The PERSISTED offer's own authorizing event supersedes the latest one stage 0
+        # read. `create_offer` is idempotent per application, so this call may have replayed
+        # an offer written under an earlier decision; disclosing it against the newer event
+        # would name a decision that did not authorize these terms, and disclosure-service
+        # refuses that outright. `is None` rather than `or`: absence is the only fallback
+        # case, and an offer that predates the edge is the only source of it.
+        authorizing = offer.get("decision_event_id")
+        if authorizing is None:
+            authorizing = state.get("decision_event_id")
+        return {
+            "figures": figures,
+            "offer_id": offer.get("offer_id"),
+            "decision_event_id": authorizing,
+        }
 
     def _complete(self, prompt_name: str, **kwargs):
         """Call the model with LangSmith tracing restored for the duration of the call.
