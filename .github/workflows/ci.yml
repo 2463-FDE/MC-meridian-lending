@@ -340,6 +340,28 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_decision.py -k "database_url or internal_service_token or schema" -q
 
+  migration-numbering-gate:
+    # Migrations are hand-applied with no runner (compose mounts db/init/* only), so a
+    # duplicate NNNN prefix -- two feature branches each grabbing the next number -- is an
+    # operator-ordering hazard: following the numeric sequence can run a later migration before
+    # the one it depends on (e.g. a document_body ALTER before its CREATE TABLE). This branch
+    # hit exactly that with two 0011_* files. Fail the build on any collision so it surfaces at
+    # PR time, not at rollout. Blocking -- no continue-on-error, no `|| true`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No duplicate migration version numbers
+        run: |
+          set -euo pipefail
+          dupes=$(ls db/migrations/ | grep -oE '^[0-9]{4}' | sort | uniq -d)
+          if [ -n "$dupes" ]; then
+            echo "Duplicate migration version number(s) in db/migrations/:"
+            echo "$dupes"
+            echo "Two files share an NNNN prefix; renumber one so the apply order is unambiguous."
+            exit 1
+          fi
+          echo "OK: all db/migrations/ version numbers are unique."
+
   disclosure-lifecycle-gate:
     # The disclosure controls this week rests on -- delivery gating (a delivered flag over a
     # persisted, readable document), provenance completeness (the chain the KG view reports),
