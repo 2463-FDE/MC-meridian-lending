@@ -340,6 +340,38 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_decision.py -k "database_url or internal_service_token or schema" -q
 
+  disclosure-lifecycle-gate:
+    # The disclosure controls this week rests on -- delivery gating (a delivered flag over a
+    # persisted, readable document), provenance completeness (the chain the KG view reports),
+    # document persistence + figure/spelling agreement, and downstream-refusal-vs-outage
+    # handling -- live in these suites, NOT in the money-math (tila-vectors-gate) or DB
+    # readiness (db-readiness-gate) gates. They otherwise run only in the `backend` matrix
+    # under continue-on-error/|| true, so a regression in delivery gating, provenance, or
+    # document persistence merges with green CI. These are correctness/compliance controls,
+    # not flaky money-math: this job MUST block -- no continue-on-error, no `|| true`.
+    #
+    # disclosure-service: the persistence/lifecycle boundary (create, replay/backfill,
+    # transition gating, offer-disagreement + document-disagreement refusals) and the
+    # provenance DDL guards. origination-service: the pipeline coordinator (route/compute/
+    # verify/narrate/persist, the one retry cycle, tracing suppression) and the officer-facing
+    # disclosure route (officer-only generation, downstream-refusal 4xx passthrough).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: disclosure-service lifecycle + provenance suites
+        run: |
+          cd services/disclosure-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_disclosures.py tests/test_schema_provenance.py -q
+      - name: origination-service disclosure coordinator + route suites
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_disclosure_coordinator.py tests/test_disclosure_route.py -q
+
   rag-eval-gate:
     # The RAG eval hygiene gate (refuses contaminated kb_dump: ssn/pan/ein) and
     # the cache pruning are security controls: they prove raw PII never reaches
