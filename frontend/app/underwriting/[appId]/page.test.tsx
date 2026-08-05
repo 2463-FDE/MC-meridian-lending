@@ -406,3 +406,106 @@ describe("underwriting detail — disclosure document repair", () => {
     expect(accept.hasAttribute("disabled")).toBe(false);
   });
 });
+
+// A disclosure action started on one application must not stamp that application's regulated
+// document/provenance onto another the officer opened while it was in flight. generate and
+// transition call loadDisclosure to refresh, but loadDisclosure captured the route generation
+// at its own call time — already the NEW route's generation for a stale in-flight action — so
+// its guard passed and it wrote the previous applicant's APR, document, and provenance onto
+// the screen now showing someone else (PR review). The sibling handlers capture the generation
+// before their first await; these two did not.
+describe("underwriting detail — disclosure actions across a route change", () => {
+  it("does not stamp a generate result onto another application opened mid-flight", async () => {
+    let app1HasDisclosure = false;
+    let resolvePost: (value: unknown) => void = () => {};
+    const pendingPost = new Promise((resolve) => {
+      resolvePost = resolve;
+    });
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === "/los/applications/1") return APP_1;
+      if (path === "/los/applications/2") return APP_2;
+      if (path === "/los/applications/1/disclosure") {
+        if (!app1HasDisclosure) throw new Error("no disclosure");
+        return { ...PROVENANCE_BASE, disclosure_status: "draft", application_id: 1 };
+      }
+      if (path === "/los/applications/1/disclosure/document") {
+        if (!app1HasDisclosure) throw new Error("no document");
+        return GOOD_DOCUMENT;
+      }
+      if (path.startsWith("/los/applications/2/disclosure")) {
+        throw new Error("no disclosure");
+      }
+      throw new Error(`unexpected GET ${path}`);
+    });
+    apiPost.mockImplementation((path: string) => {
+      if (path === "/los/applications/1/disclosure") return pendingPost;
+      throw new Error(`unexpected POST ${path}`);
+    });
+
+    const view = render(<UnderwritingDetailPage />);
+    await screen.findAllByText("Maria Alvarez");
+
+    // Officer generates a disclosure on application 1; the POST stays in flight.
+    fireEvent.click(screen.getByRole("button", { name: "Generate disclosure" }));
+
+    // They open application 2 before it resolves.
+    routeAppId = "2";
+    view.rerender(<UnderwritingDetailPage />);
+    await screen.findAllByText("Dan Brown");
+
+    // Generation completes; its follow-up load reads application 1's disclosure.
+    app1HasDisclosure = true;
+    await act(async () => {
+      resolvePost({ status: "ok" });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Application 1's regulated figures must not appear under application 2.
+    expect(screen.queryByText("Federal Truth-in-Lending Disclosure")).toBeNull();
+    expect(screen.queryByText(/9\.584%/)).toBeNull();
+  });
+
+  it("does not stamp a transition result onto another application opened mid-flight", async () => {
+    let resolvePost: (value: unknown) => void = () => {};
+    const pendingPost = new Promise((resolve) => {
+      resolvePost = resolve;
+    });
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === "/los/applications/1") return APP_1;
+      if (path === "/los/applications/2") return APP_2;
+      if (path === "/los/applications/1/disclosure") {
+        return { ...PROVENANCE_BASE, disclosure_status: "draft", application_id: 1 };
+      }
+      if (path === "/los/applications/1/disclosure/document") return GOOD_DOCUMENT;
+      if (path.startsWith("/los/applications/2/disclosure")) {
+        throw new Error("no disclosure");
+      }
+      throw new Error(`unexpected GET ${path}`);
+    });
+    apiPost.mockImplementation((path: string) => {
+      if (path === "/los/applications/1/disclosure/transition") return pendingPost;
+      throw new Error(`unexpected POST ${path}`);
+    });
+
+    const view = render(<UnderwritingDetailPage />);
+    await screen.findAllByText("Maria Alvarez");
+    await screen.findByText("Federal Truth-in-Lending Disclosure");
+
+    // Officer sends application 1's disclosure to compliance; the POST stays in flight.
+    fireEvent.click(screen.getByRole("button", { name: "Send to compliance" }));
+
+    // They open application 2, which has no disclosure of its own.
+    routeAppId = "2";
+    view.rerender(<UnderwritingDetailPage />);
+    await screen.findAllByText("Dan Brown");
+
+    await act(async () => {
+      resolvePost({ status: "in_review" });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Application 1's document must not reappear under application 2.
+    expect(screen.queryByText("Federal Truth-in-Lending Disclosure")).toBeNull();
+    expect(screen.queryByText(/9\.584%/)).toBeNull();
+  });
+});

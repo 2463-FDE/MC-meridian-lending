@@ -232,9 +232,12 @@ export default function UnderwritingDetailPage() {
   // has run — not an error worth showing. Guarded by the route generation like every other
   // async handler on this page: a disclosure fetch fired for the previous applicant must
   // not land on this one's screen.
-  const loadDisclosure = useCallback(async () => {
+  // `gen` defaults to the current generation for the load effect, but a caller that started
+  // before a route change passes the generation it captured THEN — otherwise this guard reads
+  // the new route's generation (capturing at call time is too late) and writes the previous
+  // applicant's provenance/document onto the screen now showing someone else.
+  const loadDisclosure = useCallback(async (gen: number = routeGenRef.current) => {
     if (!appId) return;
-    const gen = routeGenRef.current;
     try {
       const p = (await apiGet(
         `/los/applications/${appId}/disclosure`
@@ -499,24 +502,29 @@ export default function UnderwritingDetailPage() {
 
   async function generateDisclosure() {
     if (!appId) return;
+    const gen = routeGenRef.current;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
     try {
       await apiPost(`/los/applications/${appId}/disclosure`);
-      await loadDisclosure();
+      if (routeGenRef.current !== gen) return;
+      await loadDisclosure(gen);
+      if (routeGenRef.current !== gen) return;
       setActionMsg("Disclosure generated and held for compliance review.");
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       // A 422 here is the verification gate refusing the document, not an outage. The
       // reason it carries is the whole point of the gate, so it is shown verbatim.
       setActionErr(errMsg(err, "Could not generate a disclosure."));
     } finally {
-      setActionBusy(false);
+      if (routeGenRef.current === gen) setActionBusy(false);
     }
   }
 
   async function transitionDisclosure(toStatus: string, reasonCode?: string) {
     if (!appId) return;
+    const gen = routeGenRef.current;
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
@@ -525,16 +533,19 @@ export default function UnderwritingDetailPage() {
         `/los/applications/${appId}/disclosure/transition`,
         { to_status: toStatus, reason_code: reasonCode ?? null }
       )) as { status?: string; routed_to?: string | null };
-      await loadDisclosure();
+      if (routeGenRef.current !== gen) return;
+      await loadDisclosure(gen);
+      if (routeGenRef.current !== gen) return;
       setActionMsg(
         res.routed_to
           ? `Disclosure rejected; the work goes back to ${res.routed_to}.`
           : `Disclosure is now ${String(res.status || toStatus).replace(/_/g, " ")}.`
       );
     } catch (err) {
+      if (routeGenRef.current !== gen) return;
       setActionErr(errMsg(err, "Could not update the disclosure."));
     } finally {
-      setActionBusy(false);
+      if (routeGenRef.current === gen) setActionBusy(false);
     }
   }
 
