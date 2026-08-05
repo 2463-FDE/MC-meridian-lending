@@ -1,5 +1,7 @@
 """Request-validation tests for the application schema (these PASS)."""
 
+from datetime import date
+
 import pytest
 from pydantic import ValidationError
 
@@ -137,3 +139,81 @@ def test_phone_padding_stripped_at_boundary(raw, normalized):
     # whitespace, so a padded phone passed and model_dump() preserved the padding.
     # Normalize to the stripped value; internal formatting is untouched.
     assert _app(phone=raw).phone == normalized
+
+
+@pytest.mark.parametrize(
+    "dob",
+    ["1990-04-22", "1900-01-01", "2007-12-31"],
+)
+def test_dob_valid_dates_accepted(dob):
+    assert _app(dob=dob).dob == dob
+
+
+def test_dob_optional_when_absent():
+    # Entity applicants carry an EIN and no DOB (_entity_requires_ein), so absent is valid.
+    assert _app().dob is None
+
+
+@pytest.mark.parametrize(
+    "dob",
+    [
+        # THE DEFECT: a native date input's year spinner emits a 5-digit year. Postgres
+        # DATE stores it (its ceiling is year 294276), then SQLAlchemy cannot build a
+        # Python date from the row and GET /los/applications raises
+        # "ValueError: year 21990 is out of range" -- taking down the officer queue for
+        # every officer, over one bad row, not just the application carrying it.
+        "21990-04-22",
+        "990-04-22",  # 3-digit year, the same class from the other direction
+        "1990-4-22",  # non-ISO shape the DATE column would otherwise coerce
+        "1990-13-01",  # impossible month
+        "1990-02-30",  # impossible day
+        "not-a-date",
+    ],
+)
+def test_dob_unparseable_rejected(dob):
+    with pytest.raises(ValidationError):
+        _app(dob=dob)
+
+
+def test_dob_before_floor_year_rejected():
+    with pytest.raises(ValidationError):
+        _app(dob="1899-12-31")
+
+
+def test_dob_in_the_future_rejected():
+    future = date.today().replace(year=date.today().year + 1)
+    with pytest.raises(ValidationError):
+        _app(dob=future.isoformat())
+
+
+def test_dob_padding_stripped_at_boundary():
+    # Parity with the ssn/phone validators: date.fromisoformat rejects surrounding
+    # whitespace outright, so strip before parsing and store the canonical value.
+    assert _app(dob=" 1990-04-22 ").dob == "1990-04-22"
+
+
+@pytest.mark.parametrize("dob", ["", "   ", "\t\n"])
+def test_dob_blank_normalized_to_none(dob):
+    # A blank DOB used to survive as "" and reach the applicants.dob DATE column, where
+    # Postgres raises "invalid input syntax for type date" inside the intake transaction --
+    # a 500 for a request the boundary claims to validate. Blank means absent (dob is
+    # optional for entity applicants), so normalize to None and store SQL NULL.
+    assert _app(dob=dob).dob is None
+
+
+@pytest.mark.parametrize(
+    "dob",
+    [
+        # date.fromisoformat is not a shape check. Python 3.11+ parses the ISO basic form
+        # and week dates, and the validator returned the raw string, so these left the
+        # boundary unnormalized: Postgres coerces "19900422" (storing a value that never
+        # matched the promised shape) and rejects "2021-W01-1" with a 500.
+        "19900422",
+        "2021-W01-1",
+        "1990-W01",
+        "1990-04-22T00:00:00",
+    ],
+)
+def test_dob_non_canonical_iso_rejected(dob):
+    with pytest.raises(ValidationError):
+        _app(dob=dob)
