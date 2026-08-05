@@ -404,5 +404,41 @@ jobs:
           fi
           echo "OK: no tracked .env."
 
+  doc-path-lint-tests:
+    # BLOCKING, unlike the lint run below. These tests are hermetic — each case
+    # builds a throwaway git repo in $TMPDIR — so they assert the gate's own logic
+    # is intact, never the state of the docs. A neutered `resolves()` turns the
+    # `absent path fails` case red, which is the only thing standing between this
+    # gate and one that passes unconditionally.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check_doc_paths.sh tests
+        run: ./scripts/test_check_doc_paths.sh
+
+  doc-path-lint:
+    # CLAUDE.md and docs/kb.md are loaded by every agent session before it edits
+    # code, so a path they cite that exists only on an unmerged branch starts the
+    # session from a wrong-by-construction state. This asserts every backticked
+    # repo-path in those docs (and README.md) resolves in the branch's own tree.
+    # A reference that is absent ON PURPOSE goes in scripts/doc_path_lint_allow.txt
+    # with a reason; an entry there that starts resolving fails the run.
+    #
+    # BLOCKING. It passes on main today (README.md, 11 paths, all resolve), so this
+    # costs nothing now — and it is deliberately armed BEFORE the change that gives
+    # it teeth. CLAUDE.md and docs/kb.md are untracked on every branch, so CI checks
+    # out neither and reports them SKIPPED; the PR that tracks them will turn this
+    # red, because main's copies cite the post-#12 world (policies/fee_schedule.json,
+    # disclosure-service/app/rules.py) that main does not contain. Red on that PR is
+    # the point: reconciling the references is that PR's job, and warn-only would
+    # have let it land unreconciled. Note those two are NOT allowlist material —
+    # they resolve on the feature branch, where the stale-entry check would then fail
+    # on the exemption itself. The fix is merging the open PRs, not an exemption.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Backticked doc paths resolve in this tree
+        run: ./scripts/check_doc_paths.sh
+
   # GAP: no dependency audit, no SAST, no container image scan.
   # GAP: backend tests are continue-on-error, so failing money-math tests are green.
