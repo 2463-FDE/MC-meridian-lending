@@ -71,6 +71,20 @@ node (append-only, ADR 0009); `decisions` is a mutable pointer and is not. `disc
 `content_fingerprint` = hash(inputs + ruleset + outputs). The pipeline reads provenance through
 the view, not via ad-hoc joins.
 
+*Amended at review, 2026-08-04:* the node also carries `document_body` JSONB — the assembled
+borrower-facing document, structured as the assembler produces it. The record previously held
+what was **computed** and nothing of what was **disclosed**: the document existed only in the
+generating call's HTTP response, so no later reader could see the artifact the delivered flag
+referred to. Structured rather than a rendered blob, because the figures are then comparable
+field by field against the same outputs the fingerprint covers, and disclosure-service refuses
+any document whose figures disagree with its own recomputation. It is deliberately **outside**
+`content_fingerprint`: that hash must recompute from the persisted snapshot alone, and folding
+in model prose would make a regulated integrity value depend on wording while adding nothing —
+the figures inside the document are already pinned to the hashed outputs. The document body is
+read through its own officer-only route, not through the provenance view: the view is the one
+definition of the chain, and origination's proxy of it admits the owning borrower, who must not
+see a held draft's body.
+
 **D5 — Multi-agent is maker-checker; the LLM never computes a regulated number.** Assemble
 (maker) formats from given numbers; a deterministic **system** gate recomputes and checks
 tolerance, fee consistency, and provenance; Narrate (checker) frames the verdict and does no
@@ -89,6 +103,14 @@ migration 0010). `offers.decision_event_id` is **nullable in DDL** because
 path and the future unique index is partial, following that same precedent. A trigger blocks
 UPDATE/DELETE only when `OLD.status = 'delivered'`; earlier states mutate legitimately. Rule
 versions are properties, not a `rulesets` node.
+
+*Amended at review, 2026-08-04:* the delivery transition also requires a recorded document, so
+`delivered` states that content exists and was readable, not only that a timestamp was written.
+This is what the freeze then protects; before it, the trigger made immutable a row whose
+document nobody could produce. `document_body` is written once, at insert — no lifecycle edge
+touches it — so an officer cannot approve one document and deliver another. Rows written before
+the column existed keep NULL and become undeliverable rather than being backfilled: inventing a
+document at delivery time is fabricating the evidence the column exists to hold.
 
 ## Options Considered
 
@@ -151,7 +173,7 @@ persist. It is unreachable today regardless: bands emit approve/refer/deny
 | 1 | D2: versioned fee config + fail-closed loader; delete three constants | Loader test green; service unhealthy on bad config |
 | 2 | D1: Decimal actuarial APR + amortization | `compute_apr(18000, 7.99, 48)` = 9.584% ±0.001; APR ≥ note rate invariant |
 | 3 | D3: TILA vectors in a new blocking job | Job blocks on a seeded regression |
-| 4 | D4/D7: migration (`disclosures`, `offers.decision_event_id`, delivered-freeze trigger) in **both** `db/init/001_schema.sql` and `db/migrations/` + `/health` readiness objects | Clean-volume and populated-volume apply both verified |
+| 4 | D4/D7: migration (`disclosures`, `offers.decision_event_id`, delivered-freeze trigger, `disclosures.document_body`) in **both** `db/init/001_schema.sql` and `db/migrations/` + `/health` readiness objects | Clean-volume and populated-volume apply both verified |
 | 5 | D5/D6: coordinator, maker/checker nodes, typed-reason routing, callback-redaction test | Injected wrong number BLOCKs at the gate |
 | 6 | Frontend action + status badge; `teeth` pass; docs/tracker update | — |
 
@@ -163,12 +185,21 @@ locks — cheap to change then, expensive once vectors exist.
 mounts `db/init/*` only, and commit `e0716da` is this exact bug: an index that lived only in a
 migration left the replay path dead and `/health` permanently `schema_not_ready`.
 
+*Amended at review, 2026-08-04:* adding a column to a table declared in both files takes three
+edits, not two — the init DDL, the original migration's `CREATE TABLE` (a volume that never had
+the table gets the column with it, and a test compares the two byte for byte), and a new
+migration with `ADD COLUMN IF NOT EXISTS` for volumes where the original already ran. That
+`IF NOT EXISTS` swallows a same-named column of any type, so the new migration compares
+`data_type` and raises rather than skipping on the name, and the readiness rung probes the type
+too. Without both, a `TEXT` stand-in for `JSONB` reports ready and hands every reader a string
+instead of an object.
+
 ## Rollback Strategy
 
 | Component | Rollback |
 |---|---|
 | D1/D2 compute | Pure code revert. No data written under the new formula is destroyed — `disclosures` rows remain readable and carry `apr_method_version`, so values stay attributable to the method that produced them |
-| D4 schema | Additive only: one new table, one nullable column, one trigger. Rollback = drop trigger, drop table, drop column. No existing column is altered and no existing row is rewritten, so reverting cannot corrupt the back book |
+| D4 schema | Additive only: one new table, two nullable columns (`offers.decision_event_id`, `disclosures.document_body`), one trigger. Rollback = drop trigger, drop table, drop both columns. No existing column is altered and no existing row is rewritten, so reverting cannot corrupt the back book. Dropping `document_body` re-opens the delivery gate rather than breaking it — the code revert that accompanies it removes the check |
 | D6 LangGraph | Swap the `Coordinator` implementation back to native and drop the pins. This is the seam's entire purpose; it is the reason adoption is reversible at all |
 | D3 blocking job | Delete the job. Reverting it is a policy regression, not a technical one — it should require the same review as adding it |
 | Partial deploy | `/health` reports `schema_not_ready:<object>` until objects exist, so a code-ahead-of-migration deploy fails loudly rather than writing half-linked provenance |
@@ -183,13 +214,19 @@ migration left the replay path dead and `/health` permanently `schema_not_ready`
 | Corrected APR applied retroactively to delivered disclosures | High | Explicitly prohibited: the value disclosed is legally operative. Absence of `apr_method_version` means pre-Week-4 method. Remediation is Dana's decision, not an implementation side effect |
 | Backfilling `decision_event_id` guesses a link it cannot prove | Medium | Manual operator step, applied only where an application has exactly one decision event; otherwise left null. Mirrors migration 0010's manual dedup posture |
 | Provenance view hides legacy rows lacking the new edges | Medium | LEFT JOIN — rows with the worst provenance must not be the ones that disappear |
+| Disclosures written before `document_body` existed become undeliverable, with no officer action that gives them one (generation is disabled once a disclosure exists, and a replay returns the stored row rather than writing a document onto it) | Medium | Accepted, and the fail-closed direction: the alternative is delivering a document nobody can produce. The officer screen states it plainly and promises no self-service remedy, so the row surfaces as needing an operator instead of failing at the deliver click. Rows already `delivered` keep NULL and stay frozen — the trigger blocks any UPDATE of them, so no hand-backfill is possible either |
+| A document whose figures agree in value but not in spelling reaches a borrower | Medium | The boundary check requires a plain-decimal literal before comparing: `Decimal` accepts `17_460.00`, `+3628.71` and `3.62871E+3`, all of which compare equal to the record, and the string is stored and printed verbatim |
 | New disclosure routes on the anonymous `/disclosure` proxy bypass the officer-OR-owner path | High | Adopt `_require_internal_caller` and extend `test_auth_gate.py`; `offer-guard-gate`'s stated premise depends on it |
 | Dependency conflict blocks phase 0 | Medium | Discovered Day 1 by design; native fallback preserved by the `Coordinator` seam |
 
 ## Cross-Cutting Impact
 
 - **Security:** two new audit surfaces (framework callbacks, checkpoint store), both closed
-  above. No new PII store; no change to card or SSN handling.
+  above. No new PII store; no change to card or SSN handling. *Amended at review, 2026-08-04:*
+  `document_body` stores no new class of data — the figures already sit in adjacent columns and
+  the prose fields are digit-free and identifier-free by the assembler's output schema — but it
+  does add a read surface, closed by making the document route officer-only rather than the
+  officer-or-owner posture the rest of the disclosure reads take.
 - **Performance:** actuarial solve is an iterative root-find on ≤ a few hundred payments —
   microseconds, run once per disclosure. Framework overhead is negligible; token cost is driven
   by two agent calls, not by LangGraph.
@@ -201,8 +238,9 @@ migration left the replay path dead and `/health` permanently `schema_not_ready`
   `Coordinator` seam earns its keep with two real implementations rather than a speculative one.
 - **Cost:** ~+2–3 days for framework adoption, dominated by security re-review, bought for the
   deliverable. Infrastructure cost is zero — no new engine, no new store.
-- **Operational:** one migration, `/health` readiness objects, optional manual backfill. No
-  image change, no new service.
+- **Operational:** two migrations (0011, plus 0012 for the document column), `/health` readiness
+  objects, optional manual backfill. No image change, no new service. Disclosures written before
+  0012 need an operator: they cannot be delivered and no officer action gives them a document.
 - **Testing:** one new blocking job; unit coverage for the Decimal path, loader, status machine,
   routing, and bounded retry; agent tests run on `FakeAdapter` with no key spend.
 
@@ -214,8 +252,14 @@ the decision, inputs, and rule versions that produced it. The regulated number i
 code on both the compute and verify sides, so the LLM cannot move it. Every deferral carries a
 named trigger.
 
+*Amended at review, 2026-08-04:* the record now holds what was disclosed as well as what was
+computed, so `delivered` is a claim about content a human could read rather than a flag over an
+artifact that lived only in one HTTP response.
+
 **Negative.** Two money representations coexist across a seam that runs through the platform
-rather than around it. The back book keeps its defective numbers until Dana decides on
+rather than around it. Disclosures written before `document_body` existed are undeliverable and
+need an operator — accepted as the fail-closed direction, but it is a manual queue this ADR
+creates and does not staff. The back book keeps its defective numbers until Dana decides on
 remediation — legally the correct default, and it means known-wrong disclosures stay on file.
 LangGraph adds dependency weight and an audit surface bought for the deliverable, not the
 defect. FK-as-graph cannot express edge properties until the `graph_edges` rung.

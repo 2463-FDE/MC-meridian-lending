@@ -176,7 +176,15 @@ is the system of record and is.
 `disclosures` holds the authoritative record: money in integer minor units, APR as exact
 `NUMERIC`, `compute_snapshot` JSONB (principal, rate, term, fee_pct), `fee_schedule_version`,
 `apr_method_version`, `content_fingerprint` = hash(inputs + ruleset + outputs), status,
-`delivered_at`, `offer_id` FK, `decision_event_id` FK.
+`delivered_at`, `document_body` JSONB, `offer_id` FK, `decision_event_id` FK.
+
+*Amended at review:* `document_body` holds the assembled borrower-facing document — the same
+figures plus the digit-free prose wrapper — so the record carries what was disclosed and not
+only what was computed. Nullable, because delivery rather than insertion is the step that
+requires it. It is **not** an input to `content_fingerprint`: acceptance 4 below requires that
+hash to recompute from the persisted snapshot alone, and the document's figures are already
+pinned to the same outputs by a boundary check, so hashing model prose would only make a
+regulated integrity value depend on wording. See D6.
 
 Traversal `disclosure → offer → decision_event → application → applicant` is exposed as a
 read-only view. The multi-agent pipeline reads provenance **through that view**, not via
@@ -187,7 +195,10 @@ requirement, not just a schema one.
 1. Migration `db/migrations/00xx_disclosures.sql` + canonical `db/init/001_schema.sql` updated
    (init is authoritative; migrations lag by convention — both must land).
 2. The disclosure-service schema-readiness `/health` gate covers the new table, the new FK,
-   and the new index, reporting `schema_not_ready:<object>` until present.
+   the new index, and `disclosures.document_body`, reporting `schema_not_ready:<object>` until
+   present. The column rung asserts its `data_type`, not just its name: `ADD COLUMN IF NOT
+   EXISTS` swallows a same-named column of any type, and a `TEXT` stand-in would accept the
+   document as a JSON string and hand every reader back a string instead of an object.
 3. Given a disclosure id, one view query returns the full chain including the exact inputs and
    rule versions used.
 4. `content_fingerprint` recomputes identically from the persisted snapshot.
@@ -212,9 +223,11 @@ See *Framework Decision*.
 [3] ASSEMBLE (maker) LLM formats the document from given numbers; schema-validated
 [4a] VERIFY GATE     deterministic recompute + tolerance + single-fee + provenance checks
 [4b] NARRATE (checker) LLM frames the verdict on PASS; performs no math
-[5] PERSIST + LINK   disclosures row (status=draft) + FK edges + fingerprint
-[6] COMPLIANCE HOLD  human: draft -> in_review -> approved (reject routes by reason code)
-[7] SIGN + DELIVER   officer sign (or auto per flag) -> deliver -> delivered_at + audit
+[5] PERSIST + LINK   disclosures row (status=draft) + FK edges + fingerprint + document
+[6] COMPLIANCE HOLD  human: reads the stored document, then draft -> in_review -> approved
+                     (reject routes by reason code)
+[7] SIGN + DELIVER   officer sign (or auto per flag) -> deliver -> delivered_at + audit;
+                     refused when no document is recorded
 ```
 
 **Invariant (carried from Week 3): the LLM never computes, adjusts, or approves a regulated
@@ -274,7 +287,24 @@ than loops.
 Status machine `draft → in_review → approved → delivered`, compliance reject routed by reason
 code, `delivered_at` recorded, TILA timing check.
 
-**Acceptance:** illegal transitions rejected; `delivered_at` set only on the delivery path.
+*Amended at review:* the delivery transition also requires a **recorded document**. The
+earlier draft of this deliverable had delivery write `status` and `delivered_at` and assert
+nothing about the document those two claim was sent — and the assembled document lived only
+in the generating call's HTTP response, so the compliance reviewer who approves and delivers
+(a different session, and under maker-checker a different person) could not read it at all.
+`accept_offer` then treats the row as boardable, so a loan could be consummated behind a
+delivery marker over content no human had read. The document is now persisted on the row it
+describes (`disclosures.document_body`, migration 0012), its figures are checked against this
+service's own recomputation before it can be stored, delivery is refused when it is absent,
+and the officer screen renders it above the review controls. It is deliberately NOT an input
+to `content_fingerprint` — see acceptance 4 below, which it must not disturb.
+
+This is not the delivery channel, which stays out of scope: it makes `delivered` a statement
+about content that exists and has been read, not a statement about transport.
+
+**Acceptance:** illegal transitions rejected; `delivered_at` set only on the delivery path;
+delivery refused when no document is recorded; a document whose figures disagree with the
+recomputed record is refused rather than persisted; no lifecycle edge rewrites the document.
 
 ### D7. TILA test vectors — blocking CI gate
 
@@ -293,6 +323,13 @@ framework reversal and its rationale, the storage decision and its named flip tr
 
 `app/underwriting/[appId]/page.tsx` — "Generate disclosure" action, status badge, compliance
 approve/reject, deliver. Reuses the Week 3 assistant-panel patterns.
+
+*Amended at review:* the screen renders the stored document above the review controls, loaded
+from an officer-only route on every page load rather than read off the generate response. The
+approver is a different session from the generator — under maker-checker a different person —
+so a body that exists only in the generating reply is a body the reviewer cannot open. The
+deliver button is also held when no document is recorded; the server refusal stays
+authoritative.
 
 ## Storage Decision — FK-as-graph
 
@@ -432,6 +469,11 @@ ADR 0012 can be written once, from a record of what was actually weighed.
    Instead `uq_disclosures_offer` enforces one disclosure per offer, giving the same idempotency
    guarantee `uq_offers_app` gives the offer. **Roadmap trigger:** *when a real delivery channel
    lands, re-issue supersedes rather than replaces, and the uniqueness moves off bare `offer_id`.*
+   *Amended at review:* that same trigger carries the delivery-event work — `delivered_at`
+   becomes an FK to a delivery event (channel, recipient address, send timestamp,
+   bounce/receipt) and `document_body` gains a sent-copy record alongside it. Recorded here
+   rather than as a second trigger in *Out of Scope* so one event has one statement of what it
+   changes.
 
 4. **Ruleset — SETTLED: property, not node.** Version strings (`fee_schedule_version`,
    `apr_method_version`) on the disclosure row, plus a versioned committed policy file. Content
@@ -597,6 +639,12 @@ lands, it gets a superseding ADR, not an edit.
   `conditional`, `needs_docs`, or pending state exists in the decision engine or the schema.
 - Compliance queue UI, assignment, SLA.
 - Real delivery channel (email / mail / e-sign) — `delivered_at` is recorded, transport is stubbed.
+  Still out of scope after the D6 amendment: delivery now requires a recorded document and the
+  officer reads it before releasing it, but nothing sends it anywhere. What is NOT built is a
+  delivery *event* — channel, recipient address, send timestamp, bounce/receipt — because there
+  is no transport to record one for, and a nullable channel column with no defined semantics is
+  what Open Decision 2 declines to ship. Its roadmap trigger is Open Decision 3's, which now
+  carries the delivery-event work too.
 - `offers` money columns to integer minor units. `disclosures` is authoritative in minor units
   this week; `offers` keeps its `DOUBLE PRECISION` columns and receives the correctly computed
   value. The Q1 sin was the formula, not the column type.
@@ -612,7 +660,9 @@ lands, it gets a superseding ADR, not an edit.
 2. Disclosed APR matches the actuarial value within 0.125pp on every test vector.
 3. One fee rate, sourced from config, consistent across APR and amount financed.
 4. The provenance chain resolves in one query from disclosure back to applicant.
-5. Compliance hold blocks delivery; approve then delivers and stamps `delivered_at`.
+5. Compliance hold blocks delivery; approve then delivers and stamps `delivered_at`. Delivery
+   is refused when no document is recorded, and the officer reads that document on the screen
+   before approving or delivering it.
 
 ### Security / Compliance
 6. No LLM output reaches a regulated number. Injected-wrong-number test BLOCKs at 4a.
@@ -632,8 +682,14 @@ lands, it gets a superseding ADR, not an edit.
 
 - **TILA vectors** (blocking): multi-loan actuarial expectations with tolerance asserts.
 - **Unit**: Decimal APR; rules loader fail-closed; disclosures persistence; status machine;
-  coordinator routing; bounded retry; verify-fail → block; `render_mismatch` → retry.
-- **Integration**: endpoint plus agent loop, `FakeAdapter`, no real key.
+  coordinator routing; bounded retry; verify-fail → block; `render_mismatch` → retry; document
+  stored with the record; a document whose figures disagree refused (by value *and* by
+  spelling — `Decimal` accepts `17_460.00`, `+3628.71` and `3.62871E+3`, all of which compare
+  equal to the record and would print verbatim to a borrower); delivery refused with no
+  document; no lifecycle edge rewrites the document; the fingerprint is unchanged by it.
+- **Integration**: endpoint plus agent loop, `FakeAdapter`, no real key. The document read is
+  officer-only, proven against a stub that authorizes officer-or-owner, so a route taking the
+  weaker check fails.
 - **Smoke vs live compose**: approve → generate → disclosure persisted as draft, KG edges
-  present, fingerprint set; inject a wrong number → gate BLOCKs; compliance approve →
-  `delivered_at` recorded.
+  present, fingerprint set, document stored and rendered on the officer screen; inject a wrong
+  number → gate BLOCKs; compliance approve → `delivered_at` recorded.
