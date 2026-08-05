@@ -378,6 +378,14 @@ def board(
     (/applications/{id}/accept) IS KYC-gated. Gating this hatch on KYC would presume an LOS
     application it does not read; an operator using it takes explicit responsibility. Noted,
     not missed.
+
+    The delivered-disclosure hold (Reg Z 1026.17(b), PR review) is exempt here for exactly
+    the same reason, and this is why that hold is enforced in the accept route rather than
+    as a trigger on `loans`: a table-level trigger would also fire for this hatch — whose
+    caller-supplied app_id need not name an application with an offer at all — and for the
+    demo loans seeded by db/init/002_seed.sql, which carry no disclosures and would fail a
+    fresh `make up`. The product path is gated; an operator using this one takes the same
+    explicit responsibility as above.
     """
     applications._require_internal_caller(x_internal_service)
     loan_id = intake.board_to_servicing(

@@ -537,6 +537,9 @@ export default function UnderwritingDetailPage() {
     "Applicant";
   const currentDecision = decision?.decision || app?.decision || null;
   const disclosureStatus = provenance?.disclosure_status || null;
+  // Boarding is consummation (Reg Z 1026.17(b)), so it waits on delivery. Absent
+  // provenance means no disclosure exists yet, which is emphatically not delivered.
+  const disclosureDelivered = disclosureStatus === "delivered";
 
   return (
     <main className="wrap">
@@ -963,9 +966,22 @@ export default function UnderwritingDetailPage() {
         ) : (
           <div className="spread">
             <p className="hint" style={{ margin: 0 }}>
-              Accept the offer and board this application as a serviced loan.
+              {disclosureDelivered
+                ? "Accept the offer and board this application as a serviced loan."
+                : "Deliver the TILA disclosure first — boarding is consummation, and the disclosure has to reach the borrower before it."}
             </p>
-            <button onClick={acceptAndBoard} disabled={actionBusy}>
+            {/* Cosmetic only. The server refuses to board without a delivered disclosure
+                (origination accept route); this just stops the officer from discovering
+                that as a 409 on the terminal action. */}
+            <button
+              onClick={acceptAndBoard}
+              disabled={actionBusy || !disclosureDelivered}
+              title={
+                disclosureDelivered
+                  ? undefined
+                  : "The TILA disclosure must be delivered before this loan can be boarded."
+              }
+            >
               {actionBusy ? "Working…" : "Accept & board"}
             </button>
           </div>

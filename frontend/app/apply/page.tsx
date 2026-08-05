@@ -164,6 +164,13 @@ export default function ApplyPage() {
   );
   const [showSchedule, setShowSchedule] = useState(false);
   const [resuming, setResuming] = useState(false);
+  // Accepting boards the loan, which is consummation — so it waits on the TILA disclosure
+  // being DELIVERED, and delivery is a compliance step an officer performs (Reg Z
+  // 1026.17(b); the server refuses to board without it). The applicant therefore sees a
+  // pending state here rather than a 409 on the last click. A 404 from this read means no
+  // disclosure exists yet, which is the normal state right after an offer.
+  const [disclosureDelivered, setDisclosureDelivered] = useState(false);
+  const [checkingDisclosure, setCheckingDisclosure] = useState(false);
 
   // Resume a submitted application after a refresh / tab close: the continuation token was
   // persisted at submit, so rehydrate it and re-fetch the application (the token authorizes
@@ -368,6 +375,34 @@ export default function ApplyPage() {
       setBusy(false);
     }
   }
+
+  async function refreshDisclosureStatus() {
+    if (!app) return;
+    setCheckingDisclosure(true);
+    try {
+      // ADR 0010 read posture: officer, owner, or token-holder — the resume cookie
+      // authorizes this, same as the application read above. The chain is identifier-free
+      // and the route strips policy_band, so nothing new about the applicant is exposed.
+      const chain = (await apiGet(
+        `/los/applications/${app.app_id}/disclosure`
+      )) as { disclosure_status?: string | null };
+      setDisclosureDelivered(chain?.disclosure_status === "delivered");
+    } catch {
+      // 404 (no disclosure yet) and any transport failure both mean "not known delivered".
+      // Fail closed: the button stays held rather than inviting a click the server refuses.
+      setDisclosureDelivered(false);
+    } finally {
+      setCheckingDisclosure(false);
+    }
+  }
+
+  // Check once an offer exists, and again whenever the applicant asks. No timer: delivery
+  // is an officer action on a human timescale, so a refresh affordance beats a poll loop.
+  useEffect(() => {
+    if (!app || !disclosure || acceptedLoanId) return;
+    refreshDisclosureStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [app?.app_id, disclosure, acceptedLoanId]);
 
   // decision-service emits the outcome enum "approve" (not "approved"): match it, or
   // the "View your offer" CTA never renders for an approved borrower (PR review).
@@ -719,6 +754,9 @@ export default function ApplyPage() {
                     onAccept={acceptOffer}
                     busy={busy}
                     acceptedLoanId={acceptedLoanId}
+                    disclosureDelivered={disclosureDelivered}
+                    checkingDisclosure={checkingDisclosure}
+                    onRefreshDisclosure={refreshDisclosureStatus}
                   />
                 ) : null}
 
@@ -825,6 +863,9 @@ function OfferPanel({
   onAccept,
   busy,
   acceptedLoanId,
+  disclosureDelivered,
+  checkingDisclosure,
+  onRefreshDisclosure,
 }: {
   disclosure: Disclosure;
   amount: number;
@@ -834,6 +875,9 @@ function OfferPanel({
   onAccept: () => void;
   busy: boolean;
   acceptedLoanId: string | number | null;
+  disclosureDelivered: boolean;
+  checkingDisclosure: boolean;
+  onRefreshDisclosure: () => void;
 }) {
   const hasSchedule = !!disclosure.schedule && disclosure.schedule.length > 0;
   return (
@@ -930,10 +974,28 @@ function OfferPanel({
             Go to your loan account →
           </Link>
         </div>
-      ) : (
+      ) : disclosureDelivered ? (
         <button style={{ marginTop: 16 }} onClick={onAccept} disabled={busy}>
           {busy ? "Accepting…" : "Accept offer"}
         </button>
+      ) : (
+        // Held, not broken: the disclosure above has to be formally delivered before the
+        // loan can be booked, and that is a step on our side. Say so, and give a way to
+        // re-check — the alternative is an unexplained 409 on the final click.
+        <div className="alert alert-info" style={{ marginTop: 16 }}>
+          <p style={{ margin: "0 0 10px" }}>
+            Your Truth-in-Lending disclosure is being finalised. You can accept
+            this offer once it has been formally delivered to you — nothing is
+            needed from you right now.
+          </p>
+          <button
+            className="secondary"
+            onClick={onRefreshDisclosure}
+            disabled={checkingDisclosure}
+          >
+            {checkingDisclosure ? "Checking…" : "Check again"}
+          </button>
+        </div>
       )}
     </div>
   );

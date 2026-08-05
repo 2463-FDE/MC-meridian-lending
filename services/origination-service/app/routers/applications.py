@@ -617,11 +617,17 @@ def accept_offer(
     # gate it, and never board at a default rate when no offer exists. (Authorization —
     # whose application this is — is the separate officer-OR-owner check in ADR 0010.)
     rows = db.query(
-        "SELECT a.amount, a.term_months, ap.name, o.apr, d.outcome "
+        "SELECT a.amount, a.term_months, ap.name, o.apr, d.outcome, "
+        "ds.status AS disclosure_status, ds.delivered_at AS disclosure_delivered_at "
         "FROM applications a "
         "LEFT JOIN applicants ap ON ap.id = a.applicant_id "
         "LEFT JOIN decisions d ON d.app_id = a.id "
         "LEFT JOIN offers o ON o.app_id = a.id "
+        # Bound to THIS offer, not to the application: the disclosure that must have been
+        # delivered is the one describing the very terms being boarded below. Joining by
+        # app_id would let a delivered disclosure for some other offer authorize boarding
+        # a different one. uq_disclosures_offer keeps this at most one row per offer.
+        "LEFT JOIN disclosures ds ON ds.offer_id = o.id "
         "WHERE a.id = %s ORDER BY o.id DESC",
         (app_id,),
     )
@@ -653,6 +659,38 @@ def accept_offer(
         loan_id = existing[0]["id"]
         principal = existing[0]["principal"]
     else:
+        # TILA/Reg-Z timing hold (PR review): boarding IS this system's consummation event,
+        # and 1026.17(b) puts the disclosure before it. disclosure-service already refuses
+        # to deliver once a loan exists (_refuse_if_already_consummated); without the
+        # reciprocal guard here that hold is one-sided — accept early and the disclosure
+        # can NEVER be delivered, leaving a funded loan with no authoritative TILA record.
+        # Fail closed on anything short of delivered: absent, draft, in_review, approved.
+        #
+        # Placed on the boarding branch only. A replay that finds an already-boarded loan
+        # must still return it (and run the reconcile below) — 409ing there would not
+        # un-board the loan, it would just hide it and strand the balance/funded heal.
+        #
+        # Safe without a transaction despite the read and the INSERT being separate
+        # autocommitted statements (raw-psycopg2 seam, CLAUDE.md): the predicate is
+        # MONOTONE. `delivered` is terminal in the lifecycle whitelist and frozen by
+        # trg_disclosures_freeze_delivered, which rejects any UPDATE or DELETE of a
+        # delivered row (and trg_disclosures_no_truncate closes the wholesale end-run), so
+        # a status read as delivered cannot regress before the INSERT lands. It also
+        # settles the reverse ordering: accept cannot observe `delivered` until delivery
+        # has committed, so delivery always precedes boarding. IF A RE-ISSUE/SUPERSEDE FLOW
+        # EVER MAKES `delivered` REVERSIBLE (the DDL anticipates one), this guard becomes a
+        # genuine TOCTOU and needs a single-statement or DB-level condition instead.
+        if (
+            r.get("disclosure_status") != "delivered"
+            or r.get("disclosure_delivered_at") is None
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "no delivered TILA disclosure for this offer; the disclosure must be "
+                    "delivered before the loan is boarded"
+                ),
+            )
         try:
             loan_id = intake.board_to_servicing(
                 app_id,
