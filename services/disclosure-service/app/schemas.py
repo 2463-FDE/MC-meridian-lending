@@ -85,8 +85,11 @@ class DisclosureDocument(BaseModel):
     inside a regulated record.
 
     The prose contract is mirrored here too, not only in the assembler
-    (`origination-service` `prompts/disclosure_assemble.py` OUTPUT_SCHEMA): `payment_terms`
-    and `prepayment` carry NO digits (`^\\D*$`), with the same length caps. That check runs
+    (`origination-service` `prompts/disclosure_assemble.py` OUTPUT_SCHEMA): `heading`,
+    `payment_terms` and `prepayment` carry NO digits (`^\\D*$`), with the same length caps.
+    `heading` is on the same footing as the two prose fields — it is borrower-facing text
+    outside the `figures` check, so a title like "Truth in Lending Disclosure 9.58%" would
+    otherwise persist a stale number the figure gate never sees. That check runs
     in the caller, and this is the authoritative persistence boundary — `create_disclosure`
     only compares `figures` against the recomputed outputs, so without the constraint here
     any internal caller, coordinator change, or replay/backfill could persist prose that
@@ -98,7 +101,7 @@ class DisclosureDocument(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    heading: str = Field(max_length=120)
+    heading: str = Field(max_length=120, pattern=r"^\D*$")
     figures: DocumentFigures
     payment_terms: str = Field(max_length=600, pattern=r"^\D*$")
     prepayment: str = Field(max_length=300, pattern=r"^\D*$")

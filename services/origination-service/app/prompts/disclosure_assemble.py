@@ -9,8 +9,10 @@ request and not a guarantee — stage 4a recomputes and compares before anything
 Reg Z requires specific disclosures to be grouped and labelled; the prose fields here are
 the borrower-facing wrapper around the figures, not a substitute for them.
 
-**The prose fields carry no digits at all, and that is a hard constraint, not a style
-preference.** Two reasons, both found by running this against a real model rather than
+**The prose fields — and the heading — carry no digits at all, and that is a hard
+constraint, not a style preference.** The heading is on the same footing as `payment_terms`
+and `prepayment`: borrower-facing text outside the `figures` check, so both reasons below
+apply to it. Two reasons, both found by running this against a real model rather than
 FakeAdapter:
 
 1. *The leak guard globs numbers.* `guard_output` runs the PII redactor over the model's
@@ -36,7 +38,10 @@ OUTPUT_SCHEMA = {
     "additionalProperties": False,
     "required": ["heading", "figures", "payment_terms", "prepayment"],
     "properties": {
-        "heading": {"type": "string", "maxLength": 120},
+        # Digit-free like the prose fields below: the heading is borrower-facing text the
+        # deterministic `figures` check never sees, so a stale number in the title (e.g.
+        # "Truth in Lending Disclosure 9.58%") would otherwise pass. See the module docstring.
+        "heading": {"type": "string", "maxLength": 120, "pattern": r"^\D*$"},
         # Strings, not numbers: a JSON number invites the model to normalise, round, or
         # "tidy" a regulated figure, and the drift would be invisible in the document.
         "figures": {

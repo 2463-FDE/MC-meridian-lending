@@ -422,6 +422,10 @@ def test_an_unexpected_document_field_is_refused(client):
         # 13-19 digit run and roughly one in ten is Luhn-valid (a card number in prose).
         ("payment_terms", "Payment number 1 is due next month."),
         ("prepayment", "See section 4 for details."),
+        # The heading is borrower-facing text outside the figures check, same footing as
+        # the prose fields: a stale number in the title must be refused too.
+        ("heading", "Truth in Lending Disclosure 9.58%"),
+        ("heading", "TILA Disclosure 2026"),
     ],
 )
 def test_refuses_prose_that_carries_digits(client, field, value):

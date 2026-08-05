@@ -486,7 +486,8 @@ class TestProseFieldsCarryNoDigits:
         from app.prompts.disclosure_assemble import OUTPUT_SCHEMA
 
         props = OUTPUT_SCHEMA["properties"]
-        for field in ("payment_terms", "prepayment"):
+        # heading is on the same footing: borrower-facing text outside the figures check.
+        for field in ("heading", "payment_terms", "prepayment"):
             assert props[field].get("pattern") == r"^\D*$", field
 
     def test_a_restated_figure_in_prose_fails_the_document(self):
@@ -496,6 +497,24 @@ class TestProseFieldsCarryNoDigits:
                 "heading": "Truth in Lending Disclosure",
                 "figures": dict(FIGURES),
                 "payment_terms": "You will make 48 monthly payments of 439.35.",
+                "prepayment": "No penalty for early payoff.",
+            }
+        )
+        coordinator, calls = _coordinator([document, _narration()])
+
+        with pytest.raises(Exception) as excinfo:
+            coordinator.run(1)
+        assert "pattern" in str(excinfo.value)
+        assert calls["persist"] == 0, "a rejected document must never be persisted"
+
+    def test_a_number_in_the_heading_fails_the_document(self):
+        """The heading is outside the figures check too — a stale number in the title must
+        be rejected by the same digit-free contract, not persisted and delivered."""
+        document = json.dumps(
+            {
+                "heading": "Truth in Lending Disclosure 9.58%",
+                "figures": dict(FIGURES),
+                "payment_terms": "Equal monthly payments until the loan is repaid.",
                 "prepayment": "No penalty for early payoff.",
             }
         )
