@@ -24,7 +24,18 @@ CREATE TABLE IF NOT EXISTS applicants (
     email       TEXT,
     phone       TEXT,
     address     TEXT,
-    created_at  TIMESTAMPTZ DEFAULT now()
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    -- Postgres DATE reaches year 294276; Python's date stops at 9999 and has no BC. A dob
+    -- outside that window stores fine and then raises "year N is out of range" when the
+    -- ORM hydrates the Applicant row -- which the Application.applicant relationship does
+    -- eagerly (lazy="joined"), so ONE such row breaks the whole officer queue, not just
+    -- its own application. Constrain storage to what the readers can represent. The 1900
+    -- floor stays in the request validator (schemas.py::_validate_dob): implausibly old is
+    -- an input-policy question, unreadable is an availability one. Mirrors migration 0011;
+    -- origination-service /health reports schema_not_ready:ck_applicants_dob_readable
+    -- until it exists.
+    CONSTRAINT ck_applicants_dob_readable
+        CHECK (dob IS NULL OR (dob >= DATE '0001-01-01' AND dob <= DATE '9999-12-31'))
 );
 
 CREATE TABLE IF NOT EXISTS applications (

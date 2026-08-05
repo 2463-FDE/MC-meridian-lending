@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from app import config
 from app.llm import ClaudeClient, LLMConfigError
 from app.main import app, get_llm_client
+from tests.test_db_readiness import READABLE_DOB_CONSTRAINT_DEF
 
 
 class _Req:
@@ -32,10 +33,16 @@ class _FakeCursor:
     def __exit__(self, *exc):
         return False
 
-    def execute(self, *a, **k):
-        pass
+    def execute(self, sql="", *a, **k):
+        self._last = sql
 
     def fetchone(self):
+        # The ck_applicants_dob_readable rung compares the constraint DEFINITION, not just
+        # the name, so a ready-DB stub has to answer with it -- reuse the one constant
+        # test_db_readiness pins against config._DOB_READABLE_EXPECTED_DEF rather than
+        # copying the literal here, where it would drift unnoticed.
+        if "pg_get_constraintdef" in getattr(self, "_last", ""):
+            return (READABLE_DOB_CONSTRAINT_DEF,)
         return (1,)
 
 
