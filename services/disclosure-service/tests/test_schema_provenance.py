@@ -21,6 +21,9 @@ from app import config
 REPO = Path(__file__).resolve().parents[3]
 INIT_SQL = (REPO / "db" / "init" / "001_schema.sql").read_text()
 MIGRATION_SQL = (REPO / "db" / "migrations" / "0011_disclosures.sql").read_text()
+DOCUMENT_MIGRATION_SQL = (
+    REPO / "db" / "migrations" / "0012_disclosures_document_body.sql"
+).read_text()
 
 # Objects the provenance chain needs. Named here so a dropped statement fails loudly.
 REQUIRED_STATEMENTS = [
@@ -114,8 +117,36 @@ def test_readiness_gate_covers_every_new_object():
         "disclosures",
         "uq_disclosures_offer",
         "trg_disclosures_freeze_delivered",
+        "disclosures.document_body",
         "v_disclosure_provenance",
     }
+
+
+def test_document_body_is_declared_in_init_and_in_its_migration():
+    """Two declaration sites, same column. 0011 carries it in the CREATE TABLE (a volume
+    that never had the table); 0012 adds it to a volume where 0011 already ran without it.
+    A column present in only one place is e0716da again."""
+    assert "document_body           JSONB," in INIT_SQL
+    assert "document_body           JSONB," in MIGRATION_SQL
+    assert "ADD COLUMN IF NOT EXISTS document_body JSONB" in DOCUMENT_MIGRATION_SQL
+
+
+def test_document_body_migration_asserts_the_column_type():
+    """`ADD COLUMN IF NOT EXISTS` swallows a pre-existing column of ANY type, so the
+    migration would report success over a TEXT document_body — which accepts the JSON as a
+    string and hands every reader back a string instead of an object. Compare the definition
+    and RAISE, never warn-and-skip on the name."""
+    assert "data_type" in DOCUMENT_MIGRATION_SQL
+    assert "RAISE EXCEPTION" in DOCUMENT_MIGRATION_SQL
+    assert "RAISE NOTICE" not in DOCUMENT_MIGRATION_SQL
+
+
+def test_the_document_body_readiness_probe_asserts_jsonb():
+    """A rung that checked only the column NAME would report ready over a TEXT column the
+    write path cannot use — the same weaker-object-same-name gap the CHECK/index rungs close
+    by asserting their definitions."""
+    probe = dict(config._SCHEMA_OBJECTS)["disclosures.document_body"]
+    assert "data_type = 'jsonb'" in probe
 
 
 def test_readiness_probes_are_existence_queries():

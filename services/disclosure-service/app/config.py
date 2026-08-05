@@ -142,6 +142,18 @@ _SCHEMA_OBJECTS = (
         "SELECT 1 FROM pg_trigger WHERE tgname = 'trg_disclosures_freeze_delivered'",
     ),
     (
+        # Delivery refuses a disclosure with no recorded document (spec D6). Migration 0012
+        # is hand-applied like 0011, so without this rung a deploy reaches the write path
+        # with the column absent: every INSERT fails mid-flight on an unknown column while
+        # /health reports green. Asserts the TYPE, not just the name -- a same-named TEXT
+        # column would accept the document as a JSON string and hand every reader back a
+        # string instead of an object, and 0012's own IF NOT EXISTS swallows exactly that.
+        "disclosures.document_body",
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'disclosures' AND column_name = 'document_body' "
+        "AND data_type = 'jsonb'",
+    ),
+    (
         "v_disclosure_provenance",
         "SELECT 1 FROM information_schema.views WHERE table_name = 'v_disclosure_provenance'",
     ),

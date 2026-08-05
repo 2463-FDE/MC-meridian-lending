@@ -69,6 +69,33 @@ interface Provenance {
   missing_edges?: string[];
 }
 
+// The stored borrower-facing document, as disclosure-service persisted it alongside the
+// record. The figures are strings because they are the exact spellings the record was
+// checked against — reparsing them as numbers here would reintroduce the rounding the
+// minor-unit columns exist to avoid.
+interface DisclosureDocument {
+  heading: string;
+  figures: {
+    apr: string;
+    finance_charge: string;
+    amount_financed: string;
+    total_of_payments: string;
+    monthly_payment: string;
+  };
+  payment_terms: string;
+  prepayment: string;
+}
+
+// Labelled and grouped, per Reg Z 1026.17(a): the officer approving this has to see the
+// figures the way the borrower will, not a fingerprint standing in for them.
+const DOCUMENT_FIGURE_LABELS: [keyof DisclosureDocument["figures"], string][] = [
+  ["apr", "Annual Percentage Rate"],
+  ["finance_charge", "Finance Charge"],
+  ["amount_financed", "Amount Financed"],
+  ["total_of_payments", "Total of Payments"],
+  ["monthly_payment", "Monthly Payment"],
+];
+
 const REJECT_REASONS = [
   { value: "wording", label: "Wording — send back to the assembler" },
   { value: "formatting", label: "Formatting — send back to the assembler" },
@@ -139,6 +166,10 @@ export default function UnderwritingDetailPage() {
   const [actionBusy, setActionBusy] = useState(false);
   const [assistant, setAssistant] = useState<AssistantResult | null>(null);
   const [provenance, setProvenance] = useState<Provenance | null>(null);
+  // Not named `document`: that shadows the DOM global inside this component.
+  const [disclosureDoc, setDisclosureDoc] = useState<DisclosureDocument | null>(
+    null
+  );
   const [rejectReason, setRejectReason] = useState(REJECT_REASONS[0].value);
 
   // Route generation. Next.js reuses this page component across /underwriting/[appId]
@@ -188,6 +219,7 @@ export default function UnderwritingDetailPage() {
     setOffer(null);
     setBoardedLoanId(null);
     setProvenance(null);
+    setDisclosureDoc(null);
     setRejectReason(REJECT_REASONS[0].value);
     setActionMsg(null);
     setActionErr(null);
@@ -212,6 +244,24 @@ export default function UnderwritingDetailPage() {
     } catch {
       if (routeGenRef.current !== gen) return;
       setProvenance(null);
+    }
+    // Fetched here rather than read off the generate response, because the officer who
+    // approves or delivers is a different session from the one that generated: on a page
+    // load, or under maker-checker a different person entirely. Reading it only from the
+    // POST reply meant the reviewer approved a document they could not open.
+    //
+    // Separate try, and a 404 is the normal "none recorded" (every row written before
+    // migration 0012 has none) — a missing document must not blank out the provenance
+    // block, which is a different fact about a different question.
+    try {
+      const d = (await apiGet(
+        `/los/applications/${appId}/disclosure/document`
+      )) as DisclosureDocument;
+      if (routeGenRef.current !== gen) return;
+      setDisclosureDoc(d);
+    } catch {
+      if (routeGenRef.current !== gen) return;
+      setDisclosureDoc(null);
     }
   }, [appId]);
 
@@ -852,6 +902,49 @@ export default function UnderwritingDetailPage() {
 
         {provenance?.disclosure_id ? (
           <>
+            {/* The document itself, above the review controls — approving or delivering is
+                a judgement about this content, and it used to be unreachable from this
+                screen. Figures are printed as stored, never reformatted: they are the exact
+                spellings disclosure-service checked against the minor-unit record. */}
+            {disclosureDoc ? (
+              <div className="tila" style={{ marginBottom: 16 }}>
+                <div className="tila-title">{disclosureDoc.heading}</div>
+                <div className="tila-grid">
+                  {DOCUMENT_FIGURE_LABELS.map(([field, label]) => (
+                    <div
+                      key={field}
+                      className={
+                        field === "apr" ? "tila-cell tila-cell-apr" : "tila-cell"
+                      }
+                    >
+                      <div className="tila-cell-label">{label}</div>
+                      <div className="tila-cell-value">
+                        {field === "apr"
+                          ? `${disclosureDoc.figures.apr}%`
+                          : `$${disclosureDoc.figures[field]}`}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <p className="hint" style={{ marginTop: 12 }}>
+                  {disclosureDoc.payment_terms}
+                </p>
+                <p className="hint" style={{ marginTop: 8 }}>
+                  {disclosureDoc.prepayment}
+                </p>
+              </div>
+            ) : (
+              // Deliberately promises no remedy on this screen: generation is
+              // disabled once a disclosure exists, and a replay returns the
+              // stored row rather than writing a document onto it, so there is
+              // no officer action that gives this row one.
+              <div className="alert alert-warn">
+                <strong>No document recorded.</strong> This disclosure predates
+                document recording, so there is nothing to review and delivery
+                will be refused. It needs an operator.
+              </div>
+            )}
+
             <div className="dl">
               <div className="dl-row">
                 <dt>Disclosed APR</dt>
@@ -914,7 +1007,16 @@ export default function UnderwritingDetailPage() {
               {disclosureStatus === "approved" ? (
                 <button
                   onClick={() => transitionDisclosure("delivered")}
-                  disabled={actionBusy || provenance.chain_complete === false}
+                  disabled={
+                    actionBusy ||
+                    provenance.chain_complete === false ||
+                    !disclosureDoc
+                  }
+                  title={
+                    !disclosureDoc
+                      ? "This disclosure has no recorded document to deliver."
+                      : undefined
+                  }
                 >
                   Deliver to borrower
                 </button>

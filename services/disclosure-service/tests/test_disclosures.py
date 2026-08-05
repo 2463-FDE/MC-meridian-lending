@@ -35,6 +35,26 @@ GOOD_INPUTS = dict(
     offer_id=1, decision_event_id=7, principal=18000, annual_rate=7.99, term_months=48
 )
 
+# The assembled document for that same loan. Every figure spells what the service derives —
+# the APR to three places because `disclosures.apr` is NUMERIC(9,3), money to the cent. The
+# prose fields carry no digits, which the assembler's output schema enforces upstream.
+GOOD_DOCUMENT = {
+    "heading": "Federal Truth-in-Lending Disclosure",
+    "figures": {
+        "apr": "9.584",
+        "finance_charge": "3628.71",
+        "amount_financed": "17460.00",
+        "total_of_payments": "21088.71",
+        "monthly_payment": "439.35",
+    },
+    "payment_terms": "You will make equal monthly payments until the loan is repaid.",
+    "prepayment": "You may repay early without a penalty.",
+}
+
+
+def _inputs(**overrides):
+    return {**GOOD_INPUTS, **overrides}
+
 
 _UNSET = object()
 
@@ -220,6 +240,143 @@ def test_persists_minor_units_derived_from_inputs(client):
         "term_months": 48,
         "fee_pct": "0.03",
     }
+
+
+def test_persists_the_document_alongside_the_record(client):
+    """The document has to live with the row, not only in this response.
+
+    Before this the assembled document existed solely in the generating call's reply, so the
+    compliance reviewer who approves and delivers — a different session, and under
+    maker-checker a different person — had nothing to read.
+    """
+    session = _with_session(StubSession(offer=_offer()))
+    response = client.post(
+        "/disclosures",
+        json=_inputs(document=GOOD_DOCUMENT),
+        headers={"X-Internal-Service": TOKEN},
+    )
+    assert response.status_code == 201, response.text
+    assert session.added[0].document_body == GOOD_DOCUMENT
+
+
+def test_a_record_written_without_a_document_stores_none(client):
+    """Absence is recorded as absence. The lifecycle refuses to deliver such a row, which is
+    the fail-closed direction — the alternative would be inventing the document at delivery
+    time, which is fabricating the evidence the column exists to hold."""
+    session = _with_session(StubSession(offer=_offer()))
+    response = client.post(
+        "/disclosures", json=GOOD_INPUTS, headers={"X-Internal-Service": TOKEN}
+    )
+    assert response.status_code == 201, response.text
+    assert session.added[0].document_body is None
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        # The truncation that shipped once already: three disclosed places on the record,
+        # two in the document. One number, two spellings, in one regulated response.
+        ("apr", "9.58"),
+        ("apr", "9.6"),
+        # A cent out on any money figure.
+        ("finance_charge", "3628.72"),
+        ("amount_financed", "17459.99"),
+        ("monthly_payment", "439.34"),
+        ("total_of_payments", "21088.70"),
+        # Sub-cent precision must be refused, not rounded into agreement.
+        ("finance_charge", "3628.706"),
+        # Not a number at all, and the two Decimal literals that parse but are not values.
+        ("monthly_payment", "four hundred"),
+        ("monthly_payment", ""),
+        ("finance_charge", "NaN"),
+        ("finance_charge", "Infinity"),
+        # Spellings `Decimal` accepts that compare EQUAL to the record but must never reach a
+        # borrower: this string is stored verbatim and printed verbatim. A numeric-only check
+        # would admit a disclosure reading "Amount Financed $3.62871E+3".
+        ("finance_charge", "3.62871E+3"),
+        ("amount_financed", "17_460.00"),
+        ("finance_charge", "+3628.71"),
+        ("monthly_payment", "439.35 USD"),
+    ],
+)
+def test_refuses_a_document_whose_figures_disagree(client, field, value):
+    """The authoritative boundary proves the agreement rather than trusting the caller.
+
+    The upstream pipeline compares rendered figures against computed ones at its verify
+    stage, but that check runs in the caller. Storing a document next to a regulated figure
+    is only worth anything if a reviewer can trust the two say the same thing.
+    """
+    document = {
+        **GOOD_DOCUMENT,
+        "figures": {**GOOD_DOCUMENT["figures"], field: value},
+    }
+    session = _with_session(StubSession(offer=_offer()))
+    response = client.post(
+        "/disclosures",
+        json=_inputs(document=document),
+        headers={"X-Internal-Service": TOKEN},
+    )
+    assert response.status_code == 409, response.text
+    assert field in response.json()["detail"]
+    assert session.added == [], "must not persist a document that disagrees"
+
+
+@pytest.mark.parametrize(
+    "figures",
+    [
+        # Same numbers, different spellings. A trailing zero and a leading one are the same
+        # value, and a string comparison would refuse a correct document.
+        {"apr": "9.5840"},
+        {"monthly_payment": "439.350"},
+        {"amount_financed": "17460"},
+    ],
+)
+def test_accepts_an_equivalent_spelling_of_the_same_figure(client, figures):
+    session = _with_session(StubSession(offer=_offer()))
+    response = client.post(
+        "/disclosures",
+        json=_inputs(
+            document={
+                **GOOD_DOCUMENT,
+                "figures": {**GOOD_DOCUMENT["figures"], **figures},
+            }
+        ),
+        headers={"X-Internal-Service": TOKEN},
+    )
+    assert response.status_code == 201, response.text
+    assert session.added[0].document_body is not None
+
+
+def test_the_document_is_not_folded_into_the_fingerprint(client):
+    """`content_fingerprint` covers inputs + ruleset + outputs and must recompute from the
+    persisted snapshot alone (spec D3 acceptance 4). Hashing model prose too would make a
+    regulated integrity value depend on wording."""
+    _with_session(StubSession(offer=_offer()))
+    without = client.post(
+        "/disclosures", json=GOOD_INPUTS, headers={"X-Internal-Service": TOKEN}
+    ).json()["content_fingerprint"]
+
+    _with_session(StubSession(offer=_offer()))
+    with_document = client.post(
+        "/disclosures",
+        json=_inputs(document=GOOD_DOCUMENT),
+        headers={"X-Internal-Service": TOKEN},
+    ).json()["content_fingerprint"]
+
+    assert without == with_document
+
+
+def test_an_unexpected_document_field_is_refused(client):
+    """`extra="forbid"` mirrors the assembler's `additionalProperties: False`. An unexpected
+    field means the two shapes have drifted, and storing it would put an unvalidated field
+    inside a regulated record."""
+    _with_session(StubSession(offer=_offer()))
+    response = client.post(
+        "/disclosures",
+        json=_inputs(document={**GOOD_DOCUMENT, "late_fee": "we also charge $35"}),
+        headers={"X-Internal-Service": TOKEN},
+    )
+    assert response.status_code == 422
 
 
 def test_the_caller_cannot_supply_a_regulated_number():
@@ -532,12 +689,50 @@ def test_provenance_reports_a_partial_chain_rather_than_hiding_it(client):
 
 
 # ---------------------------------------------------------------------------
+# Reading the stored document back (spec D6). A separate route from the provenance view on
+# purpose: the view is the one definition of the CHAIN, and origination's proxy of it admits
+# the owning borrower — who must not see a held draft's body.
+# ---------------------------------------------------------------------------
+
+
+def _read_document(client, disclosure_id=5, token=TOKEN):
+    headers = {"X-Internal-Service": token} if token else {}
+    return client.get(f"/disclosures/{disclosure_id}/document", headers=headers)
+
+
+def test_reading_the_document_requires_internal_service_identity(client):
+    _with_session(StubSession(disclosure=_disclosure()))
+    assert _read_document(client, token=None).status_code == 403
+
+
+def test_reads_back_the_stored_document(client):
+    _with_session(StubSession(disclosure=_disclosure()))
+    response = _read_document(client)
+    assert response.status_code == 200, response.text
+    assert response.json() == GOOD_DOCUMENT
+
+
+def test_a_disclosure_with_no_document_reports_none_recorded(client):
+    """404 rather than 204: rows written before migration 0012 legitimately have none, and
+    the officer's screen needs "nothing recorded" apart from "recorded and empty"."""
+    _with_session(StubSession(disclosure=_disclosure(document_body=None)))
+    response = _read_document(client)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "no document recorded for this disclosure"
+
+
+def test_reading_the_document_of_an_unknown_disclosure_is_not_found(client):
+    _with_session(StubSession(disclosure=None))
+    assert _read_document(client).status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle (spec D6). The freeze trigger and the CHECK constraints live in the DDL and
 # were exercised against postgres:16-alpine; what these cover is the machine above them.
 # ---------------------------------------------------------------------------
 
 
-def _disclosure(status="draft", delivered_at=None):
+def _disclosure(status="draft", delivered_at=None, document_body=_UNSET):
     row = models.Disclosure(
         id=5,
         offer_id=1,
@@ -552,6 +747,10 @@ def _disclosure(status="draft", delivered_at=None):
         fee_schedule_version="2026.07",
         apr_method_version="actuarial-regz-appj-1",
         content_fingerprint="fp-1:abc",
+        # A recorded document by default: it is what the pipeline writes, so a lifecycle
+        # test that did not opt out is testing the normal row. Pass None to exercise a row
+        # written before migration 0012.
+        document_body=(GOOD_DOCUMENT if document_body is _UNSET else document_body),
     )
     row.delivered_at = delivered_at
     return row
@@ -616,6 +815,77 @@ def test_illegal_transitions_are_refused(client, current, target):
     assert response.status_code == 409
     assert "illegal transition" in response.json()["detail"]
     assert session.commits == 0, "a refused transition must not commit"
+
+
+def test_delivery_is_refused_when_no_document_is_recorded(client):
+    """Delivery is the delivery OF SOMETHING.
+
+    Before this guard the transition wrote `status` and `delivered_at` and asserted nothing
+    about the document those two claim was sent — and `accept_offer` then treats the row as
+    boardable, so a loan could be consummated behind a delivery marker over content no human
+    had read. The row is frozen the moment it is written, so the refusal has to come first.
+    """
+    session = _with_session(
+        StubSession(
+            disclosure=_disclosure("approved", document_body=None),
+            provenance_row=CHAIN_ROW,
+        )
+    )
+    response = _transition(client, {"to_status": "delivered"})
+
+    assert response.status_code == 409
+    assert "no document is recorded" in response.json()["detail"]
+    assert session.commits == 0, "a refused delivery must not commit"
+    assert session.disclosure.status == "approved"
+    assert session.disclosure.delivered_at is None
+
+
+def test_the_document_guard_runs_before_the_provenance_query(client):
+    """Ordering, not preference: it is a property of the row already in hand, so it costs no
+    query. A missing document must not be reported as a provenance problem."""
+    session = _with_session(
+        StubSession(disclosure=_disclosure("approved", document_body=None))
+    )
+    response = _transition(client, {"to_status": "delivered"})
+
+    assert response.status_code == 409
+    assert "no document is recorded" in response.json()["detail"]
+    assert session.statements == [], "no query should have been needed"
+
+
+@pytest.mark.parametrize("target", ["in_review", "approved", "delivered"])
+def test_no_transition_ever_rewrites_the_document(client, target):
+    """The document is written once, at insert, and no lifecycle edge touches it.
+
+    A transition that could rewrite it would let an officer approve one document and deliver
+    another — and on the delivered edge the freeze trigger would then be protecting content
+    that had just been swapped underneath it.
+    """
+    current = {"in_review": "draft", "approved": "in_review", "delivered": "approved"}[
+        target
+    ]
+    session = _with_session(
+        StubSession(disclosure=_disclosure(current), provenance_row=CHAIN_ROW)
+    )
+    response = _transition(client, {"to_status": target})
+
+    assert response.status_code == 200, response.text
+    assert session.disclosure.document_body == GOOD_DOCUMENT
+    updates = [
+        sql for sql, _ in session.statements if sql.strip().upper().startswith("UPDATE")
+    ]
+    assert all("document_body" not in sql for sql in updates)
+
+
+@pytest.mark.parametrize("target", ["in_review", "approved"])
+def test_the_document_is_only_required_at_delivery(client, target):
+    """A draft with no document still moves through review. Blocking earlier would strand a
+    legacy row with nowhere to go, and review is not the step that sends anything."""
+    current = "draft" if target == "in_review" else "in_review"
+    _with_session(StubSession(disclosure=_disclosure(current, document_body=None)))
+    response = _transition(client, {"to_status": target})
+
+    assert response.status_code == 200, response.text
 
 
 def test_delivering_sets_delivered_at_exactly_once(client):

@@ -1,6 +1,6 @@
 """Pydantic request/response models for the disclosure API."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class OfferIn(BaseModel):
@@ -44,15 +44,56 @@ class OfferResponse(BaseModel):
     schedule: list[ScheduleRow] = []
 
 
+class DocumentFigures(BaseModel):
+    """The five disclosed figures as the document spells them, as STRINGS.
+
+    Strings for the same reason the assembler's output schema uses them: a JSON number
+    invites normalising or re-rounding a regulated figure somewhere in the chain. These are
+    not trusted — `create_disclosure` parses each one and refuses the document unless it
+    equals the figure this service derived itself.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    apr: str
+    finance_charge: str
+    amount_financed: str
+    total_of_payments: str
+    monthly_payment: str
+
+
+class DisclosureDocument(BaseModel):
+    """The borrower-facing document as assembled upstream (spec D4 stage 3).
+
+    `extra="forbid"` mirrors the assembler's `additionalProperties: False`: an unexpected
+    field means the two shapes have drifted, and storing it would put an unvalidated field
+    inside a regulated record.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    heading: str
+    figures: DocumentFigures
+    payment_terms: str
+    prepayment: str
+
+
 class DisclosureIn(BaseModel):
     """Inputs, never outputs. The service derives every disclosed figure itself, so no
-    caller — agent or otherwise — can supply an APR or a finance charge."""
+    caller — agent or otherwise — can supply an APR or a finance charge.
+
+    `document` is the one exception in shape but not in posture: it carries figures, and
+    they are still not accepted. Every figure in it is compared against this service's own
+    recomputation and the whole request is refused on any disagreement, so the document can
+    only ever be stored alongside numbers it agrees with.
+    """
 
     offer_id: int
     decision_event_id: int
     principal: float = Field(gt=0, le=50000)
     term_months: int = Field(default=48, ge=12, le=60)
     annual_rate: float = Field(default=7.99, gt=0, le=35)
+    document: DisclosureDocument | None = None
 
 
 class DisclosureOut(BaseModel):

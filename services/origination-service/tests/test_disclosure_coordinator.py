@@ -72,7 +72,9 @@ COMPLETE_CHAIN = {
 }
 
 
-def _coordinator(responses, *, context=None, offer=None, persisted=None, chain=None):
+def _coordinator(
+    responses, *, context=None, offer=None, persisted=None, chain=None, record=None
+):
     calls = {"compute": 0, "persist": 0, "provenance": 0}
 
     def compute_offer(payload):
@@ -85,6 +87,9 @@ def _coordinator(responses, *, context=None, offer=None, persisted=None, chain=N
 
     def persist(payload):
         calls["persist"] += 1
+        # Pass a dict as `record` to inspect what stage 5 actually sent downstream.
+        if record is not None:
+            record["persist"] = payload
         return (
             persisted
             if persisted is not None
@@ -116,6 +121,33 @@ def test_approved_application_runs_the_full_pipeline():
     assert result["disclosure"] == {"disclosure_id": 5, "status": "draft"}
     assert result["provenance"]["chain_complete"] is True
     assert calls == {"compute": 1, "persist": 1, "provenance": 1}
+
+
+def test_the_document_is_persisted_with_the_record_it_describes():
+    """Stage 5 sends the document down with the row.
+
+    Without this the assembled document lived only in this run's HTTP response, so the row
+    carried no evidence of what was disclosed and `delivered` became a flag over content no
+    later session could read. disclosure-service re-checks the figures before storing it —
+    this stage does not get to assert agreement on its own word.
+    """
+    record = {}
+    coordinator, _ = _coordinator([_document(), _narration()], record=record)
+    result = coordinator.run(1)
+
+    assert result["status"] == "ok"
+    sent = record["persist"]
+    assert sent["document"]["figures"] == FIGURES
+    assert sent["document"]["heading"] == "Truth in Lending Disclosure"
+    # Still inputs-only otherwise: the numbers the service derives are not sent to it.
+    assert set(sent) == {
+        "offer_id",
+        "decision_event_id",
+        "principal",
+        "annual_rate",
+        "term_months",
+        "document",
+    }
 
 
 @pytest.mark.parametrize("outcome", ["refer", "deny", "counteroffer", None])
@@ -538,9 +570,9 @@ def test_llm_calls_are_traced_even_though_graph_state_is_not(monkeypatch):
     assert events.count(("enter", True)) == 2, events
     # Ordering: the re-enable happens INSIDE the suppression, never replacing it.
     first_false = events.index(("enter", False))
-    assert all(
-        i > first_false for i, e in enumerate(events) if e == ("enter", True)
-    ), events
+    assert all(i > first_false for i, e in enumerate(events) if e == ("enter", True)), (
+        events
+    )
 
 
 def test_llm_tracing_not_forced_on_when_operator_did_not_enable_it(monkeypatch):

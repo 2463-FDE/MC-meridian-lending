@@ -439,6 +439,13 @@ class LangGraphDisclosureCoordinator:
                 "principal": state["principal"],
                 "annual_rate": state["annual_rate"],
                 "term_months": state["term_months"],
+                # The document goes down with the record it describes. It reached stage 4a's
+                # figure gate to get here, and disclosure-service checks it again against its
+                # own recomputation before storing — this stage does not get to assert
+                # agreement on its own word. Without it the row is written undeliverable
+                # rather than delivered blind: `delivered` used to be a flag over content
+                # that lived only in this run's HTTP response.
+                "document": state.get("document"),
             }
         )
         chain = self._read_provenance(record["disclosure_id"])

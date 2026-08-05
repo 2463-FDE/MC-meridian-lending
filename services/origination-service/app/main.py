@@ -257,6 +257,37 @@ def read_disclosure(
     return chain
 
 
+@app.get("/applications/{app_id}/disclosure/document")
+def read_disclosure_document(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+):
+    """The stored borrower-facing document, for the officer reviewing it (spec D6).
+
+    Officer-only, and for the same reason `generate_disclosure` is: this returns the
+    document BODY, and a draft body reaching the borrower is what the compliance hold exists
+    to prevent. `read_disclosure` above stays officer-or-owner because the chain and the
+    disclosed figures are the borrower's to see; the held document is not, until an officer
+    releases it.
+
+    Exists because the body used to be readable only in the generating call's response. The
+    officer who approves or delivers is a different session — a different person, under
+    maker-checker — so without this route the reviewer approved a document they had no way
+    to open, and delivery recorded a flag over content nobody had read.
+
+    The disclosure id is resolved from the application server-side, same as the transition
+    route: that is what binds the read to the application the caller was authorized for.
+    """
+    authz.require_officer(x_user_role)
+    chain = _read_chain(app_id)
+    disclosure_id = chain.get("disclosure_id")
+    if not disclosure_id:
+        raise HTTPException(
+            status_code=404, detail="no disclosure for this application"
+        )
+    return _downstream("GET", f"/disclosures/{disclosure_id}/document")
+
+
 @app.post("/applications/{app_id}/disclosure/transition")
 def transition_disclosure(
     app_id: int,

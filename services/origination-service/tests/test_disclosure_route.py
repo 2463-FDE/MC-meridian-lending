@@ -262,6 +262,19 @@ class TestGatherBindsServerSide:
 
 BORROWER = {"X-User-Role": "borrower", "X-User-Id": "3"}
 
+STORED_DOCUMENT = {
+    "heading": "Federal Truth-in-Lending Disclosure",
+    "figures": {
+        "apr": "9.584",
+        "finance_charge": "3628.71",
+        "amount_financed": "17460.00",
+        "total_of_payments": "21088.71",
+        "monthly_payment": "439.35",
+    },
+    "payment_terms": "You will make equal monthly payments until the loan is repaid.",
+    "prepayment": "You may repay early without a penalty.",
+}
+
 
 class _Resp:
     def __init__(self, status_code, payload):
@@ -280,10 +293,15 @@ def lifecycle(monkeypatch):
         "chain": {**COMPLETE_CHAIN, "disclosure_status": "draft"},
         "chain_status": 200,
         "transition": (200, {"disclosure_id": 5, "status": "in_review"}),
+        "document": (200, STORED_DOCUMENT),
     }
 
     def fake_get(_base, path):
         sent["gets"].append(path)
+        # Two GETs share this stub now: the chain read that resolves the disclosure id, and
+        # the document read that follows it.
+        if path.endswith("/document"):
+            return _Resp(*state["document"])
         return _Resp(state["chain_status"], state["chain"])
 
     def fake_post(_base, path, payload):
@@ -302,6 +320,69 @@ def test_read_disclosure_returns_the_chain(client, lifecycle):
 
     assert response.status_code == 200
     assert response.json()["disclosure_id"] == 5
+    assert sent["gets"] == ["/applications/1/disclosure/provenance"]
+
+
+def test_read_document_returns_the_stored_document(client, lifecycle):
+    """The officer reviewing the disclosure has to be able to read it.
+
+    The body used to exist only in the generating call's response, so the compliance
+    reviewer — a different session, and a different person under maker-checker — approved and
+    delivered a document they had no way to open.
+    """
+    sent, _ = lifecycle
+    response = client.get("/applications/1/disclosure/document", headers=OFFICER)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == STORED_DOCUMENT
+    assert sent["gets"] == [
+        "/applications/1/disclosure/provenance",
+        "/disclosures/5/document",
+    ]
+
+
+def test_read_document_is_officer_only_unlike_read_disclosure(client, lifecycle):
+    """`read_disclosure` admits the owning borrower because the chain and the disclosed
+    figures are theirs. This returns the BODY, and a held draft's body reaching the borrower
+    is exactly what the compliance hold — and `generate_disclosure`'s officer-only posture —
+    exists to prevent. The fixture stubs require_officer_or_owner, not require_officer, so a
+    route that took the weaker check would pass here."""
+    sent, _ = lifecycle
+    response = client.get("/applications/1/disclosure/document", headers=BORROWER)
+
+    assert response.status_code == 403
+    assert sent["gets"] == [], "must not reach disclosure-service at all"
+
+
+def test_read_document_resolves_the_disclosure_id_server_side(client, lifecycle):
+    """The caller names an application. Accepting a disclosure id would let an authorized
+    officer read a document belonging to an application they were not authorized for."""
+    sent, _ = lifecycle
+    response = client.get(
+        "/applications/1/disclosure/document?disclosure_id=999", headers=OFFICER
+    )
+
+    assert response.status_code == 200
+    assert sent["gets"][1] == "/disclosures/5/document"
+
+
+def test_read_document_forwards_none_recorded_as_a_404(client, lifecycle):
+    """A row written before migration 0012 has no document. That is an answer the screen
+    needs — it means delivery will be refused — not an outage."""
+    _, state = lifecycle
+    state["document"] = (404, {"detail": "no document recorded for this disclosure"})
+    response = client.get("/applications/1/disclosure/document", headers=OFFICER)
+
+    assert response.status_code == 404
+    assert "no document recorded" in response.json()["detail"]
+
+
+def test_read_document_when_there_is_no_disclosure_yet(client, lifecycle):
+    sent, state = lifecycle
+    state["chain"] = {**COMPLETE_CHAIN, "disclosure_id": None}
+    response = client.get("/applications/1/disclosure/document", headers=OFFICER)
+
+    assert response.status_code == 404
     assert sent["gets"] == ["/applications/1/disclosure/provenance"]
 
 
@@ -448,7 +529,9 @@ def test_borrower_can_still_read_status_and_chain(client, monkeypatch):
     path still admits officer, owner and token-holder, and returns status + provenance
     (never the document body)."""
     monkeypatch.setattr(
-        main, "_read_chain", lambda app_id: {"disclosure_id": 5, "disclosure_status": "draft"}
+        main,
+        "_read_chain",
+        lambda app_id: {"disclosure_id": 5, "disclosure_status": "draft"},
     )
     response = client.get("/applications/1/disclosure", headers=BORROWER)
     assert response.status_code == 200, response.text

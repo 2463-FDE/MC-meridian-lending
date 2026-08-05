@@ -82,6 +82,18 @@ CREATE TABLE IF NOT EXISTS disclosures (
     apr_method_version      TEXT NOT NULL,
     -- hash(inputs + ruleset + outputs): detects post-hoc edits to a regulated document.
     content_fingerprint     TEXT NOT NULL,
+    -- The borrower-facing document as assembled: {heading, figures, payment_terms,
+    -- prepayment}. Identifier-free -- the prose fields are digit-free by output schema and
+    -- carry no applicant attributes, so this stores the same class of data the figures
+    -- above already do. NOT part of content_fingerprint: the fingerprint covers inputs +
+    -- ruleset + outputs, and every figure in here is checked against those outputs before
+    -- the row is written, so folding the prose in would make a regulated integrity hash
+    -- depend on model wording.
+    --
+    -- Nullable, because delivery -- not insertion -- is the step that requires it. A row
+    -- written without a document is a draft that can never be delivered (the lifecycle
+    -- refuses it), which is the fail-closed direction.
+    document_body           JSONB,
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     delivered_at            TIMESTAMPTZ,
     CONSTRAINT disclosures_status_valid

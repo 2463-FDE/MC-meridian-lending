@@ -67,6 +67,9 @@ class Disclosure(Base):
     fee_schedule_version: Mapped[str] = mapped_column(Text, nullable=False)
     apr_method_version: Mapped[str] = mapped_column(Text, nullable=False)
     content_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    # The assembled borrower-facing document. Nullable: delivery, not insertion, is the
+    # step that requires it, so a row without one is a draft that can never be delivered.
+    document_body: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # NOT NULL DEFAULT now() in the DDL. The server default has to be declared here too:
     # without it the mapper sends created_at=NULL on INSERT, the database default never
     # fires, and the write fails the NOT NULL constraint. A stub session never sees this.

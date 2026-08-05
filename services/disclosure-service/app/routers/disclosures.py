@@ -28,6 +28,7 @@ Internal-only, and idempotent per offer (uq_disclosures_offer), mirroring the of
 path: a retry or a concurrent POST must not produce two regulated records for one offer.
 """
 
+import re
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -41,6 +42,7 @@ from .. import fingerprint, models, rules
 from ..database import get_session
 from ..logging_config import get_logger
 from ..schemas import (
+    DisclosureDocument,
     DisclosureIn,
     DisclosureOut,
     ProvenanceOut,
@@ -151,6 +153,10 @@ def create_disclosure(
         "total_of_payments_cents": _to_cents(computed["total_of_payments"]),
     }
 
+    # Checked against this service's own numbers before it can be stored, so the document
+    # persisted next to a regulated figure can never spell that figure differently.
+    _refuse_if_document_disagrees(body.document, outputs)
+
     row = models.Disclosure(
         offer_id=body.offer_id,
         decision_event_id=body.decision_event_id,
@@ -168,6 +174,14 @@ def create_disclosure(
             fee_schedule_version=schedule.version,
             apr_method_version=APR_METHOD_VERSION,
             outputs=outputs,
+        ),
+        # Deliberately NOT an input to the fingerprint above: that hash covers inputs +
+        # ruleset + outputs and must recompute from the persisted snapshot alone (spec D3
+        # acceptance 4). The document's figures are already pinned to those outputs by the
+        # check above, so hashing the prose too would only make a regulated integrity value
+        # depend on model wording.
+        document_body=(
+            body.document.model_dump() if body.document is not None else None
         ),
     )
     session.add(row)
@@ -295,6 +309,38 @@ def read_provenance_by_application(
     return _provenance_out(row)
 
 
+@router.get("/disclosures/{disclosure_id}/document", response_model=DisclosureDocument)
+def read_document(
+    disclosure_id: int,
+    session: Session = Depends(get_session),
+    x_internal_service: str | None = Header(default=None, alias="X-Internal-Service"),
+):
+    """The stored borrower-facing document, so a reviewer can read what they are approving.
+
+    A separate route rather than a field on the provenance view, for two reasons. The view
+    is the one definition of the CHAIN — edges and disclosed figures — and a document body
+    is neither. And origination's `read_disclosure`, which proxies that view, admits the
+    owning borrower and a continuation-token holder; putting the body there would hand a
+    borrower the draft document, which is exactly what `generate_disclosure` was made
+    officer-only to prevent. The officer-only wrapper is origination's
+    `read_disclosure_document`.
+
+    Internal-only, like every other route in this module: `/disclosure/*` is reachable
+    anonymously through the gateway.
+    """
+    _require_internal_caller(x_internal_service)
+    row = session.get(models.Disclosure, disclosure_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="disclosure not found")
+    if row.document_body is None:
+        # 404, not 204: rows written before migration 0012 legitimately have none, and the
+        # officer's screen needs to tell "nothing recorded" apart from "recorded and empty".
+        raise HTTPException(
+            status_code=404, detail="no document recorded for this disclosure"
+        )
+    return row.document_body
+
+
 def _provenance_out(row) -> ProvenanceOut:
     missing = [edge for edge in _CHAIN_EDGES if row.get(edge) is None]
     return ProvenanceOut(
@@ -412,6 +458,7 @@ def transition_disclosure(
 
     values = {"status": target}
     if target == "delivered":
+        _refuse_if_no_document(row)
         _refuse_if_chain_incomplete(session, disclosure_id)
         _refuse_if_already_consummated(session, row.offer_id)
         # The only write of delivered_at, and the only status that sets it. The DDL check
@@ -447,6 +494,35 @@ def transition_disclosure(
         routed_to or "",
     )
     return TransitionOut(**_disclosure_out(row).model_dump(), routed_to=routed_to)
+
+
+def _refuse_if_no_document(row: models.Disclosure) -> None:
+    """Delivery is the delivery OF SOMETHING, so there has to be a something.
+
+    Before this check the transition wrote `status` and `delivered_at` and asserted nothing
+    about the document those two claim was sent. The assembled borrower-facing document
+    existed only in the generating call's HTTP response, so the compliance reviewer who
+    approved and delivered it — a different person and a different session under
+    maker-checker — could not read it at all, and `accept_offer` then treats the row as
+    boardable. That made `delivered` a flag over content no human had seen.
+
+    Checked first among the three delivery guards: it is a property of the row already in
+    hand, so it costs no query, and "there is no document" is the more basic refusal than
+    "the document's provenance is incomplete".
+
+    Refused rather than backfilled. A disclosure whose document was never recorded cannot
+    have one invented at delivery time without fabricating the evidence; regenerating it
+    means a new run through the pipeline, where the figure gate applies.
+    """
+    if row.document_body is None:
+        log.error("refusing delivery of disclosure_id=%s: no document recorded", row.id)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "no document is recorded for this disclosure; refusing to deliver a "
+                "disclosure whose borrower-facing document was never persisted"
+            ),
+        )
 
 
 def _refuse_if_chain_incomplete(session: Session, disclosure_id: int) -> None:
@@ -577,5 +653,85 @@ def _refuse_if_offer_disagrees(offer: models.Offer, computed: dict) -> None:
             detail=(
                 "recomputed disclosure disagrees with the persisted offer on "
                 f"{', '.join(mismatches)}; refusing to persist"
+            ),
+        )
+
+
+# document figure name -> the minor-unit output it must spell. `apr` is handled separately:
+# it is exact NUMERIC, not cents.
+_DOCUMENT_MONEY_FIELDS = {
+    "finance_charge": "finance_charge_cents",
+    "amount_financed": "amount_financed_cents",
+    "monthly_payment": "monthly_payment_cents",
+    "total_of_payments": "total_of_payments_cents",
+}
+
+
+# A figure as a borrower may be shown it: digits, optionally a decimal point and more
+# digits. Nothing else. `Decimal` is far more permissive than that — it accepts underscore
+# separators, a leading sign, and scientific notation, so `17_460.00`, `+3628.71` and
+# `3.62871E+3` all parse to values that COMPARE EQUAL to the record. This string is stored
+# verbatim and printed verbatim to the officer reviewing it, so a numeric-only check would
+# admit a disclosure reading "Amount Financed $3.62871E+3". Reject the spelling as well as
+# the value. Unsigned by design: the DDL's amount checks make a negative disclosed figure
+# impossible, so a sign here is malformed rather than negative.
+_PLAIN_DECIMAL = re.compile(r"^\d+(\.\d+)?$")
+
+
+def _parse_figure(value: str) -> Decimal | None:
+    """A rendered figure back to an exact Decimal, or None if it is not a plain one.
+
+    None covers a non-numeric string, a spelling `Decimal` would accept but a borrower must
+    never be shown (see `_PLAIN_DECIMAL`), and NaN / Infinity — the latter parse and then
+    compare unequal to everything, which would read as an ordinary mismatch rather than the
+    malformed document it is.
+    """
+    candidate = value.strip()
+    if not _PLAIN_DECIMAL.match(candidate):
+        return None
+    try:
+        parsed = Decimal(candidate)
+    except ArithmeticError:
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _refuse_if_document_disagrees(
+    document: DisclosureDocument | None, outputs: dict
+) -> None:
+    """Fail closed when the document spells a figure differently from the record.
+
+    The upstream pipeline already compares rendered figures against computed ones at its
+    verify stage, but that check runs in the caller. This is the authoritative boundary, and
+    the whole point of storing the document with the row is that a reviewer can trust the
+    two agree — so the boundary proves it rather than trusting the caller to have.
+
+    Compared as exact Decimals, not as strings: `9.584` and `9.5840` are one number with two
+    spellings and must not read as a mismatch, while `9.58` against `9.584` must. Money is
+    compared against cents-over-100 so a sub-cent spelling (`3628.706`) is refused rather
+    than quietly rounded into agreement.
+    """
+    if document is None:
+        return
+
+    mismatched = []
+    for field, cents_key in _DOCUMENT_MONEY_FIELDS.items():
+        rendered = _parse_figure(getattr(document.figures, field))
+        if rendered is None or rendered != Decimal(outputs[cents_key]) / 100:
+            mismatched.append(field)
+    rendered_apr = _parse_figure(document.figures.apr)
+    if rendered_apr is None or rendered_apr != outputs["apr"]:
+        mismatched.append("apr")
+
+    if mismatched:
+        log.error(
+            "refusing disclosure document: figures disagree on %s",
+            ",".join(sorted(mismatched)),
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the document's figures disagree with the recomputed disclosure on "
+                f"{', '.join(sorted(mismatched))}; refusing to persist"
             ),
         )
