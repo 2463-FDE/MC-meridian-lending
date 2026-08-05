@@ -1,6 +1,7 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
 
 import hmac
+import re
 
 import httpx
 from psycopg2 import errors as pg_errors
@@ -579,6 +580,49 @@ def run_decision(
     )
 
 
+# A plain-decimal literal, so a positive rate parses without Decimal's exotic accepts
+# (underscores, signs, scientific notation) reaching the servicing rate column.
+_PLAIN_DECIMAL = re.compile(r"^\d+(\.\d+)?$")
+
+
+def _note_rate_for_boarding(snapshot, apr: float) -> float:
+    """The contractual note rate to board, derived from the delivered disclosure's snapshot.
+
+    Servicing amortizes at this rate; boarding the actuarial APR instead made the funded
+    loan's schedule contradict its own TILA disclosure on every fee-bearing loan. Read from
+    the stored `compute_snapshot` — the authoritative record of what the disclosed figures
+    were derived from — never from a caller. Boarding already requires a delivered disclosure
+    with a recorded document, so a boardable loan always has this snapshot; fail closed (409)
+    rather than fall back to the APR when it is absent or unusable, because boarding at the
+    wrong rate is the defect this exists to prevent.
+    """
+    note_rate_pct = (
+        snapshot.get("note_rate_pct") if isinstance(snapshot, dict) else None
+    )
+    if note_rate_pct is None or not _PLAIN_DECIMAL.match(str(note_rate_pct)):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the delivered TILA disclosure for this offer has no usable note rate; "
+                "refusing to board a loan whose servicing rate cannot be determined"
+            ),
+        )
+    note_rate = float(note_rate_pct)
+    # Spec D1 invariant: the disclosed APR is >= the note rate for every non-zero-fee loan,
+    # because the APR annualizes the prepaid fee on top of the note rate. A snapshot note
+    # rate above the offer's APR means the two records disagree — fail closed rather than
+    # board either.
+    if note_rate > apr:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the disclosure note rate exceeds the offer APR; the offer and its "
+                "disclosure disagree, refusing to board"
+            ),
+        )
+    return note_rate
+
+
 @router.post("/{app_id}/accept")
 def accept_offer(
     app_id: int,
@@ -619,6 +663,11 @@ def accept_offer(
     rows = db.query(
         "SELECT a.amount, a.term_months, ap.name, o.apr, d.outcome, "
         "ds.status AS disclosure_status, ds.delivered_at AS disclosure_delivered_at, "
+        # The note rate servicing must amortize at (spec D1: APR carries the fee and is
+        # higher, so the disclosed schedule uses the note rate, not the APR). Recorded at
+        # compute time in the disclosure's snapshot — the authoritative value the disclosed
+        # figures were derived from — and read here so boarding stores it on the loan.
+        "ds.compute_snapshot AS disclosure_snapshot, "
         # A flag, not the document: this path only needs to know one was persisted, and
         # hauling a regulated body through the boarding query would put it in a result the
         # money path has no use for.
@@ -722,6 +771,10 @@ def accept_offer(
                     "document; refusing to board a loan whose disclosure cannot be read"
                 ),
             )
+        # Servicing amortizes at the NOTE rate, not the APR (spec D1): derive it from the
+        # delivered disclosure's snapshot and fail closed if it is absent, so a loan is never
+        # boarded at the disclosed APR — the rate the disclosed schedule was NOT built at.
+        note_rate = _note_rate_for_boarding(r.get("disclosure_snapshot"), r["apr"])
         try:
             loan_id = intake.board_to_servicing(
                 app_id,
@@ -729,6 +782,7 @@ def accept_offer(
                 r["amount"],
                 r["apr"],
                 r["term_months"],
+                note_rate_pct=note_rate,
             )
             principal = r["amount"]  # what we just boarded with
         except pg_errors.UniqueViolation:

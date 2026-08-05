@@ -273,6 +273,18 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             )
             if cur.fetchone() is None:
                 return False, "schema_not_ready:disclosures.document_body"
+            # accept_offer's boarding INSERT writes loans.note_rate (migration 0013): servicing
+            # must amortize at the note rate, not the disclosed APR. A volume that has the loans
+            # table but not this column (predating 0013) would 500 the boarding INSERT while
+            # /health read fine — the same class as the rungs above. The type is asserted, not
+            # just the name: ADD COLUMN IF NOT EXISTS swallows a same-named column of any type.
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'loans' AND column_name = 'note_rate' "
+                "AND data_type = 'double precision'"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:loans.note_rate"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__

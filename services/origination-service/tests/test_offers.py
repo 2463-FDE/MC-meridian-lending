@@ -179,6 +179,14 @@ _APPROVED_WITH_OFFER = {
     # leaves already-delivered rows at document_body NULL and they are frozen against a
     # backfill, so `delivered` alone does not prove one was ever recorded.
     "disclosure_has_document": True,
+    # Boarding derives the servicing note rate from the disclosure's snapshot (spec D1: the
+    # schedule amortizes at the note rate, not the disclosed APR, which carries the fee).
+    "disclosure_snapshot": {
+        "principal_cents": 500000,
+        "note_rate_pct": "7.99",
+        "term_months": 36,
+        "fee_pct": "0.03",
+    },
 }
 
 

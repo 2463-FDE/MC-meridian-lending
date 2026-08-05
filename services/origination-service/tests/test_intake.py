@@ -349,6 +349,99 @@ def test_capture_monthly_debt_404_when_missing(monkeypatch):
     assert resp.status_code == 404
 
 
+def test_accept_boards_note_rate_not_apr(monkeypatch):
+    # PR review: servicing amortizes the schedule at the NOTE rate, but boarding stored the
+    # disclosed actuarial APR into the loan's rate, so the funded loan's schedule contradicted
+    # its own TILA disclosure on every fee-bearing loan (APR carries the prepaid fee and is
+    # higher). accept_offer now derives the note rate from the delivered disclosure's
+    # compute_snapshot and passes it to board_to_servicing; the APR stays for display.
+    boardable = {
+        "amount": 17460,
+        "term_months": 48,
+        "name": "Maria",
+        "apr": 9.584,  # disclosed actuarial APR (carries the fee)
+        "outcome": "approve",
+        "disclosure_status": "delivered",
+        "disclosure_delivered_at": "2026-08-05T00:00:00Z",
+        "disclosure_snapshot": {
+            "principal_cents": 1800000,
+            "note_rate_pct": "7.99",  # the contractual rate servicing must amortize at
+            "term_months": 48,
+            "fee_pct": "0.03",
+        },
+        "disclosure_has_document": True,
+    }
+
+    def _query(sql, params=None):
+        if "FROM applications a" in sql:
+            return [boardable]
+        if "FROM loans WHERE app_id" in sql:
+            return []  # no existing loan -> take the boarding branch
+        return []  # balances INSERT, funded UPDATE
+
+    monkeypatch.setattr(applications.db, "query", _query)
+    monkeypatch.setattr(
+        applications.authz, "require_officer_or_owner", lambda *a, **k: None
+    )
+
+    captured = {}
+
+    def _board(app_id, name, principal, apr, term_months, note_rate_pct=None):
+        captured.update(apr=apr, note_rate_pct=note_rate_pct)
+        return 555
+
+    monkeypatch.setattr(applications.intake, "board_to_servicing", _board)
+
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["loan_id"] == 555
+    # The funded loan is serviced at the note rate, not the disclosed APR.
+    assert captured["note_rate_pct"] == 7.99
+    assert captured["apr"] == 9.584  # APR still stored for display
+    assert captured["note_rate_pct"] != captured["apr"]
+
+
+def test_accept_refuses_when_snapshot_has_no_note_rate(monkeypatch):
+    # Fail closed rather than fall back to the APR: a delivered disclosure whose snapshot
+    # carries no usable note rate cannot be boarded at the wrong rate.
+    boardable = {
+        "amount": 17460,
+        "term_months": 48,
+        "name": "Maria",
+        "apr": 9.584,
+        "outcome": "approve",
+        "disclosure_status": "delivered",
+        "disclosure_delivered_at": "2026-08-05T00:00:00Z",
+        "disclosure_snapshot": {"principal_cents": 1800000, "term_months": 48},
+        "disclosure_has_document": True,
+    }
+
+    def _query(sql, params=None):
+        if "FROM applications a" in sql:
+            return [boardable]
+        if "FROM loans WHERE app_id" in sql:
+            return []
+        return []
+
+    monkeypatch.setattr(applications.db, "query", _query)
+    monkeypatch.setattr(
+        applications.authz, "require_officer_or_owner", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        applications.intake,
+        "board_to_servicing",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not board without a note rate")
+        ),
+    )
+    resp = TestClient(app, raise_server_exceptions=False).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 409
+
+
 def test_board_endpoint_is_internal_only(monkeypatch):
     # PR review: the legacy /board endpoint creates a loan + balance from fully
     # caller-supplied inputs and is reachable via the anonymous /los proxy. An

@@ -101,7 +101,8 @@ CREATE TABLE IF NOT EXISTS loans (
     app_id          INTEGER,
     applicant_name  TEXT,
     principal       DOUBLE PRECISION NOT NULL,   -- money as float
-    apr             DOUBLE PRECISION NOT NULL,
+    apr             DOUBLE PRECISION NOT NULL,   -- disclosed actuarial APR (display); carries the fee
+    note_rate       DOUBLE PRECISION,            -- contractual rate servicing amortizes at; NULL=legacy loan, fall back to apr
     term_months     INTEGER NOT NULL,
     status          TEXT DEFAULT 'current',
     opened_at       TIMESTAMPTZ DEFAULT now()
