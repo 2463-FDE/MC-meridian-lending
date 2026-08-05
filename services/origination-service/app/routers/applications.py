@@ -618,7 +618,18 @@ def accept_offer(
     # whose application this is — is the separate officer-OR-owner check in ADR 0010.)
     rows = db.query(
         "SELECT a.amount, a.term_months, ap.name, o.apr, d.outcome, "
-        "ds.status AS disclosure_status, ds.delivered_at AS disclosure_delivered_at "
+        "ds.status AS disclosure_status, ds.delivered_at AS disclosure_delivered_at, "
+        # A flag, not the document: this path only needs to know one was persisted, and
+        # hauling a regulated body through the boarding query would put it in a result the
+        # money path has no use for.
+        #
+        # The `<> 'null'` half is not redundant. In Postgres a JSON null is a VALUE, so
+        # `'null'::jsonb IS NOT NULL` is TRUE — a column holding it would read as a
+        # recorded document while meaning the opposite. The write path only ever stores an
+        # object or SQL NULL, so this covers a row shaped by hand-written SQL, on the same
+        # posture as the delivered_at check below: corrupt is not a licence to board.
+        "(ds.document_body IS NOT NULL AND ds.document_body <> 'null'::jsonb) "
+        "AS disclosure_has_document "
         "FROM applications a "
         "LEFT JOIN applicants ap ON ap.id = a.applicant_id "
         "LEFT JOIN decisions d ON d.app_id = a.id "
@@ -689,6 +700,26 @@ def accept_offer(
                 detail=(
                     "no delivered TILA disclosure for this offer; the disclosure must be "
                     "delivered before the loan is boarded"
+                ),
+            )
+        # `delivered` alone does not prove a document was ever recorded. Migration 0012
+        # added `document_body` nullable and leaves ALREADY-DELIVERED rows at NULL, and
+        # disclosure-service refuses to backfill them because
+        # trg_disclosures_freeze_delivered makes a delivered row immutable — so a row
+        # delivered on a volume that ran 0011 before 0012 carries the flag and the timestamp
+        # over content that does not exist. Boarding on that pair funds a loan whose
+        # borrower-facing TILA document nobody can produce, which is the same defect the
+        # delivery guard closes from the other side, at the money-moving step.
+        #
+        # Monotone in the same direction as the status check above, so it needs no
+        # transaction either: `document_body` is written before delivery and frozen at it, so
+        # a document read as present cannot vanish before the INSERT lands.
+        if not r.get("disclosure_has_document"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "the delivered TILA disclosure for this offer has no recorded "
+                    "document; refusing to board a loan whose disclosure cannot be read"
                 ),
             )
         try:

@@ -123,6 +123,14 @@ touches it — so an officer cannot approve one document and deliver another. Ro
 the column existed keep NULL and become undeliverable rather than being backfilled: inventing a
 document at delivery time is fabricating the evidence the column exists to hold.
 
+*Amended at review, 2026-08-05:* `document_body` is written once at insert OR by the idempotent
+replay onto a row that has none — the one repair path, added because a row written before the
+column existed otherwise had no route to a document and no route to delivery. It is still never
+overwritten and no lifecycle edge touches it, so the approve-one-deliver-another case stays
+closed. Every consumer of `delivered` re-checks the document rather than trusting the flag:
+already-delivered rows keep NULL and are frozen against repair, so boarding refuses the pair of
+`delivered` plus a NULL document instead of funding a loan whose disclosure cannot be read.
+
 ## Options Considered
 
 ### Money representation and rule config

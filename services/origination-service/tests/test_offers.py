@@ -175,6 +175,10 @@ _APPROVED_WITH_OFFER = {
     # (Reg Z 1026.17(b)). The happy path carries a delivered one; the tests below vary it.
     "disclosure_status": "delivered",
     "disclosure_delivered_at": "2026-08-04T00:00:00+00:00",
+    # And the delivered flag has to stand over a document that exists — migration 0012
+    # leaves already-delivered rows at document_body NULL and they are frozen against a
+    # backfill, so `delivered` alone does not prove one was ever recorded.
+    "disclosure_has_document": True,
 }
 
 
@@ -424,6 +428,56 @@ def test_accept_409_when_delivered_at_is_missing(monkeypatch):
         "/applications/1/accept", headers={"X-User-Role": "underwriter"}
     )
     assert resp.status_code == 409
+
+
+def test_accept_409_when_the_delivered_disclosure_has_no_document(monkeypatch):
+    """`delivered` is a claim about a document, so the document has to exist.
+
+    Migration 0012 added `document_body` nullable and leaves ALREADY-DELIVERED rows at
+    NULL, and disclosure-service refuses to backfill them because
+    trg_disclosures_freeze_delivered makes a delivered row immutable. A row delivered on a
+    volume that ran 0011 before 0012 therefore carries the status and the timestamp over
+    content that does not exist — and boarding on that pair funds a loan whose
+    borrower-facing TILA document nobody can produce.
+    """
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        _accept_db({**_APPROVED_WITH_OFFER, "disclosure_has_document": False}),
+    )
+
+    def _must_not_board(*a, **k):
+        raise AssertionError("must not board on a delivered row with no document")
+
+    monkeypatch.setattr(applications.intake, "board_to_servicing", _must_not_board)
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 409
+    assert "no recorded document" in resp.json()["detail"]
+
+
+def test_accept_replays_existing_loan_whose_disclosure_has_no_document(monkeypatch):
+    """The document check guards BOARDING, not replay — same reason the delivery check
+    does. 409ing here would not un-board the loan, only hide it and strand the reconcile."""
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        _accept_db(
+            {**_APPROVED_WITH_OFFER, "disclosure_has_document": False},
+            existing_loan=556,
+        ),
+    )
+
+    def _must_not_board(*a, **k):
+        raise AssertionError("replay must not board")
+
+    monkeypatch.setattr(applications.intake, "board_to_servicing", _must_not_board)
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["loan_id"] == 556
 
 
 def test_accept_replays_existing_loan_even_without_a_delivered_disclosure(monkeypatch):

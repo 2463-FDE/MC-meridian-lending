@@ -336,6 +336,71 @@ def test_probe_fails_when_continuation_token_expires_at_column_missing(monkeypat
     assert err == "schema_not_ready:applications.continuation_token_expires_at"
 
 
+class _DocumentBodyMissingCursor:
+    """Every earlier rung present but disclosures.document_body absent -- a volume that ran
+    migration 0011 (the table) and not 0012 (the column). `accept_offer` selects it to decide
+    whether the delivered disclosure actually has a stored document, so that SELECT would 500
+    the boarding path while /health looked fine."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "'document_body'" in self._last:
+            return None
+        return (1,)
+
+
+class _DocumentBodyMissingConn:
+    def cursor(self):
+        return _DocumentBodyMissingCursor()
+
+    def close(self):
+        pass
+
+
+class _DocumentBodyWrongTypeCursor(_DocumentBodyMissingCursor):
+    """The column exists under the right name and the wrong type. `ADD COLUMN IF NOT EXISTS`
+    swallows a same-named column of any type, so a name-only rung reports ready over a TEXT
+    stand-in — against which the boarding gate's `<> 'null'::jsonb` is a type error."""
+
+    def fetchone(self):
+        if "'document_body'" in self._last and "jsonb" in self._last:
+            return None
+        return (1,)
+
+
+class _DocumentBodyWrongTypeConn:
+    def cursor(self):
+        return _DocumentBodyWrongTypeCursor()
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize(
+    "conn_cls",
+    [_DocumentBodyMissingConn, _DocumentBodyWrongTypeConn],
+)
+def test_probe_fails_when_disclosure_document_body_is_not_ready(monkeypatch, conn_cls):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: conn_cls())
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:disclosures.document_body"
+
+
 def test_probe_false_when_database_url_unset(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", "")
     ok, err = config.database_reachable()

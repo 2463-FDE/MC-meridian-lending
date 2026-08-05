@@ -321,10 +321,30 @@ recomputation. A row that already has one is never overwritten (that is the idem
 guarantee), and a `delivered` row is left alone because `trg_disclosures_freeze_delivered`
 rejects any UPDATE of it.
 
+*Amended at review:* the boarding gate checks the document too, not just the delivered flag.
+`accept_offer` read `status = 'delivered'` plus `delivered_at` and treated the pair as
+sufficient. Migration 0012 leaves ALREADY-DELIVERED rows at `document_body` NULL and
+`trg_disclosures_freeze_delivered` blocks their repair, so a row delivered on a volume that ran
+0011 before 0012 carries both markers over content that does not exist — and boarding on it
+funds a loan whose borrower-facing TILA document nobody can produce. The boarding query now
+selects a presence flag for the document and refuses on the creating branch when it is absent;
+replay of an already-boarded loan is unchanged, for the same reason the delivery check leaves it
+alone. The flag is `document_body IS NOT NULL AND document_body <> 'null'::jsonb`, because a JSON
+null is a value in Postgres and `IS NOT NULL` alone reads it as a recorded document. Origination
+gains a readiness rung for the column, so a volume at 0011 reports
+`schema_not_ready:disclosures.document_body` rather than 500-ing the boarding path.
+
+The officer screen offers the repair rather than describing a dead end. Generation stays
+disabled once a disclosure exists, EXCEPT when that disclosure has no recorded document and is
+not yet delivered — then the control re-runs generation to reach the replay above. A delivered
+row with no document is frozen and still says it needs an operator, which is the one case where
+that is true.
+
 **Acceptance:** illegal transitions rejected; `delivered_at` set only on the delivery path;
 delivery refused when no document is recorded; a document whose figures disagree with the
 recomputed record is refused rather than persisted; no lifecycle edge rewrites the document; a
-replay records a missing document and never replaces a recorded one.
+replay records a missing document and never replaces a recorded one; boarding refused when the
+delivered disclosure has no recorded document, while an already-boarded loan still replays.
 
 ### D7. TILA test vectors — blocking CI gate
 

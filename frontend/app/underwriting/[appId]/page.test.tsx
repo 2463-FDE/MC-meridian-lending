@@ -268,3 +268,141 @@ describe("underwriting detail — assistant panel", () => {
     expect(screen.queryByText(ASSISTANT_SUMMARY)).toBeNull();
   });
 });
+
+// The TILA disclosure panel's repair path. disclosure-service's idempotent replay records a
+// document on an existing non-delivered disclosure that has none, but this screen disabled
+// "Generate disclosure" the moment any disclosure existed and told the officer the row
+// needed an operator. Delivery stays refused for want of the document, so the application
+// could not move in either direction — the backend had the remedy and the only human who
+// would ask for it was told none existed.
+const PROVENANCE_BASE = {
+  disclosure_id: 9,
+  offer_id: 11,
+  decision_event_id: 7,
+  application_id: 1,
+  applicant_id: 3,
+  disclosed_apr: "9.584",
+  chain_complete: true,
+  missing_edges: [],
+};
+
+function disclosureGet(provenance: unknown, document: unknown) {
+  return async (path: string) => {
+    if (path === "/los/applications/1") return APP_1;
+    if (path === "/los/applications/1/disclosure") {
+      if (provenance === null) throw new Error("no disclosure");
+      return provenance;
+    }
+    if (path === "/los/applications/1/disclosure/document") {
+      // The 404 disclosure-service returns for a row with no document recorded.
+      if (document === null) throw new Error("no document recorded");
+      return document;
+    }
+    throw new Error(`unexpected GET ${path}`);
+  };
+}
+
+const GOOD_DOCUMENT = {
+  heading: "Federal Truth-in-Lending Disclosure",
+  figures: {
+    apr: "9.584",
+    finance_charge: "3628.71",
+    amount_financed: "17460.00",
+    total_of_payments: "21088.71",
+    monthly_payment: "439.35",
+  },
+  payment_terms: "You will make equal monthly payments until the loan is repaid.",
+  prepayment: "You may repay early without a penalty.",
+};
+
+describe("underwriting detail — disclosure document repair", () => {
+  it("offers the repair when a draft disclosure has no recorded document", async () => {
+    apiGet.mockImplementation(
+      disclosureGet({ ...PROVENANCE_BASE, disclosure_status: "draft" }, null)
+    );
+    apiPost.mockResolvedValue({ status: "ok" });
+
+    render(<UnderwritingDetailPage />);
+    const repair = await screen.findByRole("button", {
+      name: "Record missing document",
+    });
+    expect(repair.hasAttribute("disabled")).toBe(false);
+
+    await act(async () => {
+      fireEvent.click(repair);
+    });
+    expect(
+      apiPost.mock.calls.some(
+        (c) => c[0] === "/los/applications/1/disclosure"
+      )
+    ).toBe(true);
+  });
+
+  it("keeps generation closed once a disclosure has its document", async () => {
+    apiGet.mockImplementation(
+      disclosureGet(
+        { ...PROVENANCE_BASE, disclosure_status: "draft" },
+        GOOD_DOCUMENT
+      )
+    );
+
+    render(<UnderwritingDetailPage />);
+    const button = await screen.findByRole("button", {
+      name: "Generate disclosure",
+    });
+    expect(button.hasAttribute("disabled")).toBe(true);
+  });
+
+  it("offers no repair for a delivered row, which is frozen", async () => {
+    apiGet.mockImplementation(
+      disclosureGet(
+        {
+          ...PROVENANCE_BASE,
+          disclosure_status: "delivered",
+          delivered_at: "2026-08-04T00:00:00Z",
+        },
+        null
+      )
+    );
+
+    render(<UnderwritingDetailPage />);
+    await screen.findByText(/delivered before document recording/);
+    expect(
+      screen.queryByRole("button", { name: "Record missing document" })
+    ).toBeNull();
+  });
+
+  it("will not board a delivered disclosure that has no document", async () => {
+    apiGet.mockImplementation(
+      disclosureGet(
+        {
+          ...PROVENANCE_BASE,
+          disclosure_status: "delivered",
+          delivered_at: "2026-08-04T00:00:00Z",
+        },
+        null
+      )
+    );
+
+    render(<UnderwritingDetailPage />);
+    const accept = await screen.findByRole("button", { name: "Accept & board" });
+    expect(accept.hasAttribute("disabled")).toBe(true);
+  });
+
+  it("boards a delivered disclosure that has one", async () => {
+    apiGet.mockImplementation(
+      disclosureGet(
+        {
+          ...PROVENANCE_BASE,
+          disclosure_status: "delivered",
+          delivered_at: "2026-08-04T00:00:00Z",
+        },
+        GOOD_DOCUMENT
+      )
+    );
+
+    render(<UnderwritingDetailPage />);
+    const accept = await screen.findByRole("button", { name: "Accept & board" });
+    expect(accept.hasAttribute("disabled")).toBe(false);
+  });
+});

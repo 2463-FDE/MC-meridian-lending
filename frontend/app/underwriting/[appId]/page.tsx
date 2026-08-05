@@ -590,6 +590,21 @@ export default function UnderwritingDetailPage() {
   // Boarding is consummation (Reg Z 1026.17(b)), so it waits on delivery. Absent
   // provenance means no disclosure exists yet, which is emphatically not delivered.
   const disclosureDelivered = disclosureStatus === "delivered";
+  // A disclosure that exists but has no stored document is repairable from this screen:
+  // re-running generation reaches disclosure-service's replay, which records a document on
+  // a row that has none (checked against the figures already on that row). Not offered for
+  // a DELIVERED row — trg_disclosures_freeze_delivered rejects any UPDATE of it, so that
+  // one genuinely needs an operator. Without this the officer had no action at all: the
+  // button was disabled the moment any disclosure existed, while delivery stayed refused
+  // for want of the document, so the application could not move in either direction.
+  const disclosureNeedsDocument =
+    !!disclosureStatus && !disclosureDoc && !disclosureDelivered;
+  // Delivery is necessary but not sufficient: a row delivered before document recording
+  // carries the flag and the timestamp with no document, and the accept route refuses that
+  // pair rather than funding a loan whose disclosure cannot be read. Mirrored here so the
+  // officer does not meet the refusal as a 409 on the terminal action — same reason the
+  // deliver control already gates on the document.
+  const boardable = disclosureDelivered && !!disclosureDoc;
 
   return (
     <main className="wrap">
@@ -881,14 +896,22 @@ export default function UnderwritingDetailPage() {
           <button
             className="btn-ghost"
             onClick={generateDisclosure}
-            disabled={actionBusy || !!disclosureStatus}
+            disabled={
+              actionBusy || (!!disclosureStatus && !disclosureNeedsDocument)
+            }
             title={
-              disclosureStatus
-                ? "A disclosure already exists for this application."
-                : undefined
+              disclosureNeedsDocument
+                ? "Re-run generation to record the missing document on this disclosure."
+                : disclosureStatus
+                  ? "A disclosure already exists for this application."
+                  : undefined
             }
           >
-            {actionBusy ? "Working…" : "Generate disclosure"}
+            {actionBusy
+              ? "Working…"
+              : disclosureNeedsDocument
+                ? "Record missing document"
+                : "Generate disclosure"}
           </button>
         </div>
 
@@ -933,15 +956,27 @@ export default function UnderwritingDetailPage() {
                   {disclosureDoc.prepayment}
                 </p>
               </div>
-            ) : (
-              // Deliberately promises no remedy on this screen: generation is
-              // disabled once a disclosure exists, and a replay returns the
-              // stored row rather than writing a document onto it, so there is
-              // no officer action that gives this row one.
+            ) : disclosureNeedsDocument ? (
+              // Names the action that fixes it, because there now is one: the
+              // replay in disclosure-service records a document on a row that
+              // has none, so re-running generation repairs this row in place
+              // rather than minting a second regulated record.
               <div className="alert alert-warn">
                 <strong>No document recorded.</strong> This disclosure predates
                 document recording, so there is nothing to review and delivery
-                will be refused. It needs an operator.
+                will be refused. Use{" "}
+                <strong>Record missing document</strong> above to re-run
+                generation and store it against this disclosure.
+              </div>
+            ) : (
+              // Delivered with no document: frozen by
+              // trg_disclosures_freeze_delivered, so no officer action reaches
+              // it and the honest answer is that it needs an operator.
+              <div className="alert alert-warn">
+                <strong>No document recorded.</strong> This disclosure was
+                delivered before document recording and is frozen, so the
+                document cannot be added and boarding will be refused. It needs
+                an operator.
               </div>
             )}
 
@@ -1068,20 +1103,24 @@ export default function UnderwritingDetailPage() {
         ) : (
           <div className="spread">
             <p className="hint" style={{ margin: 0 }}>
-              {disclosureDelivered
+              {boardable
                 ? "Accept the offer and board this application as a serviced loan."
-                : "Deliver the TILA disclosure first — boarding is consummation, and the disclosure has to reach the borrower before it."}
+                : disclosureDelivered
+                  ? "This disclosure was delivered with no recorded document, so it cannot be read and the loan cannot be boarded. It needs an operator."
+                  : "Deliver the TILA disclosure first — boarding is consummation, and the disclosure has to reach the borrower before it."}
             </p>
             {/* Cosmetic only. The server refuses to board without a delivered disclosure
-                (origination accept route); this just stops the officer from discovering
-                that as a 409 on the terminal action. */}
+                that has a recorded document (origination accept route); this just stops the
+                officer from discovering that as a 409 on the terminal action. */}
             <button
               onClick={acceptAndBoard}
-              disabled={actionBusy || !disclosureDelivered}
+              disabled={actionBusy || !boardable}
               title={
-                disclosureDelivered
+                boardable
                   ? undefined
-                  : "The TILA disclosure must be delivered before this loan can be boarded."
+                  : disclosureDelivered
+                    ? "The delivered disclosure has no recorded document, so this loan cannot be boarded."
+                    : "The TILA disclosure must be delivered before this loan can be boarded."
               }
             >
               {actionBusy ? "Working…" : "Accept & board"}
