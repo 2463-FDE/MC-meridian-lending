@@ -102,6 +102,22 @@ describe("apply — acceptance gates on the delivered document, not a status fla
     // The delivered document's borrower-facing prose is on screen...
     await screen.findByText(STORED_DOCUMENT.payment_terms);
     expect(screen.getByText(STORED_DOCUMENT.prepayment)).toBeTruthy();
+    // ...along with the persisted TILA figure strings the borrower is accepting —
+    // the immutable document figures, not the recomputed offer numbers. These are
+    // rendered verbatim from /disclosure/document, so a borrower cannot Accept
+    // without seeing the actual disclosed APR and money.
+    expect(
+      screen.getByText(`${STORED_DOCUMENT.figures.apr}%`)
+    ).toBeTruthy();
+    expect(
+      screen.getByText(`$${STORED_DOCUMENT.figures.finance_charge}`)
+    ).toBeTruthy();
+    expect(
+      screen.getByText(`$${STORED_DOCUMENT.figures.amount_financed}`)
+    ).toBeTruthy();
+    expect(
+      screen.getByText(`$${STORED_DOCUMENT.figures.total_of_payments}`)
+    ).toBeTruthy();
     // ...and only then is Accept offered.
     expect(
       screen.getByRole("button", { name: /accept offer/i })

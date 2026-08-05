@@ -1030,8 +1030,51 @@ function OfferPanel({
         // borrower reads what they are accepting — not just a "delivered" status. Prose
         // fields are digit-free by contract; the figures are the disclosed strings.
         <div style={{ marginTop: 20 }}>
+          <p className="hint" style={{ marginBottom: 12 }}>
+            monthly payment{" "}
+            <strong>{deliveredDoc.figures.monthly_payment}</strong>
+          </p>
           <div className="tila">
             <div className="tila-title">{deliveredDoc.heading}</div>
+            {/* The persisted disclosed figures, rendered verbatim as the stored
+                strings — not the recomputed offer numbers above — so the borrower
+                reads the exact APR and money they are accepting. */}
+            <div className="tila-grid">
+              <div className="tila-cell tila-cell-apr">
+                <div className="tila-cell-label">Annual Percentage Rate</div>
+                <div className="tila-cell-desc">
+                  The cost of your credit as a yearly rate.
+                </div>
+                <div className="tila-cell-value">{deliveredDoc.figures.apr}%</div>
+              </div>
+              <div className="tila-cell">
+                <div className="tila-cell-label">Finance Charge</div>
+                <div className="tila-cell-desc">
+                  The dollar amount the credit will cost you.
+                </div>
+                <div className="tila-cell-value">
+                  ${deliveredDoc.figures.finance_charge}
+                </div>
+              </div>
+              <div className="tila-cell">
+                <div className="tila-cell-label">Amount Financed</div>
+                <div className="tila-cell-desc">
+                  The amount of credit provided to you.
+                </div>
+                <div className="tila-cell-value">
+                  ${deliveredDoc.figures.amount_financed}
+                </div>
+              </div>
+              <div className="tila-cell">
+                <div className="tila-cell-label">Total of Payments</div>
+                <div className="tila-cell-desc">
+                  What you will have paid after all payments are made.
+                </div>
+                <div className="tila-cell-value">
+                  ${deliveredDoc.figures.total_of_payments}
+                </div>
+              </div>
+            </div>
             <div style={{ padding: "12px 16px" }}>
               <p style={{ margin: "0 0 10px" }}>{deliveredDoc.payment_terms}</p>
               <p style={{ margin: 0 }}>{deliveredDoc.prepayment}</p>
