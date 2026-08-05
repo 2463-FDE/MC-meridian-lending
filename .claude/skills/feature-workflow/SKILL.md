@@ -12,6 +12,27 @@ This skill orchestrates three existing skills:
 - teeth — adversarial break-it review (run in Stage 5).
 - address-pr — resolve pasted review comments against the local branch (run only when the user returns with comments, Stage 10).
 
+## Project anchors (verify before you cite them)
+
+These are the concrete repo files and commands the stages below assume. Confirm each exists in the branch's own tree before relying on it (`git ls-files`, `ls`, `grep <target> Makefile`). If one is absent, say so and follow its fallback — never fabricate a path or a passing gate.
+
+- Base branch: `main`. Feature work happens on a feature branch off `main` (Stage 0).
+- ADRs: `adr/` at the repo root — sequential `NNNN-short-title.md` (highest existing is 0010+; increment it). NOT `docs/adr/`. If `adr/` is missing, ask the user where ADRs live before writing one.
+- Feature tracker: `feature-status-tracker.md` at the repo root (Stage 9). Create with a header row if absent.
+- Live stack: `make up` / `make down` / `make logs` / `make ps` (Stage 8). Portal on :3000, gateway on :8000. `make seed` re-applies seed data.
+- Tests: `make test` runs pytest across all 7 services (each `|| true`, never blocks). Per-service: `cd services/<svc> && python -m pytest -q`. Frontend: `cd frontend && npm run build && npm run lint`.
+- Prove gate: `make prove` (Stage 6/10 regression proof — rolls source to the parent commit, requires red-without-fix / green-with-fix). If the Makefile has no `prove` target on this branch, say so explicitly and skip the gate — it may be an uncommitted local addition; do NOT claim it passed.
+- Build invariants: `docs/build-invariants.md` (Stage 1 step 3a). May be ABSENT on a given branch (untracked). If missing, skip the build-invariants matrix expansion and note it — do not invent invariant kinds.
+- Chained skills: ship-thin, teeth, address-pr — invoked via the Skill tool, not shell commands.
+
+Grounding rule: any stage that names one of these must check its presence in the current tree first. A missing anchor is a "flag it and adapt" event, not a silent skip and not a fabricated path.
+
+## Which stages always run vs. only for regulated/money/PII/security changes
+
+Keep the core loop light. Run every time: Stage 0 (spec), Stage 1 steps 0–5 EXCEPT the matrix expansion, Stages 2–4, Stage 5 teeth, Stages 6–9. That is normal feature delivery.
+
+Run ONLY when the change touches a regulated, money-moving, PII, authz, or idempotency surface: Stage 1 **step 3a** (the guarantee-matrix cell tables and the `docs/build-invariants.md` kinds), and the deeper security passes teeth surfaces in Stage 5. Step 3a already gates itself — "If the feature triggers no guarantee matrix (pure-frontend tweak, copy/docs change, refactor with no regulated surface), state that and move on." A pure-UI or docs feature does the core loop and skips the security-matrix machinery entirely. Do not manufacture a matrix for a change that has no such surface.
+
 ## Stage 0 — Locate the spec (source of truth)
 
 1. Ask the user for the spec file path if not given. Read it fully. This file is authoritative for scope and acceptance.
@@ -25,7 +46,7 @@ This skill orchestrates three existing skills:
 1. Gap analysis: compare the spec's acceptance requirements against the current state of the code. For each requirement, identify the gap — what exists, what's missing, what must change. List gaps explicitly; a requirement with no gap is already satisfied and should be noted as such.
 2. Decision ledger: for each gap that has more than one reasonable way to close it, record an entry capturing the options considered, the tradeoffs of each, the option chosen, and a clear explanation of WHY it was chosen over the alternatives (e.g. fit with existing architecture, simplicity, performance, risk, consistency with the spec). One entry per non-trivial decision. This ledger is the reasoning record; the ADR in Stage 3 then locks the decisions it produced. Do not skip the "why" — an entry without a justification is incomplete.
 3. Produce an implementation plan: the changes by file/module across the full stack (frontend, API, data), the order of work, and the test strategy. Each plan item should trace to a gap from step 1 and, where applicable, a decision from the ledger in step 2.
-3a. Enumerate every guarantee matrix the feature triggers, HERE, as explicit plan work items — do not leave it to the teeth pass in Stage 5. For each guarantee the feature must uphold (authz, idempotency, new-field lifecycle, redaction/filter), write out the full cell table from the teeth skill's Phase 2.5 chain-completion rules: every entrypoint × identity/key scoping × payload binding × concurrency (authz: every regulated entrypoint × server-side identity × gateway-not-anonymous × ownership scoping). Every cell is a plan item. Then check `docs/build-invariants.md`: if the feature matches any **kind** there (ephemeral-credential, dual-store-atomicity, replay-determinism, crypto-material), paste that kind's matrix in as plan items too — those are the subsystems PR 7 hardened one property per review round, and they are not covered by the four guarantees above. The Stage 3 ADR then records a `Discharges build-invariants: <kinds>` line. This makes Stage 4 a checklist-drain instead of a discovery process, and makes Stage 5 teeth a verification of a full matrix instead of a serial discovery of a sparse one — that ordering is what collapses review rounds (PR 7 leaked 9 authz + 5 idempotency rounds because the cells were found after implementation, not before). If the feature triggers no guarantee matrix (e.g. a pure-frontend tweak, a copy or docs change, a refactor with no regulated/money/PII/idempotency surface), state that and move on — do not manufacture a matrix. This step is gated on a real guarantee being in play, not mandatory ceremony.
+3a. Enumerate every guarantee matrix the feature triggers, HERE, as explicit plan work items — do not leave it to the teeth pass in Stage 5. For each guarantee the feature must uphold (authz, idempotency, new-field lifecycle, redaction/filter), write out the full cell table from the teeth skill's Phase 2.5 chain-completion rules: every entrypoint × identity/key scoping × payload binding × concurrency (authz: every regulated entrypoint × server-side identity × gateway-not-anonymous × ownership scoping). Every cell is a plan item. Then check `docs/build-invariants.md` if it is present in the tree (see Project anchors — it may be absent; skip this step and note it when it is): if the feature matches any **kind** there (ephemeral-credential, dual-store-atomicity, replay-determinism, crypto-material), paste that kind's matrix in as plan items too — those are the subsystems PR 7 hardened one property per review round, and they are not covered by the four guarantees above. The Stage 3 ADR then records a `Discharges build-invariants: <kinds>` line. This makes Stage 4 a checklist-drain instead of a discovery process, and makes Stage 5 teeth a verification of a full matrix instead of a serial discovery of a sparse one — that ordering is what collapses review rounds (PR 7 leaked 9 authz + 5 idempotency rounds because the cells were found after implementation, not before). If the feature triggers no guarantee matrix (e.g. a pure-frontend tweak, a copy or docs change, a refactor with no regulated/money/PII/idempotency surface), state that and move on — do not manufacture a matrix. This step is gated on a real guarantee being in play, not mandatory ceremony.
 4. Map every plan item back to a spec requirement number. Anything in the plan not traceable to the spec is scope creep — flag it and drop it unless the user confirms.
 5. GATE: present the ship-thin Job + Cut list, the gap analysis, the decision ledger (with justifications), the plan, and the requirement traceability. Do not implement until the plan is coherent, covers every acceptance item, and adds nothing on the Cut list without justification.
 
@@ -38,7 +59,7 @@ This skill orchestrates three existing skills:
 ## Stage 3 — Lock decisions as an ADR
 
 1. For each significant or contested decision in the plan (architecture, data model, interface contract, tradeoff), write an ADR. Draw on the decision ledger from Stage 1 so the ADR's context and consequences reflect the options and reasoning already recorded.
-2. Write ADR files to docs/adr/ in the repo. Use sequential numbering (e.g. docs/adr/NNNN-short-title.md); check the existing highest number first and increment. Standard ADR format: Title, Status (Accepted), Context, Decision, Consequences.
+2. Write ADR files to adr/ at the repo root (see Project anchors — NOT docs/adr/). Use sequential numbering (e.g. adr/NNNN-short-title.md); check the existing highest number first and increment. Standard ADR format: Title, Status (Accepted), Context, Decision, Consequences.
 3. The ADR locks the decision: subsequent stages must not silently deviate from it. If implementation reveals an ADR was wrong, stop, amend the ADR explicitly, and note why — do not drift.
 4. GATE: ADR(s) written and committed before implementation starts.
 

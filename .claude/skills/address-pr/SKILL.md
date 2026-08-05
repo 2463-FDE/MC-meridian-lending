@@ -114,8 +114,10 @@ Enter this phase ONLY when the user gives you a PR URL and asks to poll/watch it
 
 Prerequisites: none beyond network access for a public repo — the GitHub REST API serves public PR reads unauthenticated (rate limit 60 req/hour per IP; one poll is ~3 calls, so 30-minute polling stays well under it). Use `curl` against `https://api.github.com`. Only reach for `gh` (which needs auth) if a GET returns 404/403 indicating the repo is private; if so, tell the user auth is required (`gh auth login`) and stop.
 
+Scheduling mechanism (what makes it recurring): the automatic 30-minute cadence is realized by the `ScheduleWakeup` tool, which is the dynamic-pacing primitive of the loop skill — it only fires when THIS session is running under a loop (e.g. the user launched via `/loop 30m /address-pr <url>`, or a loop is otherwise active). If `ScheduleWakeup` is not available in the session, poll mode is MANUAL: run exactly one cycle (6.1) each time the user re-invokes the skill on the PR URL, skip the auto-reschedule in 6.2, and tell the user to re-run when they want the next check. Do not claim a background timer is running when no scheduling primitive is present.
+
 State file (tracks which comments you have already surfaced, so a re-poll shows only new ones):
-`<scratchpad>/address-pr-seen-<pr-number>.txt` — one comment id per line. `<scratchpad>` is the session scratchpad directory. It persists across the 30-minute wakeups within this session.
+`<scratchpad>/address-pr-seen-<pr-number>.txt` — one comment id per line. `<scratchpad>` is the session scratchpad directory supplied by the harness (its absolute path is in the system prompt; substitute it, do not write the literal token). It persists across the 30-minute wakeups within a looped session; in manual mode it persists for as long as the session lives, and the same seen-set logic still de-dupes across re-invocations.
 
 ### 6.1 — One poll cycle
 
@@ -135,6 +137,8 @@ State file (tracks which comments you have already surfaced, so a re-poll shows 
 ### 6.2 — The 30-minute cadence
 
 To realize the 30-minute interval, after a clean cycle (no new comments, PR open) schedule the next poll with ScheduleWakeup: `delaySeconds: 1800`, and a prompt that re-enters this poll on the same PR URL. One scheduled wakeup at a time — do not stack timers. Stop rescheduling the moment the PR is merged/closed (6.1 step 2) or the user says stop.
+
+If ScheduleWakeup is unavailable (no active loop — see the Scheduling mechanism note above), do NOT pretend to reschedule: finish the cycle, tell the user the poll ran once and how to trigger the next one (re-invoke the skill on the same URL, or launch it under `/loop 30m` for hands-off polling), and stop. The seen-set state file already makes each manual re-run surface only genuinely new comments.
 
 ### 6.3 — Auto-triage the new comments
 

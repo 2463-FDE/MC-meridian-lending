@@ -54,5 +54,9 @@ rag_eval/eval_report.md
 
 # Claude Code local config: track the shared workflow skills the docs reference
 # (address-pr, teeth, feature-workflow, ship-thin); ignore personal/session state.
+# `!.claude/skills/` re-includes the directory (its children then track fine today);
+# `!.claude/skills/**` keeps nested skill files addable even if `.claude/*` is ever
+# broadened to `.claude/**` (a recursive ignore would otherwise re-exclude them).
 .claude/*
 !.claude/skills/
+!.claude/skills/**
