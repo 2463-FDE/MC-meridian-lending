@@ -163,8 +163,11 @@ export default function UnderwritingDetailPage() {
 
   // Per-application state reset. Every value below describes ONE application, so without
   // this the previous applicant's name, contact details, KYC rows, decision, assistant
-  // card, offer and boarded loan id stay on the next applicant's screen (PR review). The
-  // idempotency keys reset with them: a key identifies one attempt on one page.
+  // card, offer, boarded loan id and disclosure provenance stay on the next applicant's
+  // screen (PR review). The provenance block is the sharpest case: it renders a disclosed
+  // APR, a content fingerprint and the full disclosure -> offer -> decision -> applicant
+  // chain, so a stale one attributes one applicant's regulated disclosure to another.
+  // The idempotency keys reset with them: a key identifies one attempt on one page.
   //
   // This runs DURING render, not in an effect. A passive effect runs after the browser
   // paints, so the first commit for the new appId would pair the previous applicant's
@@ -184,6 +187,8 @@ export default function UnderwritingDetailPage() {
     setAssistant(null);
     setOffer(null);
     setBoardedLoanId(null);
+    setProvenance(null);
+    setRejectReason(REJECT_REASONS[0].value);
     setActionMsg(null);
     setActionErr(null);
     setActionBusy(false);
@@ -192,14 +197,20 @@ export default function UnderwritingDetailPage() {
   }
 
   // A 404 here means "no disclosure yet", which is the normal state before the pipeline
-  // has run — not an error worth showing.
+  // has run — not an error worth showing. Guarded by the route generation like every other
+  // async handler on this page: a disclosure fetch fired for the previous applicant must
+  // not land on this one's screen.
   const loadDisclosure = useCallback(async () => {
     if (!appId) return;
+    const gen = routeGenRef.current;
     try {
-      setProvenance(
-        (await apiGet(`/los/applications/${appId}/disclosure`)) as Provenance
-      );
+      const p = (await apiGet(
+        `/los/applications/${appId}/disclosure`
+      )) as Provenance;
+      if (routeGenRef.current !== gen) return;
+      setProvenance(p);
     } catch {
+      if (routeGenRef.current !== gen) return;
       setProvenance(null);
     }
   }, [appId]);
