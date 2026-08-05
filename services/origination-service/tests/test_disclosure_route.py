@@ -341,17 +341,47 @@ def test_read_document_returns_the_stored_document(client, lifecycle):
     ]
 
 
-def test_read_document_is_officer_only_unlike_read_disclosure(client, lifecycle):
-    """`read_disclosure` admits the owning borrower because the chain and the disclosed
-    figures are theirs. This returns the BODY, and a held draft's body reaching the borrower
-    is exactly what the compliance hold — and `generate_disclosure`'s officer-only posture —
-    exists to prevent. The fixture stubs require_officer_or_owner, not require_officer, so a
-    route that took the weaker check would pass here."""
+def test_a_borrower_cannot_read_a_draft_document(client, lifecycle):
+    """A held draft's body reaching the borrower is exactly what the compliance hold — and
+    `generate_disclosure`'s officer-only posture — exists to prevent. The fixture's default
+    status is `draft`, so an owning borrower is refused (404, not confirming a draft body
+    exists) and the document read is never made — only the chain read that resolves status."""
     sent, _ = lifecycle
     response = client.get("/applications/1/disclosure/document", headers=BORROWER)
 
-    assert response.status_code == 403
-    assert sent["gets"] == [], "must not reach disclosure-service at all"
+    assert response.status_code == 404
+    assert "no delivered disclosure document" in response.json()["detail"]
+    assert sent["gets"] == ["/applications/1/disclosure/provenance"], (
+        "must resolve status but never fetch the draft body"
+    )
+
+
+def test_a_borrower_can_read_the_delivered_document(client, lifecycle):
+    """Once delivered, the borrower must be able to read the immutable document they are
+    accepting: the `delivered` flag the boarding guard trusts has to be backed by an artifact
+    the borrower can actually see, not just a status. Delivery is terminal and frozen, so the
+    chain's status is authoritative for this gate. Without the fix the route took the
+    officer-only check and this 403s."""
+    sent, state = lifecycle
+    state["chain"] = {**COMPLETE_CHAIN, "disclosure_status": "delivered"}
+    response = client.get("/applications/1/disclosure/document", headers=BORROWER)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == STORED_DOCUMENT
+    assert sent["gets"] == [
+        "/applications/1/disclosure/provenance",
+        "/disclosures/5/document",
+    ]
+
+
+def test_an_officer_can_read_a_draft_document(client, lifecycle):
+    """The officer reviewing the hold reads the draft body — that is what the delivered-only
+    gate must NOT block. The fixture's default status is `draft`."""
+    sent, _ = lifecycle
+    response = client.get("/applications/1/disclosure/document", headers=OFFICER)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == STORED_DOCUMENT
 
 
 def test_read_document_resolves_the_disclosure_id_server_side(client, lifecycle):

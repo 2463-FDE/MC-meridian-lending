@@ -261,29 +261,48 @@ def read_disclosure(
 def read_disclosure_document(
     app_id: int,
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    x_application_token: str | None = Header(default=None, alias="X-Application-Token"),
 ):
-    """The stored borrower-facing document, for the officer reviewing it (spec D6).
+    """The stored borrower-facing document (spec D6).
 
-    Officer-only, and for the same reason `generate_disclosure` is: this returns the
-    document BODY, and a draft body reaching the borrower is what the compliance hold exists
-    to prevent. `read_disclosure` above stays officer-or-owner because the chain and the
-    disclosed figures are the borrower's to see; the held document is not, until an officer
-    releases it.
+    Officer, owner, or token-holder — but a NON-officer may read only a DELIVERED document.
+    A draft body stays officer-only: releasing it to the borrower is exactly what the
+    compliance hold exists to prevent, the same reason `generate_disclosure` is officer-only.
+    Once delivered, the borrower must be able to read the immutable document they are being
+    asked to accept — the `delivered` flag that the boarding guard trusts has to be backed by
+    an artifact the borrower can actually see, not merely a status the borrower is told about
+    (house rule: every consumer of that flag re-checks the artifact, and the borrower is the
+    consumer who acts on delivery by accepting). Delivery is terminal and frozen
+    (`trg_disclosures_freeze_delivered`), so the status the chain reports is authoritative for
+    this gate.
 
     Exists because the body used to be readable only in the generating call's response. The
     officer who approves or delivers is a different session — a different person, under
-    maker-checker — so without this route the reviewer approved a document they had no way
-    to open, and delivery recorded a flag over content nobody had read.
+    maker-checker — so without this route the reviewer approved a document they had no way to
+    open, and delivery recorded a flag over content nobody had read.
 
-    The disclosure id is resolved from the application server-side, same as the transition
-    route: that is what binds the read to the application the caller was authorized for.
+    The disclosure id and status are resolved from the application server-side, same as the
+    transition route: that is what binds the read to the application the caller was authorized
+    for.
     """
-    authz.require_officer(x_user_role)
+    authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
     chain = _read_chain(app_id)
     disclosure_id = chain.get("disclosure_id")
     if not disclosure_id:
         raise HTTPException(
             status_code=404, detail="no disclosure for this application"
+        )
+    # Drafts stay officer-only; a borrower/token-holder reads only the DELIVERED body. 404,
+    # not 403: an owner asking before delivery gets the same "not available yet" answer the
+    # applicant UI already fails closed on, and it never confirms a draft body exists.
+    if (
+        not authz.is_officer(x_user_role)
+        and chain.get("disclosure_status") != "delivered"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="no delivered disclosure document for this application",
         )
     return _downstream("GET", f"/disclosures/{disclosure_id}/document")
 

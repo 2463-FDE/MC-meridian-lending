@@ -133,6 +133,22 @@ interface Disclosure {
   }[];
 }
 
+// The immutable borrower-facing document the officer delivered (spec D4). Only readable
+// once the disclosure is DELIVERED (the server keeps a draft body officer-only); prose
+// fields are digit-free by contract, figures are the disclosed strings.
+interface DisclosureDocument {
+  heading: string;
+  figures: {
+    apr: string;
+    finance_charge: string;
+    amount_financed: string;
+    total_of_payments: string;
+    monthly_payment: string;
+  };
+  payment_terms: string;
+  prepayment: string;
+}
+
 function errMsg(err: unknown, fallback: string): string {
   if (err && typeof err === "object" && "detail" in err) {
     return String((err as { detail: unknown }).detail) || fallback;
@@ -177,7 +193,12 @@ export default function ApplyPage() {
   // 1026.17(b); the server refuses to board without it). The applicant therefore sees a
   // pending state here rather than a 409 on the last click. A 404 from this read means no
   // disclosure exists yet, which is the normal state right after an offer.
-  const [disclosureDelivered, setDisclosureDelivered] = useState(false);
+  // The delivered document itself, not just the fact of delivery: the borrower must be able
+  // to read the immutable TILA document before accepting, so acceptance gates on having
+  // fetched it (null = not yet deliverable/readable), not on a bare status flag.
+  const [deliveredDoc, setDeliveredDoc] = useState<DisclosureDocument | null>(
+    null
+  );
   const [checkingDisclosure, setCheckingDisclosure] = useState(false);
 
   // Resume a submitted application after a refresh / tab close: the continuation token was
@@ -402,11 +423,23 @@ export default function ApplyPage() {
       const chain = (await apiGet(
         `/los/applications/${app.app_id}/disclosure`
       )) as { disclosure_status?: string | null };
-      setDisclosureDelivered(chain?.disclosure_status === "delivered");
+      if (chain?.disclosure_status !== "delivered") {
+        setDeliveredDoc(null);
+        return;
+      }
+      // Delivered: fetch the immutable borrower-facing document so the applicant reads what
+      // they are accepting. The server serves this to the owner ONLY once delivered (a draft
+      // body stays officer-only), so a success here is itself the delivery evidence the
+      // accept gate needs. Any failure (404/transport) leaves it held — fail closed.
+      const doc = (await apiGet(
+        `/los/applications/${app.app_id}/disclosure/document`
+      )) as DisclosureDocument;
+      setDeliveredDoc(doc);
     } catch {
-      // 404 (no disclosure yet) and any transport failure both mean "not known delivered".
-      // Fail closed: the button stays held rather than inviting a click the server refuses.
-      setDisclosureDelivered(false);
+      // 404 (no disclosure / not yet delivered) and any transport failure all mean "not
+      // readable as delivered". Fail closed: the button stays held rather than inviting a
+      // click the server refuses.
+      setDeliveredDoc(null);
     } finally {
       setCheckingDisclosure(false);
     }
@@ -772,7 +805,7 @@ export default function ApplyPage() {
                     onAccept={acceptOffer}
                     busy={busy}
                     acceptedLoanId={acceptedLoanId}
-                    disclosureDelivered={disclosureDelivered}
+                    deliveredDoc={deliveredDoc}
                     checkingDisclosure={checkingDisclosure}
                     onRefreshDisclosure={refreshDisclosureStatus}
                   />
@@ -881,7 +914,7 @@ function OfferPanel({
   onAccept,
   busy,
   acceptedLoanId,
-  disclosureDelivered,
+  deliveredDoc,
   checkingDisclosure,
   onRefreshDisclosure,
 }: {
@@ -893,7 +926,7 @@ function OfferPanel({
   onAccept: () => void;
   busy: boolean;
   acceptedLoanId: string | number | null;
-  disclosureDelivered: boolean;
+  deliveredDoc: DisclosureDocument | null;
   checkingDisclosure: boolean;
   onRefreshDisclosure: () => void;
 }) {
@@ -992,10 +1025,26 @@ function OfferPanel({
             Go to your loan account →
           </Link>
         </div>
-      ) : disclosureDelivered ? (
-        <button style={{ marginTop: 16 }} onClick={onAccept} disabled={busy}>
-          {busy ? "Accepting…" : "Accept offer"}
-        </button>
+      ) : deliveredDoc ? (
+        // The immutable document the officer delivered, shown BEFORE acceptance so the
+        // borrower reads what they are accepting — not just a "delivered" status. Prose
+        // fields are digit-free by contract; the figures are the disclosed strings.
+        <div style={{ marginTop: 20 }}>
+          <div className="tila">
+            <div className="tila-title">{deliveredDoc.heading}</div>
+            <div style={{ padding: "12px 16px" }}>
+              <p style={{ margin: "0 0 10px" }}>{deliveredDoc.payment_terms}</p>
+              <p style={{ margin: 0 }}>{deliveredDoc.prepayment}</p>
+            </div>
+          </div>
+          <p className="hint" style={{ marginTop: 10 }}>
+            This Truth-in-Lending disclosure has been delivered to you. Review it
+            before accepting.
+          </p>
+          <button style={{ marginTop: 8 }} onClick={onAccept} disabled={busy}>
+            {busy ? "Accepting…" : "Accept offer"}
+          </button>
+        </div>
       ) : (
         // Held, not broken: the disclosure above has to be formally delivered before the
         // loan can be booked, and that is a step on our side. Say so, and give a way to
