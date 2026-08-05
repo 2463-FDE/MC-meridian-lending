@@ -1,11 +1,17 @@
 """Pydantic request/response models for the LOS API."""
 
 import re
+from datetime import date
 from typing import Generic, Optional, TypeVar
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 T = TypeVar("T")
+
+# Earliest DOB accepted. Postgres DATE reaches year 294276 and Python's date stops at
+# 9999, so an out-of-range year is not merely implausible data -- it is unreadable data
+# (see _validate_dob). 1900 is the floor because no lending applicant predates it.
+_DOB_MIN_YEAR = 1900
 
 # 9 bare digits or fully-dashed ###-##-####, nothing else. The alternation forces the
 # dashes all-or-nothing: an independently-optional \d{3}-?\d{2}-?\d{4} would accept
@@ -24,6 +30,16 @@ _SSN_RE = re.compile(r"^(?:\d{9}|\d{3}-\d{2}-\d{4})$")
 # redactor's own pattern makes every accepted value one the redactor can mask, holding
 # the boundary invariant that junk does not pass.
 _PHONE_RE = re.compile(r"^\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}$")
+
+# Canonical YYYY-MM-DD only. date.fromisoformat is NOT a shape check: since Python 3.11 it
+# accepts most of ISO 8601, including the basic form "19900422" and week dates "2021-W01-1"
+# / "1990-W01". _validate_dob returns the raw string, so those reach the applicants.dob
+# DATE column verbatim -- Postgres coerces the basic form (storing a value that never
+# matched the documented shape) and rejects the week form with "invalid input syntax for
+# type date", which surfaces as a 500 inside the intake transaction instead of a 422 (PR
+# review). Gate on the shape first so only the shape the error message and the apply form
+# promise can reach fromisoformat.
+_DOB_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class ApplicationIn(BaseModel):
@@ -63,6 +79,57 @@ class ApplicationIn(BaseModel):
         v = v.strip()
         if v and not _SSN_RE.match(v):
             raise ValueError("ssn must be 9 digits, optionally as ###-##-####")
+        return v
+
+    @field_validator("dob")
+    @classmethod
+    def _validate_dob(cls, v: Optional[str]) -> Optional[str]:
+        # Optional: entity applicants carry an EIN and no DOB (see _entity_requires_ein),
+        # so only a present, non-blank value is checked.
+        #
+        # This is a READ-PATH availability guard, not just input hygiene. `applicants.dob`
+        # is a Postgres DATE, which accepts years up to 294276, but Python's `date` stops
+        # at 9999 -- so a year outside that range stores fine and then raises
+        # `ValueError: year N is out of range` when SQLAlchemy builds the Python object.
+        # That happens during row hydration, so it takes down `GET /los/applications` --
+        # the whole officer queue, for every officer, over ONE bad row -- not merely the
+        # application that carries it. A typed "21990-04-22" in the apply form's native
+        # date input did exactly this. Reject at the boundary so an unreadable date can
+        # never reach storage.
+        #
+        # NORMALIZE by returning the stripped value, matching the ssn/phone validators:
+        # date.fromisoformat rejects surrounding whitespace outright, so stripping first
+        # keeps " 1990-04-22 " accepted while ensuring only a canonical ISO date is stored.
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            # Blank means absent, not malformed -- dob is optional (entity applicants carry
+            # an EIN instead). Return None so it lands as SQL NULL: an empty string reaches
+            # the applicants.dob DATE column as "" and Postgres raises "invalid input syntax
+            # for type date", which is a 500 inside the intake transaction rather than the
+            # 422 this validator exists to produce (PR review). None is also what the KYC
+            # call already expects for a missing DOB (routers/applications.py::run_kyc).
+            return None
+        if not _DOB_RE.fullmatch(v):
+            # Shape gate ahead of fromisoformat: rejects the 5-digit year, a 3-digit year,
+            # single-digit month/day, and the ISO variants fromisoformat would otherwise
+            # accept and hand on unnormalized (see _DOB_RE).
+            raise ValueError("dob must be a calendar date as YYYY-MM-DD")
+        try:
+            parsed = date.fromisoformat(v)
+        except ValueError:
+            # Right shape, impossible date: month 13, February 30. The DATE column would
+            # reject these too, but as a 500 rather than a 422.
+            raise ValueError("dob must be a calendar date as YYYY-MM-DD") from None
+        if parsed.year < _DOB_MIN_YEAR:
+            raise ValueError(f"dob year must be {_DOB_MIN_YEAR} or later")
+        if parsed > date.today():
+            raise ValueError("dob cannot be in the future")
+        # Deliberately NOT enforcing the minimum age here. `policies/underwriting_guidelines.md`
+        # sets it at 18, but that is an eligibility decision the underwriting path owns --
+        # rejecting a 17-year-old as a malformed request would report a policy outcome as a
+        # format error and skip the adverse-action record it deserves.
         return v
 
     @field_validator("phone")

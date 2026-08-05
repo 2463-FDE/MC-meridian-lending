@@ -64,6 +64,14 @@ const PURPOSES = [
 
 const OFFER_RATE_PCT = 7.99;
 
+// Mirrors schemas.py::_DOB_MIN_YEAR. Bounds the native date picker so its year spinner
+// cannot reach a value Python's date type can't represent.
+const DOB_MIN = "1900-01-01";
+
+function todayISO(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 interface FormState {
   name: string;
   dob: string;
@@ -215,6 +223,14 @@ export default function ApplyPage() {
     if (s === 1) {
       if (!form.name.trim()) e.name = "Required";
       if (!form.dob) e.dob = "Required";
+      // A native date input still emits a typed 5-digit year ("21990-04-22"), which the
+      // DATE column stores and the officer queue then chokes on. Mirror the server rule
+      // (schemas.py::_validate_dob) so the applicant is told here instead of getting a
+      // 422 at submit; the server check is the enforced one.
+      else if (!/^\d{4}-\d{2}-\d{2}$/.test(form.dob))
+        e.dob = "Enter a date as YYYY-MM-DD";
+      else if (form.dob < DOB_MIN || form.dob > todayISO())
+        e.dob = `Enter a date between ${DOB_MIN} and today`;
       if (!form.ssn.trim()) e.ssn = "Required";
       else if (!/^\d{3}-?\d{2}-?\d{4}$/.test(form.ssn.trim()))
         e.ssn = "Enter a valid SSN (###-##-####)";
@@ -404,6 +420,8 @@ export default function ApplyPage() {
               <Field label="Date of birth" error={errors.dob}>
                 <input
                   type="date"
+                  min={DOB_MIN}
+                  max={todayISO()}
                   value={form.dob}
                   onChange={(e) => set("dob", e.target.value)}
                 />
