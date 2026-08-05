@@ -125,9 +125,29 @@ echo 'Nothing cited here.' > "$r/docs/fixture.md"
 printf 'docs/spec-payments-week5.md\n' > "$r/scripts/doc_path_lint_allow.txt"
 check "unused allowlist entry is not an error" 0 "$r" 'OK: every backticked'
 
-# --- 9. an absent doc is reported as SKIPPED, not silently passed ---------
-r=$(new_repo)   # no docs/fixture.md written
-check "absent doc reported SKIPPED" 0 "$r" 'NOT checked:.*docs/fixture\.md'
+# --- 9. an absent doc: SKIPPED if optional, FAIL if required ---------------
+# The required/optional split. An OPTIONAL doc (CLAUDE.md / docs/kb.md are untracked
+# on every branch, so CI checks out neither) is reported SKIPPED and passes. A
+# REQUIRED doc — any explicit argument, or the tracked README.md — that is absent
+# FAILS: a rename, deletion, or typo'd invocation cannot turn the gate green over a
+# doc whose path claims were never checked.
+r=$(new_repo)   # CLAUDE.md not written -> absent + optional
+out=$(cd "$r" && "$SCRIPT" CLAUDE.md 2>&1); got=$?
+if [ "$got" -eq 0 ] && printf '%s\n' "$out" | grep -qE 'NOT checked:.*CLAUDE\.md'; then
+  echo "ok    absent OPTIONAL doc reported SKIPPED"; pass=$((pass + 1))
+else
+  echo "FAIL  absent OPTIONAL doc reported SKIPPED — exit $got, wanted 0"
+  printf '%s\n' "$out" | sed 's/^/        /'; fail=$((fail + 1))
+fi
+
+r=$(new_repo)   # docs/fixture.md is a required explicit arg and does not exist
+out=$(cd "$r" && "$SCRIPT" docs/fixture.md 2>&1); got=$?
+if [ "$got" -eq 1 ] && printf '%s\n' "$out" | grep -qE 'MISSING REQUIRED DOC.*docs/fixture\.md'; then
+  echo "ok    absent REQUIRED doc fails"; pass=$((pass + 1))
+else
+  echo "FAIL  absent REQUIRED doc fails — exit $got, wanted 1"
+  printf '%s\n' "$out" | sed 's/^/        /'; fail=$((fail + 1))
+fi
 
 # --- 10. a directory reference resolves -----------------------------------
 r=$(new_repo)

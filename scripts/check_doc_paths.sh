@@ -71,6 +71,22 @@ resolves() {  # $1 candidate -> 0 if it names a real file/dir in this tree
 DOCS=("$@")
 [ ${#DOCS[@]} -eq 0 ] && DOCS=("README.md" "CLAUDE.md" "docs/kb.md")
 
+# Docs whose ABSENCE is tolerated (reported SKIPPED, not a failure). Every other
+# requested doc — the tracked README.md, or any explicit argument — MUST exist:
+# a rename, deletion, or a typo'd invocation then FAILS the gate instead of turning
+# it into an unconditional green (a doc absent from the tree has none of its path
+# claims checked). CLAUDE.md and docs/kb.md are untracked on every branch today, so
+# CI checks out neither and reports them SKIPPED; the PR that tracks them makes them
+# present in the tree, at which point they are checked like README.md — this list is
+# about ABSENCE, so it does not weaken that transition.
+OPTIONAL_DOCS=("CLAUDE.md" "docs/kb.md")
+
+is_optional() {  # $1 doc -> 0 if its absence is tolerated (SKIPPED, not FAIL)
+  local d
+  for d in "${OPTIONAL_DOCS[@]}"; do [ "$1" = "$d" ] && return 0; done
+  return 1
+}
+
 extract() {  # $1 = doc file -> unique inline-backtick candidates, one per line
   awk '/^[[:space:]]*```/{f=!f; next} !f{print}' "$1" \
     | grep -oE '`[^`]+`' \
@@ -96,15 +112,23 @@ is_pathish() {  # $1 candidate -> 0 if it looks like a literal repo path we can 
 total_absent=0
 absent_rows=""
 skipped_docs=""
+missing_required=""
 
 printf '%-16s %7s %7s %8s\n' "DOC" "PATHS" "ABSENT" "ALLOWED"
 printf '%-16s %7s %7s %8s\n' "----------------" "-----" "------" "-------"
 for doc in "${DOCS[@]}"; do
   if [ ! -f "$doc" ]; then
-    # Not present in this tree, so none of its claims were verified. Named in the
-    # summary below so a green run is never read as "every doc was checked".
-    printf '%-16s %7s %7s %8s\n' "$doc" "-" "-" "SKIPPED"
-    skipped_docs+=" $doc"
+    if is_optional "$doc"; then
+      # Absence tolerated (untracked on purpose). None of its claims were verified;
+      # named in the summary so a green run is never read as "every doc was checked".
+      printf '%-16s %7s %7s %8s\n' "$doc" "-" "-" "SKIPPED"
+      skipped_docs+=" $doc"
+      continue
+    fi
+    # A required doc is absent — every path it should have checked goes unchecked.
+    # Fail rather than pass green, so a rename/deletion/typo cannot bypass the gate.
+    printf '%-16s %7s %7s %8s\n' "$doc" "-" "-" "ABSENT"
+    missing_required+=" $doc"
     continue
   fi
   n=0; a=0; k=0
@@ -122,6 +146,18 @@ for doc in "${DOCS[@]}"; do
   done < <(extract "$doc")
   printf '%-16s %7d %7d %8d\n' "$doc" "$n" "$a" "$k"
 done
+
+# A required doc absent from the tree checked NONE of its path claims. Fail loudly
+# rather than let a SKIPPED row read as a pass — that is the whole bypass this gate
+# would otherwise have: a renamed/deleted/typo'd doc turning the check green.
+if [ -n "$missing_required" ]; then
+  echo ""
+  echo "MISSING REQUIRED DOC — a doc that must exist is absent from this tree:$missing_required"
+  echo "FAIL: required doc absent, so none of its backticked paths were checked. Restore" >&2
+  echo "the doc, fix a typo'd invocation, or add it to OPTIONAL_DOCS only if its absence" >&2
+  echo "is genuinely intended." >&2
+  exit 1
+fi
 
 # An exemption for a path that now resolves is a stale claim about the tree. Fail so
 # it gets deleted rather than accumulating into a list nobody trusts.
