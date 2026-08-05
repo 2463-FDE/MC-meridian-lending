@@ -525,6 +525,15 @@ ADR 0012 can be written once, from a record of what was actually weighed.
    rather than as a second trigger in *Out of Scope* so one event has one statement of what it
    changes.
 
+   *Followup PR (flagged in Week 4 review):* a reviewer traced the delivery transition and
+   confirmed `delivered` records a released document but not its transport — no recipient/
+   channel/receipt evidence and no borrower read path to `document_body`, so boarding gates on
+   document presence rather than a delivery event. This is the stubbed-transport state above,
+   not a regression. Curing it is deferred to its own PR because it is a schema + API change
+   (the `delivered_at`-as-FK delivery-event model, a borrower-authenticated document read, and
+   moving the boarding gate onto delivery evidence) that warrants its own review and test
+   surface rather than riding this branch. Tracked so it is not lost.
+
 4. **Ruleset — SETTLED: property, not node.** Version strings (`fee_schedule_version`,
    `apr_method_version`) on the disclosure row, plus a versioned committed policy file. Content
    is recoverable from git by version; integrity is covered by `content_fingerprint`. A
