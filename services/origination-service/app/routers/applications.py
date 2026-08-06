@@ -686,7 +686,14 @@ def accept_offer(
         # before that guard existed can carry the divergence over a frozen `delivered` row, so
         # boarding re-checks here on the money path's own query rather than trusting the flag.
         "o.decision_event_id AS offer_decision_event_id, "
-        "ds.decision_event_id AS disclosure_decision_event_id "
+        "ds.decision_event_id AS disclosure_decision_event_id, "
+        # The outcome of the decision the REGULATED disclosure cites, read on the money
+        # path's own query. disclosure-service now refuses to create a disclosure whose
+        # decision_event_id did not approve, but a back-book row written before that guard
+        # can carry a same-application deny/refer edge over a frozen `delivered` row that is
+        # now unrepairable (trg_disclosures_freeze_delivered), so boarding re-checks here
+        # rather than trust the create-time gate — same posture as the split-brain guard.
+        "dde.outcome AS disclosure_decision_outcome "
         "FROM applications a "
         "LEFT JOIN applicants ap ON ap.id = a.applicant_id "
         "LEFT JOIN decisions d ON d.app_id = a.id "
@@ -696,6 +703,8 @@ def accept_offer(
         # app_id would let a delivered disclosure for some other offer authorize boarding
         # a different one. uq_disclosures_offer keeps this at most one row per offer.
         "LEFT JOIN disclosures ds ON ds.offer_id = o.id "
+        # The disclosure's OWN decision edge, to read its outcome for the guard above.
+        "LEFT JOIN decision_events dde ON dde.id = ds.decision_event_id "
         "WHERE a.id = %s ORDER BY o.id DESC",
         (app_id,),
     )
@@ -799,6 +808,25 @@ def accept_offer(
                 detail=(
                     "the delivered TILA disclosure's decision edge does not match the "
                     "offer being boarded; refusing to board a split-brain provenance chain"
+                ),
+            )
+        # Non-approving decision guard (defense in depth, mirrors disclosure-service's
+        # create-path refusal). A disclosure whose OWN decision edge names a deny/refer
+        # event is a regulated chain the provenance view still reports complete — boarding
+        # such a loan funds it over an audit trail that says it was not approved. Gated on
+        # the edge being present, exactly like the split-brain check: a NULL edge is a legacy
+        # partial chain the delivered/document guards above already keep out of the money
+        # step, not a divergence to judge here. `decisions.outcome` (checked at line 705) is
+        # the mutable current-state rollup; this is the append-only event the record cites.
+        if (
+            record_edge is not None
+            and (r.get("disclosure_decision_outcome") or "").lower() != "approve"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "the delivered TILA disclosure cites a non-approving decision; "
+                    "refusing to board a loan over an unapproved provenance chain"
                 ),
             )
         # Servicing amortizes at the NOTE rate, not the APR (spec D1): derive it from the

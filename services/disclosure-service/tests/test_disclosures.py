@@ -84,6 +84,7 @@ class StubSession:
         consummated=False,
         update_rowcount=1,
         decision_event_app_id=_UNSET,
+        decision_event_outcome="approve",
         winner=None,
         commit_error=None,
     ):
@@ -102,6 +103,9 @@ class StubSession:
         # that don't care about the identity check are unaffected. Pass an explicit
         # app_id (or None, for "no such decision event") to exercise it.
         self.decision_event_app_id = decision_event_app_id
+        # Default: the event approved this offer, so tests that don't care about the outcome
+        # gate are unaffected. Pass 'deny'/'refer'/'counteroffer' to exercise it.
+        self.decision_event_outcome = decision_event_outcome
         self.statements = []
         self.added = []
         self.commits = 0
@@ -125,7 +129,9 @@ class StubSession:
                 if self.decision_event_app_id is not _UNSET
                 else (self.offer.app_id if self.offer is not None else None)
             )
-            return StubResult(None if app_id is None else (app_id,))
+            return StubResult(
+                None if app_id is None else (app_id, self.decision_event_outcome)
+            )
         return StubResult(self.provenance_row)
 
     def get(self, model, _pk):
@@ -244,6 +250,29 @@ def test_accepts_the_decision_event_the_offer_itself_cites(client):
     )
     assert response.status_code == 201, response.text
     assert session.added[0].decision_event_id == 7
+
+
+@pytest.mark.parametrize("outcome", ["deny", "refer", "counteroffer"])
+def test_refuses_a_decision_event_that_did_not_approve(client, outcome):
+    """A disclosure is a regulated artifact for an APPROVED decision only. The FK proves the
+    event exists and the identity checks prove it belongs to this offer, but a same-offer
+    `deny`/`refer` event would still mint a chain the provenance view reports complete.
+    The event here is the very one the offer cites (edge=7, supplied=7, same application), so
+    the ONLY reason to refuse is its non-approving outcome — re-enforced at this boundary,
+    not trusted to `create_offer`."""
+    session = _with_session(
+        StubSession(offer=_offer(decision_event_id=7), decision_event_outcome=outcome)
+    )
+    response = client.post(
+        "/disclosures",
+        json=_inputs(decision_event_id=7),
+        headers={"X-Internal-Service": TOKEN},
+    )
+    assert response.status_code == 409, response.text
+    assert "approve" in response.text.lower()
+    assert session.added == [], (
+        "must not persist a disclosure citing a non-approving decision"
+    )
 
 
 def test_persists_minor_units_derived_from_inputs(client):

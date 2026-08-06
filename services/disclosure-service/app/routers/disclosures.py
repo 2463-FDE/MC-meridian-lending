@@ -120,7 +120,7 @@ def create_disclosure(
             session.commit()
         return _disclosure_out(existing)
 
-    _refuse_if_decision_event_mismatched(session, body.decision_event_id, offer)
+    _refuse_if_decision_event_invalid(session, body.decision_event_id, offer)
 
     schedule = rules.get_fee_schedule()
     payment = apr_mod.monthly_payment(
@@ -686,23 +686,32 @@ def _close_provenance_edge(offer: models.Offer, decision_event_id: int | None) -
     return True
 
 
-_DECISION_EVENT_APP_SQL = text(
-    "SELECT app_id FROM decision_events WHERE id = :decision_event_id"
+_DECISION_EVENT_SQL = text(
+    "SELECT app_id, outcome FROM decision_events WHERE id = :decision_event_id"
 )
 
 
-def _refuse_if_decision_event_mismatched(
+def _refuse_if_decision_event_invalid(
     session: Session, decision_event_id: int, offer: models.Offer
 ) -> None:
-    """The FK proves `decision_event_id` exists; it does not prove it is THIS offer's.
+    """The FK proves `decision_event_id` exists; it does not prove it APPROVED this offer.
 
-    Without this, any internal caller supplying a valid-but-wrong-applicant decision
-    event mints a disclosure whose provenance view reports `chain_complete: true` —
-    indistinguishable from a correct chain, and worse than the partial-chain case the
-    view already handles, because it is silent rather than flagged.
+    Without this, any internal caller supplying a valid-but-wrong-applicant OR a
+    valid-but-non-approving decision event mints a disclosure whose provenance view
+    reports `chain_complete: true` — indistinguishable from a correct chain, and worse
+    than the partial-chain case the view already handles, because it is silent rather
+    than flagged.
 
-    Two checks, because same-application is the weaker of the two. An offer that carries its
-    own authorizing event (written by `create_offer` since this change) must be disclosed
+    Three checks against the event's own row, read once. The outcome gate comes first and
+    is unconditional: a disclosure is a regulated artifact for an APPROVED decision only,
+    so a same-application `deny`/`refer`/`counteroffer` event must be refused even when it
+    is the very event the offer cites. `create_offer` already refuses to mint an offer for
+    a non-approve decision, but that is the caller — re-enforce it at THIS persistence
+    boundary rather than trust it, because the offer's stored edge is closed from whatever
+    was latest and a legacy offer carries no edge at all.
+
+    The two identity checks follow, because same-application is the weaker of them. An offer
+    that carries its own authorizing event (written by `create_offer`) must be disclosed
     against THAT event: `decision_events` is append-only and a re-decision adds a row, so
     the latest event for an application is not necessarily the one that authorized an offer
     made earlier — and `uq_offers_app` means the offer is never regenerated under the newer
@@ -710,6 +719,29 @@ def _refuse_if_decision_event_mismatched(
     still reporting `chain_complete: true`. An offer with no edge predates this and falls
     back to the same-application check, which is all its data supports.
     """
+    row = session.execute(
+        _DECISION_EVENT_SQL, {"decision_event_id": decision_event_id}
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="decision event not found")
+    event_app_id, outcome = row[0], row[1]
+
+    if (outcome or "").lower() != "approve":
+        log.error(
+            "refusing disclosure for offer_id=%s: decision_event_id=%s outcome=%s is not "
+            "an approval",
+            offer.id,
+            decision_event_id,
+            outcome,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "decision_event_id did not approve this offer "
+                f"(outcome={outcome!r}); refusing to persist"
+            ),
+        )
+
     if offer.decision_event_id is not None:
         if decision_event_id != offer.decision_event_id:
             log.error(
@@ -728,18 +760,13 @@ def _refuse_if_decision_event_mismatched(
             )
         return
 
-    row = session.execute(
-        _DECISION_EVENT_APP_SQL, {"decision_event_id": decision_event_id}
-    ).first()
-    if row is None:
-        raise HTTPException(status_code=404, detail="decision event not found")
-    if row[0] != offer.app_id:
+    if event_app_id != offer.app_id:
         log.error(
             "refusing disclosure for offer_id=%s: decision_event_id=%s belongs to "
             "app_id=%s, not this offer's app_id=%s",
             offer.id,
             decision_event_id,
-            row[0],
+            event_app_id,
             offer.app_id,
         )
         raise HTTPException(
