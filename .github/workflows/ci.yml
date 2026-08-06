@@ -523,5 +523,31 @@ jobs:
       - name: Backticked doc paths resolve in this tree
         run: ./scripts/check_doc_paths.sh
 
+  docs-drift-tests:
+    # BLOCKING, like doc-path-lint-tests. Hermetic — each case builds a throwaway git
+    # repo in $TMPDIR — so it asserts the gate's own logic, never the state of the docs.
+    # The load-bearing case is `banned claim fails`: an emptied BANNED list or a typo'd
+    # regex would make docs-drift below pass unconditionally, and this is the only thing
+    # standing between that gate and one that is green over any lie.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check_doc_claims.sh tests
+        run: ./scripts/test_check_doc_claims.sh
+
+  docs-drift:
+    # BLOCKING. README.md/CLAUDE.md/docs/kb.md are the platform's authoritative prose;
+    # the seed README claimed "PCI-DSS compliant (cardholder data encrypted)" while
+    # payment-service stores PAN+CVV in plaintext, and told the reader "the real .env is
+    # already in the repo" (false and unsafe — secret-scan blocks a tracked .env). This
+    # refuses a FIXED list of known-false claims. It is not a semantic reviewer: it checks
+    # banned literals only, the companion to doc-path-lint's path-existence check. Extend
+    # the list when a claim is retired; delete an entry only when its claim becomes true.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No banned compliance/safety claims in the authoritative docs
+        run: ./scripts/check_doc_claims.sh
+
   # GAP: no dependency audit, no SAST, no container image scan.
   # GAP: backend tests are continue-on-error, so failing money-math tests are green.

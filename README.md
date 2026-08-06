@@ -1,6 +1,9 @@
 # Meridian Lending Platform
 
-> **SOC 2 Type II / SOX-controlled. Cardholder data is encrypted and we are PCI-DSS compliant. Every credit decision is audited.**
+> **Brownfield platform under active remediation.** Card data (PAN/CVV) is currently
+> stored in plaintext, so the payment path is **not** compliant with PCI-DSS — tracked as
+> open debt (ADR 0003; tokenization is the week-5 plan). Credit decisions are recorded to
+> an append-only decision log.
 
 The Meridian Lending Co. loan origination + servicing platform. Originally delivered by
 Halcyon Software Group (now dissolved) as **three** backend services — `gateway`,
@@ -57,7 +60,7 @@ servicing schema. After a charge is captured, `payment-service` calls servicing'
 ## Quick start
 
 ```bash
-cp .env.example .env     # the real .env is already in the repo so you can just run it
+cp .env.example .env     # copy the template, then set POSTGRES_PASSWORD (no committed default)
 make up                  # docker compose up -d (postgres, redis, all services, frontend)
 make logs                # tail everything
 make seed                # load db/init seed data (loans, payments, decisions)
@@ -85,8 +88,12 @@ and a borrower login `maria`.
 
 ## Compliance
 
-We are PCI-DSS compliant (cardholder data encrypted), SOX-controlled with full audit
-trails on financial actions, and follow ECOA/Reg B for all adverse-action notices.
+**Current posture — under remediation, not a compliance attestation.** Card data (PAN/CVV)
+is stored in plaintext, so the payment path is **not** compliant with PCI-DSS — tracked as
+open debt (ADR 0003; tokenization is the week-5 plan). Adverse-action notices follow
+ECOA/Reg B. TILA/Reg-Z APR is computed actuarially against pinned test vectors
+(`tila-vectors-gate`). SOX audit coverage is partial: credit decisions are append-only,
+money movement is not yet a full ledger.
 Compliance contact: Dana (VP Lending Ops). For SOX/reconciliation questions: Sam
 (Controller). For fair-lending/BSA: Priya (Compliance Officer).
 
