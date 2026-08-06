@@ -86,6 +86,18 @@ def make_offer(
         raise HTTPException(
             status_code=409, detail="offer requires an approved decision"
         )
+    # The decision that authorizes THIS offer, recorded on the offer row at creation. Read
+    # from `decision_events` (append-only, ADR 0009) rather than `decisions` (a mutable
+    # current-state pointer) because that is the row the provenance chain walks. Sent now
+    # rather than left for disclosure time: a re-decision between the two adds a newer
+    # event, and closing the edge from whatever was latest by then re-parents this offer to
+    # a decision that did not produce it. None for an application decided before
+    # `decision_events` existed — the offer then carries no edge, as it did before.
+    event_rows = db.query(
+        "SELECT id FROM decision_events WHERE app_id = %s "
+        "ORDER BY decided_at DESC, id DESC LIMIT 1",
+        (body.app_id,),
+    )
     resp = clients.post(
         clients.DISCLOSURE_URL,
         "/offers",
@@ -94,6 +106,7 @@ def make_offer(
             "principal": app_row["amount"],
             "term_months": app_row["term_months"],
             "annual_rate": POLICY_RATE_PCT,
+            "decision_event_id": event_rows[0]["id"] if event_rows else None,
         },
     )
     return _to_offer_out(body.app_id, resp)

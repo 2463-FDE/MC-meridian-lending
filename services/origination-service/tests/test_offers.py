@@ -4,7 +4,8 @@
 themselves rather than trust the UI flow:
   - money inputs are bound to the stored application, never the caller;
   - a TILA offer is only generated for an APPROVED application;
-  - boarding requires an approved decision AND an existing offer (no default-rate board).
+  - boarding requires an approved decision AND an existing offer (no default-rate board);
+  - boarding requires the offer's TILA disclosure to be DELIVERED (Reg Z 1026.17(b)).
 The remaining anonymous-trigger authorization (WHOSE application this is) is the separate
 officer-OR-owner check deferred to ADR 0010.
 """
@@ -38,11 +39,15 @@ def _disclosure_resp():
     }
 
 
-def _offer_db(app_row, outcome):
+def _offer_db(app_row, outcome, decision_event_id=7):
     """SQL-aware db.query stub for make_offer: the applications SELECT returns app_row
-    (or [] if None); the decisions SELECT returns the given outcome (or [] if None)."""
+    (or [] if None); the decisions SELECT returns the given outcome (or [] if None); the
+    decision_events SELECT returns the authorizing event id (or [] when it is None, which
+    is an application decided before decision_events existed)."""
 
     def _q(sql, params=None):
+        if "FROM decision_events" in sql:
+            return [{"id": decision_event_id}] if decision_event_id is not None else []
         if "FROM decisions" in sql:
             return [{"outcome": outcome}] if outcome is not None else []
         return [app_row] if app_row else []
@@ -78,6 +83,55 @@ def test_offer_binds_to_stored_application_ignores_caller_money_fields(monkeypat
     assert (
         fwd["annual_rate"] == offers.POLICY_RATE_PCT
     )  # server policy, not caller 0.01
+
+
+def test_offer_carries_its_authorizing_decision_event(monkeypatch):
+    """The offer row records WHICH decision authorized it, at creation.
+
+    Left to disclosure time, the edge was closed from whichever decision event was latest
+    then. `decision_events` is append-only and `uq_offers_app` means the offer is never
+    regenerated, so a re-decision in between re-parented the offer to an event that did not
+    produce its terms — and the provenance view reported that chain as complete.
+    """
+    capture = {}
+    monkeypatch.setattr(
+        offers.db,
+        "query",
+        _offer_db({"amount": 5000.0, "term_months": 36}, "approve", 42),
+    )
+
+    def _post(base, path, payload):
+        capture["payload"] = payload
+        return _disclosure_resp()
+
+    monkeypatch.setattr(offers.clients, "post", _post)
+    resp = TestClient(app).post(
+        "/offer", json={"app_id": 1}, headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 200
+    assert capture["payload"]["decision_event_id"] == 42
+
+
+def test_offer_for_an_application_with_no_decision_event_carries_no_edge(monkeypatch):
+    """An application decided before `decision_events` existed still gets its offer; the
+    edge stays open, which is what its data supports."""
+    capture = {}
+    monkeypatch.setattr(
+        offers.db,
+        "query",
+        _offer_db({"amount": 5000.0, "term_months": 36}, "approve", None),
+    )
+
+    def _post(base, path, payload):
+        capture["payload"] = payload
+        return _disclosure_resp()
+
+    monkeypatch.setattr(offers.clients, "post", _post)
+    resp = TestClient(app).post(
+        "/offer", json={"app_id": 1}, headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 200
+    assert capture["payload"]["decision_event_id"] is None
 
 
 def test_offer_404_when_application_missing(monkeypatch):
@@ -117,6 +171,22 @@ _APPROVED_WITH_OFFER = {
     "name": "Maria",
     "apr": 8.5,
     "outcome": "approve",
+    # Boarding is consummation, so the offer's TILA disclosure must already be delivered
+    # (Reg Z 1026.17(b)). The happy path carries a delivered one; the tests below vary it.
+    "disclosure_status": "delivered",
+    "disclosure_delivered_at": "2026-08-04T00:00:00+00:00",
+    # And the delivered flag has to stand over a document that exists — migration 0013
+    # leaves already-delivered rows at document_body NULL and they are frozen against a
+    # backfill, so `delivered` alone does not prove one was ever recorded.
+    "disclosure_has_document": True,
+    # Boarding derives the servicing note rate from the disclosure's snapshot (spec D1: the
+    # schedule amortizes at the note rate, not the disclosed APR, which carries the fee).
+    "disclosure_snapshot": {
+        "principal_cents": 500000,
+        "note_rate_pct": "7.99",
+        "term_months": 36,
+        "fee_pct": "0.03",
+    },
 }
 
 
@@ -293,3 +363,155 @@ def test_accept_409_when_no_offer(monkeypatch):
         "/applications/1/accept", headers={"X-User-Role": "underwriter"}
     )
     assert resp.status_code == 409
+
+
+# Reg Z 1026.17(b): the disclosure is made BEFORE consummation, and boarding is this
+# system's consummation event. disclosure-service refuses to deliver once a loan exists,
+# so an accept that ran early would leave a funded loan whose TILA disclosure can never
+# be delivered at all. Every status short of `delivered` must fail closed here.
+@pytest.mark.parametrize(
+    "disclosure_status, delivered_at",
+    [
+        (None, None),  # no disclosure generated yet
+        ("draft", None),
+        ("in_review", None),
+        ("approved", None),  # approved is NOT delivered — the borrower has seen nothing
+    ],
+)
+def test_accept_409_without_a_delivered_disclosure(
+    monkeypatch, disclosure_status, delivered_at
+):
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        _accept_db(
+            {
+                **_APPROVED_WITH_OFFER,
+                "disclosure_status": disclosure_status,
+                "disclosure_delivered_at": delivered_at,
+            }
+        ),
+    )
+
+    def _must_not_board(*a, **k):
+        raise AssertionError(
+            f"must not board with disclosure_status={disclosure_status!r}"
+        )
+
+    monkeypatch.setattr(applications.intake, "board_to_servicing", _must_not_board)
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 409
+    assert "delivered" in resp.json()["detail"]
+
+
+def test_accept_boards_when_disclosure_is_delivered(monkeypatch):
+    # The one status that may board. Paired with the parametrised refusals above so the
+    # gate is proven to discriminate, not merely to refuse everything.
+    monkeypatch.setattr(applications.db, "query", _accept_db(_APPROVED_WITH_OFFER))
+    monkeypatch.setattr(applications.intake, "board_to_servicing", lambda *a, **k: 222)
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["loan_id"] == 222
+
+
+def test_accept_409_when_delivered_at_is_missing(monkeypatch):
+    # status and delivered_at cannot disagree (DDL disclosures_delivered_at_matches_status),
+    # but the guard checks both rather than trusting one: a row that reached this shape by
+    # hand-written SQL is corrupt, and corrupt is not a licence to board.
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        _accept_db({**_APPROVED_WITH_OFFER, "disclosure_delivered_at": None}),
+    )
+
+    def _must_not_board(*a, **k):
+        raise AssertionError("must not board on a delivered row with no delivered_at")
+
+    monkeypatch.setattr(applications.intake, "board_to_servicing", _must_not_board)
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 409
+
+
+def test_accept_409_when_the_delivered_disclosure_has_no_document(monkeypatch):
+    """`delivered` is a claim about a document, so the document has to exist.
+
+    Migration 0012 added `document_body` nullable and leaves ALREADY-DELIVERED rows at
+    NULL, and disclosure-service refuses to backfill them because
+    trg_disclosures_freeze_delivered makes a delivered row immutable. A row delivered on a
+    volume that ran 0011 before 0012 therefore carries the status and the timestamp over
+    content that does not exist — and boarding on that pair funds a loan whose
+    borrower-facing TILA document nobody can produce.
+    """
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        _accept_db({**_APPROVED_WITH_OFFER, "disclosure_has_document": False}),
+    )
+
+    def _must_not_board(*a, **k):
+        raise AssertionError("must not board on a delivered row with no document")
+
+    monkeypatch.setattr(applications.intake, "board_to_servicing", _must_not_board)
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 409
+    assert "no recorded document" in resp.json()["detail"]
+
+
+def test_accept_replays_existing_loan_whose_disclosure_has_no_document(monkeypatch):
+    """The document check guards BOARDING, not replay — same reason the delivery check
+    does. 409ing here would not un-board the loan, only hide it and strand the reconcile."""
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        _accept_db(
+            {**_APPROVED_WITH_OFFER, "disclosure_has_document": False},
+            existing_loan=556,
+        ),
+    )
+
+    def _must_not_board(*a, **k):
+        raise AssertionError("replay must not board")
+
+    monkeypatch.setattr(applications.intake, "board_to_servicing", _must_not_board)
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["loan_id"] == 556
+
+
+def test_accept_replays_existing_loan_even_without_a_delivered_disclosure(monkeypatch):
+    # The gate guards BOARDING, not replay. A loan boarded before this gate existed (or by
+    # the internal /board hatch) must still be returned to its caller: 409ing here would
+    # not un-board it, it would only hide a funded loan and strand the balance/funded
+    # reconcile that the replay path performs.
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        _accept_db(
+            {
+                **_APPROVED_WITH_OFFER,
+                "disclosure_status": None,
+                "disclosure_delivered_at": None,
+            },
+            existing_loan=555,
+        ),
+    )
+
+    def _must_not_board(*a, **k):
+        raise AssertionError("replay must not board")
+
+    monkeypatch.setattr(applications.intake, "board_to_servicing", _must_not_board)
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["loan_id"] == 555

@@ -43,7 +43,9 @@ This document tracks known issues, their business/compliance impact, and mitigat
 | | PCI-DSS **does not prohibit** float math, but it creates operational risk (disputes, chargebacks). |
 | **Current Impact** | Test suite (`services/*/tests/test_money.py`) includes tests that **fail by design**; they document rounding defects. No one reacts to these failures (CI runs with `|| true`). |
 | **Mitigation Path** | **Week 2–3:** Migrate to `NUMERIC(19,2)` (fixed-point, cents precision) in DB. Update all ORM models to use `decimal.Decimal`. Recalculate all outstanding balances post-migration (audit + customer communication). Add pre-payment validation to round amounts to cents. Tighten test suite to fail on rounding discrepancies > $0.01. |
-| **Status** | Open; flagged as debt; accepted design risk (tradeoff: simplicity vs. correctness). |
+| **Week 4 progress** | **Partially mitigated — the disclosure compute path only (ADR 0012).** `disclosure-service` `apr.py` / `schedule.py` / `offer.py` are `Decimal` end to end, and the new `disclosures` table holds money as integer **minor units** with the APR as exact `NUMERIC(9,3)`. That row is the authoritative TILA record; the float `offers` columns are now a rounded convenience copy, and where the two disagree `disclosures` wins. The path is guarded by the **blocking** `tila-vectors-gate` — the only money math in this repo that cannot regress under `\|\| true`. Chosen as the beachhead because it is where float error is a *regulatory* defect rather than a reconciliation nuisance. |
+| **Still open** | Intake, decisioning, servicing, and payments remain float throughout, as does `balances` (a single mutable column, no ledger). The `offers` money columns were deliberately **not** converted: rewriting the figure disclosed to a borrower would destroy the evidence of what was disclosed (see `db/migrations/0012_disclosures.sql`). Converting those paths needs its own migration and a balance-recalculation plan. |
+| **Status** | **Partially mitigated (disclosure compute path, Week 4, ADR 0012); open everywhere else.** |
 
 ---
 
@@ -217,7 +219,7 @@ logged here as pre-existing debt; not fixed, out of scope for "parts we touched"
 | **Critical** | D1: Hardcoded credentials | Open | Document, flag, schedule rotation (Week 2+). |
 | **Critical** | D5: Plaintext PII in logs | Open | **Planned: ADR 0006 designs redaction; code + tests in `feature/pii-redaction` PR (not yet merged).** |
 | **Critical** | D13: PAN/CVV in DB | Open | Document, flag, schedule tokenization (Week 2–3). |
-| **High** | D2: Float money math | Open | Document, flag, schedule migration to Decimal (Week 2+). |
+| **High** | D2: Float money math | Partially mitigated | Week 4 (ADR 0012): the disclosure compute path is `Decimal` end to end and the authoritative `disclosures` record is integer minor units, held by the blocking `tila-vectors-gate`. Intake, decisioning, servicing, payments, and `balances` remain float. |
 | **Medium** | D14: Encoded PII bypasses log redaction | Deferred | The log redactor matches literal shapes only, so percent-encoded (email=maria%40example.com, ssn=412%2D55%2D9981) and unicode-escaped (@) PII in uvicorn access-log query strings is not masked. Payload vector closed by allowlist logging; no sensitive route accepts PII via query/path today, so exposure is a client-crafted query param. Follow-up: bounded URL-decode + \uXXXX-unescape normalization pass in the (CI-synced) redactor, with regression tests for encoded email/SSN/phone. Not done now to avoid a byte-altering change to the shared redactor for a low-exposure case. |
 | **Low** | D15: `redactor.py` duplicated per service (no shared package) | Mitigated | `services/*/app/redactor.py` is a near-identical copy in each of the 7 services — no shared module. Drift risk (a fix in one not reaching the others) is held closed by the **blocking** `redactor-drift` CI job, which fails the build if any copy diverges from the canonical; copies are resynced with `scripts/sync_redactor.sh`, never hand-edited. So this is a maintainability/structure cost, not an open leak path. Follow-up: extract a shared internal package (e.g. `libs/redaction`) so the copies collapse to one import; deferred because the CI gate already prevents divergence and a shared package adds packaging/build wiring across 7 services (YAGNI until a 2nd shared util appears). |
 | **Low** | D17: Offer-replay schedule APR default 0 vs 7.99 | Open (residual) | Null-APR offer row would disclose 0% APR beside a 7.99%-computed schedule (`_offer_response_from_persisted`). Not reachable — `accept_offer` rejects null-APR, `build_offer` always writes one. Display-only; unify the default when next touched. |
@@ -244,5 +246,5 @@ logged here as pre-existing debt; not fixed, out of scope for "parts we touched"
 
 - **Week 1:** Complete logging redaction (D5) and verify via integration tests.
 - **Week 2:** Rotate credentials (D1), begin tokenization design (D13).
-- **Week 2–3:** Migrate to Decimal for money math (D2).
+- **Week 2–3:** Migrate to Decimal for money math (D2). *Week 4: done for the disclosure compute path (ADR 0012); intake, decisioning, servicing, payments still to do.*
 - **Ongoing:** Review new debt as it emerges; update this log.

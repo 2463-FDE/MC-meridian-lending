@@ -1,6 +1,7 @@
 """Application intake, listing, detail, decisioning, and acceptance/boarding."""
 
 import hmac
+import re
 
 import httpx
 from psycopg2 import errors as pg_errors
@@ -579,6 +580,49 @@ def run_decision(
     )
 
 
+# A plain-decimal literal, so a positive rate parses without Decimal's exotic accepts
+# (underscores, signs, scientific notation) reaching the servicing rate column.
+_PLAIN_DECIMAL = re.compile(r"^\d+(\.\d+)?$")
+
+
+def _note_rate_for_boarding(snapshot, apr: float) -> float:
+    """The contractual note rate to board, derived from the delivered disclosure's snapshot.
+
+    Servicing amortizes at this rate; boarding the actuarial APR instead made the funded
+    loan's schedule contradict its own TILA disclosure on every fee-bearing loan. Read from
+    the stored `compute_snapshot` — the authoritative record of what the disclosed figures
+    were derived from — never from a caller. Boarding already requires a delivered disclosure
+    with a recorded document, so a boardable loan always has this snapshot; fail closed (409)
+    rather than fall back to the APR when it is absent or unusable, because boarding at the
+    wrong rate is the defect this exists to prevent.
+    """
+    note_rate_pct = (
+        snapshot.get("note_rate_pct") if isinstance(snapshot, dict) else None
+    )
+    if note_rate_pct is None or not _PLAIN_DECIMAL.match(str(note_rate_pct)):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the delivered TILA disclosure for this offer has no usable note rate; "
+                "refusing to board a loan whose servicing rate cannot be determined"
+            ),
+        )
+    note_rate = float(note_rate_pct)
+    # Spec D1 invariant: the disclosed APR is >= the note rate for every non-zero-fee loan,
+    # because the APR annualizes the prepaid fee on top of the note rate. A snapshot note
+    # rate above the offer's APR means the two records disagree — fail closed rather than
+    # board either.
+    if note_rate > apr:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the disclosure note rate exceeds the offer APR; the offer and its "
+                "disclosure disagree, refusing to board"
+            ),
+        )
+    return note_rate
+
+
 @router.post("/{app_id}/accept")
 def accept_offer(
     app_id: int,
@@ -617,11 +661,50 @@ def accept_offer(
     # gate it, and never board at a default rate when no offer exists. (Authorization —
     # whose application this is — is the separate officer-OR-owner check in ADR 0010.)
     rows = db.query(
-        "SELECT a.amount, a.term_months, ap.name, o.apr, d.outcome "
+        "SELECT a.amount, a.term_months, ap.name, o.apr, d.outcome, "
+        "ds.status AS disclosure_status, ds.delivered_at AS disclosure_delivered_at, "
+        # The note rate servicing must amortize at (spec D1: APR carries the fee and is
+        # higher, so the disclosed schedule uses the note rate, not the APR). Recorded at
+        # compute time in the disclosure's snapshot — the authoritative value the disclosed
+        # figures were derived from — and read here so boarding stores it on the loan.
+        "ds.compute_snapshot AS disclosure_snapshot, "
+        # A flag, not the document: this path only needs to know one was persisted, and
+        # hauling a regulated body through the boarding query would put it in a result the
+        # money path has no use for.
+        #
+        # The `<> 'null'` half is not redundant. In Postgres a JSON null is a VALUE, so
+        # `'null'::jsonb IS NOT NULL` is TRUE — a column holding it would read as a
+        # recorded document while meaning the opposite. The write path only ever stores an
+        # object or SQL NULL, so this covers a row shaped by hand-written SQL, on the same
+        # posture as the delivered_at check below: corrupt is not a licence to board.
+        "(ds.document_body IS NOT NULL AND ds.document_body <> 'null'::jsonb) "
+        "AS disclosure_has_document, "
+        # The two decision edges, to reject a split-brain provenance chain at the money step.
+        # `o.decision_event_id` is the edge the provenance view walks (the offer's); the
+        # regulated disclosure carries its OWN `ds.decision_event_id`, stamped and validated at
+        # write. disclosure-service refuses to DELIVER when they diverge, but a row delivered
+        # before that guard existed can carry the divergence over a frozen `delivered` row, so
+        # boarding re-checks here on the money path's own query rather than trusting the flag.
+        "o.decision_event_id AS offer_decision_event_id, "
+        "ds.decision_event_id AS disclosure_decision_event_id, "
+        # The outcome of the decision the REGULATED disclosure cites, read on the money
+        # path's own query. disclosure-service now refuses to create a disclosure whose
+        # decision_event_id did not approve, but a back-book row written before that guard
+        # can carry a same-application deny/refer edge over a frozen `delivered` row that is
+        # now unrepairable (trg_disclosures_freeze_delivered), so boarding re-checks here
+        # rather than trust the create-time gate — same posture as the split-brain guard.
+        "dde.outcome AS disclosure_decision_outcome "
         "FROM applications a "
         "LEFT JOIN applicants ap ON ap.id = a.applicant_id "
         "LEFT JOIN decisions d ON d.app_id = a.id "
         "LEFT JOIN offers o ON o.app_id = a.id "
+        # Bound to THIS offer, not to the application: the disclosure that must have been
+        # delivered is the one describing the very terms being boarded below. Joining by
+        # app_id would let a delivered disclosure for some other offer authorize boarding
+        # a different one. uq_disclosures_offer keeps this at most one row per offer.
+        "LEFT JOIN disclosures ds ON ds.offer_id = o.id "
+        # The disclosure's OWN decision edge, to read its outcome for the guard above.
+        "LEFT JOIN decision_events dde ON dde.id = ds.decision_event_id "
         "WHERE a.id = %s ORDER BY o.id DESC",
         (app_id,),
     )
@@ -653,6 +736,103 @@ def accept_offer(
         loan_id = existing[0]["id"]
         principal = existing[0]["principal"]
     else:
+        # TILA/Reg-Z timing hold (PR review): boarding IS this system's consummation event,
+        # and 1026.17(b) puts the disclosure before it. disclosure-service already refuses
+        # to deliver once a loan exists (_refuse_if_already_consummated); without the
+        # reciprocal guard here that hold is one-sided — accept early and the disclosure
+        # can NEVER be delivered, leaving a funded loan with no authoritative TILA record.
+        # Fail closed on anything short of delivered: absent, draft, in_review, approved.
+        #
+        # Placed on the boarding branch only. A replay that finds an already-boarded loan
+        # must still return it (and run the reconcile below) — 409ing there would not
+        # un-board the loan, it would just hide it and strand the balance/funded heal.
+        #
+        # Safe without a transaction despite the read and the INSERT being separate
+        # autocommitted statements (raw-psycopg2 seam, CLAUDE.md): the predicate is
+        # MONOTONE. `delivered` is terminal in the lifecycle whitelist and frozen by
+        # trg_disclosures_freeze_delivered, which rejects any UPDATE or DELETE of a
+        # delivered row (and trg_disclosures_no_truncate closes the wholesale end-run), so
+        # a status read as delivered cannot regress before the INSERT lands. It also
+        # settles the reverse ordering: accept cannot observe `delivered` until delivery
+        # has committed, so delivery always precedes boarding. IF A RE-ISSUE/SUPERSEDE FLOW
+        # EVER MAKES `delivered` REVERSIBLE (the DDL anticipates one), this guard becomes a
+        # genuine TOCTOU and needs a single-statement or DB-level condition instead.
+        if (
+            r.get("disclosure_status") != "delivered"
+            or r.get("disclosure_delivered_at") is None
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "no delivered TILA disclosure for this offer; the disclosure must be "
+                    "delivered before the loan is boarded"
+                ),
+            )
+        # `delivered` alone does not prove a document was ever recorded. Migration 0012
+        # added `document_body` nullable and leaves ALREADY-DELIVERED rows at NULL, and
+        # disclosure-service refuses to backfill them because
+        # trg_disclosures_freeze_delivered makes a delivered row immutable — so a row
+        # delivered on a volume that ran 0011 before 0012 carries the flag and the timestamp
+        # over content that does not exist. Boarding on that pair funds a loan whose
+        # borrower-facing TILA document nobody can produce, which is the same defect the
+        # delivery guard closes from the other side, at the money-moving step.
+        #
+        # Monotone in the same direction as the status check above, so it needs no
+        # transaction either: `document_body` is written before delivery and frozen at it, so
+        # a document read as present cannot vanish before the INSERT lands.
+        if not r.get("disclosure_has_document"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "the delivered TILA disclosure for this offer has no recorded "
+                    "document; refusing to board a loan whose disclosure cannot be read"
+                ),
+            )
+        # Split-brain provenance guard (defense in depth, mirrors disclosure-service's
+        # delivery refusal). Both edges non-null and unequal means the disclosure record and
+        # its offer name DIFFERENT decisions: the audit trail points to a decision that did
+        # not authorize the boarded terms. The delivery guard closes this for any row
+        # delivered from now on; this closes the back-book row delivered before that guard,
+        # which trg_disclosures_freeze_delivered now makes unrepairable. A NULL on either side
+        # is a legacy partial chain, not a divergence, and stays out of the money step by the
+        # delivered/document guards above rather than here.
+        offer_edge = r.get("offer_decision_event_id")
+        record_edge = r.get("disclosure_decision_event_id")
+        if (
+            offer_edge is not None
+            and record_edge is not None
+            and offer_edge != record_edge
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "the delivered TILA disclosure's decision edge does not match the "
+                    "offer being boarded; refusing to board a split-brain provenance chain"
+                ),
+            )
+        # Non-approving decision guard (defense in depth, mirrors disclosure-service's
+        # create-path refusal). A disclosure whose OWN decision edge names a deny/refer
+        # event is a regulated chain the provenance view still reports complete — boarding
+        # such a loan funds it over an audit trail that says it was not approved. Gated on
+        # the edge being present, exactly like the split-brain check: a NULL edge is a legacy
+        # partial chain the delivered/document guards above already keep out of the money
+        # step, not a divergence to judge here. `decisions.outcome` (checked at line 705) is
+        # the mutable current-state rollup; this is the append-only event the record cites.
+        if (
+            record_edge is not None
+            and (r.get("disclosure_decision_outcome") or "").lower() != "approve"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "the delivered TILA disclosure cites a non-approving decision; "
+                    "refusing to board a loan over an unapproved provenance chain"
+                ),
+            )
+        # Servicing amortizes at the NOTE rate, not the APR (spec D1): derive it from the
+        # delivered disclosure's snapshot and fail closed if it is absent, so a loan is never
+        # boarded at the disclosed APR — the rate the disclosed schedule was NOT built at.
+        note_rate = _note_rate_for_boarding(r.get("disclosure_snapshot"), r["apr"])
         try:
             loan_id = intake.board_to_servicing(
                 app_id,
@@ -660,6 +840,7 @@ def accept_offer(
                 r["amount"],
                 r["apr"],
                 r["term_months"],
+                note_rate_pct=note_rate,
             )
             principal = r["amount"]  # what we just boarded with
         except pg_errors.UniqueViolation:

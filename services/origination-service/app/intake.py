@@ -97,12 +97,23 @@ def board_to_servicing(
     principal: float,
     annual_rate_pct: float,
     term_months: int,
+    note_rate_pct: float | None = None,
 ) -> int:
-    """Direct cross-schema insert into the LSS tables. The 'seam'."""
+    """Direct cross-schema insert into the LSS tables. The 'seam'.
+
+    `annual_rate_pct` is the disclosed actuarial APR, stored in `loans.apr` for display.
+    `note_rate_pct` is the contractual rate servicing amortizes at — lower than the APR
+    because the APR carries the prepaid origination fee. Boarding the APR as the servicing
+    rate made the funded loan's schedule contradict its own TILA disclosure on every
+    fee-bearing loan; accept_offer now derives the note rate from the delivered disclosure's
+    compute_snapshot and passes it here. Defaults to `annual_rate_pct` for the legacy /board
+    hatch, which supplies a single caller-supplied rate with no fee model to separate.
+    """
+    note_rate = note_rate_pct if note_rate_pct is not None else annual_rate_pct
     loan = db.query(
-        "INSERT INTO loans (app_id, applicant_name, principal, apr, term_months) "
-        "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-        (app_id, applicant_name, principal, annual_rate_pct, term_months),
+        "INSERT INTO loans (app_id, applicant_name, principal, apr, note_rate, term_months) "
+        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+        (app_id, applicant_name, principal, annual_rate_pct, note_rate, term_months),
     )
     loan_id = loan[0]["id"]
     # reach across into the servicing balances table directly

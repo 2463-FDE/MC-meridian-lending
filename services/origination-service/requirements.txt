@@ -6,3 +6,10 @@ pydantic==2.10.4
 SQLAlchemy==2.0.36
 anthropic[bedrock]==0.116.0
 langsmith==0.10.5
+# ADR 0012: LangGraph orchestrates the disclosure pipeline (stages 0-7 as nodes, the typed
+# retry as a conditional edge). Pinned exactly, and langchain-core pinned alongside it --
+# it is the surface that breaks between releases, and this service already carries a
+# hard-won anthropic pin (011f296). Verified 2026-08-01 to resolve with no upgrade forced
+# on pydantic 2.10.4 / anthropic 0.116.0 / langsmith 0.10.5.
+langgraph==1.2.10
+langchain-core==1.5.3

@@ -49,7 +49,10 @@ def database_url_configured() -> bool:
     # stale/rotated DSN is caught by the POSTGRES_PASSWORD consistency check below.
     if password.lower() in {
         "replace_with_postgres_password",
-        "changeme", "change_me", "password", "postgres",
+        "changeme",
+        "change_me",
+        "password",
+        "postgres",
     }:
         return False
     # When POSTGRES_PASSWORD is the source of truth (compose ${VAR:?}), the DSN
@@ -126,6 +129,22 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
+            # Schema rung: the loan read paths (list, detail, schedule) load the full
+            # Loan entity, whose ORM mapping now includes loans.note_rate (migration
+            # 0014 — servicing amortizes the schedule at the note rate, not the disclosed
+            # APR). Migrations are hand-applied and lag the init DDL, so a volume that has
+            # the loans table but not this column (predating 0014) would 500 EVERY servicing
+            # loan read while /health otherwise read fine — the same class origination's
+            # readiness rung guards for on its boarding INSERT. The type is asserted, not
+            # just the name: ADD COLUMN IF NOT EXISTS swallows a same-named column of any
+            # type, and the ORM maps it as a float.
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'loans' AND column_name = 'note_rate' "
+                "AND data_type = 'double precision'"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:loans.note_rate"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__
@@ -165,6 +184,10 @@ def processor_configured() -> bool:
     service cannot legitimately capture — fail closed (readiness AND the /payments
     endpoint) rather than record a 'captured' payment no processor ever saw."""
     return bool(PROCESSOR_API_KEY)
-PROCESSOR_BASE_URL = os.getenv("PROCESSOR_BASE_URL", "https://api.cardprocessor.example.com")
+
+
+PROCESSOR_BASE_URL = os.getenv(
+    "PROCESSOR_BASE_URL", "https://api.cardprocessor.example.com"
+)
 SETTLEMENT_FILE = os.getenv("SETTLEMENT_FILE", "data/settlement.csv")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

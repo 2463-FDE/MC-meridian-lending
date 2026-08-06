@@ -268,3 +268,244 @@ describe("underwriting detail — assistant panel", () => {
     expect(screen.queryByText(ASSISTANT_SUMMARY)).toBeNull();
   });
 });
+
+// The TILA disclosure panel's repair path. disclosure-service's idempotent replay records a
+// document on an existing non-delivered disclosure that has none, but this screen disabled
+// "Generate disclosure" the moment any disclosure existed and told the officer the row
+// needed an operator. Delivery stays refused for want of the document, so the application
+// could not move in either direction — the backend had the remedy and the only human who
+// would ask for it was told none existed.
+const PROVENANCE_BASE = {
+  disclosure_id: 9,
+  offer_id: 11,
+  decision_event_id: 7,
+  application_id: 1,
+  applicant_id: 3,
+  disclosed_apr: "9.584",
+  chain_complete: true,
+  missing_edges: [],
+};
+
+function disclosureGet(provenance: unknown, document: unknown) {
+  return async (path: string) => {
+    if (path === "/los/applications/1") return APP_1;
+    if (path === "/los/applications/1/disclosure") {
+      if (provenance === null) throw new Error("no disclosure");
+      return provenance;
+    }
+    if (path === "/los/applications/1/disclosure/document") {
+      // The 404 disclosure-service returns for a row with no document recorded.
+      if (document === null) throw new Error("no document recorded");
+      return document;
+    }
+    throw new Error(`unexpected GET ${path}`);
+  };
+}
+
+const GOOD_DOCUMENT = {
+  heading: "Federal Truth-in-Lending Disclosure",
+  figures: {
+    apr: "9.584",
+    finance_charge: "3628.71",
+    amount_financed: "17460.00",
+    total_of_payments: "21088.71",
+    monthly_payment: "439.35",
+  },
+  payment_terms: "You will make equal monthly payments until the loan is repaid.",
+  prepayment: "You may repay early without a penalty.",
+};
+
+describe("underwriting detail — disclosure document repair", () => {
+  it("offers the repair when a draft disclosure has no recorded document", async () => {
+    apiGet.mockImplementation(
+      disclosureGet({ ...PROVENANCE_BASE, disclosure_status: "draft" }, null)
+    );
+    apiPost.mockResolvedValue({ status: "ok" });
+
+    render(<UnderwritingDetailPage />);
+    const repair = await screen.findByRole("button", {
+      name: "Record missing document",
+    });
+    expect(repair.hasAttribute("disabled")).toBe(false);
+
+    await act(async () => {
+      fireEvent.click(repair);
+    });
+    expect(
+      apiPost.mock.calls.some(
+        (c) => c[0] === "/los/applications/1/disclosure"
+      )
+    ).toBe(true);
+  });
+
+  it("keeps generation closed once a disclosure has its document", async () => {
+    apiGet.mockImplementation(
+      disclosureGet(
+        { ...PROVENANCE_BASE, disclosure_status: "draft" },
+        GOOD_DOCUMENT
+      )
+    );
+
+    render(<UnderwritingDetailPage />);
+    const button = await screen.findByRole("button", {
+      name: "Generate disclosure",
+    });
+    expect(button.hasAttribute("disabled")).toBe(true);
+  });
+
+  it("offers no repair for a delivered row, which is frozen", async () => {
+    apiGet.mockImplementation(
+      disclosureGet(
+        {
+          ...PROVENANCE_BASE,
+          disclosure_status: "delivered",
+          delivered_at: "2026-08-04T00:00:00Z",
+        },
+        null
+      )
+    );
+
+    render(<UnderwritingDetailPage />);
+    await screen.findByText(/delivered before document recording/);
+    expect(
+      screen.queryByRole("button", { name: "Record missing document" })
+    ).toBeNull();
+  });
+
+  it("will not board a delivered disclosure that has no document", async () => {
+    apiGet.mockImplementation(
+      disclosureGet(
+        {
+          ...PROVENANCE_BASE,
+          disclosure_status: "delivered",
+          delivered_at: "2026-08-04T00:00:00Z",
+        },
+        null
+      )
+    );
+
+    render(<UnderwritingDetailPage />);
+    const accept = await screen.findByRole("button", { name: "Accept & board" });
+    expect(accept.hasAttribute("disabled")).toBe(true);
+  });
+
+  it("boards a delivered disclosure that has one", async () => {
+    apiGet.mockImplementation(
+      disclosureGet(
+        {
+          ...PROVENANCE_BASE,
+          disclosure_status: "delivered",
+          delivered_at: "2026-08-04T00:00:00Z",
+        },
+        GOOD_DOCUMENT
+      )
+    );
+
+    render(<UnderwritingDetailPage />);
+    const accept = await screen.findByRole("button", { name: "Accept & board" });
+    expect(accept.hasAttribute("disabled")).toBe(false);
+  });
+});
+
+// A disclosure action started on one application must not stamp that application's regulated
+// document/provenance onto another the officer opened while it was in flight. generate and
+// transition call loadDisclosure to refresh, but loadDisclosure captured the route generation
+// at its own call time — already the NEW route's generation for a stale in-flight action — so
+// its guard passed and it wrote the previous applicant's APR, document, and provenance onto
+// the screen now showing someone else (PR review). The sibling handlers capture the generation
+// before their first await; these two did not.
+describe("underwriting detail — disclosure actions across a route change", () => {
+  it("does not stamp a generate result onto another application opened mid-flight", async () => {
+    let app1HasDisclosure = false;
+    let resolvePost: (value: unknown) => void = () => {};
+    const pendingPost = new Promise((resolve) => {
+      resolvePost = resolve;
+    });
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === "/los/applications/1") return APP_1;
+      if (path === "/los/applications/2") return APP_2;
+      if (path === "/los/applications/1/disclosure") {
+        if (!app1HasDisclosure) throw new Error("no disclosure");
+        return { ...PROVENANCE_BASE, disclosure_status: "draft", application_id: 1 };
+      }
+      if (path === "/los/applications/1/disclosure/document") {
+        if (!app1HasDisclosure) throw new Error("no document");
+        return GOOD_DOCUMENT;
+      }
+      if (path.startsWith("/los/applications/2/disclosure")) {
+        throw new Error("no disclosure");
+      }
+      throw new Error(`unexpected GET ${path}`);
+    });
+    apiPost.mockImplementation((path: string) => {
+      if (path === "/los/applications/1/disclosure") return pendingPost;
+      throw new Error(`unexpected POST ${path}`);
+    });
+
+    const view = render(<UnderwritingDetailPage />);
+    await screen.findAllByText("Maria Alvarez");
+
+    // Officer generates a disclosure on application 1; the POST stays in flight.
+    fireEvent.click(screen.getByRole("button", { name: "Generate disclosure" }));
+
+    // They open application 2 before it resolves.
+    routeAppId = "2";
+    view.rerender(<UnderwritingDetailPage />);
+    await screen.findAllByText("Dan Brown");
+
+    // Generation completes; its follow-up load reads application 1's disclosure.
+    app1HasDisclosure = true;
+    await act(async () => {
+      resolvePost({ status: "ok" });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Application 1's regulated figures must not appear under application 2.
+    expect(screen.queryByText("Federal Truth-in-Lending Disclosure")).toBeNull();
+    expect(screen.queryByText(/9\.584%/)).toBeNull();
+  });
+
+  it("does not stamp a transition result onto another application opened mid-flight", async () => {
+    let resolvePost: (value: unknown) => void = () => {};
+    const pendingPost = new Promise((resolve) => {
+      resolvePost = resolve;
+    });
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === "/los/applications/1") return APP_1;
+      if (path === "/los/applications/2") return APP_2;
+      if (path === "/los/applications/1/disclosure") {
+        return { ...PROVENANCE_BASE, disclosure_status: "draft", application_id: 1 };
+      }
+      if (path === "/los/applications/1/disclosure/document") return GOOD_DOCUMENT;
+      if (path.startsWith("/los/applications/2/disclosure")) {
+        throw new Error("no disclosure");
+      }
+      throw new Error(`unexpected GET ${path}`);
+    });
+    apiPost.mockImplementation((path: string) => {
+      if (path === "/los/applications/1/disclosure/transition") return pendingPost;
+      throw new Error(`unexpected POST ${path}`);
+    });
+
+    const view = render(<UnderwritingDetailPage />);
+    await screen.findAllByText("Maria Alvarez");
+    await screen.findByText("Federal Truth-in-Lending Disclosure");
+
+    // Officer sends application 1's disclosure to compliance; the POST stays in flight.
+    fireEvent.click(screen.getByRole("button", { name: "Send to compliance" }));
+
+    // They open application 2, which has no disclosure of its own.
+    routeAppId = "2";
+    view.rerender(<UnderwritingDetailPage />);
+    await screen.findAllByText("Dan Brown");
+
+    await act(async () => {
+      resolvePost({ status: "in_review" });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Application 1's document must not reappear under application 2.
+    expect(screen.queryByText("Federal Truth-in-Lending Disclosure")).toBeNull();
+    expect(screen.queryByText(/9\.584%/)).toBeNull();
+  });
+});

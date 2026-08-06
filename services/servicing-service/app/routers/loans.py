@@ -1,4 +1,5 @@
 """Loan portfolio read API: list, detail, amortization schedule, payment history."""
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -42,9 +43,14 @@ def list_loans(
     stmt = stmt.order_by(models.Loan.id).limit(limit).offset(offset)
     items = [
         LoanListItem(
-            id=loan.id, applicant_name=loan.applicant_name, principal=loan.principal,
-            apr=loan.apr, term_months=loan.term_months, status=loan.status,
-            balance=(bal.balance if bal else 0.0), past_due=(bal.past_due if bal else 0.0),
+            id=loan.id,
+            applicant_name=loan.applicant_name,
+            principal=loan.principal,
+            apr=loan.apr,
+            term_months=loan.term_months,
+            status=loan.status,
+            balance=(bal.balance if bal else 0.0),
+            past_due=(bal.past_due if bal else 0.0),
             opened_at=loan.opened_at.isoformat() if loan.opened_at else None,
         )
         for loan, bal in session.execute(stmt).all()
@@ -59,9 +65,14 @@ def get_loan(loan_id: int, session: Session = Depends(get_session)):
         raise HTTPException(status_code=404, detail="loan not found")
     bal = session.get(models.Balance, loan_id)
     return LoanDetail(
-        id=loan.id, applicant_name=loan.applicant_name, principal=loan.principal,
-        apr=loan.apr, term_months=loan.term_months, status=loan.status,
-        balance=(bal.balance if bal else 0.0), past_due=(bal.past_due if bal else 0.0),
+        id=loan.id,
+        applicant_name=loan.applicant_name,
+        principal=loan.principal,
+        apr=loan.apr,
+        term_months=loan.term_months,
+        status=loan.status,
+        balance=(bal.balance if bal else 0.0),
+        past_due=(bal.past_due if bal else 0.0),
         opened_at=loan.opened_at.isoformat() if loan.opened_at else None,
     )
 
@@ -71,19 +82,28 @@ def loan_schedule(loan_id: int, session: Session = Depends(get_session)):
     loan = session.get(models.Loan, loan_id)
     if not loan:
         raise HTTPException(status_code=404, detail="loan not found")
-    rows = schedule.amortization(loan.principal, loan.apr, loan.term_months)
+    # Amortize at the NOTE rate, not the APR: the APR carries the prepaid origination fee, so
+    # a schedule built at it contradicts the loan's own TILA disclosure (disclosure-service
+    # builds the disclosed schedule at the note rate). Fall back to apr for a legacy loan
+    # boarded before note_rate was recorded (NULL) — pre-change behavior for those rows.
+    rate = loan.note_rate if loan.note_rate is not None else loan.apr
+    rows = schedule.amortization(loan.principal, rate, loan.term_months)
     return ScheduleOut(loan_id=loan_id, schedule=[ScheduleRow(**r) for r in rows])
 
 
 @router.get("/{loan_id}/payments", response_model=PaymentsOut)
 def loan_payments(loan_id: int, session: Session = Depends(get_session)):
     rows = session.scalars(
-        select(models.Payment).where(models.Payment.loan_id == loan_id)
+        select(models.Payment)
+        .where(models.Payment.loan_id == loan_id)
         .order_by(models.Payment.created_at.desc())
     ).all()
     items = [
         PaymentItem(
-            id=p.id, amount=p.amount, method=p.method, masked_pan=_mask_pan(p.pan),
+            id=p.id,
+            amount=p.amount,
+            method=p.method,
+            masked_pan=_mask_pan(p.pan),
             created_at=p.created_at.isoformat() if p.created_at else None,
         )
         for p in rows

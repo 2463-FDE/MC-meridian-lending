@@ -39,6 +39,18 @@ def post(base_url: str, path: str, payload: dict) -> dict:
     return resp.json()
 
 
+def post_raw(base_url: str, path: str, payload: dict) -> httpx.Response:
+    """POST and return the raw response, so a caller can forward a downstream 4xx.
+
+    `post()` raises on non-2xx, which turns "the service refused this" into an exception
+    indistinguishable from "the service is down". The disclosure lifecycle needs the
+    difference: an illegal transition is an answer, not an outage.
+    """
+    return httpx.post(
+        f"{base_url}{path}", json=payload, timeout=_TIMEOUT, headers=_internal_headers()
+    )
+
+
 def get(base_url: str, path: str) -> httpx.Response:
     """GET a downstream service; return the raw response so callers can branch on status
     (e.g. forward a 404 instead of treating it as a 500)."""
