@@ -8,9 +8,10 @@ withhold. PROVEN must require step 1 to have actually run and failed.
 These build a throwaway git repository per case rather than stubbing, because the behaviour
 under test IS the interaction between `git diff --name-status`, the rollback, and pytest.
 
-Not wired into CI (nothing runs scripts/ today), and `make prove` cannot certify a change to
-prove_test.sh itself -- it only rolls back *.py, so a .sh fix is never removed in step 1.
-Run directly: python3 -m pytest scripts/tests/test_prove_test.py
+Not wired into CI (nothing runs scripts/ today). `make prove` now rolls back ANY changed
+tracked file, not only *.py, so a fix whose regression test is Python but whose fix lives in a
+non-Python source file (.sql, policy JSON, a shell gate, frontend) is proved rather than
+reported UNPROVEN. Run directly: python3 -m pytest scripts/tests/test_prove_test.py
 """
 
 import os
@@ -267,6 +268,49 @@ def test_fix_that_deletes_source_is_proven_and_leaves_no_debris(tmp_path):
     assert "legacy.py" not in dirty, (
         f"deleted file left in the tree: {dirty!r}\n{res.stdout}"
     )
+
+
+def test_fix_in_non_python_source_is_proven(tmp_path):
+    """PR review (source rollback filtered to *.py): a fix can live in a .sql migration, a
+    policy JSON, a shell gate, or a frontend file. Those must be rolled back in step 1 too,
+    or the test runs against a tree that still holds the fix. Here app.py is UNCHANGED and the
+    only source change is a JSON the test reads through it -- classified as *.py, that change is
+    invisible, n_src is 0, and the run prints UNPROVEN over a real, proven-red fix.
+    """
+    repo = _repo(tmp_path)
+    _write(
+        repo,
+        "services/svc/app.py",
+        """
+        import json
+        import pathlib
+
+        def f():
+            data = json.loads((pathlib.Path(__file__).parent / "data.json").read_text())
+            return data["v"]
+        """,
+    )
+    _write(repo, "services/svc/data.json", '{"v": 1}\n')
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base with the bug in JSON")
+
+    # The fix is ENTIRELY in the non-Python file; app.py never changes.
+    _write(repo, "services/svc/data.json", '{"v": 22222}\n')
+    _write(
+        repo,
+        "services/svc/tests/test_f.py",
+        """
+        from app import f
+
+        def test_f_reads_fixed_value():
+            assert f() == 22222
+        """,
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "fix JSON + regression test")
+
+    res = _run(repo)
+    assert res.returncode == PROVEN, res.stdout + res.stderr
 
 
 @pytest.mark.parametrize("label", ["PROVEN", "UNPROVEN", "REJECTED", "ABORT"])

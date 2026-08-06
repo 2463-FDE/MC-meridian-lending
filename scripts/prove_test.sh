@@ -14,11 +14,12 @@
 #   2  ABORT     could not run (dirty tree, no parent, no test file in the commit)
 #   3  UNPROVEN  FIX_REF changes no source, so no rollback happened and nothing was proved
 #
-# Runner scope: pytest under services/<svc>/ only. Non-Python tests never enter the set
-# (the diff below filters to '*.py'), so a frontend-only fix aborts as "changes no test
-# file". A .py test OUTSIDE services/<svc>/ — rag_eval/tests/ today — used to be skipped
-# with a warning while the run still printed PROVEN. It is now REFUSED: a run that skips
-# a test and reports a pass it never executed is worse than no run at all.
+# Runner scope: the TEST it runs must be Python (pytest); the SOURCE it rolls back may be
+# any tracked file (.sql, policy JSON, shell, frontend). A fix whose regression test is a .py
+# file but whose fix lives in a .sql migration is proved; a fix with no .py test at all still
+# aborts as "changes no test file". A .py test OUTSIDE services/<svc>/ — rag_eval/tests/
+# today — used to be skipped with a warning while the run still printed PROVEN. It is now
+# REFUSED: a run that skips a test and reports a pass it never executed is worse than no run.
 #
 # Assumes the working tree is checked out at FIX_REF (normally HEAD, the fix you
 # just committed). Only touches the tracked source files that commit changed;
@@ -53,19 +54,27 @@ if [ "$(git rev-parse HEAD)" != "$(git rev-parse "$FIX")" ]; then
   exit 2
 fi
 
-# Classify the .py files the fix commit changed: tests vs source (added/modified/deleted).
+# Classify every file the fix commit changed: tests vs source (added/modified/deleted).
+# SOURCE is ANY changed tracked file, not just *.py -- a fix can live in a .sql migration,
+# fee-schedule JSON, a shell gate, or a frontend file, and step 1 must roll those back too or
+# it proves the test against a tree that still holds half the fix (a mixed .py+.sql fix where
+# the .py rollback alone reintroduces the failure would print PROVEN over a never-rolled-back
+# SQL half). git checkout/rm restores any tracked path, so no file type has to be refused
+# here. Test detection stays Python-only: this runner is pytest-only, so a non-.py file
+# (including one under a tests/ dir) is a fixture/source input to a test, never a runnable
+# test itself.
 src_mods=(); src_adds=(); src_dels=(); tests=()
 while IFS=$'\t' read -r status path; do
   [ -z "${path:-}" ] && continue
   case "$path" in
-    *test_*.py|*_test.py|*/tests/*) tests+=("$path"); continue ;;
+    *test_*.py|*_test.py|*/tests/*.py) tests+=("$path"); continue ;;
   esac
   case "$status" in
     A*) src_adds+=("$path") ;;
     D*) src_dels+=("$path") ;;
     *)  src_mods+=("$path") ;;   # M / R / C -> treat as modified
   esac
-done < <(git diff --name-status "$PARENT" "$FIX" -- '*.py')
+done < <(git diff --name-status "$PARENT" "$FIX")
 
 if [ ${#tests[@]} -eq 0 ]; then
   echo "ABORT: $FIX changes no test file — nothing to prove." >&2
