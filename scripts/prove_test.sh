@@ -29,6 +29,14 @@ FIX=${1:-HEAD}
 PARENT="${FIX}~1"
 PY=python3
 
+# Never let one phase import the other phase's compiled bytecode. CPython judges a cached
+# .pyc fresh from source mtime-SECONDS + size, and this script rolls a file back and forward
+# within one second — so two same-size revisions are indistinguishable and step 2 would
+# re-import step 1's rolled-back .pyc, failing against source that is no longer there
+# (a false REJECTED). Disabling writes here means the guarantee no longer depends on the
+# caller setting it; run_tests also clears any pre-existing cache before each phase.
+export PYTHONDONTWRITEBYTECODE=1
+
 cd "$(git rev-parse --show-toplevel)" || exit 2
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -83,6 +91,7 @@ run_tests() {   # 0 if every changed test file passes, 1 if any fails/errors
       services/*/*)
         svc="services/$(printf '%s' "$t" | cut -d/ -f2)"
         rel="${t#"$svc"/}"
+        find "$svc" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null
         ( cd "$svc" && $PY -m pytest "$rel" -q ) || overall=1
         ;;
       # Repo-level tests (scripts/tests/...) run from the repo root instead. They exist
@@ -95,16 +104,21 @@ run_tests() {   # 0 if every changed test file passes, 1 if any fails/errors
   return $overall
 }
 
-roll_back() {   # FIX source -> PARENT source (reintroduce the bug)
-  [ ${#src_mods[@]} -gt 0 ] && git checkout "$PARENT" -- "${src_mods[@]}"
-  [ ${#src_dels[@]} -gt 0 ] && git checkout "$PARENT" -- "${src_dels[@]}"
-  [ ${#src_adds[@]} -gt 0 ] && rm -f "${src_adds[@]}"
+roll_back() {   # FIX source -> PARENT source (reintroduce the bug); nonzero on any failure
+  [ ${#src_mods[@]} -gt 0 ] && { git checkout "$PARENT" -- "${src_mods[@]}" || return 1; }
+  [ ${#src_dels[@]} -gt 0 ] && { git checkout "$PARENT" -- "${src_dels[@]}" || return 1; }
+  [ ${#src_adds[@]} -gt 0 ] && { rm -f -- "${src_adds[@]}" || return 1; }
   return 0
 }
-restore() {     # PARENT source -> FIX source (reapply the fix)
-  [ ${#src_mods[@]} -gt 0 ] && git checkout "$FIX" -- "${src_mods[@]}"
-  [ ${#src_dels[@]} -gt 0 ] && git checkout "$FIX" -- "${src_dels[@]}"
-  [ ${#src_adds[@]} -gt 0 ] && git checkout "$FIX" -- "${src_adds[@]}"
+restore() {     # PARENT source -> FIX source (reapply the fix); nonzero on any failure
+  # A file the fix DELETED is absent at FIX, so removing it IS restoring the FIX tree.
+  # `git checkout "$FIX" -- <deleted>` errors ("did not match any file") and leaves the
+  # parent copy behind — step 2 would then run with the bug present and the tree exit dirty.
+  # `git rm` (not plain rm) also drops the index entry roll_back's checkout staged, so the
+  # tree returns fully to FIX; --ignore-unmatch makes it a safe no-op when already absent.
+  [ ${#src_mods[@]} -gt 0 ] && { git checkout "$FIX" -- "${src_mods[@]}" || return 1; }
+  [ ${#src_adds[@]} -gt 0 ] && { git checkout "$FIX" -- "${src_adds[@]}" || return 1; }
+  [ ${#src_dels[@]} -gt 0 ] && { git rm -f --ignore-unmatch -- "${src_dels[@]}" || return 1; }
   return 0
 }
 trap restore EXIT   # never leave the tree on parent source
@@ -117,9 +131,9 @@ echo "source: $n_src changed file(s)"
 fail_step=skip
 if [ "$n_src" -gt 0 ]; then
   echo; echo "-- step 1: bug present (source at $PARENT) — expect FAILURE --"
-  roll_back
+  roll_back || { echo "ABORT: could not roll source back to $PARENT." >&2; exit 2; }
   if run_tests; then fail_step=BAD; else fail_step=GOOD; fi
-  restore
+  restore || { echo "ABORT: could not restore source to $FIX after step 1." >&2; exit 2; }
 else
   echo; echo "-- step 1: skipped ($FIX changes no source, only tests) --"
 fi

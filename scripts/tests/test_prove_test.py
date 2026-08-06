@@ -63,6 +63,23 @@ def _run(repo: Path) -> subprocess.CompletedProcess:
     )
 
 
+def _run_plain(repo: Path) -> subprocess.CompletedProcess:
+    """Run the script WITHOUT PYTHONDONTWRITEBYTECODE in the environment.
+
+    _run sets it for the caller, which masks whether the SCRIPT disables bytecode itself.
+    The stale-.pyc-reuse guard has to hold when the caller does nothing, so this runner
+    strips the variable and lets prove_test.sh be the only thing that can set it.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONDONTWRITEBYTECODE"}
+    return subprocess.run(
+        ["./scripts/prove_test.sh", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
 def test_test_only_commit_is_unproven_not_proven(tmp_path):
     """The regression: tests changed, no source changed, tests pass -> must NOT be PROVEN."""
     repo = _repo(tmp_path)
@@ -175,6 +192,81 @@ def test_commit_with_no_test_file_aborts(tmp_path):
 
     res = _run(repo)
     assert res.returncode == ABORT, res.stdout + res.stderr
+
+
+def test_script_disables_bytecode_writes(tmp_path):
+    """PR review (bytecode reuse): the script must disable bytecode itself, not rely on the
+    caller. Run without PYTHONDONTWRITEBYTECODE and assert no .pyc survives -- writing one
+    during a rollback run is the mechanism by which step 2 re-imports step 1's stale bytecode.
+    The two revisions are the same byte length (return 1 / return 2), the collision case.
+    """
+    repo = _repo(tmp_path)
+    _write(repo, "services/svc/app.py", "def f():\n    return 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base with the bug")
+
+    _write(repo, "services/svc/app.py", "def f():\n    return 2\n")
+    _write(
+        repo,
+        "services/svc/tests/test_f.py",
+        """
+        from app import f
+
+        def test_f():
+            assert f() == 2
+        """,
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "fix + regression test")
+
+    res = _run_plain(repo)
+    assert res.returncode == PROVEN, res.stdout
+    leftover = [str(p) for p in (repo / "services").rglob("*.pyc")]
+    assert not leftover, (
+        f"prove_test.sh left compiled bytecode: {leftover}\n{res.stdout}"
+    )
+
+
+def test_fix_that_deletes_source_is_proven_and_leaves_no_debris(tmp_path):
+    """PR review (deleted-source restore): a fix that DELETES a source file must restore to
+    FIX (file gone, index clean). The old restore ran `git checkout FIX -- <deleted>`, which
+    errored and left the parent copy -- step 2 then ran the bug (REJECTED) and the tree exited
+    dirty with the file still staged.
+    """
+    repo = _repo(tmp_path)
+    _write(repo, "services/svc/legacy.py", "X = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base ships legacy")
+
+    # The fix DELETES legacy.py; the test passes only once it is gone (import must fail).
+    _git(repo, "rm", "-q", "services/svc/legacy.py")
+    _write(
+        repo,
+        "services/svc/tests/test_gone.py",
+        """
+        import importlib
+
+        def test_legacy_absent():
+            try:
+                importlib.import_module("legacy")
+            except ModuleNotFoundError:
+                return
+            raise AssertionError("legacy should have been deleted")
+        """,
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "delete legacy + regression test")
+
+    res = _run(repo)
+    assert res.returncode == PROVEN, res.stdout
+    # The deleted file must not be resurrected in the worktree or left staged in the index.
+    assert not (repo / "services" / "svc" / "legacy.py").exists(), res.stdout
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True
+    ).stdout
+    assert "legacy.py" not in dirty, (
+        f"deleted file left in the tree: {dirty!r}\n{res.stdout}"
+    )
 
 
 @pytest.mark.parametrize("label", ["PROVEN", "UNPROVEN", "REJECTED", "ABORT"])
