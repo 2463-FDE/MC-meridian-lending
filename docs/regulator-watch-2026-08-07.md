@@ -53,20 +53,30 @@ that is the next issue's job (FCRA/Reg V and Reg E first, since both map to live
 
 | Date | Regulator / rule | What changed | Meridian relevance | Action |
 |---|---|---|---|---|
+| **withdrawn 2025-05-12** (released 2023-09-19; 89 FR 27361) | **CFPB Circular 2023-03 — WITHDRAWN** (adverse-action notices, Reg B sample forms) | The circular said a creditor may **not** rely on the checklist of reasons in the CFPB sample adverse-action forms when those reasons do not specifically and accurately state the principal reason(s). CFPB **withdrew** it 2025-05-12 as part of a mass withdrawal of guidance (FR 2025-08286). | **HIGH — and this is a correction to our own work.** The week-3 decision-assistant centrepiece cited Circular 2023-03 as authority. That citation is now stale: the circular is withdrawn. **The underlying obligation is unchanged** — the specificity requirement lives in the statute/regulation itself (ECOA / **12 CFR 1002.9**), not in the circular. | Recite **12 CFR 1002.9** wherever the assistant/docs cited Circular 2023-03; do **not** cite the withdrawn circular. This is the lead entry on purpose — the client knew of the withdrawal before we did. |
 | **2026-04-22** (issued); compliance **2026-07-21** | **Reg B / ECOA final rule** — effects test removed | CFPB removed the "effects test" from Regulation B and states ECOA does **not** recognize disparate-impact liability. Also narrows "discouragement" to statements of *intent* to discriminate, and restricts Special Purpose Credit Programs (bars race/color/national-origin/sex as SPCP common characteristics; extra conditions for for-profit creditors). | **HIGH.** We run a credit scorecard (`decision-service`) and issue ECOA/Reg B adverse-action notices. This changes the fair-lending liability posture our scorecard is tested against. | Priya to reassess fair-lending testing under the new standard; confirm adverse-action *notice* mechanics are unchanged (the summary changes liability theory, not the §1002.9 notice content). Add to Monday agenda. |
 | **2026-01-01** (effective) | **Reg Z / TILA** — 2026 annual threshold adjustments | Exempt-consumer-credit threshold rose **$71,900 → $73,400** (CPI-W based). Closed-end consumer credit **not** secured by real property/a dwelling **above** the threshold is exempt from TILA. (Also HOEPA/QM/credit-card and escrow asset-size adjustments — mortgage-only, not us.) | **MEDIUM.** Our personal installment loans are unsecured. Any single loan **> $73,400** falls outside TILA, so `disclosure-service` would not be *required* to issue a TILA disclosure for it (we may still choose to). | Confirm our max loan amount. If we never exceed $73,400, no action; if we do, decide whether to keep disclosing voluntarily and record it. |
 | **2026-05-01** (issued) | **Reg B / ECOA §1071** — small-business lending rule refocused | Coverage narrowed to core lenders/products/data points; excludes merchant cash advances, small-dollar, and agricultural loans. | **LOW / N/A.** §1071 governs *small-business* lending data collection. Meridian is a *consumer* lender. | None. Track only in case product scope ever adds business-purpose loans. |
 
 ## CFPB circulars — status
 
-No new Consumer Financial Protection Circular has been issued in 2026. The most recent
+No **new** Consumer Financial Protection Circular has been issued in 2026. The most recent
 circular of record is **2024-07** (Design, Marketing, and Administration of Credit Card
 Rewards Programs, 2024-12-30, 89 FR 106277) — not relevant to our unsecured-installment
-product. **No action.** Re-check the circulars index each week; a new circular is the
+product.
+
+**Withdrawal that touches us (lead entry above): Circular 2023-03 was withdrawn 2025-05-12.**
+It concerned adverse-action notices and the proper use of Reg B sample forms — the exact area
+the week-3 decision assistant operates in. Cite **12 CFR 1002.9** (the standing regulation),
+never the withdrawn circular. See the *What moved* table for the action.
+
+Re-check the circulars index each week; a new circular — or a withdrawal — is the
 highest-signal single event on this page.
 
 ## Standing summary for the client
 
+- **Correction we carry:** the week-3 assistant cited **Circular 2023-03**, withdrawn
+  **2025-05-12**. The obligation is unchanged — recite **12 CFR 1002.9**, not the circular.
 - The one item that touches us this quarter is the **Reg B effects-test removal**, compliance
   **2026-07-21** (already in effect). It changes fair-lending liability theory under ECOA, not
   our disclosure math. Owner: Priya.
@@ -87,6 +97,8 @@ Free to run, so the enforced thing is the freshness metric, not the tool:
 ## Sources
 
 - [CFPB — Consumer Financial Protection Circulars](https://www.consumerfinance.gov/compliance/circulars/)
+- [CFPB — Circular 2023-03 (adverse-action notices / Reg B sample forms)](https://www.consumerfinance.gov/compliance/circulars/circular-2023-03-adverse-action-notification-requirements-and-the-proper-use-of-the-cfpbs-sample-forms-provided-in-regulation-b/) — withdrawn 2025-05-12
+- [Federal Register — Interpretive Rules, Policy Statements, and Advisory Opinions; Withdrawal, 2025-05-12](https://www.federalregister.gov/documents/2025/05/12/2025-08286/interpretive-rules-policy-statements-and-advisory-opinions-withdrawal) (FR doc 2025-08286)
 - [CFPB — Equal Credit Opportunity Act (Regulation B) final rule](https://www.consumerfinance.gov/rules-policy/final-rules/equal-credit-opportunity-act-regulation-b/) (compliance date 2026-07-21)
 - [Federal Register — Equal Credit Opportunity Act (Regulation B), 2026-04-22](https://www.federalregister.gov/documents/2026/04/22/2026-07804/equal-credit-opportunity-act-regulation-b) (FR doc 2026-07804)
 - [CFPB — Small Business Lending under ECOA (Regulation B), 2026](https://www.consumerfinance.gov/rules-policy/final-rules/small-business-lending-under-the-equal-credit-opportunity-act-regulation-b-2026/)
@@ -98,3 +110,4 @@ Free to run, so the enforced thing is the freshness metric, not the tool:
 | Date | By | Change |
 |---|---|---|
 | 2026-08-07 | initial | First issue. Reg B effects-test removal (HIGH), Reg Z $73,400 exemption (MEDIUM), §1071 refocus (LOW), no 2026 circulars. Reg B Federal Register text verified via CFPB final-rule page — the FR host blocked automated fetch, so the FR-text detail (exact adverse-action wording) is **UNVERIFIED** pending a manual read of FR doc 2026-07804. Added the full **watch universe** (11 rows) — FCRA/Reg V, EFTA/Reg E and BSA/AML scoped as active but not yet swept for 2026 movement. |
+| 2026-08-07 | correction | Added **Circular 2023-03 withdrawal (2025-05-12)** as the lead *What moved* entry per mentor feedback — the week-3 assistant cited it; recite 12 CFR 1002.9 instead. Verified via CFPB circular page + FR doc 2025-08286. |
