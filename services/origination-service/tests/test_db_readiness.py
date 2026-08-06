@@ -545,6 +545,80 @@ def test_dob_readable_constraint_is_in_canonical_init_schema():
         )
 
 
+class _DocumentBodyMissingCursor:
+    """Every earlier rung present but disclosures.document_body absent -- a volume that ran
+    migration 0012 (the table) and not 0013 (the column). `accept_offer` selects it to decide
+    whether the delivered disclosure actually has a stored document, so that SELECT would 500
+    the boarding path while /health looked fine.
+
+    The ck_applicants_dob_readable rung runs BEFORE this one, so answering it with the
+    canonical definition is what makes this fake the 0012-not-0013 volume the docstring
+    claims: without that, the probe would fail one rung earlier and the assertion below
+    would pass for the wrong reason."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql="", *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "pg_get_constraintdef" in self._last:
+            return (READABLE_DOB_CONSTRAINT_DEF,)
+        if "'document_body'" in self._last:
+            return None
+        return (1,)
+
+
+class _DocumentBodyMissingConn:
+    def cursor(self):
+        return _DocumentBodyMissingCursor()
+
+    def close(self):
+        pass
+
+
+class _DocumentBodyWrongTypeCursor(_DocumentBodyMissingCursor):
+    """The column exists under the right name and the wrong type. `ADD COLUMN IF NOT EXISTS`
+    swallows a same-named column of any type, so a name-only rung reports ready over a TEXT
+    stand-in — against which the boarding gate's `<> 'null'::jsonb` is a type error."""
+
+    def fetchone(self):
+        if "pg_get_constraintdef" in self._last:
+            return (READABLE_DOB_CONSTRAINT_DEF,)
+        if "'document_body'" in self._last and "jsonb" in self._last:
+            return None
+        return (1,)
+
+
+class _DocumentBodyWrongTypeConn:
+    def cursor(self):
+        return _DocumentBodyWrongTypeCursor()
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize(
+    "conn_cls",
+    [_DocumentBodyMissingConn, _DocumentBodyWrongTypeConn],
+)
+def test_probe_fails_when_disclosure_document_body_is_not_ready(monkeypatch, conn_cls):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: conn_cls())
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:disclosures.document_body"
+
+
 def test_probe_false_when_database_url_unset(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", "")
     ok, err = config.database_reachable()

@@ -16,14 +16,3 @@
 docs/scoping-payments-week5.md
 docs/spec-payments-week5.md
 scripts/repro_double_charge.py
-
-# Week 4 disclosure package — CLAUDE.md cites these; they live on
-# feature/disclosure-week4, not yet merged to main. Tracking CLAUDE.md here (commit
-# 135a50b) makes the doc gate grade it, so these must be listed until that branch
-# lands. Entries mirror the backtick text verbatim (is_allowed is an exact match);
-# each self-clears when the file becomes tracked and starts resolving.
-# Delete these four when feature/disclosure-week4 merges.
-disclosure-service/app/rules.py
-policies/fee_schedule.json
-docs/kb.md
-docs/spec-disclosure-week4.md

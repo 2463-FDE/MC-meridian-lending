@@ -118,6 +118,74 @@ def database_reachable(timeout: float = 2.0) -> tuple[bool, str | None]:
         return result
 
 
+# (object name reported by /health, existence probe). Checked in dependency order so the
+# first thing reported is the first thing to apply.
+_SCHEMA_OBJECTS = (
+    (
+        "offers.decision_event_id",
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'offers' AND column_name = 'decision_event_id'",
+    ),
+    (
+        "disclosures",
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'disclosures'",
+    ),
+    (
+        # Idempotent disclosure writes depend on uq_disclosures_offer being a UNIQUE index on
+        # exactly disclosures(offer_id): it is what makes POST /disclosures one-per-offer under a
+        # retry or a concurrent race. Both declaration sites use CREATE UNIQUE INDEX IF NOT EXISTS
+        # (db/init/001_schema.sql, migration 0012), which is SKIPPED when a same-named index
+        # already exists of ANY shape -- so a name-only pg_indexes lookup reports ready over a
+        # non-unique or wrong-column index, and the invariant is silently gone: concurrent creates
+        # persist duplicate regulated records and provenance reads go ambiguous. Assert the
+        # DEFINITION -- indisunique, the table, and that the sole key column is offer_id -- same
+        # posture as origination's ck_applicants_dob_readable rung. Missing and wrong-definition
+        # fold to one schema_not_ready:uq_disclosures_offer label, as the document_body type rung
+        # below does; the query returns a row only when the index is exactly right.
+        "uq_disclosures_offer",
+        "SELECT 1 FROM pg_index i "
+        "JOIN pg_class c ON c.oid = i.indexrelid "
+        "JOIN pg_class t ON t.oid = i.indrelid "
+        "JOIN pg_namespace n ON n.oid = t.relnamespace "
+        "WHERE c.relname = 'uq_disclosures_offer' AND t.relname = 'disclosures' "
+        "AND n.nspname = 'public' AND i.indisunique AND i.indnkeyatts = 1 "
+        "AND (SELECT a.attname FROM pg_attribute a "
+        "WHERE a.attrelid = i.indrelid AND a.attnum = i.indkey[0]) = 'offer_id'",
+    ),
+    (
+        # Without the freeze trigger a delivered disclosure is silently editable, which is
+        # the guarantee the table exists to make — treat its absence as not-ready, not as
+        # a missing nicety.
+        "trg_disclosures_freeze_delivered",
+        "SELECT 1 FROM pg_trigger WHERE tgname = 'trg_disclosures_freeze_delivered'",
+    ),
+    (
+        # Delivery refuses a disclosure with no recorded document (spec D6). Migration 0012
+        # is hand-applied like 0011, so without this rung a deploy reaches the write path
+        # with the column absent: every INSERT fails mid-flight on an unknown column while
+        # /health reports green. Asserts the TYPE, not just the name -- a same-named TEXT
+        # column would accept the document as a JSON string and hand every reader back a
+        # string instead of an object, and 0012's own IF NOT EXISTS swallows exactly that.
+        "disclosures.document_body",
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'disclosures' AND column_name = 'document_body' "
+        "AND data_type = 'jsonb'",
+    ),
+    (
+        # The provenance read selects disclosure_decision_event_id (migration 0015) to detect
+        # a split-brain decision edge. Migrations are hand-applied and lag init, so probe the
+        # COLUMN, not just the view's existence: a volume at 0012 without 0015 has the view
+        # but not the column, and the route would 500 on the unknown column while /health
+        # reported green. information_schema.columns lists a view's columns, so this reports
+        # schema_not_ready:v_disclosure_provenance until the reshaped view is applied.
+        "v_disclosure_provenance",
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'v_disclosure_provenance' "
+        "AND column_name = 'disclosure_decision_event_id'",
+    ),
+)
+
+
 def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
     if not DATABASE_URL:
         return False, "DATABASE_URL not set"
@@ -131,14 +199,36 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
-            # Idempotent offer writes depend on the uq_offers_app unique index (PR review):
-            # on a dirty volume the 0010 migration can fail to create it (pre-existing
-            # duplicate offers), which would silently re-allow duplicate regulated TILA
-            # disclosures while /health looks green. Fail readiness loudly instead. Mirrors
-            # origination's uq_loans_app readiness rung.
-            cur.execute("SELECT 1 FROM pg_indexes WHERE indexname = 'uq_offers_app'")
+            # Idempotent offer writes depend on uq_offers_app being a UNIQUE index on
+            # offers(app_id) (PR review): on a dirty volume the 0010 migration can fail to
+            # create it (pre-existing duplicate offers), and CREATE UNIQUE INDEX IF NOT EXISTS
+            # then skips a same-named index of any shape -- silently re-allowing duplicate
+            # regulated TILA disclosures while /health looks green. Assert the DEFINITION
+            # (indisunique + table + sole key column app_id), not the name, so a non-unique or
+            # wrong-column stand-in fails readiness. The declared index is partial
+            # (WHERE app_id IS NOT NULL); indisunique holds for a partial unique index, and the
+            # predicate is not asserted here because a non-partial unique index over app_id is a
+            # stronger guard, not a weaker one. Mirrors origination's uq_loans_app rung.
+            cur.execute(
+                "SELECT 1 FROM pg_index i "
+                "JOIN pg_class c ON c.oid = i.indexrelid "
+                "JOIN pg_class t ON t.oid = i.indrelid "
+                "JOIN pg_namespace n ON n.oid = t.relnamespace "
+                "WHERE c.relname = 'uq_offers_app' AND t.relname = 'offers' "
+                "AND n.nspname = 'public' AND i.indisunique AND i.indnkeyatts = 1 "
+                "AND (SELECT a.attname FROM pg_attribute a "
+                "WHERE a.attrelid = i.indrelid AND a.attnum = i.indkey[0]) = 'app_id'"
+            )
             if cur.fetchone() is None:
                 return False, "schema_not_ready:uq_offers_app"
+            # ADR 0012 provenance objects. Migration 0011 is hand-applied (compose mounts
+            # db/init/* only), so a deploy can reach code that writes disclosures before
+            # the schema exists. Report unhealthy per missing object rather than let the
+            # write path fail mid-flight and leave an offer with no provenance edge.
+            for object_name, probe in _SCHEMA_OBJECTS:
+                cur.execute(probe)
+                if cur.fetchone() is None:
+                    return False, f"schema_not_ready:{object_name}"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__

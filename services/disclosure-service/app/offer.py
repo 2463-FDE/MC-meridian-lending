@@ -1,22 +1,35 @@
-"""Offer assembly.
+"""Offer assembly — the Reg Z disclosure box.
 
-Has its OWN hardcoded copy of the origination fee (0.03) — a third value that has
-drifted from fees.py (0.030) and apr.py (0.025). Same idea, three numbers.
+Computation happens in Decimal in apr.py; this is the boundary where it becomes float,
+because the `offers` columns are DOUBLE PRECISION and the response schema is float (debt
+D2). The authoritative minor-unit record lands with the `disclosures` table (spec D3);
+until then these floats are the only stored form, so they are quantized to cents here
+rather than left to float rounding.
+
+All five figures derive from ONE fee, read from the single versioned schedule — the defect
+this replaced had amount_financed on 3.0% and the APR on 2.5% inside the same dict.
 """
+
+from decimal import ROUND_HALF_UP, Decimal
+
 from . import apr
 
-ORIGINATION_FEE_PCT = 0.03   # third copy
+CENTS = Decimal("0.01")
 
 
-def build_offer(principal: float, annual_rate_pct: float, term_months: int) -> dict:
-    a = apr.compute_apr(principal, annual_rate_pct, term_months)
-    fc = apr.finance_charge(principal, annual_rate_pct, term_months)
+def _cents(value: Decimal) -> float:
+    return float(value.quantize(CENTS, rounding=ROUND_HALF_UP))
+
+
+def build_offer(principal, annual_rate_pct, term_months: int) -> dict:
     pmt = apr.monthly_payment(principal, annual_rate_pct, term_months)
-    fee = principal * ORIGINATION_FEE_PCT
     return {
-        "apr": a,
-        "finance_charge": round(fc, 2),
-        "monthly_payment": round(pmt, 2),
-        "amount_financed": round(principal - fee, 2),
-        "total_of_payments": round(pmt * term_months, 2),
+        # APR is already quantized to 3 decimals by the actuarial solve.
+        "apr": float(apr.compute_apr(principal, annual_rate_pct, term_months)),
+        "finance_charge": _cents(
+            apr.finance_charge(principal, annual_rate_pct, term_months)
+        ),
+        "monthly_payment": _cents(pmt),
+        "amount_financed": _cents(apr.amount_financed(principal)),
+        "total_of_payments": _cents(pmt * term_months),
     }

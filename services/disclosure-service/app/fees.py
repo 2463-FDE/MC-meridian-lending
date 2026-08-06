@@ -1,19 +1,18 @@
-"""Fee constants — hardcoded.
+"""Fee helpers.
 
-These are copy-pasted into apr.py and offer.py too, and have drifted.
-The published source of truth is policies/fee_schedule.md (origination fee = 3.0%).
+The constants that used to live here — and, drifted, in apr.py (0.025) and offer.py (0.03)
+— now come from `policies/fee_schedule.json` via rules.py: one versioned source, loaded
+fail-closed. NSF is unused in code today; it stays in the schedule as published policy.
 """
 
-ORIGINATION_FEE_PCT = 0.030     # policy says 3.0%
-LATE_FEE_FLAT = 35.0
-NSF_FEE = 25.0
+from . import rules
 
 
 def origination_fee(amount: float) -> float:
-    # float math on money
-    return amount * ORIGINATION_FEE_PCT
+    # float math on money (debt D2; Decimal lands on the disclosure compute path)
+    return amount * rules.get_fee_schedule().origination_fee_pct
 
 
 def late_fee(past_due: float) -> float:
     # "flat $35 OR 5% of past due, whichever is less" — but this returns the flat fee only.
-    return LATE_FEE_FLAT
+    return rules.get_fee_schedule().late_fee_flat

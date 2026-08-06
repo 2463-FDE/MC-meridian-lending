@@ -349,6 +349,247 @@ def test_capture_monthly_debt_404_when_missing(monkeypatch):
     assert resp.status_code == 404
 
 
+def test_accept_boards_note_rate_not_apr(monkeypatch):
+    # PR review: servicing amortizes the schedule at the NOTE rate, but boarding stored the
+    # disclosed actuarial APR into the loan's rate, so the funded loan's schedule contradicted
+    # its own TILA disclosure on every fee-bearing loan (APR carries the prepaid fee and is
+    # higher). accept_offer now derives the note rate from the delivered disclosure's
+    # compute_snapshot and passes it to board_to_servicing; the APR stays for display.
+    boardable = {
+        "amount": 17460,
+        "term_months": 48,
+        "name": "Maria",
+        "apr": 9.584,  # disclosed actuarial APR (carries the fee)
+        "outcome": "approve",
+        "disclosure_status": "delivered",
+        "disclosure_delivered_at": "2026-08-05T00:00:00Z",
+        "disclosure_snapshot": {
+            "principal_cents": 1800000,
+            "note_rate_pct": "7.99",  # the contractual rate servicing must amortize at
+            "term_months": 48,
+            "fee_pct": "0.03",
+        },
+        "disclosure_has_document": True,
+    }
+
+    def _query(sql, params=None):
+        if "FROM applications a" in sql:
+            return [boardable]
+        if "FROM loans WHERE app_id" in sql:
+            return []  # no existing loan -> take the boarding branch
+        return []  # balances INSERT, funded UPDATE
+
+    monkeypatch.setattr(applications.db, "query", _query)
+    monkeypatch.setattr(
+        applications.authz, "require_officer_or_owner", lambda *a, **k: None
+    )
+
+    captured = {}
+
+    def _board(app_id, name, principal, apr, term_months, note_rate_pct=None):
+        captured.update(apr=apr, note_rate_pct=note_rate_pct)
+        return 555
+
+    monkeypatch.setattr(applications.intake, "board_to_servicing", _board)
+
+    resp = TestClient(app).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["loan_id"] == 555
+    # The funded loan is serviced at the note rate, not the disclosed APR.
+    assert captured["note_rate_pct"] == 7.99
+    assert captured["apr"] == 9.584  # APR still stored for display
+    assert captured["note_rate_pct"] != captured["apr"]
+
+
+def test_accept_refuses_when_snapshot_has_no_note_rate(monkeypatch):
+    # Fail closed rather than fall back to the APR: a delivered disclosure whose snapshot
+    # carries no usable note rate cannot be boarded at the wrong rate.
+    boardable = {
+        "amount": 17460,
+        "term_months": 48,
+        "name": "Maria",
+        "apr": 9.584,
+        "outcome": "approve",
+        "disclosure_status": "delivered",
+        "disclosure_delivered_at": "2026-08-05T00:00:00Z",
+        "disclosure_snapshot": {"principal_cents": 1800000, "term_months": 48},
+        "disclosure_has_document": True,
+    }
+
+    def _query(sql, params=None):
+        if "FROM applications a" in sql:
+            return [boardable]
+        if "FROM loans WHERE app_id" in sql:
+            return []
+        return []
+
+    monkeypatch.setattr(applications.db, "query", _query)
+    monkeypatch.setattr(
+        applications.authz, "require_officer_or_owner", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        applications.intake,
+        "board_to_servicing",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not board without a note rate")
+        ),
+    )
+    resp = TestClient(app, raise_server_exceptions=False).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 409
+
+
+def test_accept_refuses_an_undelivered_disclosure(monkeypatch):
+    # Spec D6 compliance hold: a loan may not board until its TILA disclosure is DELIVERED.
+    # Every other accept test uses a delivered row; this pins the refusal itself, so a future
+    # change cannot quietly board a disclosure still in review. (A reviewer placed this guard
+    # in disclosure_coordinator.py, but it lives on the money path — accept_offer.)
+    undelivered = {
+        "amount": 17460,
+        "term_months": 48,
+        "name": "Maria",
+        "apr": 9.584,
+        "outcome": "approve",
+        "disclosure_status": "in_review",  # NOT delivered
+        "disclosure_delivered_at": None,
+        "disclosure_snapshot": {
+            "principal_cents": 1800000,
+            "term_months": 48,
+            "note_rate_pct": "9.20",
+        },
+        "disclosure_has_document": True,
+    }
+
+    def _query(sql, params=None):
+        if "FROM applications a" in sql:
+            return [undelivered]
+        if "FROM loans WHERE app_id" in sql:
+            return []
+        return []
+
+    monkeypatch.setattr(applications.db, "query", _query)
+    monkeypatch.setattr(
+        applications.authz, "require_officer_or_owner", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        applications.intake,
+        "board_to_servicing",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not board an undelivered disclosure")
+        ),
+    )
+    resp = TestClient(app, raise_server_exceptions=False).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 409, resp.text
+
+
+def test_accept_refuses_a_split_brain_decision_edge(monkeypatch):
+    # Defense in depth mirroring disclosure-service's delivery refusal: a row delivered
+    # before that guard can carry an offer decision edge (7) that disagrees with the
+    # disclosure record's own edge (9) while every edge is non-null and status is delivered.
+    # trg_disclosures_freeze_delivered makes it unrepairable, so boarding must refuse it here
+    # rather than fund a loan whose audit trail names a decision that did not authorize it.
+    boardable = {
+        "amount": 17460,
+        "term_months": 48,
+        "name": "Maria",
+        "apr": 9.584,
+        "outcome": "approve",
+        "disclosure_status": "delivered",
+        "disclosure_delivered_at": "2026-08-05T00:00:00Z",
+        "disclosure_snapshot": {
+            "principal_cents": 1800000,
+            "note_rate_pct": "7.99",
+            "term_months": 48,
+            "fee_pct": "0.03",
+        },
+        "disclosure_has_document": True,
+        "offer_decision_event_id": 7,
+        "disclosure_decision_event_id": 9,
+    }
+
+    def _query(sql, params=None):
+        if "FROM applications a" in sql:
+            return [boardable]
+        if "FROM loans WHERE app_id" in sql:
+            return []
+        return []
+
+    monkeypatch.setattr(applications.db, "query", _query)
+    monkeypatch.setattr(
+        applications.authz, "require_officer_or_owner", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        applications.intake,
+        "board_to_servicing",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not board a split-brain chain")
+        ),
+    )
+    resp = TestClient(app, raise_server_exceptions=False).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 409
+    assert "split-brain" in resp.json()["detail"]
+
+
+def test_accept_refuses_a_non_approving_decision_edge(monkeypatch):
+    # Defense in depth mirroring disclosure-service's create-path refusal: a back-book row
+    # delivered before that guard can carry a disclosure decision edge that names a
+    # deny/refer event while the mutable `decisions.outcome` rollup reads approve and every
+    # other edge is consistent. trg_disclosures_freeze_delivered makes it unrepairable, so
+    # boarding must refuse it here rather than fund a loan whose regulated audit trail says
+    # it was not approved. The two edges AGREE (7 == 7) so this is not the split-brain case;
+    # the only defect is the cited event's non-approving outcome.
+    boardable = {
+        "amount": 17460,
+        "term_months": 48,
+        "name": "Maria",
+        "apr": 9.584,
+        "outcome": "approve",  # the mutable current-state rollup
+        "disclosure_status": "delivered",
+        "disclosure_delivered_at": "2026-08-05T00:00:00Z",
+        "disclosure_snapshot": {
+            "principal_cents": 1800000,
+            "note_rate_pct": "7.99",
+            "term_months": 48,
+            "fee_pct": "0.03",
+        },
+        "disclosure_has_document": True,
+        "offer_decision_event_id": 7,
+        "disclosure_decision_event_id": 7,
+        "disclosure_decision_outcome": "refer",  # the append-only event the record cites
+    }
+
+    def _query(sql, params=None):
+        if "FROM applications a" in sql:
+            return [boardable]
+        if "FROM loans WHERE app_id" in sql:
+            return []
+        return []
+
+    monkeypatch.setattr(applications.db, "query", _query)
+    monkeypatch.setattr(
+        applications.authz, "require_officer_or_owner", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        applications.intake,
+        "board_to_servicing",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not board a non-approving provenance chain")
+        ),
+    )
+    resp = TestClient(app, raise_server_exceptions=False).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 409, resp.text
+    assert "non-approving" in resp.json()["detail"]
+
+
 def test_board_endpoint_is_internal_only(monkeypatch):
     # PR review: the legacy /board endpoint creates a loan + balance from fully
     # caller-supplied inputs and is reachable via the anonymous /los proxy. An

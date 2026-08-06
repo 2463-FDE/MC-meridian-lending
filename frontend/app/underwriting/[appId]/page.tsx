@@ -49,6 +49,61 @@ interface Application {
   offer?: Offer;
 }
 
+// One walk of the provenance chain, as v_disclosure_provenance returns it (ADR 0012).
+// Every field is optional because a legacy offer genuinely has a partial chain — the view
+// reports that rather than hiding it, and so does this screen.
+interface Provenance {
+  disclosure_id?: number | null;
+  disclosure_status?: string | null;
+  disclosed_apr?: string | null;
+  fee_schedule_version?: string | null;
+  apr_method_version?: string | null;
+  content_fingerprint?: string | null;
+  delivered_at?: string | null;
+  offer_id?: number | null;
+  decision_event_id?: number | null;
+  decision_outcome?: string | null;
+  application_id?: number | null;
+  applicant_id?: number | null;
+  chain_complete?: boolean;
+  missing_edges?: string[];
+}
+
+// The stored borrower-facing document, as disclosure-service persisted it alongside the
+// record. The figures are strings because they are the exact spellings the record was
+// checked against — reparsing them as numbers here would reintroduce the rounding the
+// minor-unit columns exist to avoid.
+interface DisclosureDocument {
+  heading: string;
+  figures: {
+    apr: string;
+    finance_charge: string;
+    amount_financed: string;
+    total_of_payments: string;
+    monthly_payment: string;
+  };
+  payment_terms: string;
+  prepayment: string;
+}
+
+// Labelled and grouped, per Reg Z 1026.17(a): the officer approving this has to see the
+// figures the way the borrower will, not a fingerprint standing in for them.
+const DOCUMENT_FIGURE_LABELS: [keyof DisclosureDocument["figures"], string][] = [
+  ["apr", "Annual Percentage Rate"],
+  ["finance_charge", "Finance Charge"],
+  ["amount_financed", "Amount Financed"],
+  ["total_of_payments", "Total of Payments"],
+  ["monthly_payment", "Monthly Payment"],
+];
+
+const REJECT_REASONS = [
+  { value: "wording", label: "Wording — send back to the assembler" },
+  { value: "formatting", label: "Formatting — send back to the assembler" },
+  { value: "wrong_terms", label: "Wrong terms — back to decisioning" },
+  { value: "wrong_rate", label: "Wrong rate — back to decisioning" },
+  { value: "ineligible", label: "Not eligible — back to decisioning" },
+];
+
 interface DecisionResult {
   app_id: string | number;
   decision: string;
@@ -110,6 +165,12 @@ export default function UnderwritingDetailPage() {
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [assistant, setAssistant] = useState<AssistantResult | null>(null);
+  const [provenance, setProvenance] = useState<Provenance | null>(null);
+  // Not named `document`: that shadows the DOM global inside this component.
+  const [disclosureDoc, setDisclosureDoc] = useState<DisclosureDocument | null>(
+    null
+  );
+  const [rejectReason, setRejectReason] = useState(REJECT_REASONS[0].value);
 
   // Route generation. Next.js reuses this page component across /underwriting/[appId]
   // navigations, so a request can outlive the application it was fired from. Each handler
@@ -133,8 +194,11 @@ export default function UnderwritingDetailPage() {
 
   // Per-application state reset. Every value below describes ONE application, so without
   // this the previous applicant's name, contact details, KYC rows, decision, assistant
-  // card, offer and boarded loan id stay on the next applicant's screen (PR review). The
-  // idempotency keys reset with them: a key identifies one attempt on one page.
+  // card, offer, boarded loan id and disclosure provenance stay on the next applicant's
+  // screen (PR review). The provenance block is the sharpest case: it renders a disclosed
+  // APR, a content fingerprint and the full disclosure -> offer -> decision -> applicant
+  // chain, so a stale one attributes one applicant's regulated disclosure to another.
+  // The idempotency keys reset with them: a key identifies one attempt on one page.
   //
   // This runs DURING render, not in an effect. A passive effect runs after the browser
   // paints, so the first commit for the new appId would pair the previous applicant's
@@ -154,12 +218,55 @@ export default function UnderwritingDetailPage() {
     setAssistant(null);
     setOffer(null);
     setBoardedLoanId(null);
+    setProvenance(null);
+    setDisclosureDoc(null);
+    setRejectReason(REJECT_REASONS[0].value);
     setActionMsg(null);
     setActionErr(null);
     setActionBusy(false);
     decisionKeyRef.current = null;
     assistantKeyRef.current = null;
   }
+
+  // A 404 here means "no disclosure yet", which is the normal state before the pipeline
+  // has run — not an error worth showing. Guarded by the route generation like every other
+  // async handler on this page: a disclosure fetch fired for the previous applicant must
+  // not land on this one's screen.
+  // `gen` defaults to the current generation for the load effect, but a caller that started
+  // before a route change passes the generation it captured THEN — otherwise this guard reads
+  // the new route's generation (capturing at call time is too late) and writes the previous
+  // applicant's provenance/document onto the screen now showing someone else.
+  const loadDisclosure = useCallback(async (gen: number = routeGenRef.current) => {
+    if (!appId) return;
+    try {
+      const p = (await apiGet(
+        `/los/applications/${appId}/disclosure`
+      )) as Provenance;
+      if (routeGenRef.current !== gen) return;
+      setProvenance(p);
+    } catch {
+      if (routeGenRef.current !== gen) return;
+      setProvenance(null);
+    }
+    // Fetched here rather than read off the generate response, because the officer who
+    // approves or delivers is a different session from the one that generated: on a page
+    // load, or under maker-checker a different person entirely. Reading it only from the
+    // POST reply meant the reviewer approved a document they could not open.
+    //
+    // Separate try, and a 404 is the normal "none recorded" (every row written before
+    // migration 0012 has none) — a missing document must not blank out the provenance
+    // block, which is a different fact about a different question.
+    try {
+      const d = (await apiGet(
+        `/los/applications/${appId}/disclosure/document`
+      )) as DisclosureDocument;
+      if (routeGenRef.current !== gen) return;
+      setDisclosureDoc(d);
+    } catch {
+      if (routeGenRef.current !== gen) return;
+      setDisclosureDoc(null);
+    }
+  }, [appId]);
 
   const load = useCallback(async () => {
     if (!appId) return;
@@ -182,7 +289,8 @@ export default function UnderwritingDetailPage() {
 
   useEffect(() => {
     load();
-  }, [load]);
+    loadDisclosure();
+  }, [load, loadDisclosure]);
 
   async function runDecision() {
     if (!appId) return;
@@ -392,6 +500,55 @@ export default function UnderwritingDetailPage() {
     }
   }
 
+  async function generateDisclosure() {
+    if (!appId) return;
+    const gen = routeGenRef.current;
+    setActionBusy(true);
+    setActionErr(null);
+    setActionMsg(null);
+    try {
+      await apiPost(`/los/applications/${appId}/disclosure`);
+      if (routeGenRef.current !== gen) return;
+      await loadDisclosure(gen);
+      if (routeGenRef.current !== gen) return;
+      setActionMsg("Disclosure generated and held for compliance review.");
+    } catch (err) {
+      if (routeGenRef.current !== gen) return;
+      // A 422 here is the verification gate refusing the document, not an outage. The
+      // reason it carries is the whole point of the gate, so it is shown verbatim.
+      setActionErr(errMsg(err, "Could not generate a disclosure."));
+    } finally {
+      if (routeGenRef.current === gen) setActionBusy(false);
+    }
+  }
+
+  async function transitionDisclosure(toStatus: string, reasonCode?: string) {
+    if (!appId) return;
+    const gen = routeGenRef.current;
+    setActionBusy(true);
+    setActionErr(null);
+    setActionMsg(null);
+    try {
+      const res = (await apiPost(
+        `/los/applications/${appId}/disclosure/transition`,
+        { to_status: toStatus, reason_code: reasonCode ?? null }
+      )) as { status?: string; routed_to?: string | null };
+      if (routeGenRef.current !== gen) return;
+      await loadDisclosure(gen);
+      if (routeGenRef.current !== gen) return;
+      setActionMsg(
+        res.routed_to
+          ? `Disclosure rejected; the work goes back to ${res.routed_to}.`
+          : `Disclosure is now ${String(res.status || toStatus).replace(/_/g, " ")}.`
+      );
+    } catch (err) {
+      if (routeGenRef.current !== gen) return;
+      setActionErr(errMsg(err, "Could not update the disclosure."));
+    } finally {
+      if (routeGenRef.current === gen) setActionBusy(false);
+    }
+  }
+
   async function acceptAndBoard() {
     if (!appId) return;
     const gen = routeGenRef.current;
@@ -440,6 +597,25 @@ export default function UnderwritingDetailPage() {
     (typeof app?.applicant === "string" ? app.applicant : "") ||
     "Applicant";
   const currentDecision = decision?.decision || app?.decision || null;
+  const disclosureStatus = provenance?.disclosure_status || null;
+  // Boarding is consummation (Reg Z 1026.17(b)), so it waits on delivery. Absent
+  // provenance means no disclosure exists yet, which is emphatically not delivered.
+  const disclosureDelivered = disclosureStatus === "delivered";
+  // A disclosure that exists but has no stored document is repairable from this screen:
+  // re-running generation reaches disclosure-service's replay, which records a document on
+  // a row that has none (checked against the figures already on that row). Not offered for
+  // a DELIVERED row — trg_disclosures_freeze_delivered rejects any UPDATE of it, so that
+  // one genuinely needs an operator. Without this the officer had no action at all: the
+  // button was disabled the moment any disclosure existed, while delivery stayed refused
+  // for want of the document, so the application could not move in either direction.
+  const disclosureNeedsDocument =
+    !!disclosureStatus && !disclosureDoc && !disclosureDelivered;
+  // Delivery is necessary but not sufficient: a row delivered before document recording
+  // carries the flag and the timestamp with no document, and the accept route refuses that
+  // pair rather than funding a loan whose disclosure cannot be read. Mirrored here so the
+  // officer does not meet the refusal as a 409 on the terminal action — same reason the
+  // deliver control already gates on the document.
+  const boardable = disclosureDelivered && !!disclosureDoc;
 
   return (
     <main className="wrap">
@@ -709,6 +885,222 @@ export default function UnderwritingDetailPage() {
         ) : null}
       </div>
 
+      {/* TILA disclosure — generation, compliance hold, delivery (spec D4/D6/D9) */}
+      <h2>TILA disclosure</h2>
+      <div className="card">
+        <div className="spread" style={{ marginBottom: 16 }}>
+          <div>
+            <div className="card-title" style={{ marginBottom: 8 }}>
+              Document status
+            </div>
+            {disclosureStatus ? (
+              <StatusChip status={disclosureStatus} />
+            ) : (
+              <span className="muted">Not generated yet.</span>
+            )}
+            {provenance?.delivered_at ? (
+              <p className="hint" style={{ marginTop: 10 }}>
+                Delivered {shortDate(provenance.delivered_at)}.
+              </p>
+            ) : null}
+          </div>
+          <button
+            className="btn-ghost"
+            onClick={generateDisclosure}
+            disabled={
+              actionBusy || (!!disclosureStatus && !disclosureNeedsDocument)
+            }
+            title={
+              disclosureNeedsDocument
+                ? "Re-run generation to record the missing document on this disclosure."
+                : disclosureStatus
+                  ? "A disclosure already exists for this application."
+                  : undefined
+            }
+          >
+            {actionBusy
+              ? "Working…"
+              : disclosureNeedsDocument
+                ? "Record missing document"
+                : "Generate disclosure"}
+          </button>
+        </div>
+
+        {provenance && provenance.chain_complete === false ? (
+          <div className="alert alert-warn">
+            <strong>Incomplete provenance chain.</strong> Missing:{" "}
+            {(provenance.missing_edges || []).join(", ") || "unknown"}. This
+            disclosure cannot be traced end to end and must not be delivered.
+          </div>
+        ) : null}
+
+        {provenance?.disclosure_id ? (
+          <>
+            {/* The document itself, above the review controls — approving or delivering is
+                a judgement about this content, and it used to be unreachable from this
+                screen. Figures are printed as stored, never reformatted: they are the exact
+                spellings disclosure-service checked against the minor-unit record. */}
+            {disclosureDoc ? (
+              <div className="tila" style={{ marginBottom: 16 }}>
+                <div className="tila-title">{disclosureDoc.heading}</div>
+                <div className="tila-grid">
+                  {DOCUMENT_FIGURE_LABELS.map(([field, label]) => (
+                    <div
+                      key={field}
+                      className={
+                        field === "apr" ? "tila-cell tila-cell-apr" : "tila-cell"
+                      }
+                    >
+                      <div className="tila-cell-label">{label}</div>
+                      <div className="tila-cell-value">
+                        {field === "apr"
+                          ? `${disclosureDoc.figures.apr}%`
+                          : `$${disclosureDoc.figures[field]}`}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <p className="hint" style={{ marginTop: 12 }}>
+                  {disclosureDoc.payment_terms}
+                </p>
+                <p className="hint" style={{ marginTop: 8 }}>
+                  {disclosureDoc.prepayment}
+                </p>
+              </div>
+            ) : disclosureNeedsDocument ? (
+              // Names the action that fixes it, because there now is one: the
+              // replay in disclosure-service records a document on a row that
+              // has none, so re-running generation repairs this row in place
+              // rather than minting a second regulated record.
+              <div className="alert alert-warn">
+                <strong>No document recorded.</strong> This disclosure predates
+                document recording, so there is nothing to review and delivery
+                will be refused. Use{" "}
+                <strong>Record missing document</strong> above to re-run
+                generation and store it against this disclosure.
+              </div>
+            ) : (
+              // Delivered with no document: frozen by
+              // trg_disclosures_freeze_delivered, so no officer action reaches
+              // it and the honest answer is that it needs an operator.
+              <div className="alert alert-warn">
+                <strong>No document recorded.</strong> This disclosure was
+                delivered before document recording and is frozen, so the
+                document cannot be added and boarding will be refused. It needs
+                an operator.
+              </div>
+            )}
+
+            <div className="dl">
+              <div className="dl-row">
+                <dt>Disclosed APR</dt>
+                <dd>
+                  {provenance.disclosed_apr
+                    ? `${provenance.disclosed_apr}%`
+                    : "—"}
+                </dd>
+              </div>
+              <div className="dl-row">
+                <dt>Provenance</dt>
+                <dd>
+                  disclosure #{provenance.disclosure_id} → offer #
+                  {provenance.offer_id ?? "—"} → decision event #
+                  {provenance.decision_event_id ?? "—"} → application #
+                  {provenance.application_id ?? "—"} → applicant #
+                  {provenance.applicant_id ?? "—"}
+                </dd>
+              </div>
+              <div className="dl-row">
+                <dt>Rules applied</dt>
+                <dd>
+                  fees {provenance.fee_schedule_version || "—"} · APR{" "}
+                  {provenance.apr_method_version || "—"}
+                </dd>
+              </div>
+              <div className="dl-row">
+                <dt>Fingerprint</dt>
+                <dd>
+                  <code>{provenance.content_fingerprint || "—"}</code>
+                </dd>
+              </div>
+            </div>
+
+            <div
+              style={{
+                display: "flex",
+                gap: 8,
+                alignItems: "center",
+                flexWrap: "wrap",
+                marginTop: 16,
+              }}
+            >
+              {disclosureStatus === "draft" ? (
+                <button
+                  onClick={() => transitionDisclosure("in_review")}
+                  disabled={actionBusy}
+                >
+                  Send to compliance
+                </button>
+              ) : null}
+              {disclosureStatus === "in_review" ? (
+                <button
+                  onClick={() => transitionDisclosure("approved")}
+                  disabled={actionBusy}
+                >
+                  Approve
+                </button>
+              ) : null}
+              {disclosureStatus === "approved" ? (
+                <button
+                  onClick={() => transitionDisclosure("delivered")}
+                  disabled={
+                    actionBusy ||
+                    provenance.chain_complete === false ||
+                    !disclosureDoc
+                  }
+                  title={
+                    !disclosureDoc
+                      ? "This disclosure has no recorded document to deliver."
+                      : undefined
+                  }
+                >
+                  Deliver to borrower
+                </button>
+              ) : null}
+              {disclosureStatus === "in_review" ||
+              disclosureStatus === "approved" ? (
+                <>
+                  <select
+                    value={rejectReason}
+                    onChange={(e) => setRejectReason(e.target.value)}
+                    disabled={actionBusy}
+                  >
+                    {REJECT_REASONS.map((r) => (
+                      <option key={r.value} value={r.value}>
+                        {r.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="secondary"
+                    onClick={() => transitionDisclosure("draft", rejectReason)}
+                    disabled={actionBusy}
+                  >
+                    Reject
+                  </button>
+                </>
+              ) : null}
+              {disclosureStatus === "delivered" ? (
+                <p className="hint" style={{ margin: 0 }}>
+                  Delivered disclosures are frozen — the record of what the
+                  borrower was shown cannot be edited.
+                </p>
+              ) : null}
+            </div>
+          </>
+        ) : null}
+      </div>
+
       {/* Accept & board */}
       <h2>Board to servicing</h2>
       <div className="card">
@@ -722,9 +1114,26 @@ export default function UnderwritingDetailPage() {
         ) : (
           <div className="spread">
             <p className="hint" style={{ margin: 0 }}>
-              Accept the offer and board this application as a serviced loan.
+              {boardable
+                ? "Accept the offer and board this application as a serviced loan."
+                : disclosureDelivered
+                  ? "This disclosure was delivered with no recorded document, so it cannot be read and the loan cannot be boarded. It needs an operator."
+                  : "Deliver the TILA disclosure first — boarding is consummation, and the disclosure has to reach the borrower before it."}
             </p>
-            <button onClick={acceptAndBoard} disabled={actionBusy}>
+            {/* Cosmetic only. The server refuses to board without a delivered disclosure
+                that has a recorded document (origination accept route); this just stops the
+                officer from discovering that as a 409 on the terminal action. */}
+            <button
+              onClick={acceptAndBoard}
+              disabled={actionBusy || !boardable}
+              title={
+                boardable
+                  ? undefined
+                  : disclosureDelivered
+                    ? "The delivered disclosure has no recorded document, so this loan cannot be boarded."
+                    : "The TILA disclosure must be delivered before this loan can be boarded."
+              }
+            >
               {actionBusy ? "Working…" : "Accept & board"}
             </button>
           </div>

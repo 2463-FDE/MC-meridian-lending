@@ -273,6 +273,35 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_kyc_persistence.py -q
 
+  tila-vectors-gate:
+    # The disclosed APR is a regulated number with a Reg Z TOLERANCE: exceeding it is a
+    # violation, not a rounding nit. compute_apr shipped an add-on annualization instead of
+    # the actuarial method and was 4.5pp wrong (~36x the 0.125pp tolerance) on every loan --
+    # 5.041% disclosed on a 7.99% note. Nothing caught it, for two reasons this job closes:
+    # the unit test compared the implementation against a re-derivation of its own formula,
+    # and it ran in the `backend` job under continue-on-error/|| true. A money-math gate that
+    # inherits `|| true` is not a gate. This job MUST block -- no continue-on-error, no
+    # `|| true`.
+    #
+    # test_tila_vectors.py holds expectations pinned as literals from an independent
+    # 50-digit Newton solve (apr.py uses bisection), plus a bracket check that validates the
+    # literals themselves without calling apr.py. test_apr.py carries the invariants that
+    # make the old error unshippable (APR never below the note rate; APR collapses to the
+    # note rate at zero fee). test_rules.py is here because the fee feeds the APR: a
+    # silently defaulted or drifted origination fee moves the disclosed rate, so the
+    # fail-closed loader is part of the same control, not a separate concern.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: disclosure-service TILA vectors + APR invariants + fee-config fail-closed
+        run: |
+          cd services/disclosure-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_tila_vectors.py tests/test_apr.py tests/test_rules.py -q
+
   db-readiness-gate:
     # DB readiness is a security control: a passwordless / placeholder / stale
     # DATABASE_URL must report unhealthy, not connect unauthenticated or fail
@@ -310,6 +339,60 @@ jobs:
           cd services/decision-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_decision.py -k "database_url or internal_service_token or schema" -q
+
+  migration-numbering-gate:
+    # Migrations are hand-applied with no runner (compose mounts db/init/* only), so a
+    # duplicate NNNN prefix -- two feature branches each grabbing the next number -- is an
+    # operator-ordering hazard: following the numeric sequence can run a later migration before
+    # the one it depends on (e.g. a document_body ALTER before its CREATE TABLE). This branch
+    # hit exactly that with two 0011_* files. Fail the build on any collision so it surfaces at
+    # PR time, not at rollout. Blocking -- no continue-on-error, no `|| true`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No duplicate migration version numbers
+        run: |
+          set -euo pipefail
+          dupes=$(ls db/migrations/ | grep -oE '^[0-9]{4}' | sort | uniq -d)
+          if [ -n "$dupes" ]; then
+            echo "Duplicate migration version number(s) in db/migrations/:"
+            echo "$dupes"
+            echo "Two files share an NNNN prefix; renumber one so the apply order is unambiguous."
+            exit 1
+          fi
+          echo "OK: all db/migrations/ version numbers are unique."
+
+  disclosure-lifecycle-gate:
+    # The disclosure controls this week rests on -- delivery gating (a delivered flag over a
+    # persisted, readable document), provenance completeness (the chain the KG view reports),
+    # document persistence + figure/spelling agreement, and downstream-refusal-vs-outage
+    # handling -- live in these suites, NOT in the money-math (tila-vectors-gate) or DB
+    # readiness (db-readiness-gate) gates. They otherwise run only in the `backend` matrix
+    # under continue-on-error/|| true, so a regression in delivery gating, provenance, or
+    # document persistence merges with green CI. These are correctness/compliance controls,
+    # not flaky money-math: this job MUST block -- no continue-on-error, no `|| true`.
+    #
+    # disclosure-service: the persistence/lifecycle boundary (create, replay/backfill,
+    # transition gating, offer-disagreement + document-disagreement refusals) and the
+    # provenance DDL guards. origination-service: the pipeline coordinator (route/compute/
+    # verify/narrate/persist, the one retry cycle, tracing suppression) and the officer-facing
+    # disclosure route (officer-only generation, downstream-refusal 4xx passthrough).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: disclosure-service lifecycle + provenance suites
+        run: |
+          cd services/disclosure-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_disclosures.py tests/test_schema_provenance.py -q
+      - name: origination-service disclosure coordinator + route suites
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_disclosure_coordinator.py tests/test_disclosure_route.py -q
 
   rag-eval-gate:
     # The RAG eval hygiene gate (refuses contaminated kb_dump: ssn/pan/ein) and
