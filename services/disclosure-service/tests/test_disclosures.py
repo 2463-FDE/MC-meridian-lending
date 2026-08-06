@@ -1117,6 +1117,48 @@ def test_the_document_guard_runs_before_the_provenance_query(client):
     assert session.statements == [], "no query should have been needed"
 
 
+def test_delivery_is_refused_when_the_stored_document_no_longer_matches(client):
+    """Delivery is the irreversible freeze, so the stored document is re-checked against the
+    row's authoritative figures here — not only at insert. Every API write of `document_body`
+    already validates it, but a pre-delivery operator edit or a future repair path that
+    skipped the figure gate must not ride an approval into a frozen borrower-facing artifact
+    whose APR disagrees with the record; boarding later trusts `delivered` plus presence."""
+    tampered = {
+        **GOOD_DOCUMENT,
+        "figures": {**GOOD_DOCUMENT["figures"], "apr": "9.999"},
+    }
+    session = _with_session(
+        StubSession(
+            disclosure=_disclosure("approved", document_body=tampered),
+            provenance_row=CHAIN_ROW,
+        )
+    )
+    response = _transition(client, {"to_status": "delivered"})
+
+    assert response.status_code == 409, response.text
+    assert "figures disagree" in response.json()["detail"]
+    assert session.commits == 0, "a refused delivery must not commit"
+    assert session.disclosure.status == "approved"
+    assert session.disclosure.delivered_at is None
+
+
+def test_delivery_is_refused_when_the_stored_document_is_malformed(client):
+    """A stored body that no longer parses to the document shape is corruption. At the freeze
+    boundary it is refused as a 409, not surfaced as a 500."""
+    session = _with_session(
+        StubSession(
+            disclosure=_disclosure("approved", document_body={"unexpected": "shape"}),
+            provenance_row=CHAIN_ROW,
+        )
+    )
+    response = _transition(client, {"to_status": "delivered"})
+
+    assert response.status_code == 409, response.text
+    assert "malformed" in response.json()["detail"]
+    assert session.commits == 0, "a refused delivery must not commit"
+    assert session.disclosure.delivered_at is None
+
+
 @pytest.mark.parametrize("target", ["in_review", "approved", "delivered"])
 def test_no_transition_ever_rewrites_the_document(client, target):
     """The document is written once, at insert, and no lifecycle edge touches it.

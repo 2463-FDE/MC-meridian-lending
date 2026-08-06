@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import ValidationError
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -488,6 +489,7 @@ def transition_disclosure(
     values = {"status": target}
     if target == "delivered":
         _refuse_if_no_document(row)
+        _refuse_if_delivered_document_disagrees(row)
         _refuse_if_chain_incomplete(session, disclosure_id)
         _refuse_if_already_consummated(session, row.offer_id)
         # The only write of delivered_at, and the only status that sets it. The DDL check
@@ -552,6 +554,39 @@ def _refuse_if_no_document(row: models.Disclosure) -> None:
                 "disclosure whose borrower-facing document was never persisted"
             ),
         )
+
+
+def _refuse_if_delivered_document_disagrees(row: models.Disclosure) -> None:
+    """Delivery is the irreversible freeze, so the document is re-checked here too.
+
+    Every API write of `document_body` already validates it against the record's figures —
+    the insert path and the backfill path both call `_refuse_if_document_disagrees` — the
+    same way the pipeline already gates the chain. Yet the chain is re-checked at delivery
+    anyway (see `_refuse_if_chain_incomplete`), because this is the last point before
+    `trg_disclosures_freeze_delivered` makes the row immutable. Give the document the same
+    treatment: out-of-band SQL, an operator edit, or a future pre-delivery repair path that
+    skips the figure gate must not be able to ride an earlier approval into a frozen,
+    borrower-facing artifact whose figures no longer match the authoritative cents/APR
+    columns — boarding later trusts `delivered` plus document presence, not the figures.
+
+    Runs after `_refuse_if_no_document`, so the body is present; a stored body that no longer
+    parses to the document shape is corruption, refused as a 409 rather than a 500. Compared
+    against the PERSISTED figures (`_persisted_outputs`), never a recomputation, for the same
+    reason the backfill path does: the delivered document must agree with the record it is,
+    not with whatever the rules would compute now.
+    """
+    try:
+        document = DisclosureDocument.model_validate(row.document_body)
+    except ValidationError:
+        log.error(
+            "refusing delivery of disclosure_id=%s: recorded document is malformed",
+            row.id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="the recorded document is malformed; refusing to deliver",
+        )
+    _refuse_if_document_disagrees(document, _persisted_outputs(row))
 
 
 def _refuse_if_chain_incomplete(session: Session, disclosure_id: int) -> None:
