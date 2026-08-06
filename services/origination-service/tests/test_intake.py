@@ -442,6 +442,51 @@ def test_accept_refuses_when_snapshot_has_no_note_rate(monkeypatch):
     assert resp.status_code == 409
 
 
+def test_accept_refuses_an_undelivered_disclosure(monkeypatch):
+    # Spec D6 compliance hold: a loan may not board until its TILA disclosure is DELIVERED.
+    # Every other accept test uses a delivered row; this pins the refusal itself, so a future
+    # change cannot quietly board a disclosure still in review. (A reviewer placed this guard
+    # in disclosure_coordinator.py, but it lives on the money path — accept_offer.)
+    undelivered = {
+        "amount": 17460,
+        "term_months": 48,
+        "name": "Maria",
+        "apr": 9.584,
+        "outcome": "approve",
+        "disclosure_status": "in_review",  # NOT delivered
+        "disclosure_delivered_at": None,
+        "disclosure_snapshot": {
+            "principal_cents": 1800000,
+            "term_months": 48,
+            "note_rate_pct": "9.20",
+        },
+        "disclosure_has_document": True,
+    }
+
+    def _query(sql, params=None):
+        if "FROM applications a" in sql:
+            return [undelivered]
+        if "FROM loans WHERE app_id" in sql:
+            return []
+        return []
+
+    monkeypatch.setattr(applications.db, "query", _query)
+    monkeypatch.setattr(
+        applications.authz, "require_officer_or_owner", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        applications.intake,
+        "board_to_servicing",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not board an undelivered disclosure")
+        ),
+    )
+    resp = TestClient(app, raise_server_exceptions=False).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 409, resp.text
+
+
 def test_accept_refuses_a_split_brain_decision_edge(monkeypatch):
     # Defense in depth mirroring disclosure-service's delivery refusal: a row delivered
     # before that guard can carry an offer decision edge (7) that disagrees with the

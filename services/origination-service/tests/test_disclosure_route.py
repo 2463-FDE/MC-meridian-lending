@@ -203,6 +203,40 @@ def test_requires_authorization(client, monkeypatch):
     assert client.post("/applications/1/disclosure").status_code == 403
 
 
+def test_read_disclosure_denies_a_non_owner_borrower_404(monkeypatch):
+    """A borrower who is not the owner (and holds no continuation token) is refused at the
+    read route — through the REAL require_officer_or_owner, not a stub.
+
+    The status is 404, not 403: the guard fails closed without an existence oracle so serial
+    ids cannot be enumerated (ADR 0010; test_authz.test_non_owner_borrower_denied_404). A
+    reviewer asked for a 403 assertion here, but 403-on-exists is exactly what the guard
+    avoids. test_requires_authorization only proves the route CALLS authz (it monkeypatches
+    the function); this pins that a real non-owner is turned away, so flipping the status or
+    dropping the join is caught. No `client` fixture — it no-ops authz, which is the thing
+    under test.
+    """
+
+    def _query(sql, params=None):
+        if "FROM applications" in sql:
+            return [
+                {
+                    "applicant_id": 100,
+                    "continuation_token": None,
+                    "continuation_token_expires_at": None,
+                }
+            ]
+        if "FROM users" in sql:
+            return [{"applicant_id": 200}]  # caller maps to a DIFFERENT applicant
+        return []
+
+    monkeypatch.setattr(main.authz.db, "query", _query)
+    resp = TestClient(main.app).get(
+        "/applications/1/disclosure",
+        headers={"X-User-Role": "borrower", "X-User-Id": "5"},
+    )
+    assert resp.status_code == 404, resp.text
+
+
 def test_requires_passing_kyc(client, monkeypatch):
     """ADR 0011, defense in depth alongside the decision gate."""
     _stub_db(monkeypatch)
