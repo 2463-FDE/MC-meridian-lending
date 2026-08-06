@@ -194,6 +194,11 @@ class ProvenanceOut(BaseModel):
     # the chain incomplete (see missing_edges) and delivery is refused.
     disclosure_decision_event_id: int | None = None
     decision_outcome: str | None = None
+    # The outcome of the decision the disclosure record itself cites, next to the offer-edge
+    # `decision_outcome` above. A present, non-'approve' value makes the chain incomplete
+    # (see missing_edges) and delivery is refused; the offer-edge copy is NULL on a legacy
+    # no-edge offer, so this is the one that reveals an unapproved back-book chain.
+    disclosure_decision_outcome: str | None = None
     policy_band: str | None = None
     decided_at: str | None = None
     application_id: int | None = None

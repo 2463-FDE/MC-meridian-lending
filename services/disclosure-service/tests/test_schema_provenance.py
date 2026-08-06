@@ -86,7 +86,9 @@ def test_provenance_view_left_joins_from_offers():
     """
     view = MIGRATION_SQL[MIGRATION_SQL.index("CREATE VIEW v_disclosure_provenance") :]
     assert "FROM offers o" in view
-    assert view.count("LEFT JOIN") == 3
+    # Four: disclosures, the offer's decision event, the disclosure's OWN decision event
+    # (0016, for disclosure_decision_outcome), and applications.
+    assert view.count("LEFT JOIN") == 4
     # No plain/INNER JOIN survives once the LEFT JOINs are removed.
     assert "JOIN" not in view.replace("LEFT JOIN", "")
 

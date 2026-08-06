@@ -188,11 +188,23 @@ SELECT
     -- are exposed so the reader compares them; delivery refuses when they disagree.
     d.decision_event_id     AS disclosure_decision_event_id,
     de.outcome              AS decision_outcome,
+    -- The outcome of the decision the REGULATED disclosure record ITSELF cites, alongside
+    -- `decision_outcome` (which walks the OFFER's edge). A disclosure is a regulated artifact
+    -- for an APPROVED decision only; the create guard now refuses a non-approve edge, but a
+    -- back-book row written before that guard -- or an operator backfill of
+    -- disclosures.decision_event_id -- can name a deny/refer decision while every edge is
+    -- non-null, and a completeness check that only asks "is each edge non-null" reports
+    -- chain_complete over it. Exposed so the reader compares outcomes rather than infers;
+    -- delivery refuses when this is present and not 'approve'. NULL for the offer-edge copy
+    -- (`decision_outcome`) on a legacy no-edge offer, which is exactly why the disclosure's
+    -- OWN edge is walked here rather than reusing that column.
+    dde.outcome             AS disclosure_decision_outcome,
     de.policy_band,
     de.decided_at,
     app.id                  AS application_id,
     app.applicant_id        AS applicant_id
 FROM offers o
-LEFT JOIN disclosures d      ON d.offer_id = o.id
-LEFT JOIN decision_events de ON de.id = o.decision_event_id
-LEFT JOIN applications app   ON app.id = o.app_id;
+LEFT JOIN disclosures d       ON d.offer_id = o.id
+LEFT JOIN decision_events de  ON de.id = o.decision_event_id
+LEFT JOIN decision_events dde ON dde.id = d.decision_event_id
+LEFT JOIN applications app    ON app.id = o.app_id;
