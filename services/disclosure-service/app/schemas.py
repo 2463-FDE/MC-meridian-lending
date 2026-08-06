@@ -188,6 +188,11 @@ class ProvenanceOut(BaseModel):
     offer_apr: float | None = None
     offer_created_at: str | None = None
     decision_event_id: int | None = None
+    # The disclosure record's own decision edge (disclosures.decision_event_id), exposed
+    # next to the offer-derived `decision_event_id` above so a consumer can see a split-brain
+    # audit trail. Equal to `decision_event_id` for any healthy chain; a disagreement makes
+    # the chain incomplete (see missing_edges) and delivery is refused.
+    disclosure_decision_event_id: int | None = None
     decision_outcome: str | None = None
     policy_band: str | None = None
     decided_at: str | None = None

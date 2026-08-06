@@ -442,6 +442,56 @@ def test_accept_refuses_when_snapshot_has_no_note_rate(monkeypatch):
     assert resp.status_code == 409
 
 
+def test_accept_refuses_a_split_brain_decision_edge(monkeypatch):
+    # Defense in depth mirroring disclosure-service's delivery refusal: a row delivered
+    # before that guard can carry an offer decision edge (7) that disagrees with the
+    # disclosure record's own edge (9) while every edge is non-null and status is delivered.
+    # trg_disclosures_freeze_delivered makes it unrepairable, so boarding must refuse it here
+    # rather than fund a loan whose audit trail names a decision that did not authorize it.
+    boardable = {
+        "amount": 17460,
+        "term_months": 48,
+        "name": "Maria",
+        "apr": 9.584,
+        "outcome": "approve",
+        "disclosure_status": "delivered",
+        "disclosure_delivered_at": "2026-08-05T00:00:00Z",
+        "disclosure_snapshot": {
+            "principal_cents": 1800000,
+            "note_rate_pct": "7.99",
+            "term_months": 48,
+            "fee_pct": "0.03",
+        },
+        "disclosure_has_document": True,
+        "offer_decision_event_id": 7,
+        "disclosure_decision_event_id": 9,
+    }
+
+    def _query(sql, params=None):
+        if "FROM applications a" in sql:
+            return [boardable]
+        if "FROM loans WHERE app_id" in sql:
+            return []
+        return []
+
+    monkeypatch.setattr(applications.db, "query", _query)
+    monkeypatch.setattr(
+        applications.authz, "require_officer_or_owner", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        applications.intake,
+        "board_to_servicing",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not board a split-brain chain")
+        ),
+    )
+    resp = TestClient(app, raise_server_exceptions=False).post(
+        "/applications/1/accept", headers={"X-User-Role": "underwriter"}
+    )
+    assert resp.status_code == 409
+    assert "split-brain" in resp.json()["detail"]
+
+
 def test_board_endpoint_is_internal_only(monkeypatch):
     # PR review: the legacy /board endpoint creates a loan + balance from fully
     # caller-supplied inputs and is reachable via the anonymous /los proxy. An

@@ -172,8 +172,16 @@ _SCHEMA_OBJECTS = (
         "AND data_type = 'jsonb'",
     ),
     (
+        # The provenance read selects disclosure_decision_event_id (migration 0015) to detect
+        # a split-brain decision edge. Migrations are hand-applied and lag init, so probe the
+        # COLUMN, not just the view's existence: a volume at 0012 without 0015 has the view
+        # but not the column, and the route would 500 on the unknown column while /health
+        # reported green. information_schema.columns lists a view's columns, so this reports
+        # schema_not_ready:v_disclosure_provenance until the reshaped view is applied.
         "v_disclosure_provenance",
-        "SELECT 1 FROM information_schema.views WHERE table_name = 'v_disclosure_provenance'",
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'v_disclosure_provenance' "
+        "AND column_name = 'disclosure_decision_event_id'",
     ),
 )
 

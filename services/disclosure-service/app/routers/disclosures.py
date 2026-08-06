@@ -226,7 +226,8 @@ _PROVENANCE_SQL = text(
     SELECT disclosure_id, disclosure_status, disclosed_apr, compute_snapshot,
            fee_schedule_version, apr_method_version, content_fingerprint, delivered_at,
            offer_id, offer_apr, offer_created_at,
-           decision_event_id, decision_outcome, policy_band, decided_at,
+           decision_event_id, disclosure_decision_event_id,
+           decision_outcome, policy_band, decided_at,
            application_id, applicant_id
     FROM v_disclosure_provenance
     WHERE disclosure_id = :disclosure_id
@@ -273,7 +274,8 @@ _PROVENANCE_BY_APPLICATION_SQL = text(
     SELECT disclosure_id, disclosure_status, disclosed_apr, compute_snapshot,
            fee_schedule_version, apr_method_version, content_fingerprint, delivered_at,
            offer_id, offer_apr, offer_created_at,
-           decision_event_id, decision_outcome, policy_band, decided_at,
+           decision_event_id, disclosure_decision_event_id,
+           decision_outcome, policy_band, decided_at,
            application_id, applicant_id
     FROM v_disclosure_provenance
     WHERE application_id = :application_id
@@ -343,8 +345,32 @@ def read_document(
     return row.document_body
 
 
-def _provenance_out(row) -> ProvenanceOut:
+# A disagreement between the offer's decision edge and the disclosure record's own is not a
+# missing edge — both are present — so it needs its own label in missing_edges. Named, not a
+# bare bool, so the delivery refusal and the provenance read report the same reason string.
+_DECISION_EDGE_SPLIT = "decision_event_id_mismatch"
+
+
+def _incomplete_edges(row) -> list[str]:
+    """Every reason this chain is not whole: a null edge, or a split-brain decision edge.
+
+    The view exposes both `decision_event_id` (walked through offers.decision_event_id) and
+    `disclosure_decision_event_id` (the edge on the regulated disclosures row). The write path
+    keeps them equal, but a legacy or operator-backfilled row can carry two different
+    decisions while every edge is non-null — a chain that a bare not-null check calls complete
+    while its audit trail names a decision that did not produce its terms. Both consumers
+    (the provenance read and the delivery guard) route through here so they agree.
+    """
     missing = [edge for edge in _CHAIN_EDGES if row.get(edge) is None]
+    offer_edge = row.get("decision_event_id")
+    record_edge = row.get("disclosure_decision_event_id")
+    if offer_edge is not None and record_edge is not None and offer_edge != record_edge:
+        missing.append(_DECISION_EDGE_SPLIT)
+    return missing
+
+
+def _provenance_out(row) -> ProvenanceOut:
+    missing = _incomplete_edges(row)
     return ProvenanceOut(
         disclosure_id=row.get("disclosure_id"),
         disclosure_status=row.get("disclosure_status"),
@@ -360,6 +386,7 @@ def _provenance_out(row) -> ProvenanceOut:
         offer_apr=row.get("offer_apr"),
         offer_created_at=_text_or_none(row.get("offer_created_at")),
         decision_event_id=row.get("decision_event_id"),
+        disclosure_decision_event_id=row.get("disclosure_decision_event_id"),
         decision_outcome=row.get("decision_outcome"),
         policy_band=row.get("policy_band"),
         decided_at=_text_or_none(row.get("decided_at")),
@@ -541,11 +568,7 @@ def _refuse_if_chain_incomplete(session: Session, disclosure_id: int) -> None:
         .mappings()
         .first()
     )
-    missing = (
-        [edge for edge in _CHAIN_EDGES if row.get(edge) is None]
-        if row is not None
-        else list(_CHAIN_EDGES)
-    )
+    missing = _incomplete_edges(row) if row is not None else list(_CHAIN_EDGES)
     if missing:
         log.error(
             "refusing delivery of disclosure_id=%s: incomplete chain missing=%s",

@@ -678,7 +678,15 @@ def accept_offer(
         # object or SQL NULL, so this covers a row shaped by hand-written SQL, on the same
         # posture as the delivered_at check below: corrupt is not a licence to board.
         "(ds.document_body IS NOT NULL AND ds.document_body <> 'null'::jsonb) "
-        "AS disclosure_has_document "
+        "AS disclosure_has_document, "
+        # The two decision edges, to reject a split-brain provenance chain at the money step.
+        # `o.decision_event_id` is the edge the provenance view walks (the offer's); the
+        # regulated disclosure carries its OWN `ds.decision_event_id`, stamped and validated at
+        # write. disclosure-service refuses to DELIVER when they diverge, but a row delivered
+        # before that guard existed can carry the divergence over a frozen `delivered` row, so
+        # boarding re-checks here on the money path's own query rather than trusting the flag.
+        "o.decision_event_id AS offer_decision_event_id, "
+        "ds.decision_event_id AS disclosure_decision_event_id "
         "FROM applications a "
         "LEFT JOIN applicants ap ON ap.id = a.applicant_id "
         "LEFT JOIN decisions d ON d.app_id = a.id "
@@ -769,6 +777,28 @@ def accept_offer(
                 detail=(
                     "the delivered TILA disclosure for this offer has no recorded "
                     "document; refusing to board a loan whose disclosure cannot be read"
+                ),
+            )
+        # Split-brain provenance guard (defense in depth, mirrors disclosure-service's
+        # delivery refusal). Both edges non-null and unequal means the disclosure record and
+        # its offer name DIFFERENT decisions: the audit trail points to a decision that did
+        # not authorize the boarded terms. The delivery guard closes this for any row
+        # delivered from now on; this closes the back-book row delivered before that guard,
+        # which trg_disclosures_freeze_delivered now makes unrepairable. A NULL on either side
+        # is a legacy partial chain, not a divergence, and stays out of the money step by the
+        # delivered/document guards above rather than here.
+        offer_edge = r.get("offer_decision_event_id")
+        record_edge = r.get("disclosure_decision_event_id")
+        if (
+            offer_edge is not None
+            and record_edge is not None
+            and offer_edge != record_edge
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "the delivered TILA disclosure's decision edge does not match the "
+                    "offer being boarded; refusing to board a split-brain provenance chain"
                 ),
             )
         # Servicing amortizes at the NOTE rate, not the APR (spec D1): derive it from the

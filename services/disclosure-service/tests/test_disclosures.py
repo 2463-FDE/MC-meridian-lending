@@ -815,6 +815,8 @@ CHAIN_ROW = {
     "offer_apr": 9.584,
     "offer_created_at": None,
     "decision_event_id": 7,
+    # The offer edge (7) and the disclosure record's own edge (7) agree: a healthy chain.
+    "disclosure_decision_event_id": 7,
     "decision_outcome": "approve",
     "policy_band": "A",
     "decided_at": None,
@@ -897,6 +899,28 @@ def test_provenance_reports_a_partial_chain_rather_than_hiding_it(client):
     body = response.json()
     assert body["chain_complete"] is False
     assert body["missing_edges"] == ["decision_event_id", "applicant_id"]
+
+
+def test_provenance_flags_a_split_brain_decision_edge(client):
+    """The offer's decision edge and the disclosure record's own edge disagree. Both are
+    non-null, so the not-null check reports a complete chain — but the audit trail names a
+    decision that did not authorize the disclosed terms. Report it as incomplete, and expose
+    both ids so the divergence is visible rather than inferred."""
+    _with_session(
+        StubSession(
+            provenance_row={**CHAIN_ROW, "disclosure_decision_event_id": 9},
+        )
+    )
+    response = client.get(
+        "/disclosures/5/provenance", headers={"X-Internal-Service": TOKEN}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["chain_complete"] is False
+    assert body["missing_edges"] == ["decision_event_id_mismatch"]
+    # Both edges surfaced so the reader compares them instead of trusting one.
+    assert body["decision_event_id"] == 7
+    assert body["disclosure_decision_event_id"] == 9
 
 
 # ---------------------------------------------------------------------------
@@ -1268,6 +1292,29 @@ def test_delivery_refuses_an_incomplete_provenance_chain(client):
     detail = response.json()["detail"]
     assert "provenance chain is incomplete" in detail
     assert "application_id" in detail and "applicant_id" in detail
+    assert session.commits == 0
+    assert not any(
+        sql.strip().upper().startswith("UPDATE") for sql, _ in session.statements
+    )
+
+
+def test_delivery_refuses_a_split_brain_decision_edge(client):
+    """Every edge is non-null, but the offer's decision edge (7) and the disclosure record's
+    own edge (9) name different decisions. A bare not-null check calls that chain complete
+    and boards a loan whose audit trail points to a decision that did not produce its terms.
+    Delivery is the irreversible step, so it must refuse the divergence server-side."""
+    session = _with_session(
+        StubSession(
+            disclosure=_disclosure("approved"),
+            provenance_row={**CHAIN_ROW, "disclosure_decision_event_id": 9},
+        )
+    )
+    response = _transition(client, {"to_status": "delivered"})
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "provenance chain is incomplete" in detail
+    assert "decision_event_id_mismatch" in detail
     assert session.commits == 0
     assert not any(
         sql.strip().upper().startswith("UPDATE") for sql, _ in session.statements

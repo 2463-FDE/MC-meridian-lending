@@ -329,6 +329,15 @@ SELECT
     d.content_fingerprint,
     d.delivered_at,
     de.id                   AS decision_event_id,
+    -- The disclosure record's OWN decision edge, alongside the offer-derived one above.
+    -- `decision_event_id` walks offers.decision_event_id (the offer's edge); this is
+    -- disclosures.decision_event_id (the edge stamped on the regulated record at write).
+    -- The write path keeps the two equal (create refuses a mismatch, replay closes the
+    -- offer edge from this column), but a row predating that guard -- or an operator
+    -- backfill of offers.decision_event_id -- can diverge, and a completeness check that
+    -- only asks "is each edge non-null" reports chain_complete over that split-brain. Both
+    -- are exposed so the reader compares them; delivery refuses when they disagree.
+    d.decision_event_id     AS disclosure_decision_event_id,
     de.outcome              AS decision_outcome,
     de.policy_band,
     de.decided_at,
