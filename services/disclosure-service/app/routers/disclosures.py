@@ -228,7 +228,7 @@ _PROVENANCE_SQL = text(
            fee_schedule_version, apr_method_version, content_fingerprint, delivered_at,
            offer_id, offer_apr, offer_created_at,
            decision_event_id, disclosure_decision_event_id,
-           decision_outcome, policy_band, decided_at,
+           decision_outcome, disclosure_decision_outcome, policy_band, decided_at,
            application_id, applicant_id
     FROM v_disclosure_provenance
     WHERE disclosure_id = :disclosure_id
@@ -276,7 +276,7 @@ _PROVENANCE_BY_APPLICATION_SQL = text(
            fee_schedule_version, apr_method_version, content_fingerprint, delivered_at,
            offer_id, offer_apr, offer_created_at,
            decision_event_id, disclosure_decision_event_id,
-           decision_outcome, policy_band, decided_at,
+           decision_outcome, disclosure_decision_outcome, policy_band, decided_at,
            application_id, applicant_id
     FROM v_disclosure_provenance
     WHERE application_id = :application_id
@@ -343,30 +343,61 @@ def read_document(
         raise HTTPException(
             status_code=404, detail="no document recorded for this disclosure"
         )
-    return row.document_body
+    # Validate the stored body here rather than lean on response_model coercion. An
+    # out-of-band SQL/operator edit — or a legacy body carrying prose digits the `^\D*$`
+    # facet now rejects — makes the coercion raise a ResponseValidationError (a 500), which
+    # the officer's screen cannot tell from an outage. Refuse it as a 409, the same posture
+    # `_refuse_if_delivered_document_disagrees` gives a malformed body at delivery: corrupt
+    # is a distinct, reportable state, not a server fault.
+    try:
+        return DisclosureDocument.model_validate(row.document_body)
+    except ValidationError:
+        log.error(
+            "refusing to return disclosure_id=%s: recorded document is malformed",
+            row.id,
+        )
+        raise HTTPException(
+            status_code=409, detail="the recorded document is malformed"
+        )
 
 
 # A disagreement between the offer's decision edge and the disclosure record's own is not a
 # missing edge — both are present — so it needs its own label in missing_edges. Named, not a
 # bare bool, so the delivery refusal and the provenance read report the same reason string.
 _DECISION_EDGE_SPLIT = "decision_event_id_mismatch"
+# The disclosure record cites a decision whose outcome is not 'approve'. Both edges can be
+# present and equal — nothing is missing and nothing is split — so it needs its own label:
+# a regulated artifact for an unapproved decision is an incomplete chain, not a whole one.
+_DECISION_NOT_APPROVED = "decision_not_approved"
 
 
 def _incomplete_edges(row) -> list[str]:
-    """Every reason this chain is not whole: a null edge, or a split-brain decision edge.
+    """Every reason this chain is not whole: a null edge, a split-brain edge, or a chain
+    whose cited decision did not approve.
 
     The view exposes both `decision_event_id` (walked through offers.decision_event_id) and
     `disclosure_decision_event_id` (the edge on the regulated disclosures row). The write path
     keeps them equal, but a legacy or operator-backfilled row can carry two different
     decisions while every edge is non-null — a chain that a bare not-null check calls complete
-    while its audit trail names a decision that did not produce its terms. Both consumers
-    (the provenance read and the delivery guard) route through here so they agree.
+    while its audit trail names a decision that did not produce its terms. It exposes the
+    OUTCOME of the disclosure's own edge (`disclosure_decision_outcome`) for the same reason:
+    the create guard now refuses a non-approve edge, but a back-book row can carry a deny/refer
+    decision on the regulated record while every edge is non-null, and the offer-edge outcome
+    (`decision_outcome`) is NULL on a legacy no-edge offer, so only the disclosure's own outcome
+    reveals it. All consumers (the provenance read and the delivery guard) route through here so
+    they agree.
     """
     missing = [edge for edge in _CHAIN_EDGES if row.get(edge) is None]
     offer_edge = row.get("decision_event_id")
     record_edge = row.get("disclosure_decision_event_id")
     if offer_edge is not None and record_edge is not None and offer_edge != record_edge:
         missing.append(_DECISION_EDGE_SPLIT)
+    # Gated on the outcome being present, like the split-brain check on its edges: a NULL here
+    # is a legacy no-edge/no-disclosure row already reported by the null-edge check above, not
+    # a decision to judge. A present, non-'approve' outcome is the defect.
+    disclosure_outcome = row.get("disclosure_decision_outcome")
+    if disclosure_outcome is not None and disclosure_outcome.lower() != "approve":
+        missing.append(_DECISION_NOT_APPROVED)
     return missing
 
 
@@ -389,6 +420,7 @@ def _provenance_out(row) -> ProvenanceOut:
         decision_event_id=row.get("decision_event_id"),
         disclosure_decision_event_id=row.get("disclosure_decision_event_id"),
         decision_outcome=row.get("decision_outcome"),
+        disclosure_decision_outcome=row.get("disclosure_decision_outcome"),
         policy_band=row.get("policy_band"),
         decided_at=_text_or_none(row.get("decided_at")),
         application_id=row.get("application_id"),

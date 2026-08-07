@@ -847,6 +847,8 @@ CHAIN_ROW = {
     # The offer edge (7) and the disclosure record's own edge (7) agree: a healthy chain.
     "disclosure_decision_event_id": 7,
     "decision_outcome": "approve",
+    # The outcome of the disclosure's own decision edge — an approval, so the chain is whole.
+    "disclosure_decision_outcome": "approve",
     "policy_band": "A",
     "decided_at": None,
     "application_id": 42,
@@ -952,6 +954,27 @@ def test_provenance_flags_a_split_brain_decision_edge(client):
     assert body["disclosure_decision_event_id"] == 9
 
 
+@pytest.mark.parametrize("outcome", ["deny", "refer", "counteroffer"])
+def test_provenance_flags_a_non_approving_cited_decision(client, outcome):
+    """Every edge is present and the two edges agree — nothing null, no split — but the
+    decision the regulated record cites did not approve. A disclosure for an unapproved
+    decision is an incomplete chain, and the offer-edge outcome copy would be NULL on a
+    legacy no-edge offer, so the disclosure's OWN outcome is what surfaces it."""
+    _with_session(
+        StubSession(
+            provenance_row={**CHAIN_ROW, "disclosure_decision_outcome": outcome},
+        )
+    )
+    response = client.get(
+        "/disclosures/5/provenance", headers={"X-Internal-Service": TOKEN}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["chain_complete"] is False
+    assert body["missing_edges"] == ["decision_not_approved"]
+    assert body["disclosure_decision_outcome"] == outcome
+
+
 # ---------------------------------------------------------------------------
 # Reading the stored document back (spec D6). A separate route from the provenance view on
 # purpose: the view is the one definition of the CHAIN, and origination's proxy of it admits
@@ -988,6 +1011,19 @@ def test_a_disclosure_with_no_document_reports_none_recorded(client):
 def test_reading_the_document_of_an_unknown_disclosure_is_not_found(client):
     _with_session(StubSession(disclosure=None))
     assert _read_document(client).status_code == 404
+
+
+def test_reading_a_malformed_stored_document_is_a_clean_refusal_not_a_500(client):
+    """G2: an out-of-band / hand-edited `document_body` that no longer parses to the
+    document shape must read as a 409 — the same refusal the delivery guard gives a
+    malformed body (`_refuse_if_delivered_document_disagrees`) — never a 500 from
+    response_model coercion, which the officer's screen cannot tell from an outage."""
+    _with_session(
+        StubSession(disclosure=_disclosure(document_body={"unexpected": "shape"}))
+    )
+    response = _read_document(client)
+    assert response.status_code == 409, response.text
+    assert "malformed" in response.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -1156,6 +1192,27 @@ def test_delivery_is_refused_when_the_stored_document_is_malformed(client):
     assert response.status_code == 409, response.text
     assert "malformed" in response.json()["detail"]
     assert session.commits == 0, "a refused delivery must not commit"
+    assert session.disclosure.delivered_at is None
+
+
+@pytest.mark.parametrize("outcome", ["deny", "refer", "counteroffer"])
+def test_delivery_is_refused_when_the_cited_decision_did_not_approve(client, outcome):
+    """Delivery re-checks the chain, so a back-book row whose disclosure edge cites a
+    non-approving decision cannot be delivered even if the create guard never saw it. The
+    edges are present and agree — the defect is only the cited outcome, surfaced through the
+    view's `disclosure_decision_outcome` and reported as `decision_not_approved`."""
+    session = _with_session(
+        StubSession(
+            disclosure=_disclosure("approved"),
+            provenance_row={**CHAIN_ROW, "disclosure_decision_outcome": outcome},
+        )
+    )
+    response = _transition(client, {"to_status": "delivered"})
+
+    assert response.status_code == 409, response.text
+    assert "decision_not_approved" in response.json()["detail"]
+    assert session.commits == 0, "a refused delivery must not commit"
+    assert session.disclosure.status == "approved"
     assert session.disclosure.delivered_at is None
 
 
