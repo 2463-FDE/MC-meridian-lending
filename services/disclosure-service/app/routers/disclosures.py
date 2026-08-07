@@ -343,7 +343,22 @@ def read_document(
         raise HTTPException(
             status_code=404, detail="no document recorded for this disclosure"
         )
-    return row.document_body
+    # Validate the stored body here rather than lean on response_model coercion. An
+    # out-of-band SQL/operator edit — or a legacy body carrying prose digits the `^\D*$`
+    # facet now rejects — makes the coercion raise a ResponseValidationError (a 500), which
+    # the officer's screen cannot tell from an outage. Refuse it as a 409, the same posture
+    # `_refuse_if_delivered_document_disagrees` gives a malformed body at delivery: corrupt
+    # is a distinct, reportable state, not a server fault.
+    try:
+        return DisclosureDocument.model_validate(row.document_body)
+    except ValidationError:
+        log.error(
+            "refusing to return disclosure_id=%s: recorded document is malformed",
+            row.id,
+        )
+        raise HTTPException(
+            status_code=409, detail="the recorded document is malformed"
+        )
 
 
 # A disagreement between the offer's decision edge and the disclosure record's own is not a

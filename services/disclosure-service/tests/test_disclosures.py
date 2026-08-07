@@ -1013,6 +1013,19 @@ def test_reading_the_document_of_an_unknown_disclosure_is_not_found(client):
     assert _read_document(client).status_code == 404
 
 
+def test_reading_a_malformed_stored_document_is_a_clean_refusal_not_a_500(client):
+    """G2: an out-of-band / hand-edited `document_body` that no longer parses to the
+    document shape must read as a 409 — the same refusal the delivery guard gives a
+    malformed body (`_refuse_if_delivered_document_disagrees`) — never a 500 from
+    response_model coercion, which the officer's screen cannot tell from an outage."""
+    _with_session(
+        StubSession(disclosure=_disclosure(document_body={"unexpected": "shape"}))
+    )
+    response = _read_document(client)
+    assert response.status_code == 409, response.text
+    assert "malformed" in response.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle (spec D6). The freeze trigger and the CHECK constraints live in the DDL and
 # were exercised against postgres:16-alpine; what these cover is the machine above them.
