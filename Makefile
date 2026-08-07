@@ -33,5 +33,7 @@ config:
 # Prove the tests in a fix commit actually catch the bug: they must FAIL with the
 # source rolled back to the parent commit and PASS with the fix applied.
 # Default proves HEAD; override with `make prove REF=<sha>`.
+# Runs in a throwaway worktree (prove_wt.sh) so it works on a dirty tree and leaves
+# nothing behind — the fix must be COMMITTED, since a worktree checks out a ref.
 prove:
-	./scripts/prove_test.sh $(REF)
+	./scripts/prove_wt.sh $(REF)
