@@ -40,6 +40,11 @@ BANNED=(
   'real \.env is already in the repo|||unsafe and false: no .env is tracked (secret-scan blocks it). Use "cp .env.example .env".'
 )
 
+# Negators that, appearing before a banned phrase on the same clause, exempt the hit.
+# Applied uniformly to every entry so an honest correction ("not PCI-DSS compliant",
+# "cardholder data is not encrypted") passes while the bare affirmative still fails.
+NEG="(not|isn'?t|aren'?t|never|no longer)[^.]*"
+
 DOCS=("$@")
 [ ${#DOCS[@]} -eq 0 ] && DOCS=("README.md" "CLAUDE.md" "docs/kb.md")
 
@@ -79,6 +84,13 @@ for doc in "${DOCS[@]}"; do
     # grep -n so the row points the reader at the exact line to fix.
     while IFS= read -r match; do
       [ -z "$match" ] && continue
+      # A negator before the banned phrase flips its meaning: "not PCI-DSS compliant"
+      # contains the affirmative substring but asserts the opposite, so it must pass.
+      # ERE has no lookbehind, so re-test the matched LINE for negator-then-phrase and
+      # drop that hit. Same clause only ([^.]* stops at a period); a truthful negation
+      # is exempt while the bare affirmative ("we are PCI-DSS compliant") still fails.
+      line=${match#*:}
+      if printf '%s' "$line" | grep -iqE "${NEG}${regex}"; then continue; fi
       h=$((h + 1)); total_hits=$((total_hits + 1))
       hit_rows+="  $doc:$match"$'\n'"      -> $reason"$'\n'
     done < <(grep -inE "$regex" "$doc")

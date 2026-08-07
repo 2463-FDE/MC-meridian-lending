@@ -83,6 +83,15 @@ r=$(new_repo)
 echo 'The payment path is **not** compliant with PCI-DSS (tracked debt, ADR 0003).' > "$r/docs/fixture.md"
 check "honest negation passes" 0 "$r" 'OK: no banned claim'
 
+# --- 5b. adjective-order negation passes ------------------------------------
+# "not PCI-DSS compliant" DOES contain the banned substring "PCI-DSS compliant",
+# so a bare-substring gate false-fails the truthful correction. A negator before
+# the phrase must exempt it, same as case 5's word-order negation. This is the
+# real correction phrasing a doc fix would use, and it must not fail a blocking gate.
+r=$(new_repo)
+echo 'The payment path is not PCI-DSS compliant (tracked debt, ADR 0003).' > "$r/docs/fixture.md"
+check "adjective-order negation passes" 0 "$r" 'OK: no banned claim'
+
 # --- 6. an absent OPTIONAL doc is SKIPPED, not a failure --------------------
 r=$(new_repo)   # CLAUDE.md not written -> absent + optional
 out=$(cd "$r" && "$SCRIPT" CLAUDE.md 2>&1); got=$?
