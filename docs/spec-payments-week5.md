@@ -840,9 +840,16 @@ cannot see what a live volume does.
   fresh one — T6, the append-only trigger, and the partial unique index against legacy NULL
   keys are all only observable there.
 - **Concurrency harness:** R2, A1, and A6 driven from parallel connections against `make up`.
-  `scripts/repro_double_charge.py` is that harness for the pre-fix side and has already been
-  run: R1 red (2 rows for one intent), R2 red (8 rows for one intent), A6 red ($800 captured
-  against $600 credited). The build week's job is to turn the same script green.
+  `scripts/repro_double_charge.py` is that harness for the **pre-fix** side only and has
+  already been run: R1 red (2 rows for one intent), R2 red (8 rows for one intent), A6 red
+  ($800 captured against $600 credited). It posts the legacy `pan`/`cvv` body with no
+  `Idempotency-Key`, so it is **not** the green vector: once the fix lands, that body is
+  rejected with `400` at the first charge by design (criteria 4 and 11; T1/T2/R4/R5), before
+  any duplicate or balance assertion is reached. The build week's green verification is the
+  R/A/T contract-test suite (criterion 18), which sends a hosted-field token plus an
+  `Idempotency-Key` and asserts the expected codes per the tables above — not this legacy
+  reproduction. Keep the two apart: this script proves the defect exists on `main`; the
+  contract suite proves the fix closes it.
 
 ---
 
