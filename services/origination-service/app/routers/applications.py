@@ -526,6 +526,41 @@ def decision_request_payload(app_id: int) -> dict:
     }
 
 
+def summary_payload(app_id: int) -> dict | None:
+    """Build the officer loan-summary payload for the `loan_application_summary` prompt.
+
+    Advisory (no record is written), so unlike `decision_request_payload` this NEVER
+    raises on a NULL field — it omits the key and lets the prompt's "summarize ONLY facts
+    present" rule handle the gap. Returns None when the application does not exist.
+
+    Selects ONLY non-identity columns and NEVER joins `applicants`: name/dob/ssn/address
+    are unreachable by construction, not merely filtered (the prompt's `json_vars` redaction
+    stays defense-in-depth, not the control). `offers` is at most one row per app
+    (`uq_offers_app`); `kyc_checks` can repeat, so take the latest by id.
+    """
+    rows = db.query(
+        "SELECT a.amount, a.term_months, a.purpose, a.income, a.monthly_debt, "
+        "a.employer, a.job_title, a.employment_years, a.status, "
+        "o.apr, o.finance_charge, o.monthly_payment, o.amount_financed, o.total_of_payments, "
+        "d.outcome, "
+        "k.name_verified, k.dob_verified, k.address_verified, k.ssn_verified "
+        "FROM applications a "
+        "LEFT JOIN offers o ON o.app_id = a.id "
+        "LEFT JOIN decisions d ON d.app_id = a.id "
+        "LEFT JOIN LATERAL ("
+        "  SELECT name_verified, dob_verified, address_verified, ssn_verified "
+        "  FROM kyc_checks WHERE applicant_id = a.applicant_id ORDER BY id DESC LIMIT 1"
+        ") k ON TRUE "
+        "WHERE a.id = %s",
+        (app_id,),
+    )
+    if not rows:
+        return None
+    # Drop NULL fields: an advisory summary states only what is present (a missing offer,
+    # decision, or KYC row leaves its keys absent rather than surfacing bare nulls).
+    return {key: value for key, value in rows[0].items() if value is not None}
+
+
 @router.post("/{app_id}/decision", response_model=DecisionOut)
 def run_decision(
     app_id: int,

@@ -5,6 +5,7 @@ LOS->LSS boarding seam. Read paths (list/detail) use SQLAlchemy; the older write
 (intake, decisioning, boarding) still use raw psycopg2 — a partial, unfinished migration.
 """
 
+import json
 import os
 from contextlib import asynccontextmanager
 
@@ -142,6 +143,36 @@ def assistant_explain(
     """
     authz.require_officer(x_user_role)
     return _run_assistant(app_id, client, "explain")
+
+
+@app.get("/applications/{app_id}/summary")
+def summarize_application(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    client: ClaudeClient = Depends(get_llm_client),
+):
+    """Officer triage summary of an application via the loan-summary LLM prompt.
+
+    Officer-only, not officer-or-owner: `recommended_next_step` carries internal triage
+    language (`decline_review` / `manual_underwrite`) a borrower must never see about their
+    own file. GET because nothing is recorded — sibling `GET /assistant/decisions/{app_id}`
+    is precedent for an LLM read. Declared here, not in the router, because `get_llm_client`
+    lives in this module (importing it into the router is circular).
+
+    The payload selects zero identity columns (`summary_payload` never joins `applicants`),
+    so no applicant name/ssn/dob/address can reach the model; the prompt's `json_vars`
+    redaction stays defense-in-depth. Provider/adapter failure maps to 503 "summary
+    unavailable" — no `fallback=`, one success shape, the UI says "unavailable" off the 503.
+    """
+    authz.require_officer(x_user_role)
+    payload = applications.summary_payload(app_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="application not found")
+    try:
+        return client.summarize_application(json.dumps(payload))
+    except LLMError as exc:
+        log.error("summary LLM failure for app_id=%s: %s", app_id, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="summary unavailable") from exc
 
 
 @app.post("/applications/{app_id}/disclosure")

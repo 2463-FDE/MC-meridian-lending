@@ -267,6 +267,33 @@ describe("underwriting detail — assistant panel", () => {
 
     expect(screen.queryByText(ASSISTANT_SUMMARY)).toBeNull();
   });
+
+  it("clears the application summary when the route moves to another application", async () => {
+    const SUMMARY_TEXT = "Applicant requests $12,000 over 48 months for debt consolidation.";
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === "/los/applications/1") return APP_1;
+      if (path === "/los/applications/2") return APP_2;
+      if (path === "/los/applications/1/summary")
+        return {
+          summary: SUMMARY_TEXT,
+          risk_flags: ["short employment tenure"],
+          recommended_next_step: "request_docs",
+        };
+      throw new Error(`unexpected GET ${path}`);
+    });
+
+    const view = render(<UnderwritingDetailPage />);
+    await screen.findAllByText("Maria Alvarez");
+    fireEvent.click(screen.getByRole("button", { name: "Summarize" }));
+    expect(await screen.findByText(SUMMARY_TEXT)).toBeTruthy();
+
+    // Navigating to another application must not carry the previous summary across.
+    routeAppId = "2";
+    view.rerender(<UnderwritingDetailPage />);
+    await screen.findAllByText("Dan Brown");
+
+    expect(screen.queryByText(SUMMARY_TEXT)).toBeNull();
+  });
 });
 
 // The TILA disclosure panel's repair path. disclosure-service's idempotent replay records a

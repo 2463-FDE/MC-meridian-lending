@@ -131,6 +131,14 @@ interface AssistantResult {
   narration_validated?: boolean;
 }
 
+// Officer triage summary from the loan-summary LLM prompt (GET /applications/{id}/summary).
+// Advisory only: recommended_next_step is a triage hint, not the record-backed decision.
+interface Summary {
+  summary: string;
+  risk_flags: string[];
+  recommended_next_step: string;
+}
+
 const OFFER_RATE_PCT = 7.99;
 
 function errMsg(err: unknown, fallback: string): string {
@@ -165,6 +173,7 @@ export default function UnderwritingDetailPage() {
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [assistant, setAssistant] = useState<AssistantResult | null>(null);
+  const [summary, setSummary] = useState<Summary | null>(null);
   const [provenance, setProvenance] = useState<Provenance | null>(null);
   // Not named `document`: that shadows the DOM global inside this component.
   const [disclosureDoc, setDisclosureDoc] = useState<DisclosureDocument | null>(
@@ -216,6 +225,7 @@ export default function UnderwritingDetailPage() {
     setError(null);
     setDecision(null);
     setAssistant(null);
+    setSummary(null);
     setOffer(null);
     setBoardedLoanId(null);
     setProvenance(null);
@@ -452,6 +462,32 @@ export default function UnderwritingDetailPage() {
     } catch (err) {
       if (routeGenRef.current !== gen) return;
       setActionErr(errMsg(err, "The AI assistant is unavailable."));
+    } finally {
+      if (routeGenRef.current === gen) setActionBusy(false);
+    }
+  }
+
+  // Officer triage summary. Button-triggered ONLY — deliberately NOT in the on-mount
+  // load effect: a GET here is a paid provider call, so summarizing on every application
+  // open would bill each visit. Guarded by the route generation like every async handler:
+  // capture `gen` before the first await and drop a response that lands after navigation,
+  // so applicant A's summary never appears under applicant B's header.
+  async function runSummary() {
+    if (!appId) return;
+    const gen = routeGenRef.current;
+    setActionBusy(true);
+    setActionErr(null);
+    setActionMsg(null);
+    try {
+      const res = (await apiGet(
+        `/los/applications/${appId}/summary`
+      )) as Summary;
+      if (routeGenRef.current !== gen) return;
+      setSummary(res);
+      setActionMsg("Summary generated.");
+    } catch (err) {
+      if (routeGenRef.current !== gen) return;
+      setActionErr(errMsg(err, "The summary is unavailable."));
     } finally {
       if (routeGenRef.current === gen) setActionBusy(false);
     }
@@ -720,6 +756,52 @@ export default function UnderwritingDetailPage() {
       {/* Action feedback (shared by all panels) */}
       {actionMsg ? <div className="alert alert-success">{actionMsg}</div> : null}
       {actionErr ? <div className="alert alert-error">{actionErr}</div> : null}
+
+      {/* Application summary — advisory triage, read before deciding. Above the
+          Decision panel on purpose, and visually distinct from it: the
+          recommended_next_step is a triage hint, not a second decision outcome. */}
+      <h2>Application summary</h2>
+      <div className="card">
+        <div className="spread">
+          <div>
+            <div className="card-title" style={{ marginBottom: 8 }}>
+              LLM triage summary
+            </div>
+            <p className="hint" style={{ margin: 0 }}>
+              An advisory summary of this application for triage. It reads only the
+              application facts (never applicant identity) and does not record anything.
+            </p>
+          </div>
+          <button onClick={runSummary} disabled={actionBusy}>
+            {actionBusy ? "Working…" : "Summarize"}
+          </button>
+        </div>
+        {summary ? (
+          <div style={{ marginTop: 12 }}>
+            <p style={{ margin: 0 }}>{summary.summary}</p>
+            {summary.risk_flags.length > 0 ? (
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: 6,
+                  marginTop: 10,
+                }}
+              >
+                {summary.risk_flags.map((flag, i) => (
+                  <span key={i} className="chip chip-amber">
+                    {flag}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            <p className="hint" style={{ marginTop: 10 }}>
+              Triage hint from the assistant, not a lending decision:{" "}
+              <strong>{summary.recommended_next_step}</strong>
+            </p>
+          </div>
+        ) : null}
+      </div>
 
       {/* Decision */}
       <h2>Decision</h2>
