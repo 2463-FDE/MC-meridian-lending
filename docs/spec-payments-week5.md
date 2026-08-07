@@ -365,7 +365,11 @@ the amount are read from — the cheap half of the cross-service problem was alr
 
 This is the **ledger seam** required by the scoping doc §3.4: applications are events, they
 add no new mutable money column, and a future ledger reads this table rather than
-re-modelling. The balance mutation itself stays as it is; converting it is D2 work.
+re-modelling. The balance mutation itself must become atomic and share this transaction —
+see (d) — so a `payment_applications` row and the `UPDATE balances` it authorizes commit or
+roll back together; a run that records the application but leaves the balance unmoved fails
+acceptance criterion 6. The only piece deferred to D2 is the money *type*: `balances` stays
+`DOUBLE PRECISION` here, and its conversion to Decimal/minor units against a ledger is D2 work.
 
 **(c) A failed apply is never reported as success.** The `except Exception` at
 `payment-service/app/payments.py:104` no longer returns a bare `"captured"`. The response

@@ -251,77 +251,94 @@ def main() -> int:
         )
 
     print(f"loan {args.loan_id}, {args.amount:.2f} per intent, gateway {GATEWAY}")
+    # Record the opening balance and the pre-run row set BEFORE any charge, so the finally
+    # block can always undo whatever the mutation phase inserted -- even a partial run.
     opening_all = balance_of(args.loan_id)
     ids_before_all = payment_ids(args.loan_id)
     clean = True
+    charge_failure = None
 
-    # --- Case A: sequential retry -------------------------------------------------
-    opening = balance_of(args.loan_id)
-    before = payment_ids(args.loan_id)
-    for _ in range(2):
-        st, _body = charge(token, args.loan_id, args.amount)
-        if st not in (200, 201):
-            sys.exit(f"charge failed ({st}): {_body}")
-    clean &= report(
-        "A. RETRY (2 sequential POSTs, one intent)",
-        2,
-        payment_ids(args.loan_id) - before,
-        opening,
-        balance_of(args.loan_id),
-        args.amount,
-    )
-
-    # --- Case B: concurrent --------------------------------------------------------
-    opening = balance_of(args.loan_id)
-    before = payment_ids(args.loan_id)
-    with ThreadPoolExecutor(max_workers=args.parallel) as pool:
-        results = list(
-            pool.map(
-                lambda _: charge(token, args.loan_id, args.amount), range(args.parallel)
+    # Everything below mutates balances. A charge that returns non-2xx, or an uncaught
+    # transport exception in the concurrent block, must NOT bail out with rows inserted and
+    # the balance debited: the next run would read that as its opening balance and report
+    # wrong arithmetic. So the mutation phase runs under try/finally and the finally always
+    # restores (unless --keep was asked for). Do not sys.exit inside the try.
+    try:
+        # --- Case A: sequential retry ---------------------------------------------
+        opening = balance_of(args.loan_id)
+        before = payment_ids(args.loan_id)
+        for _ in range(2):
+            st, _body = charge(token, args.loan_id, args.amount)
+            if st not in (200, 201):
+                charge_failure = f"charge failed ({st}): {_body}"
+                break
+        if charge_failure is None:
+            clean &= report(
+                "A. RETRY (2 sequential POSTs, one intent)",
+                2,
+                payment_ids(args.loan_id) - before,
+                opening,
+                balance_of(args.loan_id),
+                args.amount,
             )
-        )
-    codes = [st for st, _ in results]
-    clean &= report(
-        f"B. CONCURRENT ({args.parallel} simultaneous POSTs, one intent)",
-        args.parallel,
-        payment_ids(args.loan_id) - before,
-        opening,
-        balance_of(args.loan_id),
-        args.amount,
-    )
-    print(f"    response codes     : {codes}  (every attempt reported success)")
 
-    print("\n" + "=" * 72)
-    if clean:
-        print(
-            "VERDICT: no double-charge observed. The spec's premise does not hold here —"
-        )
-        print("         re-check the branch under test before presenting.")
-    else:
-        print(
-            "VERDICT: DOUBLE-CHARGE CONFIRMED. One customer intent, multiple charges."
-        )
-        print("         Not customer confusion. Not a UI bug. Two+ successful inserts.")
-        print("         See docs/scoping-payments-week5.md §3.1.")
-    print("=" * 72)
+            # --- Case B: concurrent ------------------------------------------------
+            opening = balance_of(args.loan_id)
+            before = payment_ids(args.loan_id)
+            with ThreadPoolExecutor(max_workers=args.parallel) as pool:
+                results = list(
+                    pool.map(
+                        lambda _: charge(token, args.loan_id, args.amount),
+                        range(args.parallel),
+                    )
+                )
+            codes = [st for st, _ in results]
+            clean &= report(
+                f"B. CONCURRENT ({args.parallel} simultaneous POSTs, one intent)",
+                args.parallel,
+                payment_ids(args.loan_id) - before,
+                opening,
+                balance_of(args.loan_id),
+                args.amount,
+            )
+            print(f"    response codes     : {codes}  (every attempt reported success)")
 
-    created = payment_ids(args.loan_id) - ids_before_all
-    if args.keep:
-        # Print the cleanup invocation rather than the raw numbers: --cleanup-only now
-        # requires both, and reconstructing the high-water id from the created ids by hand
-        # is where an operator gets it wrong and deletes seeded rows.
-        high_water = max(ids_before_all, default=0)
-        print(
-            f"\n--keep: left {len(created)} row(s) {sorted(created)}; "
-            f"opening balance was {opening_all}"
-        )
-        print(
-            f"        clean up with: python3 scripts/repro_double_charge.py "
-            f"--cleanup-only --loan-id {args.loan_id} --since-id {high_water} "
-            f"--restore-balance {opening_all}"
-        )
-    else:
-        cleanup(args.loan_id, created, opening_all)
+            print("\n" + "=" * 72)
+            if clean:
+                print(
+                    "VERDICT: no double-charge observed. The spec's premise does not hold here —"
+                )
+                print("         re-check the branch under test before presenting.")
+            else:
+                print(
+                    "VERDICT: DOUBLE-CHARGE CONFIRMED. One customer intent, multiple charges."
+                )
+                print(
+                    "         Not customer confusion. Not a UI bug. Two+ successful inserts."
+                )
+                print("         See docs/scoping-payments-week5.md §3.1.")
+            print("=" * 72)
+    finally:
+        created = payment_ids(args.loan_id) - ids_before_all
+        if args.keep:
+            # Print the cleanup invocation rather than the raw numbers: --cleanup-only now
+            # requires both, and reconstructing the high-water id from the created ids by hand
+            # is where an operator gets it wrong and deletes seeded rows.
+            high_water = max(ids_before_all, default=0)
+            print(
+                f"\n--keep: left {len(created)} row(s) {sorted(created)}; "
+                f"opening balance was {opening_all}"
+            )
+            print(
+                f"        clean up with: python3 scripts/repro_double_charge.py "
+                f"--cleanup-only --loan-id {args.loan_id} --since-id {high_water} "
+                f"--restore-balance {opening_all}"
+            )
+        else:
+            cleanup(args.loan_id, created, opening_all)
+
+    if charge_failure is not None:
+        sys.exit(charge_failure)
     return 0 if clean else 1
 
 
