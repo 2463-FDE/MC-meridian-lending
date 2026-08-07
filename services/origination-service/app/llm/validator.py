@@ -107,6 +107,23 @@ def _check(node, schema, path: str) -> None:
     elif t == "string":
         if not isinstance(node, str):
             raise ValidationFailed(f"{path}: expected string")
+        # `pattern` is the only string facet enforced here. It exists because the
+        # disclosure maker's prose fields must contain no digits — a sentence restating
+        # several money figures is one quoted value whose concatenated digits can be a
+        # Luhn-valid run, and the PII leak guard then masks the document as a card number
+        # (see prompts/disclosure_assemble.py). A constraint that only lives in the prompt
+        # is a request; this makes it a contract.
+        #
+        # NOTE: `maxLength` is declared by several prompts and is NOT enforced — a
+        # pre-existing gap, left alone here rather than silently tightening prompts this
+        # change does not touch.
+        expected = schema.get("pattern")
+        if expected is not None and not re.match(expected, node):
+            # The value is model-controlled and may carry application content, so it is
+            # never interpolated into the message — only the path and our own pattern.
+            raise ValidationFailed(
+                f"{path}: does not match required pattern {expected}"
+            )
     elif t == "number":
         if not isinstance(node, (int, float)) or isinstance(node, bool):
             raise ValidationFailed(f"{path}: expected number")

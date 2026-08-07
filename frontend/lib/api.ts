@@ -78,6 +78,23 @@ function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+// FastAPI details are usually strings, but the disclosure pipeline returns a structured
+// one ({status, reason, attempts, ...}) so the officer learns WHICH gate refused. String()
+// on that object renders "[object Object]" — the one message that tells nobody anything.
+function detailText(detail: unknown, status: number): string {
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object") {
+    const reason = (detail as { reason?: unknown }).reason;
+    if (typeof reason === "string") return reason.replace(/_/g, " ");
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return `Request failed (${status})`;
+    }
+  }
+  return `Request failed (${status})`;
+}
+
 async function parse(res: Response) {
   const text = await res.text();
   let data: unknown = null;
@@ -91,7 +108,7 @@ async function parse(res: Response) {
   if (!res.ok) {
     const detail =
       data && typeof data === "object" && "detail" in data
-        ? String((data as { detail: unknown }).detail)
+        ? detailText((data as { detail: unknown }).detail, res.status)
         : typeof data === "string" && data
           ? data
           : `Request failed (${res.status})`;

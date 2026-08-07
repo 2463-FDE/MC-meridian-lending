@@ -6,6 +6,7 @@ secret manager; see docs/security-remediation-2026-07.md.
 """
 
 import os
+import re
 import threading
 import time
 from urllib.parse import unquote, urlparse
@@ -92,6 +93,33 @@ _probe_state = (None, 0.0, (False, None))  # (dsn, monotonic_at, result)
 # Single-flight: only one thread probes per DSN/TTL window; concurrent misses wait
 # on this and reuse the fresh result instead of each opening its own connection.
 _probe_lock = threading.Lock()
+
+
+def _normalize_constraint_def(definition: str) -> str:
+    """Case/whitespace/parenthesis-insensitive form of a CHECK constraint definition.
+
+    Compared against pg_get_constraintdef output, which Postgres re-renders from the
+    parse tree rather than echoing the source: DATE '0001-01-01' comes back as
+    '0001-01-01'::date, and the deparser adds its own parentheses. Normalizing those
+    three dimensions away keeps the comparison stable across how the constraint was
+    written (init DDL vs migration) and across deparser paren style, while any drift
+    that matters -- a different column, operator or bound literal -- still shows up.
+
+    Paren-insensitivity does mean a re-associated but token-identical expression would
+    compare equal. Reaching that requires the same columns, operators and both exact
+    bound literals, so it is not a way to smuggle in a WEAKER range.
+    """
+    return re.sub(r"[\s()]", "", definition).lower()
+
+
+# The expected definition of applicants.ck_applicants_dob_readable, written as Postgres
+# renders it. Declared in BOTH db/init/001_schema.sql (fresh volumes) and
+# db/migrations/0011_applicants_dob_readable.sql (existing ones) -- two sources that can
+# drift, which is exactly why the readiness rung below compares the definition and not
+# just the name. Keep all three in step.
+_DOB_READABLE_EXPECTED_DEF = _normalize_constraint_def(
+    "CHECK (dob IS NULL OR (dob >= '0001-01-01'::date AND dob <= '9999-12-31'::date))"
+)
 
 
 def reset_database_probe_cache() -> None:
@@ -190,6 +218,73 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
                 return False, (
                     "schema_not_ready:applications.continuation_token_expires_at"
                 )
+            # PR review: applicants.dob is a DATE that reaches year 294276, while Python's
+            # date stops at 9999 -- so an out-of-range value stores fine and then raises
+            # "year N is out of range" during row hydration. models.Application.applicant is
+            # lazy="joined", so that happens on the officer list and the detail view alike,
+            # taking the queue down over ONE row. Migration 0011's CHECK constraint is what
+            # keeps such a value out of storage, and because a VALIDATED check cannot be
+            # created while a violating row exists, its presence also proves the existing
+            # rows are readable. A volume predating 0011 is therefore both unguarded and
+            # unproven -- fail readiness loud, naming the constraint, same as the rungs above.
+            # convalidated is load-bearing, not defensive noise: ADD CONSTRAINT ... NOT VALID
+            # installs the guard for future writes while explicitly NOT checking the rows
+            # already there. Such a constraint appears in pg_constraint, so a name-only lookup
+            # would report ready on exactly the volume this rung exists to catch -- one holding
+            # an unreadable dob. Matching on the table and contype too keeps a same-named
+            # constraint elsewhere in the database from satisfying the check.
+            #
+            # The DEFINITION is checked, not just the name (PR review): the constraint has two
+            # declaration sites -- db/init/001_schema.sql for a fresh volume and migration 0011
+            # for an existing one -- and 0011 swallows duplicate_object, so a same-named
+            # constraint carrying a WEAKER expression makes the migration report "already
+            # present, skipping" while the DATE column still accepts a dob Python cannot read.
+            # A name-only rung would call that volume ready and hand the officer queue the very
+            # row it exists to keep out, so a definition mismatch fails readiness in its own
+            # right, under a distinct reason an operator can act on.
+            cur.execute(
+                "SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c "
+                "JOIN pg_class t ON t.oid = c.conrelid "
+                "WHERE c.conname = 'ck_applicants_dob_readable' "
+                "AND t.relname = 'applicants' "
+                "AND c.contype = 'c' "
+                "AND c.convalidated"
+            )
+            row = cur.fetchone()
+            if row is None:
+                return False, "schema_not_ready:ck_applicants_dob_readable"
+            if (
+                _normalize_constraint_def(str(row[0] or ""))
+                != _DOB_READABLE_EXPECTED_DEF
+            ):
+                return False, "schema_not_ready:ck_applicants_dob_readable:definition"
+            # `accept_offer` reads disclosures.document_body: `delivered` is a claim about a
+            # document, and migration 0013 leaves already-delivered rows at NULL, so the
+            # boarding gate has to see whether one was recorded. A volume that ran 0011 but
+            # not 0012 has the table and not the column, so that SELECT would 500 the
+            # boarding path while /health read fine — the same class as the rungs above, and
+            # the one migration state this gate exists for. The type is asserted, not just
+            # the name: `ADD COLUMN IF NOT EXISTS` swallows a same-named column of any type,
+            # and a TEXT stand-in makes `<> 'null'::jsonb` a type error at boarding time.
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'disclosures' AND column_name = 'document_body' "
+                "AND data_type = 'jsonb'"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:disclosures.document_body"
+            # accept_offer's boarding INSERT writes loans.note_rate (migration 0014): servicing
+            # must amortize at the note rate, not the disclosed APR. A volume that has the loans
+            # table but not this column (predating 0014) would 500 the boarding INSERT while
+            # /health read fine — the same class as the rungs above. The type is asserted, not
+            # just the name: ADD COLUMN IF NOT EXISTS swallows a same-named column of any type.
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'loans' AND column_name = 'note_rate' "
+                "AND data_type = 'double precision'"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:loans.note_rate"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__

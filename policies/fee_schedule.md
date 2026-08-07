@@ -2,9 +2,12 @@
 
 *Last reviewed: 2024-11. Owner: Lending Ops.*
 
-> ⚠️ These published values are the source of truth. Note that the code hardcodes its
-> own copies of several of these in `apr.py`, `fees.py`, and `offer.py`, and they have
-> drifted from this schedule.
+> These published values are the human-facing source of truth. The code no longer hardcodes
+> its own copies: the drifted constants that used to live in `apr.py` (0.025), `fees.py`, and
+> `offer.py` (0.03) were replaced by a single versioned loader — `apr.py`, `fees.py`, and
+> `offer.py` all read `policies/fee_schedule.json` via `rules.get_fee_schedule()`, which fails
+> closed. `tests/test_rules.py` asserts this markdown and the JSON agree, so the two cannot
+> drift the way the three hardcoded copies did. Keep this table and `fee_schedule.json` in step.
 
 | Fee | Amount |
 |-----|--------|

@@ -161,6 +161,12 @@ def require_officer(x_user_role: str | None) -> None:
         raise HTTPException(status_code=403, detail="officer role required")
 
 
+def is_officer(x_user_role: str | None) -> bool:
+    """Non-raising officer predicate, for a route that ADMITS the borrower but still has to
+    branch on officer-ness (e.g. drafts officer-only, delivered body owner-readable)."""
+    return _is_officer(x_user_role)
+
+
 def require_officer_or_owner(
     app_id: int,
     x_user_role: str | None,

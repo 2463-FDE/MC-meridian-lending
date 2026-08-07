@@ -25,7 +25,7 @@ from langsmith.run_helpers import get_current_run_tree
 
 from ..prompts import get_prompt
 from .adapter import BedrockAdapter, ClaudeAdapter, ModelAdapter
-from .config import LLMConfig
+from .config import LLMConfig, trace_content_enabled
 from .errors import LLMConfigError, LLMError, ValidationFailed
 from .logging_setup import get_llm_logger
 from .request_builder import build_request
@@ -49,6 +49,13 @@ def _trace_complete_inputs(inputs: dict) -> dict:
     email-derived value would leak that identifier to the telemetry vendor. Omitted
     on both this span and llm.transport — see _trace_transport_inputs for the
     omit-vs-hash rationale.
+
+    `LLM_TRACE_CONTENT` does NOT unlock this span's inputs, and that asymmetry is
+    deliberate. These variables are PRE-redaction; the identical content, post-redaction,
+    is available one span down on `llm.transport`, which the flag does unlock. So there is
+    nothing a debugger gains here that they cannot get more safely there — only a way to
+    export raw identity PII by setting one variable. The flag is for reading prompts, not
+    for defeating `build_request`.
     """
     return {"prompt_name": inputs.get("prompt_name")}
 
@@ -60,11 +67,18 @@ def _trace_complete_outputs(output: Any) -> dict:
     string) — that body carries customer lending content (loan amounts, income,
     risk facts), so exporting it would ship application data to a third-party
     telemetry vendor (PR review). Trace only a non-content shape marker; token
-    cost/usage already lives on the child `llm.transport` span. If content-level
-    trace debugging is ever needed, gate it behind an explicit non-production
-    flag with its own policy controls — never on by default.
+    cost/usage already lives on the child `llm.transport` span.
+
+    `LLM_TRACE_CONTENT=true` (non-production, see config.trace_content_enabled) adds
+    `result` — this is the flag that earlier revision asked for. Unlike the raw text on
+    the transport span, this body has already been through `guard_output` and
+    `validate_structured`, so seeing both spans is what shows you whether a validation
+    failure was the model's fault or the schema's. Off by default; never on in production.
     """
-    return {"result_type": type(output).__name__}
+    traced = {"result_type": type(output).__name__}
+    if trace_content_enabled():
+        traced["result"] = output
+    return traced
 
 
 def _default_adapter(config: LLMConfig) -> ModelAdapter:

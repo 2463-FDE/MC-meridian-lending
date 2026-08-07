@@ -5,6 +5,7 @@ LOS->LSS boarding seam. Read paths (list/detail) use SQLAlchemy; the older write
 (intake, decisioning, boarding) still use raw psycopg2 — a partial, unfinished migration.
 """
 
+import json
 import os
 from contextlib import asynccontextmanager
 
@@ -13,7 +14,15 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import assistant, authz, config, intake
+from . import (
+    assistant,
+    authz,
+    clients,
+    config,
+    disclosure_coordinator,
+    intake,
+    kyc_gate,
+)
 from .llm import ClaudeClient, load_llm_config
 from .llm.errors import LLMError
 from .logging_config import get_logger
@@ -136,6 +145,266 @@ def assistant_explain(
     return _run_assistant(app_id, client, "explain")
 
 
+@app.get("/applications/{app_id}/summary")
+def summarize_application(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    client: ClaudeClient = Depends(get_llm_client),
+):
+    """Officer triage summary of an application via the loan-summary LLM prompt.
+
+    Officer-only, not officer-or-owner: `recommended_next_step` carries internal triage
+    language (`decline_review` / `manual_underwrite`) a borrower must never see about their
+    own file. GET because nothing is recorded — sibling `GET /assistant/decisions/{app_id}`
+    is precedent for an LLM read. Declared here, not in the router, because `get_llm_client`
+    lives in this module (importing it into the router is circular).
+
+    The payload selects zero identity columns (`summary_payload` never joins `applicants`),
+    so no applicant name/ssn/dob/address can reach the model; the prompt's `json_vars`
+    redaction stays defense-in-depth. Provider/adapter failure maps to 503 "summary
+    unavailable" — no `fallback=`, one success shape, the UI says "unavailable" off the 503.
+    """
+    authz.require_officer(x_user_role)
+    payload = applications.summary_payload(app_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="application not found")
+    try:
+        return client.summarize_application(json.dumps(payload))
+    except LLMError as exc:
+        log.error("summary LLM failure for app_id=%s: %s", app_id, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="summary unavailable") from exc
+
+
+@app.post("/applications/{app_id}/disclosure")
+def generate_disclosure(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    client: ClaudeClient = Depends(get_llm_client),
+):
+    """Generate the TILA disclosure for an approved application (ADR 0012, spec D4).
+
+    Officer-only, like `transition_disclosure` and unlike the rest of the disclosure
+    routes (PR review). This previously took `make_offer`'s officer-OR-owner posture on
+    the grounds that it persists a regulated document for the application — but it also
+    RETURNS that document, plus the officer narration, in the response. A borrower holding
+    a valid continuation token could therefore generate and read a draft TILA disclosure
+    while its status was still `draft`, which is precisely the state the spec D6 compliance
+    hold exists to keep from reaching them; the officer's `review_and_send` /
+    `hold_for_compliance` verdict was borrower-visible along with it. The hold is only a
+    control if the held document is unreadable until an officer releases it.
+
+    The borrower is not shut out of their own disclosure: `read_disclosure` still admits
+    officer, owner, and token-holder, and returns the status and provenance chain. What
+    they cannot do is mint the document or read its body before an officer has moved it
+    past `draft`.
+
+    Loan terms are bound server-side from the stored application — the caller supplies
+    nothing but the id.
+
+    A blocked run returns 422 with the typed reason rather than a 500: "the gate refused
+    this document" is a result, not a failure, and the officer needs to see which check
+    stopped it.
+    """
+    authz.require_officer(x_user_role)
+    kyc_gate.require_kyc_passed(app_id)
+
+    coordinator = disclosure_coordinator.build_coordinator(client)
+    try:
+        result = coordinator.run(app_id)
+    except disclosure_coordinator.ApplicationNotFound:
+        raise HTTPException(status_code=404, detail="application not found")
+    except disclosure_coordinator.DownstreamRefused as exc:
+        # The service answered and said no (a recompute disagreement, a missing offer) —
+        # an answer the officer needs to read, not the generic "unavailable" below.
+        log.warning(
+            "disclosure pipeline refused app_id=%s status=%s detail=%s",
+            app_id,
+            exc.status_code,
+            exc.detail,
+        )
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except LLMError as exc:
+        log.error(
+            "disclosure pipeline LLM failure app_id=%s: %s", app_id, type(exc).__name__
+        )
+        raise HTTPException(
+            status_code=503, detail="disclosure agent unavailable"
+        ) from exc
+    except httpx.HTTPError as exc:
+        log.error("disclosure pipeline downstream failure app_id=%s: %s", app_id, exc)
+        raise HTTPException(
+            status_code=502, detail="disclosure service unavailable"
+        ) from exc
+
+    if result["status"] == "blocked":
+        log.warning(
+            "disclosure blocked app_id=%s reason=%s detail=%s",
+            app_id,
+            result["reason"],
+            result.get("detail", ""),
+        )
+        detail = {
+            "status": "blocked",
+            "reason": result["reason"],
+            "attempts": result.get("attempts", 0),
+        }
+        # A stage-5 provenance block leaves a persisted draft behind (see the coordinator);
+        # hand back its id so the officer can act on the row rather than hunt for it.
+        persisted = result.get("disclosure") or {}
+        if persisted.get("disclosure_id"):
+            detail["disclosure_id"] = persisted["disclosure_id"]
+            detail["missing_edges"] = (result.get("provenance") or {}).get(
+                "missing_edges", []
+            )
+        raise HTTPException(status_code=422, detail=detail)
+    return result
+
+
+class TransitionIn(BaseModel):
+    to_status: str
+    reason_code: str | None = None
+
+
+@app.get("/applications/{app_id}/disclosure")
+def read_disclosure(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    x_application_token: str | None = Header(default=None, alias="X-Application-Token"),
+):
+    """The disclosure's status and its provenance chain, read from the KG view.
+
+    Same read posture as `get_offer`: the chain carries the disclosed APR, so officer,
+    owner, or token-holder only (ADR 0010).
+    """
+    authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
+    chain = _read_chain(app_id)
+    # `policy_band` is the internal underwriting band. Every other route that exposes it
+    # (`/assistant/*`) is officer-only; this one admits the owning borrower, so proxying
+    # the view verbatim would make an internal risk attribute borrower-visible for the
+    # first time. The disclosed figures and the chain itself are theirs to see; the band
+    # they were scored into is not, and nothing on this screen uses it.
+    chain.pop("policy_band", None)
+    return chain
+
+
+@app.get("/applications/{app_id}/disclosure/document")
+def read_disclosure_document(
+    app_id: int,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    x_application_token: str | None = Header(default=None, alias="X-Application-Token"),
+):
+    """The stored borrower-facing document (spec D6).
+
+    Officer, owner, or token-holder — but a NON-officer may read only a DELIVERED document.
+    A draft body stays officer-only: releasing it to the borrower is exactly what the
+    compliance hold exists to prevent, the same reason `generate_disclosure` is officer-only.
+    Once delivered, the borrower must be able to read the immutable document they are being
+    asked to accept — the `delivered` flag that the boarding guard trusts has to be backed by
+    an artifact the borrower can actually see, not merely a status the borrower is told about
+    (house rule: every consumer of that flag re-checks the artifact, and the borrower is the
+    consumer who acts on delivery by accepting). Delivery is terminal and frozen
+    (`trg_disclosures_freeze_delivered`), so the status the chain reports is authoritative for
+    this gate.
+
+    Exists because the body used to be readable only in the generating call's response. The
+    officer who approves or delivers is a different session — a different person, under
+    maker-checker — so without this route the reviewer approved a document they had no way to
+    open, and delivery recorded a flag over content nobody had read.
+
+    The disclosure id and status are resolved from the application server-side, same as the
+    transition route: that is what binds the read to the application the caller was authorized
+    for.
+    """
+    authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
+    chain = _read_chain(app_id)
+    disclosure_id = chain.get("disclosure_id")
+    if not disclosure_id:
+        raise HTTPException(
+            status_code=404, detail="no disclosure for this application"
+        )
+    # Drafts stay officer-only; a borrower/token-holder reads only the DELIVERED body. 404,
+    # not 403: an owner asking before delivery gets the same "not available yet" answer the
+    # applicant UI already fails closed on, and it never confirms a draft body exists.
+    if (
+        not authz.is_officer(x_user_role)
+        and chain.get("disclosure_status") != "delivered"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="no delivered disclosure document for this application",
+        )
+    return _downstream("GET", f"/disclosures/{disclosure_id}/document")
+
+
+@app.post("/applications/{app_id}/disclosure/transition")
+def transition_disclosure(
+    app_id: int,
+    body: TransitionIn,
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+):
+    """Compliance hold and delivery (spec D6): draft -> in_review -> approved -> delivered.
+
+    Officer-only, not officer-OR-owner. Every other disclosure route admits the borrower
+    because it is their document; this one is the control that decides whether the
+    document is fit to send, and a borrower approving their own TILA disclosure would
+    make the compliance hold ceremonial.
+
+    The disclosure id is resolved from the application server-side rather than accepted
+    from the caller — that is what binds the transition to the application the caller was
+    authorized for.
+    """
+    authz.require_officer(x_user_role)
+    chain = _read_chain(app_id)
+    disclosure_id = chain.get("disclosure_id")
+    if not disclosure_id:
+        raise HTTPException(
+            status_code=404, detail="no disclosure for this application"
+        )
+    return _downstream(
+        "POST",
+        f"/disclosures/{disclosure_id}/transition",
+        json=body.model_dump(),
+    )
+
+
+def _read_chain(app_id: int) -> dict:
+    return _downstream("GET", f"/applications/{app_id}/disclosure/provenance")
+
+
+def _downstream(method: str, path: str, json: dict | None = None) -> dict:
+    """Call disclosure-service and preserve its 4xx.
+
+    A 409 "illegal transition" or a TILA timing refusal is an answer the officer needs to
+    read, not an outage. Collapsing it into 502 would tell them the service is down when
+    what actually happened is that the service said no.
+    """
+    try:
+        if method == "GET":
+            resp = clients.get(clients.DISCLOSURE_URL, path)
+        else:
+            resp = clients.post_raw(clients.DISCLOSURE_URL, path, json)
+    except httpx.HTTPError as exc:
+        log.error("disclosure-service unreachable path=%s: %s", path, exc)
+        raise HTTPException(
+            status_code=502, detail="disclosure service unavailable"
+        ) from exc
+    if 400 <= resp.status_code < 500:
+        raise HTTPException(status_code=resp.status_code, detail=_detail(resp))
+    if resp.status_code >= 500:
+        log.error("disclosure-service %s on %s", resp.status_code, path)
+        raise HTTPException(status_code=502, detail="disclosure service unavailable")
+    return resp.json()
+
+
+def _detail(resp: httpx.Response):
+    try:
+        return resp.json().get("detail", "disclosure request refused")
+    except ValueError:
+        return "disclosure request refused"
+
+
 def _run_assistant(
     app_id: int, client: ClaudeClient, task: str, request_id: str | None = None
 ):
@@ -190,6 +459,14 @@ def board(
     (/applications/{id}/accept) IS KYC-gated. Gating this hatch on KYC would presume an LOS
     application it does not read; an operator using it takes explicit responsibility. Noted,
     not missed.
+
+    The delivered-disclosure hold (Reg Z 1026.17(b), PR review) is exempt here for exactly
+    the same reason, and this is why that hold is enforced in the accept route rather than
+    as a trigger on `loans`: a table-level trigger would also fire for this hatch — whose
+    caller-supplied app_id need not name an application with an offer at all — and for the
+    demo loans seeded by db/init/002_seed.sql, which carry no disclosures and would fail a
+    fresh `make up`. The product path is gated; an operator using this one takes the same
+    explicit responsibility as above.
     """
     applications._require_internal_caller(x_internal_service)
     loan_id = intake.board_to_servicing(

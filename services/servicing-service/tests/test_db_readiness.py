@@ -5,6 +5,7 @@ misconfigured so /health can report unhealthy instead of connecting
 unauthenticated or failing auth at first query. Covers the passwordless DSN
 (meridian:@postgres) the secret purge left behind and the shipped placeholder.
 """
+
 import threading
 import time
 
@@ -56,7 +57,9 @@ def test_stale_password_rejected_against_postgres_password(monkeypatch):
     # without a DB round trip.
     monkeypatch.setenv("POSTGRES_PASSWORD", "the_real_pw")
     monkeypatch.setattr(
-        config, "DATABASE_URL", "postgresql://meridian:stale_old_pw@postgres:5432/meridian"
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:stale_old_pw@postgres:5432/meridian",
     )
     assert config.database_url_configured() is False
     assert "DATABASE_URL" in config.missing_required_secrets()
@@ -65,7 +68,9 @@ def test_stale_password_rejected_against_postgres_password(monkeypatch):
 def test_password_matching_postgres_password_is_ok(monkeypatch):
     monkeypatch.setenv("POSTGRES_PASSWORD", "the_real_pw")
     monkeypatch.setattr(
-        config, "DATABASE_URL", "postgresql://meridian:the_real_pw@postgres:5432/meridian"
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:the_real_pw@postgres:5432/meridian",
     )
     assert config.database_url_configured() is True
     assert "DATABASE_URL" not in config.missing_required_secrets()
@@ -230,6 +235,79 @@ def test_probe_single_flight_under_concurrent_misses(monkeypatch):
 
     assert calls["n"] == 1  # exactly one probe despite 8 concurrent misses
     assert results == [(True, None)] * 8
+
+
+# --- Schema rung: loans.note_rate --------------------------------------------
+# The Loan ORM entity maps loans.note_rate (migration 0014), so every servicing loan
+# read (list, detail, schedule) loads it. Migrations lag the init DDL, so a volume that
+# has the loans table but not this column would 500 EVERY loan read while /health
+# otherwise read fine. The probe asserts the column with the right type; absent -> unready.
+
+
+class _SchemaAwareCursor:
+    """SELECT 1 is truthy; the information_schema probe answers by a flag."""
+
+    def __init__(self, note_rate_present):
+        self._note_rate_present = note_rate_present
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "information_schema.columns" in self._last:
+            return (1,) if self._note_rate_present else None
+        return (1,)
+
+
+class _SchemaAwareConn:
+    def __init__(self, note_rate_present):
+        self._present = note_rate_present
+        self.closed_flag = False
+
+    def cursor(self):
+        return _SchemaAwareCursor(self._present)
+
+    def close(self):
+        self.closed_flag = True
+
+
+def test_probe_unready_when_note_rate_column_absent(monkeypatch):
+    # Regression: a volume predating migration 0014 has the loans table but not
+    # loans.note_rate. The connection opens and SELECT 1 succeeds, but the schema rung
+    # must report unready — otherwise /health reads ok while every loan read 500s on the
+    # ORM's note_rate SELECT.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2,
+        "connect",
+        lambda *a, **k: _SchemaAwareConn(note_rate_present=False),
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:loans.note_rate"
+
+
+def test_probe_ready_when_note_rate_column_present(monkeypatch):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2,
+        "connect",
+        lambda *a, **k: _SchemaAwareConn(note_rate_present=True),
+    )
+    ok, err = config.database_reachable()
+    assert ok is True
+    assert err is None
 
 
 # --- Processor-key readiness + fail-closed capture -------------------------

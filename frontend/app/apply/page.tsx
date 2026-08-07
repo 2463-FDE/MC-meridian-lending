@@ -64,6 +64,14 @@ const PURPOSES = [
 
 const OFFER_RATE_PCT = 7.99;
 
+// Mirrors schemas.py::_DOB_MIN_YEAR. Bounds the native date picker so its year spinner
+// cannot reach a value Python's date type can't represent.
+const DOB_MIN = "1900-01-01";
+
+function todayISO(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 interface FormState {
   name: string;
   dob: string;
@@ -125,6 +133,22 @@ interface Disclosure {
   }[];
 }
 
+// The immutable borrower-facing document the officer delivered (spec D4). Only readable
+// once the disclosure is DELIVERED (the server keeps a draft body officer-only); prose
+// fields are digit-free by contract, figures are the disclosed strings.
+interface DisclosureDocument {
+  heading: string;
+  figures: {
+    apr: string;
+    finance_charge: string;
+    amount_financed: string;
+    total_of_payments: string;
+    monthly_payment: string;
+  };
+  payment_terms: string;
+  prepayment: string;
+}
+
 function errMsg(err: unknown, fallback: string): string {
   if (err && typeof err === "object" && "detail" in err) {
     return String((err as { detail: unknown }).detail) || fallback;
@@ -164,6 +188,18 @@ export default function ApplyPage() {
   );
   const [showSchedule, setShowSchedule] = useState(false);
   const [resuming, setResuming] = useState(false);
+  // Accepting boards the loan, which is consummation — so it waits on the TILA disclosure
+  // being DELIVERED, and delivery is a compliance step an officer performs (Reg Z
+  // 1026.17(b); the server refuses to board without it). The applicant therefore sees a
+  // pending state here rather than a 409 on the last click. A 404 from this read means no
+  // disclosure exists yet, which is the normal state right after an offer.
+  // The delivered document itself, not just the fact of delivery: the borrower must be able
+  // to read the immutable TILA document before accepting, so acceptance gates on having
+  // fetched it (null = not yet deliverable/readable), not on a bare status flag.
+  const [deliveredDoc, setDeliveredDoc] = useState<DisclosureDocument | null>(
+    null
+  );
+  const [checkingDisclosure, setCheckingDisclosure] = useState(false);
 
   // Resume a submitted application after a refresh / tab close: the continuation token was
   // persisted at submit, so rehydrate it and re-fetch the application (the token authorizes
@@ -215,6 +251,14 @@ export default function ApplyPage() {
     if (s === 1) {
       if (!form.name.trim()) e.name = "Required";
       if (!form.dob) e.dob = "Required";
+      // A native date input still emits a typed 5-digit year ("21990-04-22"), which the
+      // DATE column stores and the officer queue then chokes on. Mirror the server rule
+      // (schemas.py::_validate_dob) so the applicant is told here instead of getting a
+      // 422 at submit; the server check is the enforced one.
+      else if (!/^\d{4}-\d{2}-\d{2}$/.test(form.dob))
+        e.dob = "Enter a date as YYYY-MM-DD";
+      else if (form.dob < DOB_MIN || form.dob > todayISO())
+        e.dob = `Enter a date between ${DOB_MIN} and today`;
       if (!form.ssn.trim()) e.ssn = "Required";
       else if (!/^\d{3}-?\d{2}-?\d{4}$/.test(form.ssn.trim()))
         e.ssn = "Enter a valid SSN (###-##-####)";
@@ -369,6 +413,46 @@ export default function ApplyPage() {
     }
   }
 
+  async function refreshDisclosureStatus() {
+    if (!app) return;
+    setCheckingDisclosure(true);
+    try {
+      // ADR 0010 read posture: officer, owner, or token-holder — the resume cookie
+      // authorizes this, same as the application read above. The chain is identifier-free
+      // and the route strips policy_band, so nothing new about the applicant is exposed.
+      const chain = (await apiGet(
+        `/los/applications/${app.app_id}/disclosure`
+      )) as { disclosure_status?: string | null };
+      if (chain?.disclosure_status !== "delivered") {
+        setDeliveredDoc(null);
+        return;
+      }
+      // Delivered: fetch the immutable borrower-facing document so the applicant reads what
+      // they are accepting. The server serves this to the owner ONLY once delivered (a draft
+      // body stays officer-only), so a success here is itself the delivery evidence the
+      // accept gate needs. Any failure (404/transport) leaves it held — fail closed.
+      const doc = (await apiGet(
+        `/los/applications/${app.app_id}/disclosure/document`
+      )) as DisclosureDocument;
+      setDeliveredDoc(doc);
+    } catch {
+      // 404 (no disclosure / not yet delivered) and any transport failure all mean "not
+      // readable as delivered". Fail closed: the button stays held rather than inviting a
+      // click the server refuses.
+      setDeliveredDoc(null);
+    } finally {
+      setCheckingDisclosure(false);
+    }
+  }
+
+  // Check once an offer exists, and again whenever the applicant asks. No timer: delivery
+  // is an officer action on a human timescale, so a refresh affordance beats a poll loop.
+  useEffect(() => {
+    if (!app || !disclosure || acceptedLoanId) return;
+    refreshDisclosureStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [app?.app_id, disclosure, acceptedLoanId]);
+
   // decision-service emits the outcome enum "approve" (not "approved"): match it, or
   // the "View your offer" CTA never renders for an approved borrower (PR review).
   const decisionApproved = (decision?.decision || "").toLowerCase() === "approve";
@@ -404,6 +488,8 @@ export default function ApplyPage() {
               <Field label="Date of birth" error={errors.dob}>
                 <input
                   type="date"
+                  min={DOB_MIN}
+                  max={todayISO()}
                   value={form.dob}
                   onChange={(e) => set("dob", e.target.value)}
                 />
@@ -719,6 +805,9 @@ export default function ApplyPage() {
                     onAccept={acceptOffer}
                     busy={busy}
                     acceptedLoanId={acceptedLoanId}
+                    deliveredDoc={deliveredDoc}
+                    checkingDisclosure={checkingDisclosure}
+                    onRefreshDisclosure={refreshDisclosureStatus}
                   />
                 ) : null}
 
@@ -825,6 +914,9 @@ function OfferPanel({
   onAccept,
   busy,
   acceptedLoanId,
+  deliveredDoc,
+  checkingDisclosure,
+  onRefreshDisclosure,
 }: {
   disclosure: Disclosure;
   amount: number;
@@ -834,6 +926,9 @@ function OfferPanel({
   onAccept: () => void;
   busy: boolean;
   acceptedLoanId: string | number | null;
+  deliveredDoc: DisclosureDocument | null;
+  checkingDisclosure: boolean;
+  onRefreshDisclosure: () => void;
 }) {
   const hasSchedule = !!disclosure.schedule && disclosure.schedule.length > 0;
   return (
@@ -930,10 +1025,87 @@ function OfferPanel({
             Go to your loan account →
           </Link>
         </div>
+      ) : deliveredDoc ? (
+        // The immutable document the officer delivered, shown BEFORE acceptance so the
+        // borrower reads what they are accepting — not just a "delivered" status. Prose
+        // fields are digit-free by contract; the figures are the disclosed strings.
+        <div style={{ marginTop: 20 }}>
+          <p className="hint" style={{ marginBottom: 12 }}>
+            monthly payment{" "}
+            <strong>{deliveredDoc.figures.monthly_payment}</strong>
+          </p>
+          <div className="tila">
+            <div className="tila-title">{deliveredDoc.heading}</div>
+            {/* The persisted disclosed figures, rendered verbatim as the stored
+                strings — not the recomputed offer numbers above — so the borrower
+                reads the exact APR and money they are accepting. */}
+            <div className="tila-grid">
+              <div className="tila-cell tila-cell-apr">
+                <div className="tila-cell-label">Annual Percentage Rate</div>
+                <div className="tila-cell-desc">
+                  The cost of your credit as a yearly rate.
+                </div>
+                <div className="tila-cell-value">{deliveredDoc.figures.apr}%</div>
+              </div>
+              <div className="tila-cell">
+                <div className="tila-cell-label">Finance Charge</div>
+                <div className="tila-cell-desc">
+                  The dollar amount the credit will cost you.
+                </div>
+                <div className="tila-cell-value">
+                  ${deliveredDoc.figures.finance_charge}
+                </div>
+              </div>
+              <div className="tila-cell">
+                <div className="tila-cell-label">Amount Financed</div>
+                <div className="tila-cell-desc">
+                  The amount of credit provided to you.
+                </div>
+                <div className="tila-cell-value">
+                  ${deliveredDoc.figures.amount_financed}
+                </div>
+              </div>
+              <div className="tila-cell">
+                <div className="tila-cell-label">Total of Payments</div>
+                <div className="tila-cell-desc">
+                  What you will have paid after all payments are made.
+                </div>
+                <div className="tila-cell-value">
+                  ${deliveredDoc.figures.total_of_payments}
+                </div>
+              </div>
+            </div>
+            <div style={{ padding: "12px 16px" }}>
+              <p style={{ margin: "0 0 10px" }}>{deliveredDoc.payment_terms}</p>
+              <p style={{ margin: 0 }}>{deliveredDoc.prepayment}</p>
+            </div>
+          </div>
+          <p className="hint" style={{ marginTop: 10 }}>
+            This Truth-in-Lending disclosure has been delivered to you. Review it
+            before accepting.
+          </p>
+          <button style={{ marginTop: 8 }} onClick={onAccept} disabled={busy}>
+            {busy ? "Accepting…" : "Accept offer"}
+          </button>
+        </div>
       ) : (
-        <button style={{ marginTop: 16 }} onClick={onAccept} disabled={busy}>
-          {busy ? "Accepting…" : "Accept offer"}
-        </button>
+        // Held, not broken: the disclosure above has to be formally delivered before the
+        // loan can be booked, and that is a step on our side. Say so, and give a way to
+        // re-check — the alternative is an unexplained 409 on the final click.
+        <div className="alert alert-info" style={{ marginTop: 16 }}>
+          <p style={{ margin: "0 0 10px" }}>
+            Your Truth-in-Lending disclosure is being finalised. You can accept
+            this offer once it has been formally delivered to you — nothing is
+            needed from you right now.
+          </p>
+          <button
+            className="secondary"
+            onClick={onRefreshDisclosure}
+            disabled={checkingDisclosure}
+          >
+            {checkingDisclosure ? "Checking…" : "Check again"}
+          </button>
+        </div>
       )}
     </div>
   );

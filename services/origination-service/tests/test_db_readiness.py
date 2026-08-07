@@ -107,17 +107,32 @@ def test_url_encoded_reserved_char_password_is_ok(monkeypatch):
 # so no real database is required.
 
 
+# How Postgres 16 renders the intended ck_applicants_dob_readable definition (verified
+# against pg_get_constraintdef on postgres:16-alpine): the source's DATE '0001-01-01'
+# comes back as a ::date cast with the deparser's own parentheses. The fully-ready fakes
+# below answer the definition rung with this so they model a correctly-migrated volume.
+READABLE_DOB_CONSTRAINT_DEF = (
+    "CHECK (((dob IS NULL) OR ((dob >= '0001-01-01'::date) "
+    "AND (dob <= '9999-12-31'::date))))"
+)
+
+
 class _FakeCursor:
+    def __init__(self):
+        self._last = ""
+
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
         return False
 
-    def execute(self, *a, **k):
-        pass
+    def execute(self, sql="", *a, **k):
+        self._last = sql
 
     def fetchone(self):
+        if "pg_get_constraintdef" in self._last:
+            return (READABLE_DOB_CONSTRAINT_DEF,)
         return (1,)
 
 
@@ -336,6 +351,274 @@ def test_probe_fails_when_continuation_token_expires_at_column_missing(monkeypat
     assert err == "schema_not_ready:applications.continuation_token_expires_at"
 
 
+class _DobConstraintMissingCursor:
+    """Every earlier rung satisfied, but migration 0011's ck_applicants_dob_readable absent --
+    a volume on which an out-of-range applicants.dob can still be stored, and on which any
+    already-stored one is unproven (PR review)."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "pg_constraint" in self._last:
+            return None
+        return (1,)
+
+
+class _DobConstraintMissingConn:
+    def cursor(self):
+        return _DobConstraintMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_dob_readable_constraint_missing(monkeypatch):
+    # PR review: applicants.dob is a DATE reaching year 294276 while Python's date stops at
+    # 9999, so an out-of-range value stores fine and then raises during ORM hydration. Because
+    # Application.applicant is lazy="joined", that breaks the officer list and the detail view
+    # over ONE row. Readiness must fail on a volume without the constraint that both prevents
+    # a new one and proves no existing row violates it.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _DobConstraintMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:ck_applicants_dob_readable"
+
+
+class _DobConstraintNotValidatedCursor:
+    """The constraint exists under the right name but was added NOT VALID -- installed for
+    future writes while explicitly NOT checking the rows already stored."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "pg_constraint" in self._last:
+            # Models a real NOT VALID constraint: a convalidated-filtered lookup finds
+            # nothing, while a name-only lookup still matches the row.
+            return None if "convalidated" in self._last else (1,)
+        return (1,)
+
+
+class _DobConstraintNotValidatedConn:
+    def cursor(self):
+        return _DobConstraintNotValidatedCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_dob_constraint_is_not_validated(monkeypatch):
+    # The reason no separate row-scanner exists is that a VALIDATED check cannot be created
+    # while a violating row is present, so the constraint's presence proves the stored rows
+    # are readable. ADD CONSTRAINT ... NOT VALID breaks exactly that inference: it guards new
+    # writes and leaves an existing unreadable dob in place. Readiness must therefore require
+    # convalidated -- a name-only lookup would report ready on the one volume this rung exists
+    # to catch.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _DobConstraintNotValidatedConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:ck_applicants_dob_readable"
+
+
+class _DobConstraintDriftedCursor:
+    """A VALIDATED CHECK on applicants under the right name, but with a WEAKER expression --
+    the constraint drifted, or was hand-created before the migration ran. Here it bounds only
+    the lower end, so year 21990 still stores."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql="", *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "pg_get_constraintdef" in self._last:
+            return ("CHECK ((dob IS NULL) OR (dob >= '0001-01-01'::date))",)
+        return (1,)
+
+
+class _DobConstraintDriftedConn:
+    def cursor(self):
+        return _DobConstraintDriftedCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_dob_constraint_definition_drifted(monkeypatch):
+    # PR review: the name proves nothing on its own. Migration 0011 swallows duplicate_object,
+    # and the constraint is also declared by db/init/001_schema.sql, so a same-named constraint
+    # with a weaker expression makes the migration skip -- while the DATE column still accepts a
+    # dob outside Python's range and the officer queue still breaks on hydration. Readiness must
+    # compare the DEFINITION and fail on drift, under its own reason.
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _DobConstraintDriftedConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:ck_applicants_dob_readable:definition"
+
+
+def test_probe_ready_on_canonical_constraint_definition(monkeypatch):
+    # The other direction: the intended definition, as Postgres renders it, must read ready --
+    # the drift check must not reject a correctly-migrated volume over deparsed casts or
+    # parenthesisation (DATE '0001-01-01' comes back as '0001-01-01'::date).
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: _FakeConn())
+    assert config.database_reachable() == (True, None)
+    # Guard the constant itself: if the expected definition is edited, the fake above must
+    # still be the definition the migration and the init DDL actually install.
+    assert (
+        config._normalize_constraint_def(READABLE_DOB_CONSTRAINT_DEF)
+        == config._DOB_READABLE_EXPECTED_DEF
+    )
+
+
+# --- ck_applicants_dob_readable must live in the CANONICAL init schema ---------------
+# Same rung as the disclosure-service uq_offers_app regression: nothing applies
+# db/migrations/ on `make up`, so a constraint that exists only in migration 0011 is absent
+# on a default deploy -- leaving the readiness rung permanently unhealthy and the DATE column
+# unguarded. It must be declared by db/init/001_schema.sql too.
+
+
+def test_dob_readable_constraint_is_in_canonical_init_schema():
+    from pathlib import Path
+
+    schema = Path(__file__).resolve().parents[3] / "db" / "init" / "001_schema.sql"
+    text = schema.read_text()
+    assert "uq_loans_app" in text, "parity anchor missing -- test path is wrong"
+    assert "ck_applicants_dob_readable" in text, (
+        "ck_applicants_dob_readable is not declared by db/init/001_schema.sql -- a default "
+        "`make up` deploy runs with no storage guard on applicants.dob, so an out-of-range "
+        "date can still break the officer queue during ORM hydration"
+    )
+    # The two declaration sites must agree on the BOUNDS, not just the name (PR review).
+    # Readiness compares the installed definition against _DOB_READABLE_EXPECTED_DEF, so an
+    # init DDL that drifts from migration 0011 leaves a fresh `make up` volume permanently
+    # reporting schema_not_ready:ck_applicants_dob_readable:definition.
+    declaration = text.split("ck_applicants_dob_readable", 1)[1].split(");", 1)[0]
+    for bound in ("0001-01-01", "9999-12-31"):
+        assert bound in declaration, (
+            f"db/init/001_schema.sql declares ck_applicants_dob_readable without the {bound} "
+            "bound -- it has drifted from db/migrations/0011_applicants_dob_readable.sql and "
+            "from config._DOB_READABLE_EXPECTED_DEF, so a fresh volume reads not-ready"
+        )
+
+
+class _DocumentBodyMissingCursor:
+    """Every earlier rung present but disclosures.document_body absent -- a volume that ran
+    migration 0012 (the table) and not 0013 (the column). `accept_offer` selects it to decide
+    whether the delivered disclosure actually has a stored document, so that SELECT would 500
+    the boarding path while /health looked fine.
+
+    The ck_applicants_dob_readable rung runs BEFORE this one, so answering it with the
+    canonical definition is what makes this fake the 0012-not-0013 volume the docstring
+    claims: without that, the probe would fail one rung earlier and the assertion below
+    would pass for the wrong reason."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql="", *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "pg_get_constraintdef" in self._last:
+            return (READABLE_DOB_CONSTRAINT_DEF,)
+        if "'document_body'" in self._last:
+            return None
+        return (1,)
+
+
+class _DocumentBodyMissingConn:
+    def cursor(self):
+        return _DocumentBodyMissingCursor()
+
+    def close(self):
+        pass
+
+
+class _DocumentBodyWrongTypeCursor(_DocumentBodyMissingCursor):
+    """The column exists under the right name and the wrong type. `ADD COLUMN IF NOT EXISTS`
+    swallows a same-named column of any type, so a name-only rung reports ready over a TEXT
+    stand-in — against which the boarding gate's `<> 'null'::jsonb` is a type error."""
+
+    def fetchone(self):
+        if "pg_get_constraintdef" in self._last:
+            return (READABLE_DOB_CONSTRAINT_DEF,)
+        if "'document_body'" in self._last and "jsonb" in self._last:
+            return None
+        return (1,)
+
+
+class _DocumentBodyWrongTypeConn:
+    def cursor(self):
+        return _DocumentBodyWrongTypeCursor()
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize(
+    "conn_cls",
+    [_DocumentBodyMissingConn, _DocumentBodyWrongTypeConn],
+)
+def test_probe_fails_when_disclosure_document_body_is_not_ready(monkeypatch, conn_cls):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: conn_cls())
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:disclosures.document_body"
+
+
 def test_probe_false_when_database_url_unset(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", "")
     ok, err = config.database_reachable()
@@ -410,3 +693,55 @@ def test_probe_single_flight_under_concurrent_misses(monkeypatch):
 
     assert calls["n"] == 1  # exactly one probe despite 8 concurrent misses
     assert results == [(True, None)] * 8
+
+
+# --- readiness rungs must be satisfiable by this repository's own DDL -------------------
+#
+# PR review: a rung was added for ck_applicants_dob_readable while the CHECK constraint and
+# its migration lived on a different branch. Every database built from this repository then
+# reported schema_not_ready:ck_applicants_dob_readable forever -- /health unhealthy with no
+# shipped migration that could satisfy it. A readiness gate naming an object the repo never
+# creates is not a gate, it is an outage.
+#
+# The probe's own error strings are the list of things it demands, so parse them out rather
+# than maintaining a second hand-written copy that can drift from the SQL above it.
+
+import pathlib
+import re
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+_INIT_SCHEMA = _REPO_ROOT / "db" / "init" / "001_schema.sql"
+_CONFIG_SRC = pathlib.Path(config.__file__)
+
+
+def _required_objects() -> list[str]:
+    """Every `schema_not_ready:<object>` the probe can return, as written in config.py."""
+    src = _CONFIG_SRC.read_text()
+    # The literals are split across adjacent string chunks in places, so match the token
+    # inside whatever quoting it lands in rather than assuming one string per rung.
+    return sorted(set(re.findall(r"schema_not_ready:([A-Za-z0-9_.]+)", src)))
+
+
+def test_probe_names_at_least_the_known_rungs():
+    # Guards the parser itself: if the extraction silently returned nothing, the parity
+    # test below would pass vacuously and prove the opposite of what it claims.
+    found = _required_objects()
+    assert "uq_loans_app" in found
+    assert "applications.continuation_token" in found
+    assert len(found) >= 4
+
+
+def test_every_readiness_rung_exists_in_the_init_schema():
+    schema = _INIT_SCHEMA.read_text()
+    missing = []
+    for obj in _required_objects():
+        # `table.column` rungs name a column; bare rungs name a constraint or index. Either
+        # way the identifier has to appear in the authoritative DDL, or no database this
+        # repo builds can ever satisfy the rung.
+        identifier = obj.split(".")[-1]
+        if not re.search(rf"\b{re.escape(identifier)}\b", schema):
+            missing.append(obj)
+    assert not missing, (
+        "readiness rungs name objects absent from db/init/001_schema.sql, so a fresh "
+        f"database can never report ready: {missing}"
+    )

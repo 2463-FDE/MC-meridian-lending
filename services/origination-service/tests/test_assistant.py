@@ -117,6 +117,18 @@ def test_happy_path_tool_then_validated_final(tools):
     assert result["decided_by"] == "meridian-risk-stub:v1"
 
 
+def test_response_carries_the_recorded_model_score(tools):
+    """The officer screen must show the SAME decision facts for an assistant run as for a
+    manual Run decision (score + adverse-action reason), so the response carries the
+    record's model score. Without it the primary decision panel is blank after an
+    assistant-recorded outcome while the assistant card shows one (PR #11 review)."""
+    client, _ = _client(TOOL_CALL, FINAL_DENY)
+    result = assistant.run(42, client)
+    assert result["score"] == RECORD_BODY["drivers"]["model_score"]
+    # Record-derived, not narration-derived: the model never supplies the score.
+    assert result["score"] == 518
+
+
 def test_contradicting_narration_is_replaced_by_recorded_facts(tools):
     lying_final = json.dumps(
         {
@@ -404,6 +416,8 @@ def test_explain_legacy_record_answers_honestly(monkeypatch):
     assert result["outcome"] == "deny"
     assert result["principal_reasons"] == []
     assert "never recorded" in result["summary"]
+    # Legacy events never captured drivers: report the score as absent, never invent one.
+    assert result["score"] is None
 
 
 def test_explain_never_decisioned_raises_not_found(monkeypatch):

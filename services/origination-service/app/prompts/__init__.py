@@ -79,3 +79,5 @@ def list_prompts() -> list:
 # Register built-in prompts at import time.
 from . import loan_summary  # noqa: E402,F401  (side effect: registers templates)
 from . import decision_assistant  # noqa: E402,F401  (side effect: registers templates)
+from . import disclosure_assemble  # noqa: E402,F401  (side effect: registers templates)
+from . import disclosure_narrate  # noqa: E402,F401  (side effect: registers templates)

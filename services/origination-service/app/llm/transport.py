@@ -28,6 +28,7 @@ from langsmith import traceable
 from langsmith.run_helpers import get_current_run_tree
 
 from .adapter import Completion, CompletionRequest, ModelAdapter
+from .config import trace_content_enabled
 from .errors import LLMHTTPError, LLMTimeoutError
 
 _BACKOFF_BASE = 2  # seconds: 2**attempt -> 1, 2, 4, ...
@@ -76,17 +77,32 @@ def _trace_transport_inputs(inputs: dict) -> dict:
     -owned secret exists to key an HMAC and an unkeyed hash of a low-entropy id is
     reversible. LangSmith's own run ids provide trace correlation; if request-id
     correlation is ever needed, export a keyed HMAC with a provisioned secret.
+
+    `LLM_TRACE_CONTENT=true` (non-production, see config.trace_content_enabled) adds
+    `system` and `messages` — the prompt exactly as sent, which is what makes a trace
+    debuggable instead of a latency chart. This is the RIGHT layer for it: `req` is the
+    post-`build_request` payload, so identity PII is already redacted. The parent
+    `llm.complete` span sees the pre-redaction variables and therefore never exports its
+    inputs, flag or not.
+
+    The flag does NOT re-enable idempotency_key. That omission is about a caller-supplied
+    identifier making traces linkable to customer records, which is independent of whether
+    content is being exported.
     """
     req = inputs.get("req")
     if req is None:
         return {}
-    return {
+    traced = {
         "model": req.model,
         "max_tokens": req.max_tokens,
         "temperature": req.temperature,
         "timeout": req.timeout,
         "max_retries": inputs.get("max_retries"),
     }
+    if trace_content_enabled():
+        traced["system"] = req.system
+        traced["messages"] = req.messages
+    return traced
 
 
 def _trace_transport_outputs(completion: Completion) -> dict:
@@ -103,8 +119,14 @@ def _trace_transport_outputs(completion: Completion) -> dict:
     `usage_metadata` is the shape LangSmith's cost engine reads; without it the
     span shows latency but no tokens and no cost. Values come from the
     Completion the adapter already fills.
+
+    `LLM_TRACE_CONTENT=true` (non-production) adds `text`. Read the paragraph above
+    before turning it on: this is the RAW provider response, so what lands in LangSmith
+    is whatever the model actually said — including output the client is about to reject.
+    That is precisely why it is useful for debugging a validation failure, and precisely
+    why it must never be the default.
     """
-    return {
+    traced = {
         "stop_reason": completion.stop_reason,
         "usage_metadata": {
             "input_tokens": completion.input_tokens,
@@ -112,6 +134,9 @@ def _trace_transport_outputs(completion: Completion) -> dict:
             "total_tokens": completion.input_tokens + completion.output_tokens,
         },
     }
+    if trace_content_enabled():
+        traced["text"] = completion.text
+    return traced
 
 
 def _backoff_delay(attempt: int, rng: Callable[[], float]) -> float:

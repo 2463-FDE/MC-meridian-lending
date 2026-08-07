@@ -5,6 +5,7 @@ misconfigured so /health can report unhealthy instead of connecting
 unauthenticated or failing auth at first query. Covers the passwordless DSN
 (meridian:@postgres) the secret purge left behind and the shipped placeholder.
 """
+
 import threading
 import time
 
@@ -56,7 +57,9 @@ def test_stale_password_rejected_against_postgres_password(monkeypatch):
     # without a DB round trip.
     monkeypatch.setenv("POSTGRES_PASSWORD", "the_real_pw")
     monkeypatch.setattr(
-        config, "DATABASE_URL", "postgresql://meridian:stale_old_pw@postgres:5432/meridian"
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:stale_old_pw@postgres:5432/meridian",
     )
     assert config.database_url_configured() is False
     assert "DATABASE_URL" in config.missing_required_secrets()
@@ -65,7 +68,9 @@ def test_stale_password_rejected_against_postgres_password(monkeypatch):
 def test_password_matching_postgres_password_is_ok(monkeypatch):
     monkeypatch.setenv("POSTGRES_PASSWORD", "the_real_pw")
     monkeypatch.setattr(
-        config, "DATABASE_URL", "postgresql://meridian:the_real_pw@postgres:5432/meridian"
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:the_real_pw@postgres:5432/meridian",
     )
     assert config.database_url_configured() is True
     assert "DATABASE_URL" not in config.missing_required_secrets()
@@ -242,15 +247,27 @@ def test_missing_internal_service_token_is_flagged(monkeypatch):
     assert "INTERNAL_SERVICE_TOKEN" not in config.missing_required_secrets()
 
 
-# --- uq_offers_app schema readiness (PR review) ----------------------------
-# Idempotent offer writes depend on the uq_offers_app unique index; the live probe reports
-# schema_not_ready if a dirty-volume migration failed to create it, so /health is not green
-# while duplicate regulated disclosures are silently possible.
+# --- unique-index readiness by DEFINITION, not name (PR review) ------------
+# Idempotent offer AND disclosure writes each depend on a UNIQUE index (uq_offers_app,
+# uq_disclosures_offer). Both are created with CREATE UNIQUE INDEX IF NOT EXISTS at two
+# declaration sites, so a same-named NON-UNIQUE or WRONG-COLUMN index makes the migration skip
+# and a name-only pg_indexes lookup report ready over a broken invariant -- concurrent creates
+# then persist duplicate regulated records. The rungs assert indisunique + table + the sole key
+# column; these fakes model that catalog state so a wrong-definition index reads not-ready.
 
 
 class _IndexAwareCursor:
-    def __init__(self, has_index):
-        self.has_index = has_index
+    """Fake cursor answering the readiness probes from a declared index state.
+
+    `index_ready` maps an index NAME to whether a correctly-defined (unique, single expected
+    key column) index exists. The hardened rung is a definition query -- it names the index and
+    joins pg_index/indisunique -- so it is detected by the `indisunique` token and the index
+    name literal; it returns a row only for a ready index. Every other probe (SELECT 1,
+    information_schema, pg_trigger, views) answers present.
+    """
+
+    def __init__(self, index_ready):
+        self.index_ready = index_ready
         self._last = ""
 
     def __enter__(self):
@@ -263,42 +280,63 @@ class _IndexAwareCursor:
         self._last = sql
 
     def fetchone(self):
-        if "pg_indexes" in self._last:
-            return (1,) if self.has_index else None
+        if "indisunique" in self._last:
+            for name, ready in self.index_ready.items():
+                if f"'{name}'" in self._last:
+                    return (1,) if ready else None
+            return None
         return (1,)
 
 
 class _IndexAwareConn:
-    def __init__(self, has_index):
-        self.has_index = has_index
+    def __init__(self, index_ready):
+        self.index_ready = index_ready
         self.closed_flag = False
 
     def cursor(self):
-        return _IndexAwareCursor(self.has_index)
+        return _IndexAwareCursor(self.index_ready)
 
     def close(self):
         self.closed_flag = True
 
 
-def test_probe_reports_missing_uq_offers_app(monkeypatch):
+def _with_indexes(monkeypatch, index_ready):
     monkeypatch.setattr(
         config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
     )
     monkeypatch.setattr(
-        config.psycopg2, "connect", lambda *a, **k: _IndexAwareConn(has_index=False)
+        config.psycopg2, "connect", lambda *a, **k: _IndexAwareConn(index_ready)
     )
+
+
+# uq_offers_app checked first, then uq_disclosures_offer in _SCHEMA_OBJECTS; a "ready" map
+# for the well-defined case marks both good.
+_BOTH_GOOD = {"uq_offers_app": True, "uq_disclosures_offer": True}
+
+
+def test_probe_reports_bad_uq_offers_app(monkeypatch):
+    # A missing OR non-unique/wrong-column same-named index: the name-only check the rung
+    # replaced would report ready for the wrong-definition case; the definition check must not.
+    # (The stub cannot tell absence from a wrong definition; both fold to one label, as the
+    # code does.)
+    _with_indexes(monkeypatch, {**_BOTH_GOOD, "uq_offers_app": False})
     ok, err = config.database_reachable()
     assert ok is False
     assert err == "schema_not_ready:uq_offers_app"
 
 
-def test_probe_ok_when_uq_offers_app_present(monkeypatch):
-    monkeypatch.setattr(
-        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
-    )
-    monkeypatch.setattr(
-        config.psycopg2, "connect", lambda *a, **k: _IndexAwareConn(has_index=True)
-    )
+def test_probe_reports_bad_uq_disclosures_offer_definition(monkeypatch):
+    # The finding: readiness accepted uq_disclosures_offer by name, so a same-named non-unique
+    # or wrong-column index passed and one-disclosure-per-offer was silently gone. With the
+    # definition-asserting rung, a broken index reads not-ready.
+    _with_indexes(monkeypatch, {**_BOTH_GOOD, "uq_disclosures_offer": False})
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:uq_disclosures_offer"
+
+
+def test_probe_ok_when_both_unique_indexes_well_defined(monkeypatch):
+    _with_indexes(monkeypatch, _BOTH_GOOD)
     ok, err = config.database_reachable()
     assert ok is True
     assert err is None
