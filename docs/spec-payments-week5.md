@@ -119,8 +119,19 @@ reuses it across every transport-level retry of that submission; a fresh user-in
 payment mints a new key.
 
 **Fingerprint.** The server stores `sha256` over a canonical serialization of
-`(loan_id, amount_minor, method, card_token)`. This is what distinguishes a genuine replay
+`(loan_id, amount_minor, method, card_token, bank_token)` — the rail-specific instrument is
+part of the fingerprint, not just the card one. This is what distinguishes a genuine replay
 from a client bug that reused a key with different parameters.
+
+The instrument field is rail-selected: a card request carries `card_token` and a `NULL`
+`bank_token`, an ACH request carries `bank_token` and a `NULL` `card_token`. Including only
+`card_token` would leave the fingerprint blind to the ACH instrument (D4b adds `bank_token`,
+D4c tokenizes the account/routing client-side), so two ACH submissions reusing one key against
+**different bank accounts** would hash identically and be answered as a replay or an in-flight
+`409` instead of the `422` a changed payload demands — suppressing a legitimate payment or
+replaying the wrong prior response. Both tokens participate on both rails; the `NULL` for the
+absent rail is a fixed value in the canonical serialization, so the hash still changes when the
+present instrument changes.
 
 **Behaviours.**
 
@@ -202,14 +213,29 @@ ALTER TABLE payments
 
 CREATE UNIQUE INDEX IF NOT EXISTS payments_idempotency_key_uniq
   ON payments (idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS payments_processor_idempotency_key_uniq
+  ON payments (processor_idempotency_key) WHERE processor_idempotency_key IS NOT NULL;
 ```
 
 `processor_idempotency_key` is a **distinct** value from the client's Meridian
 `idempotency_key`, generated once per `payments` row (D1, "forwarded to the processor")
-and sized/namespaced to the processor's contract rather than to Meridian's. It is not made
-unique in the schema — the processor enforces its own uniqueness — but it is stamped at
+and sized/namespaced to the processor's contract rather than to Meridian's. It is stamped at
 insert time so the stuck-row reaper can re-query the processor for a row that crashed before
 `processor_ref` was written, independent of whether the Meridian key has since been retired.
+
+**It carries its own partial unique index, on the same principle as the Meridian key.** The
+processor enforces uniqueness on its side, but the correctness thesis of this design is that
+money invariants live in the schema *because there are multiple writers* — two charge handlers
+and a support engineer with `psql` (D2, opening lines). Delegating this one to the vendor alone
+contradicts that: application drift, a bad generator, or a manual `INSERT` could stamp the same
+`processor_idempotency_key` onto two Meridian rows. The processor would then collapse the second
+charge as a replay while Meridian holds a second row it still applies — recreating the exact
+version-skew money bug (a charge suppressed at the processor but credited at Meridian, or the
+reverse) that binding the key per row exists to prevent. The local index makes the second insert
+fail **before** any processor call, so a collision is a refused write, never a split-brain
+charge. It is nullable (`WHERE processor_idempotency_key IS NOT NULL`) so legacy rows, whose
+value is `NULL`, stay valid — the same shape as the Meridian-key index.
 
 `status` defaults to `'captured'` because that is what every pre-migration row factually is;
 the partial index leaves those legacy `NULL` keys untouched and non-conflicting. `amount_minor`
@@ -625,7 +651,11 @@ hands to the build week. Criteria 16–21 are what this week itself must deliver
 2. Two concurrent requests with the same key produce exactly one row and exactly one
    processor call; the loser receives `409`, never a second charge.
 3. A reused key with a different payload is refused (`422`) with no row and no processor
-   call.
+   call. A changed rail instrument counts as a changed payload: a reused key with a different
+   `card_token` (card) or `bank_token` (ACH) is refused, since the fingerprint covers the
+   rail-specific instrument.
+3a. Two `payments` rows cannot carry the same non-NULL `processor_idempotency_key`; the
+    duplicate insert fails at the schema before any processor call.
 4. A missing or malformed key is refused (`400`) with no row and no processor call.
 5. Applying the same `payment_id` twice moves the balance once and leaves exactly one
    `payment_applications` row. The application credits only the loan and the amount recorded
@@ -685,6 +715,8 @@ units.
 | R1 | `POST` key `K`, `loan 4471`, `25000`; then `POST` again, same key, same body | 1 `payments` row; 1 processor call; second response identical to first plus `Idempotent-Replay: true` |
 | R2 | Two simultaneous `POST`s, key `K`, same body, **separate connections** | 1 row; 1 processor call; one `201`, one `409` with `Retry-After` |
 | R3 | `POST` key `K` amount `25000`; then key `K` amount `50000` | `422`; still 1 row; still 1 processor call; balance moved once |
+| R3b | Card `POST` key `K`, `card_token` `T1`; then key `K`, same loan/amount/method, `card_token` `T2` | `422`; still 1 row; **0** further processor calls. A changed instrument is a changed payload |
+| R3c | ACH `POST` key `K`, `bank_token` `B1`; then key `K`, same loan/amount/method, `bank_token` `B2` | `422`; still 1 row; **0** further processor calls. Red on a fingerprint that omits `bank_token` — the two hash equal and the second is answered as a replay or `409` |
 | R4 | `POST` with no `Idempotency-Key` | `400`; 0 rows; 0 processor calls |
 | R5 | `POST` with `Idempotency-Key: not-a-uuid` | `400`; 0 rows; 0 processor calls |
 | R6 | `POST` key `K`; age its `idempotency_expires_at` past `now()`; `POST` key `K` again | 2 rows; 2 processor calls **carrying two *different* `processor_idempotency_key` values**; treated as distinct payments. The first row survives with `idempotency_key` `NULL` and its `payment_applications` row intact — the key is retired, the payment is not |
@@ -717,6 +749,7 @@ it red.
 | # | Scenario | Expected |
 |---|---|---|
 | R-DDL | Apply `0012_payments_idempotency.sql` to a real Postgres, then run the **exact** claim insert from D2: `INSERT INTO payments (...) VALUES (...) ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id` | Both statements succeed; a first insert of key `K` returns a row, a second insert of `K` returns zero rows (key claimed). Proves the partial-index arbiter is inferable by the documented conflict target — a bare `ON CONFLICT (idempotency_key)` raises `no unique or exclusion constraint matching the ON CONFLICT specification` and fails this vector |
+| R-DDL2 | Same live Postgres: insert two rows carrying the **same non-NULL** `processor_idempotency_key` | Second insert raises `duplicate key value violates unique constraint "payments_processor_idempotency_key_uniq"` and writes no row. Proves a duplicate processor key cannot be persisted locally, so a bad generator or manual SQL fails before any processor call rather than producing two Meridian rows the processor collapses to one charge. Red on a schema that leaves `processor_idempotency_key` non-unique |
 
 R-DDL runs the literal SQL string the implementation ships, against a live Postgres, not a
 stub — the whole class of defect it guards is one Postgres rejects at plan time and no

@@ -66,7 +66,17 @@ rather than larger.
 
 We will require a client-minted `Idempotency-Key` header on `POST /payments`, store it with
 a fingerprint of the request, and enforce uniqueness with a partial unique index on
-`payments`. The write is insert-first — `INSERT ... ON CONFLICT (idempotency_key)
+`payments`. The fingerprint covers the **rail-specific instrument** — `(loan_id,
+amount_minor, method, card_token, bank_token)` — so a reused key against a different bank
+account (ACH) or card returns `422`, not a false replay; a fingerprint over `card_token`
+alone would be blind to the ACH instrument. The `processor_idempotency_key` forwarded to the
+processor carries its **own** partial unique index on `payments` for the same reason the
+Meridian key does: the design's premise is that money invariants live in the schema because
+multiple writers exist, so the "the processor enforces its own uniqueness" delegation is not
+enough — a drifted generator or manual SQL stamping one processor key onto two rows would let
+the processor collapse the second charge while Meridian still applies its second row, the
+version-skew bug this decision exists to prevent. The local index fails that duplicate insert
+before any processor call. The write is insert-first — `INSERT ... ON CONFLICT (idempotency_key)
 WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id` — and **the key is claimed before
 the processor is contacted**, so two concurrent identical requests cannot both reach the
 processor. The conflict target must carry the index predicate: the arbiter is a *partial*
