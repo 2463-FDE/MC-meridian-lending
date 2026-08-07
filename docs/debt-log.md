@@ -201,7 +201,7 @@ logged here as pre-existing debt; not fixed, out of scope for "parts we touched"
 | **Risk** | **High.** Duplicate customer charges; compounded by D2 (no ledger to reconstruct). |
 | **Attribution** | **Pre-existing** (baseline `60d1c37` servicing/payments). Not touched by our features. |
 | **Measured** | **2026-08-02, Week 5, `scripts/repro_double_charge.py`.** Two sequential POSTs of one $100.00 intent: 2 rows, $200.00 captured. Eight concurrent POSTs of the same intent: 8 rows, $800.00 captured, all returning `200`. The client's "customers are just confused" reading does not survive the reproduction. |
-| **Mitigation Path** | Client-minted `Idempotency-Key`, a **partial unique index** on `payments.idempotency_key`, and an insert-first write (`ON CONFLICT DO NOTHING`) that claims the key *before* the processor is contacted. The constraint rather than application code is the enforcement point, because two handlers write this table (see D23). Full design: `docs/spec-payments-week5.md` D1–D2; decided in **ADR 0013**. |
+| **Mitigation Path** | Client-minted `Idempotency-Key`, a **partial unique index** on `payments.idempotency_key`, and an insert-first write (`ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`) that claims the key *before* the processor is contacted. The constraint rather than application code is the enforcement point, because two handlers write this table (see D23). Full design: `docs/spec-payments-week5.md` D1–D2; decided in **ADR 0013**. |
 | **Status** | Open. **Fix specified (ADR 0013, Week 5); not built** — spec-only week. |
 
 ### D20: `audit_logs` is mutable + seeded with a plaintext PAN

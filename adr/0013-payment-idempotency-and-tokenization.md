@@ -66,9 +66,14 @@ rather than larger.
 
 We will require a client-minted `Idempotency-Key` header on `POST /payments`, store it with
 a fingerprint of the request, and enforce uniqueness with a partial unique index on
-`payments`. The write is insert-first — `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING
-RETURNING id` — and **the key is claimed before the processor is contacted**, so two
-concurrent identical requests cannot both reach the processor. A replay returns the original
+`payments`. The write is insert-first — `INSERT ... ON CONFLICT (idempotency_key)
+WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id` — and **the key is claimed before
+the processor is contacted**, so two concurrent identical requests cannot both reach the
+processor. The conflict target must carry the index predicate: the arbiter is a *partial*
+unique index, so a bare `ON CONFLICT (idempotency_key)` matches no arbiter and Postgres raises
+`there is no unique or exclusion constraint matching the ON CONFLICT specification` at runtime,
+failing the insert before it claims the key. This is the single copyable pattern; the R-DDL
+vector (`docs/spec-payments-week5.md`) runs it against real Postgres. A replay returns the original
 status and body with an `Idempotent-Replay: true` header; a reused key with a different
 fingerprint returns `422`; an in-flight duplicate returns `409` with `Retry-After`.
 
