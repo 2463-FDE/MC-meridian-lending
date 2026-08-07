@@ -160,8 +160,26 @@ evidence that would tell it from a new payment. That is what "treated as a new p
 from the persisted row. No response-snapshot column — it would be a second source of truth
 for the same facts.
 
-**The key is forwarded to the processor.** The same value is passed on the processor API
-call, so a duplicate that somehow escapes Meridian is still collapsed one layer down.
+**A distinct key is forwarded to the processor.** The value passed on the processor API call
+is `processor_idempotency_key`, generated once per `payments` row — **not** the client's
+Meridian `Idempotency-Key`. This is deliberate. If Meridian forwarded the client key verbatim,
+the two idempotency windows would be coupled across two vendors we do not co-version: once a
+Meridian key is retired after `PAYMENT_IDEMPOTENCY_TTL_HOURS` (D1), a legitimately *new*
+payment reusing that key would be sent to the processor under the same value, and a processor
+whose own retention outlives Meridian's would collapse the new charge as a replay of the old
+one — Meridian writes a second row and may move the balance again while the processor silently
+suppresses the charge, or vice-versa. Version-skew between the two retention windows becomes a
+money-movement bug.
+
+Binding the processor key to the row instead breaks that coupling: a post-expiry "new payment"
+is a new row (R6) with a new `processor_idempotency_key`, so the processor treats it as
+distinct exactly as Meridian does. The duplicate-escape protection the forwarded key was there
+for is preserved without the coupling — the processor key is *stable per row*, so a Meridian
+replay (which never reaches step 3, it short-circuits at replay) and the stuck-row reaper both
+address the processor with the same value for the same charge, and the processor still collapses
+a true retry of *that* charge. The one property we drop — that a client reusing an expired
+Meridian key is de-duplicated at the processor — is the property D1 explicitly gives up:
+past the window a late retry of the same intent is a new payment by definition.
 
 ### D2. Database uniqueness and the transaction boundary
 
@@ -173,17 +191,25 @@ table today, and a support engineer with `psql` is a third.
 
 ```sql
 ALTER TABLE payments
-  ADD COLUMN IF NOT EXISTS idempotency_key        TEXT,
-  ADD COLUMN IF NOT EXISTS idempotency_expires_at TIMESTAMPTZ,
-  ADD COLUMN IF NOT EXISTS request_fingerprint    TEXT,
-  ADD COLUMN IF NOT EXISTS status                 TEXT NOT NULL DEFAULT 'captured',
-  ADD COLUMN IF NOT EXISTS processor_ref          TEXT,
-  ADD COLUMN IF NOT EXISTS amount_minor           BIGINT,
-  ADD COLUMN IF NOT EXISTS updated_at             TIMESTAMPTZ;
+  ADD COLUMN IF NOT EXISTS idempotency_key         TEXT,
+  ADD COLUMN IF NOT EXISTS idempotency_expires_at  TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS request_fingerprint     TEXT,
+  ADD COLUMN IF NOT EXISTS status                  TEXT NOT NULL DEFAULT 'captured',
+  ADD COLUMN IF NOT EXISTS processor_idempotency_key TEXT,
+  ADD COLUMN IF NOT EXISTS processor_ref           TEXT,
+  ADD COLUMN IF NOT EXISTS amount_minor            BIGINT,
+  ADD COLUMN IF NOT EXISTS updated_at              TIMESTAMPTZ;
 
 CREATE UNIQUE INDEX IF NOT EXISTS payments_idempotency_key_uniq
   ON payments (idempotency_key) WHERE idempotency_key IS NOT NULL;
 ```
+
+`processor_idempotency_key` is a **distinct** value from the client's Meridian
+`idempotency_key`, generated once per `payments` row (D1, "forwarded to the processor")
+and sized/namespaced to the processor's contract rather than to Meridian's. It is not made
+unique in the schema — the processor enforces its own uniqueness — but it is stamped at
+insert time so the stuck-row reaper can re-query the processor for a row that crashed before
+`processor_ref` was written, independent of whether the Meridian key has since been retired.
 
 `status` defaults to `'captured'` because that is what every pre-migration row factually is;
 the partial index leaves those legacy `NULL` keys untouched and non-conflicting. `amount_minor`
@@ -196,13 +222,23 @@ window has to be a column the retirement transition below reads. Without that co
 is permanent, the second request in R6 conflicts forever, and the contract's last row is
 unimplementable — the defect this revision closes.
 
+**The conflict target must carry the index predicate.** The arbiter is a *partial* unique
+index (`WHERE idempotency_key IS NOT NULL`), so a bare `ON CONFLICT (idempotency_key)` matches
+no arbiter and Postgres raises `there is no unique or exclusion constraint matching the ON
+CONFLICT specification` at runtime — the insert fails before it can claim the key, disabling
+the whole double-charge control. Every insert against this index must therefore spell the
+predicate: `ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`. This
+is not cosmetic: it is the difference between the control working and the control raising on
+first use. The migration smoke test in the test-vector table (`R-DDL`) executes this exact
+insert against a real Postgres so the mismatch cannot ship.
+
 **Claim the key before contacting the processor.** The write is insert-first, never
 read-check-then-insert:
 
 ```
 1. INSERT ... (idempotency_key, idempotency_expires_at, request_fingerprint,
-               status='processing')
-   ON CONFLICT (idempotency_key) DO NOTHING
+               processor_idempotency_key, status='processing')
+   ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
    RETURNING id
 2. zero rows  -> a row already holds this key. Read it.
    2a. its idempotency_expires_at <= now() AND its status is terminal (D5)
@@ -215,7 +251,8 @@ read-check-then-insert:
        claimed the freed key first -> fall through to 2b against the new row.
    2b. otherwise -> a live key, or an expired one on an intent still in flight.
        Branch per D1's table.
-3. one row    -> we own this intent. Call the processor (passing the key).
+3. one row    -> we own this intent. Call the processor, passing this row's
+                 processor_idempotency_key (NOT the client's Meridian key).
 4. UPDATE the row to its terminal status + processor_ref.
 5. Apply to servicing (D3).
 ```
@@ -247,8 +284,10 @@ for replay, not how long the system is willing to wait for the payment.
 
 **Stuck-row resolution.** A crash between steps 3 and 4 leaves `processing`. A reaper
 resolves rows older than `PAYMENT_PROCESSING_TIMEOUT_MINUTES` by querying the processor for
-that idempotency key — the third use of the same value. Rows terminal-but-unapplied
-(see D3) are retried by the same job.
+that row's `processor_idempotency_key` — the same value step 3 charged under, stamped at
+insert so it survives even a crash before `processor_ref` is written and independent of any
+later Meridian-key retirement. Rows terminal-but-unapplied (see D3) are retried by the same
+job.
 
 The same job retires expired keys in bulk, under the same terminal-only condition as step 2a
 and for the same reason — it must not strip the key off a row it is itself about to resolve
@@ -648,11 +687,12 @@ units.
 | R3 | `POST` key `K` amount `25000`; then key `K` amount `50000` | `422`; still 1 row; still 1 processor call; balance moved once |
 | R4 | `POST` with no `Idempotency-Key` | `400`; 0 rows; 0 processor calls |
 | R5 | `POST` with `Idempotency-Key: not-a-uuid` | `400`; 0 rows; 0 processor calls |
-| R6 | `POST` key `K`; age its `idempotency_expires_at` past `now()`; `POST` key `K` again | 2 rows; 2 processor calls; treated as distinct payments. The first row survives with `idempotency_key` `NULL` and its `payment_applications` row intact — the key is retired, the payment is not |
+| R6 | `POST` key `K`; age its `idempotency_expires_at` past `now()`; `POST` key `K` again | 2 rows; 2 processor calls **carrying two *different* `processor_idempotency_key` values**; treated as distinct payments. The first row survives with `idempotency_key` `NULL` and its `payment_applications` row intact — the key is retired, the payment is not |
+| R6d | `POST` key `K`; retire its Meridian key (R6); `POST` key `K` again, against a **processor stub that still remembers** the first row's `processor_idempotency_key` and would collapse a reuse of it | 2 processor charges, because the second row's `processor_idempotency_key` differs from the first's. The stub's memory of the old value is never hit. Proves Meridian-key retirement does not couple to processor retention — the version-skew money bug cannot occur. Red on a spec that forwards the client key verbatim |
 | R6b | Key `K` expired; **N** simultaneous `POST`s with `K` | 1 new row; 1 processor call; the rest get D1's concurrent answer. Retirement must not open a window where two requests both own the key |
 | R6c | ACH key `K` still `submitted`, `idempotency_expires_at` aged past `now()`; `POST` key `K` again | `409` + `Retry-After`; **no** new row; **no** processor call; `K` still on the original row. An unfinished intent does not release its key just because the window passed |
 | R7 | `POST` key `K` while an earlier `K` is still `processing` | `409` + `Retry-After`; no second processor call |
-| R8 | Row left `processing` past the timeout; reaper runs | Resolved from the processor by key; terminal status; exactly one application row |
+| R8 | Row left `processing` past the timeout; reaper runs | Resolved from the processor by the row's `processor_idempotency_key`; terminal status; exactly one application row |
 | R9 | Reaper runs over an expired key on a terminal row and an expired key on a `submitted` row | Terminal row's key retired to `NULL`, its status and application row unchanged, a subsequent `POST` with that key inserts; the `submitted` row **keeps** its key, so the stuck-row path can still resolve it by that value |
 
 R2 must run against real concurrency — two connections issued in parallel. A sequential
@@ -664,6 +704,23 @@ each side. R6b separates "expired keys become reusable" from "the unique index i
 advisory", and must run against real concurrency for the same reason R2 does. R6c is the
 opposite failure — retirement reaching an intent that has not finished, which would both
 re-open the duplicate charge and strip the value the reaper resolves the row by.
+
+R6d closes the processor/version-skew vector: it drives the second insert against a processor
+stub whose idempotency memory outlives Meridian's window and asserts the second charge is *not*
+suppressed, which holds only because the value forwarded to the processor is the row-bound
+`processor_idempotency_key`, not the reused Meridian key. Run it with the stub configured to
+collapse on the *first row's* processor key so a regression that forwards the client key turns
+it red.
+
+### Migration / DDL
+
+| # | Scenario | Expected |
+|---|---|---|
+| R-DDL | Apply `0012_payments_idempotency.sql` to a real Postgres, then run the **exact** claim insert from D2: `INSERT INTO payments (...) VALUES (...) ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id` | Both statements succeed; a first insert of key `K` returns a row, a second insert of `K` returns zero rows (key claimed). Proves the partial-index arbiter is inferable by the documented conflict target — a bare `ON CONFLICT (idempotency_key)` raises `no unique or exclusion constraint matching the ON CONFLICT specification` and fails this vector |
+
+R-DDL runs the literal SQL string the implementation ships, against a live Postgres, not a
+stub — the whole class of defect it guards is one Postgres rejects at plan time and no
+`db.query`-mocking service test can see.
 
 ### Cross-service apply
 
