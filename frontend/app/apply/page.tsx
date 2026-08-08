@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import Stepper, { type Step } from "../../components/Stepper";
 import StatusChip from "../../components/StatusChip";
 import { apiGet, apiPost } from "../../lib/api";
-import { usd, pct } from "../../lib/format";
+import { usd, pct, maskSsn } from "../../lib/format";
 
 // Resume state (ADR 0010 Phase B, PR #7 review). The continuation token is NO LONGER held
 // by the browser: the gateway keeps it server-side and hands back an HttpOnly resume cookie
@@ -176,6 +176,12 @@ export default function ApplyPage() {
     purpose: "debt_consolidation",
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
+  // The SSN field renders as a password input so the number is not readable over the
+  // applicant's shoulder or in a screen share. This is a display control only -- the value
+  // still travels to the API in full; server-side handling (transport, storage, the PII
+  // redactor) is what protects it there. Reveal is opt-in and resets on every step change,
+  // so leaving step 1 and coming back never returns revealed.
+  const [showSsn, setShowSsn] = useState(false);
 
   // submission / decision / offer state
   const [busy, setBusy] = useState(false);
@@ -200,6 +206,13 @@ export default function ApplyPage() {
     null
   );
   const [checkingDisclosure, setCheckingDisclosure] = useState(false);
+
+  // Re-hide the SSN whenever the wizard moves. Every setStep call site funnels through this
+  // (next, back, and the two resume/submit jumps to step 5), so a revealed field cannot be
+  // left on screen by navigating away and back.
+  useEffect(() => {
+    setShowSsn(false);
+  }, [step]);
 
   // Resume a submitted application after a refresh / tab close: the continuation token was
   // persisted at submit, so rehydrate it and re-fetch the application (the token authorizes
@@ -495,13 +508,33 @@ export default function ApplyPage() {
                 />
               </Field>
               <Field label="Social Security Number" error={errors.ssn}>
-                <input
-                  value={form.ssn}
-                  onChange={(e) => set("ssn", e.target.value)}
-                  placeholder="###-##-####"
-                  inputMode="numeric"
-                  maxLength={11}
-                />
+                <div className="input-with-action">
+                  <input
+                    type={showSsn ? "text" : "password"}
+                    value={form.ssn}
+                    onChange={(e) => set("ssn", e.target.value)}
+                    placeholder="###-##-####"
+                    inputMode="numeric"
+                    maxLength={11}
+                    autoComplete="off"
+                    // Keep password managers and the browser's own value cache off a field
+                    // that is never a credential and is not ours to store.
+                    data-1p-ignore
+                  />
+                  <button
+                    type="button"
+                    className="btn-ghost btn-sm"
+                    aria-pressed={showSsn}
+                    aria-label={
+                      showSsn
+                        ? "Hide Social Security Number"
+                        : "Show Social Security Number"
+                    }
+                    onClick={() => setShowSsn((v) => !v)}
+                  >
+                    {showSsn ? "Hide" : "Show"}
+                  </button>
+                </div>
               </Field>
             </div>
             <div className="field-row">
@@ -658,7 +691,7 @@ export default function ApplyPage() {
             <SummaryGroup title="Personal">
               <SummaryRow label="Full name" value={form.name} />
               <SummaryRow label="Date of birth" value={form.dob} />
-              <SummaryRow label="SSN" value={form.ssn} />
+              <SummaryRow label="SSN" value={maskSsn(form.ssn)} />
               <SummaryRow label="Email" value={form.email} />
               <SummaryRow label="Phone" value={form.phone} />
               <SummaryRow label="Address" value={form.address} />
