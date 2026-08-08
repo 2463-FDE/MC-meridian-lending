@@ -41,6 +41,12 @@ Standing rules distilled from external review (Codex) live in the `house-rules` 
 - After any review round, `address-pr` promotes each recurring valid finding into that skill
   file (one line, imperative, `[YYYY-MM-DD]` tag), not into this file.
 - Edit that file surgically, never wholesale — parallel sessions append to it concurrently.
+- A tracked `PreToolUse` hook in `.claude/settings.json` fires once per session on the first
+  `Write`/`Edit` under those directories and points at the skill, so a fresh clone inherits the
+  reminder. It never blocks. The sibling settings.local.json stays untracked and holds personal
+  permission grants — do not move the hook there, or a clone gets the skill with nothing pointing
+  at it. (That path is deliberately un-backticked: doc-path-lint requires backticked paths to
+  resolve in the tree, and this one never does.)
 
 ### Branch and PR naming
 
