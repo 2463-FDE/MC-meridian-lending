@@ -74,6 +74,33 @@ title-cased branch name when it has several — which is why #1, #2, #3, #5, #6,
 #14 are all called things like `Feature/payments week5`. The default is never right on a
 multi-commit PR.
 
+## W7–W10 working agreement
+
+### Stop amending. Merge or split.
+
+PR #12 was 7,009 additions across 46 files when I wrote "stop amending #12, merge it." Four days
+later it is **11,575 additions across 72 files** — it grew 65% while the instruction was to stop.
+
+- A PR that is still growing is not a PR, it is a branch with a URL.
+- When I catch myself adding to an open PR: either it merges today, or the addition is a new PR.
+- My own Tier-2 metric — unmerged hand-written lines at freeze under 1,500 — is failing on this
+  one PR alone. That metric was right. Use it.
+
+### WIP
+
+Maximum two open PRs. A third requires closing one.
+
+### Size
+
+Target median merged PR at or under 400 changed lines. Mine is ~1,077. #7 was 11,342 across 97
+files. 72 files is past every published reviewability threshold by an order of magnitude —
+nobody can review it, including me.
+
+### Keep doing
+
+Every PR description I write is substantive, and description length explains more review-latency
+variance than PR size does. That part is right. Do not stop.
+
 ## Commands
 
 ```bash
