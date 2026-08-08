@@ -60,15 +60,25 @@ def test_cleanup_runs_when_a_charge_fails_mid_run(monkeypatch):
     assert exc.value.code != 0
 
 
-def test_default_cleanup_deletes_only_rows_this_run_created(monkeypatch):
-    """A concurrent, unrelated payment for the same loan must survive our cleanup.
+def _wire(monkeypatch, *, payment_ids_fn, charge_fn=None, argv):
+    """Common stubs: no network, no database. Each test supplies the census/charge behaviour."""
+    monkeypatch.setattr(repro, "api", lambda *a, **k: (200, {"ok": True}))
+    monkeypatch.setattr(repro, "login", lambda user, password: "tok")
+    monkeypatch.setattr(repro, "balance_of", lambda loan_id: 24800.00)
+    monkeypatch.setattr(repro, "payment_ids", payment_ids_fn)
+    if charge_fn is not None:
+        monkeypatch.setattr(repro, "charge", charge_fn)
+    monkeypatch.setattr(sys, "argv", argv)
 
-    The bug: cleanup deleted `payment_ids(loan) - ids_before_all` — every id that appeared
-    during the run, not just the rows this run's own POSTs created. A legitimate payment
-    landing on the same seeded loan mid-run was swept into the delete set and the balance was
-    reset over its movement. The fix tracks only the `payment_id`s the charge responses
-    returned, and skips the balance restore entirely once a foreign mutation is detected
-    (there is no ledger to reconcile against — D2).
+
+def test_default_cleanup_refuses_entirely_when_a_foreign_row_is_detected(monkeypatch):
+    """A concurrent, unrelated payment on the same loan must make cleanup refuse ENTIRELY.
+
+    The bug (this fix): the default finally deleted our rows but skipped only the balance
+    restore when a foreign write was seen. That left this run's debit in the shared balance
+    with the rows behind it gone — a balance reduced by rows that no longer exist. The fix
+    refuses cleanup entirely on any foreign row: neither the rows nor the balance is touched,
+    so the two stay consistent for a human to reconcile.
     """
     created_by_charge: set[int] = set()
     state = {"calls": 0}
@@ -90,28 +100,152 @@ def test_default_cleanup_deletes_only_rows_this_run_created(monkeypatch):
             created_by_charge.add(pid)
         return 201, {"payment_id": pid, "status": "captured"}
 
-    deleted: dict = {}
-
-    def fake_cleanup(loan_id, del_ids, restore_to, restore_balance=True):
-        deleted["ids"] = set(del_ids)
-        deleted["restore_balance"] = restore_balance
-
-    monkeypatch.setattr(repro, "api", lambda *a, **k: (200, {"ok": True}))
-    monkeypatch.setattr(repro, "login", lambda user, password: "tok")
-    monkeypatch.setattr(repro, "balance_of", lambda loan_id: 24800.00)
-    monkeypatch.setattr(repro, "payment_ids", fake_payment_ids)
-    monkeypatch.setattr(repro, "charge", fake_charge)
-    monkeypatch.setattr(repro, "cleanup", fake_cleanup)
-    monkeypatch.setattr(sys, "argv", ["repro_double_charge.py", "--parallel", "3"])
+    calls = {"cleanup": False, "refused": None}
+    monkeypatch.setattr(
+        repro, "cleanup", lambda *a, **k: calls.__setitem__("cleanup", True)
+    )
+    monkeypatch.setattr(
+        repro,
+        "refuse_cleanup",
+        lambda loan_id, our_ids, foreign, opening: calls.__setitem__(
+            "refused", (set(our_ids), set(foreign))
+        ),
+    )
+    _wire(
+        monkeypatch,
+        payment_ids_fn=fake_payment_ids,
+        charge_fn=fake_charge,
+        argv=["repro_double_charge.py", "--parallel", "3"],
+    )
 
     repro.main()
 
-    assert 99 not in deleted["ids"], (
-        "cleanup deleted id 99 — a concurrent unrelated payment this run never created. "
-        "The delete set must be the run's own returned payment_ids, not a census diff."
+    assert calls["cleanup"] is False, (
+        "cleanup ran despite a foreign row — deleting our rows while a foreign write is "
+        "present orphans this run's debit in the shared balance."
     )
-    assert deleted["ids"] == {10, 11, 12, 13, 14}
-    assert deleted["restore_balance"] is False, (
-        "a detected foreign mutation makes the balance restore unsafe (no ledger to "
-        "reconcile against) — it must be skipped, not stomp the concurrent movement."
+    assert calls["refused"] is not None, "a foreign row must trigger refuse_cleanup"
+    our_ids, foreign = calls["refused"]
+    assert foreign == {99} and our_ids == {10, 11, 12, 13, 14}
+
+
+def test_default_cleanup_runs_when_no_foreign_row(monkeypatch):
+    """The happy path: no concurrent write, so cleanup deletes exactly our rows and restores."""
+    created_by_charge: set[int] = set()
+    lock = threading.Lock()
+    ids = iter([10, 11, 12, 13, 14])
+
+    def fake_payment_ids(loan_id):
+        with lock:
+            return {1, 2, 3} | set(created_by_charge)
+
+    def fake_charge(token, loan_id, amount):
+        with lock:
+            pid = next(ids)
+            created_by_charge.add(pid)
+        return 201, {"payment_id": pid, "status": "captured"}
+
+    deleted: dict = {}
+    monkeypatch.setattr(
+        repro,
+        "cleanup",
+        lambda loan_id, del_ids, restore_to: deleted.update(ids=set(del_ids)),
     )
+    _wire(
+        monkeypatch,
+        payment_ids_fn=fake_payment_ids,
+        charge_fn=fake_charge,
+        argv=["repro_double_charge.py", "--parallel", "3"],
+    )
+
+    repro.main()
+
+    assert deleted["ids"] == {10, 11, 12, 13, 14}, (
+        "cleanup must delete exactly the run's own returned payment_ids."
+    )
+
+
+def test_cleanup_only_refuses_when_a_payment_landed_after_the_keep_run(monkeypatch):
+    """--cleanup-only must not restore a stale absolute balance over a later legitimate payment.
+
+    The bug (this fix): --cleanup-only deleted the saved ids and reset the balance to the saved
+    opening unconditionally. A payment that landed on the same loan between the --keep run and
+    this cleanup was erased by that absolute restore. The fix records the --keep run's
+    high-water id; any row past it means the loan moved since, and cleanup refuses.
+    """
+    # Loan now holds a row (500) with an id past the --keep run's high-water of 119 — a
+    # legitimate payment that landed after that run.
+    monkeypatch.setattr(repro, "payment_ids", lambda loan_id: {118, 119, 500})
+
+    calls = {"cleanup": False, "refused": None}
+    monkeypatch.setattr(
+        repro, "cleanup", lambda *a, **k: calls.__setitem__("cleanup", True)
+    )
+    monkeypatch.setattr(
+        repro,
+        "refuse_cleanup",
+        lambda loan_id, our_ids, foreign, opening: calls.__setitem__(
+            "refused", set(foreign)
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "repro_double_charge.py",
+            "--cleanup-only",
+            "--loan-id",
+            "4471",
+            "--ids",
+            "118,119",
+            "--restore-balance",
+            "24800.00",
+            "--high-water",
+            "119",
+        ],
+    )
+
+    rc = repro.main()
+
+    assert calls["cleanup"] is False, (
+        "cleanup ran and restored a stale absolute balance over a payment (id 500) that "
+        "landed after the --keep run."
+    )
+    assert calls["refused"] == {500}
+    assert rc == 1
+
+
+def test_cleanup_only_runs_when_the_loan_has_not_moved(monkeypatch):
+    """--cleanup-only happy path: no row past the high-water, so it deletes and restores."""
+    monkeypatch.setattr(repro, "payment_ids", lambda loan_id: {118, 119})
+
+    deleted: dict = {}
+    monkeypatch.setattr(
+        repro,
+        "cleanup",
+        lambda loan_id, del_ids, restore_to: deleted.update(
+            ids=set(del_ids), restore_to=restore_to
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "repro_double_charge.py",
+            "--cleanup-only",
+            "--loan-id",
+            "4471",
+            "--ids",
+            "118,119",
+            "--restore-balance",
+            "24800.00",
+            "--high-water",
+            "119",
+        ],
+    )
+
+    rc = repro.main()
+
+    assert deleted["ids"] == {118, 119}
+    assert deleted["restore_to"] == 24800.00
+    assert rc == 0

@@ -20,7 +20,7 @@ Usage:
     python3 scripts/repro_double_charge.py                     # run, then clean up
     python3 scripts/repro_double_charge.py --keep              # leave the rows for inspection
     python3 scripts/repro_double_charge.py --parallel 5
-    python3 scripts/repro_double_charge.py --cleanup-only --ids 118,119 --restore-balance 24800.00
+    python3 scripts/repro_double_charge.py --cleanup-only --ids 118,119 --restore-balance 24800.00 --high-water 119
 
 Requires the stack up (`make up`) and PROCESSOR_API_KEY set, or payment-service fails closed
 at /health and refuses every charge. Note that no processor is actually contacted: the only
@@ -29,12 +29,14 @@ outbound call in `charge()` is the servicing apply hop (payment-service/app/paym
 Writes real rows to the local dev database and moves a real balance. Cleanup is on by default
 and deletes ONLY the payment ids this run's own POST responses returned — never a database
 census diff, so a concurrent unrelated payment for the same loan is never swept into the
-delete set. If such a concurrent write is detected, the balance restore is skipped (there is
-no ledger to net our debits out of the shared column, D2) and the state is left for a human.
-`--cleanup-only` cleans up after a `--keep` run and needs the explicit `--ids` list and the
-opening balance that run printed. It refuses without them, because deleting the rows without
-restoring the balance leaves the loan debited with no payment behind it, and a range instead
-of an explicit list would take a concurrent actor's rows with it.
+delete set. If such a concurrent write IS detected, cleanup is refused ENTIRELY — neither the
+rows nor the balance are touched — because deleting our rows would orphan their debit in the
+shared balance and restoring the opening would stomp the foreign movement, and there is no
+ledger (D2) to reconcile either automatically; the full state is printed for a human.
+`--cleanup-only` cleans up after a `--keep` run and needs the explicit `--ids` list, the
+opening balance, AND the high-water id that run printed. It refuses without them, and refuses
+again at run time if any payment row for the loan has an id past the high-water — a payment
+that landed after the `--keep` run, which restoring a stale absolute balance would erase.
 
 This script is the pre-fix RED reproduction only. It posts the legacy `pan`/`cvv` body with
 no `Idempotency-Key`; once the Week 5 fix lands, `POST /payments` rejects that body with `400`
@@ -198,26 +200,35 @@ def report(
     return money_ok
 
 
-def cleanup(
-    loan_id: int, ids: set[int], restore_to: float, restore_balance: bool = True
-) -> None:
+def cleanup(loan_id: int, ids: set[int], restore_to: float) -> None:
+    # Only ever called once the caller has proven no foreign write happened to this loan:
+    # deleting our rows and restoring an absolute balance are safe together ONLY then. A
+    # foreign write present means deleting rows would leave their debit orphaned in the shared
+    # balance AND restoring the opening would stomp the foreign movement — so both callers
+    # refuse cleanup entirely in that case rather than pass a "restore or not" flag here.
     if ids:
         psql(
             f"DELETE FROM payments WHERE id IN ({','.join(str(i) for i in sorted(ids))});"
         )
-    if restore_balance:
-        psql(f"UPDATE balances SET balance = {restore_to} WHERE loan_id = {loan_id};")
-        print(f"\ncleanup: removed {len(ids)} row(s), balance restored to {restore_to}")
-    else:
-        # A concurrent write to this loan moved the balance during the run. There is no ledger
-        # (D2) to net our own debits out of the shared mutable column, so restoring the opening
-        # value would stomp that movement. Delete only our rows and leave the balance for a
-        # human — better a visible debit than silently reverting a stranger's payment.
-        print(
-            f"\ncleanup: removed {len(ids)} row(s); balance NOT restored — a concurrent write "
-            f"to loan {loan_id} was detected during the run. Reconcile manually (opening was "
-            f"{restore_to})."
-        )
+    psql(f"UPDATE balances SET balance = {restore_to} WHERE loan_id = {loan_id};")
+    print(f"\ncleanup: removed {len(ids)} row(s), balance restored to {restore_to}")
+
+
+def refuse_cleanup(
+    loan_id: int, our_ids: set[int], foreign: set[int], opening: float
+) -> None:
+    """A concurrent write to this loan was detected. Touch nothing — leave our rows AND the
+    balance exactly as they are — and hand the operator the full state. Deleting our rows now
+    would orphan their debit in the shared balance; restoring the opening would stomp the
+    foreign movement. There is no ledger (D2) to reconcile either automatically."""
+    print(
+        f"\ncleanup REFUSED: a concurrent write to loan {loan_id} was detected "
+        f"(rows {sorted(foreign)} are not ours).\n"
+        f"  Left untouched: this run's {len(our_ids)} row(s) {sorted(our_ids)} and the current "
+        f"balance.\n"
+        f"  Reconcile by hand: the opening balance before this run was {opening}; this run's "
+        f"rows are listed above and the foreign row(s) must be preserved."
+    )
 
 
 def main() -> int:
@@ -252,6 +263,14 @@ def main() -> int:
         default=None,
         help="with --cleanup-only: the opening balance the --keep run reported (required)",
     )
+    ap.add_argument(
+        "--high-water",
+        type=int,
+        default=None,
+        help="with --cleanup-only: the max payment id at the end of the --keep run (required). "
+        "Any row with a larger id landed after that run and means the loan moved since — "
+        "cleanup then refuses rather than restore a stale absolute balance over it.",
+    )
     args = ap.parse_args()
 
     if args.cleanup_only:
@@ -265,12 +284,12 @@ def main() -> int:
         # with id greater than a high-water mark, which took any legitimate payment another
         # actor inserted for the same loan after that mark. Delete exactly the ids the --keep
         # run created and printed, nothing inferred.
-        if args.ids is None or args.restore_balance is None:
+        if args.ids is None or args.restore_balance is None or args.high_water is None:
             sys.exit(
-                "--cleanup-only needs --ids and --restore-balance. Deleting the rows without "
-                "restoring the balance leaves the loan debited with no payment behind it, and "
-                "a range instead of an explicit id list would take a concurrent actor's rows "
-                "with it. The --keep run printed both."
+                "--cleanup-only needs --ids, --restore-balance and --high-water. Deleting the "
+                "rows without restoring the balance leaves the loan debited with no payment "
+                "behind it; restoring a stale absolute balance over a payment that landed since "
+                "the --keep run would erase that payment. The --keep run printed all three."
             )
         try:
             doomed = {int(x) for x in args.ids.split(",") if x.strip()}
@@ -278,8 +297,16 @@ def main() -> int:
             sys.exit(
                 f"--ids must be a comma-separated list of integers, got {args.ids!r}"
             )
-        # Delete only ids this run created; a stray concurrent row is never in the list, so the
-        # balance restore is safe.
+        # Restoring an ABSOLUTE opening balance is safe only if the loan has not moved since the
+        # --keep run. Serial ids are monotonic, so any row with id > the recorded high-water
+        # landed after that run and is a legitimate movement this cleanup must not stomp. Our
+        # own --ids are all <= high-water (they were created during the --keep run), so this
+        # never flags them. On any such movement, refuse entirely: deleting our rows would
+        # orphan their debit and the absolute restore would erase the newer payment.
+        moved = {i for i in payment_ids(args.loan_id) if i > args.high_water}
+        if moved:
+            refuse_cleanup(args.loan_id, doomed, moved, args.restore_balance)
+            return 1
         cleanup(args.loan_id, doomed, args.restore_balance)
         return 0
 
@@ -373,14 +400,20 @@ def main() -> int:
             print("=" * 72)
     finally:
         # Rows that appeared during the run but were NOT created by our own POSTs: a concurrent
-        # actor writing to the same loan. We never delete these, and their presence means the
-        # shared balance moved for a reason we cannot net out (no ledger, D2), so the automatic
-        # restore is unsafe and is skipped.
-        foreign = (payment_ids(args.loan_id) - ids_before_all) - created_ids
-        if args.keep:
-            # Print an EXPLICIT id list, not a high-water mark: --cleanup-only deletes exactly
-            # these ids, so a concurrent row inserted after this run is never taken with them.
+        # actor writing to the same loan. Their presence makes BOTH halves of cleanup unsafe --
+        # deleting our rows would orphan their debit in the shared balance, and restoring the
+        # opening would stomp the foreign movement (no ledger to net either, D2) -- so we refuse
+        # cleanup entirely and leave our rows AND the balance for a human.
+        current_ids = payment_ids(args.loan_id)
+        foreign = (current_ids - ids_before_all) - created_ids
+        if foreign and not args.keep:
+            refuse_cleanup(args.loan_id, created_ids, foreign, opening_all)
+        elif args.keep:
+            # Print an EXPLICIT id list and the high-water mark: --cleanup-only deletes exactly
+            # these ids and refuses if any row landed past the high-water, so neither a
+            # concurrent row nor a later legitimate payment is ever taken or stomped.
             id_list = ",".join(str(i) for i in sorted(created_ids))
+            high_water = max(current_ids | created_ids, default=0)
             print(
                 f"\n--keep: left {len(created_ids)} row(s) {sorted(created_ids)}; "
                 f"opening balance was {opening_all}"
@@ -393,10 +426,10 @@ def main() -> int:
             print(
                 f"        clean up with: python3 scripts/repro_double_charge.py "
                 f"--cleanup-only --loan-id {args.loan_id} --ids {id_list or '<none>'} "
-                f"--restore-balance {opening_all}"
+                f"--restore-balance {opening_all} --high-water {high_water}"
             )
         else:
-            cleanup(args.loan_id, created_ids, opening_all, restore_balance=not foreign)
+            cleanup(args.loan_id, created_ids, opening_all)
 
     if charge_failure is not None:
         sys.exit(charge_failure)
