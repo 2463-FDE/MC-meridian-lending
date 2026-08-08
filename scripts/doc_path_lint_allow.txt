@@ -10,9 +10,3 @@
 #
 # An entry whose path STARTS resolving fails the run: delete the line when the
 # branch merges. That is the only thing keeping this list from rotting.
-
-# Week 5 payments package — spec-only, lives on feature/payments-week5 (PR #14).
-# Delete these three when #14 merges.
-docs/scoping-payments-week5.md
-docs/spec-payments-week5.md
-scripts/repro_double_charge.py
