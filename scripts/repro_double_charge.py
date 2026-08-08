@@ -406,7 +406,12 @@ def main() -> int:
         # cleanup entirely and leave our rows AND the balance for a human.
         current_ids = payment_ids(args.loan_id)
         foreign = (current_ids - ids_before_all) - created_ids
-        if foreign and not args.keep:
+        if foreign:
+            # A high-water mark computed now would have to be >= the foreign row's id just to
+            # let THIS run pass its own check, which means it would also let a later
+            # --cleanup-only silently accept that same foreign row instead of refusing it. No
+            # --cleanup-only command is safe to print here — refuse the same way the
+            # non-keep path does, whether or not --keep was asked for.
             refuse_cleanup(args.loan_id, created_ids, foreign, opening_all)
         elif args.keep:
             # Print an EXPLICIT id list and the high-water mark: --cleanup-only deletes exactly
@@ -418,11 +423,6 @@ def main() -> int:
                 f"\n--keep: left {len(created_ids)} row(s) {sorted(created_ids)}; "
                 f"opening balance was {opening_all}"
             )
-            if foreign:
-                print(
-                    f"        note: concurrent rows {sorted(foreign)} were also seen — "
-                    f"left untouched, not ours to clean up."
-                )
             print(
                 f"        clean up with: python3 scripts/repro_double_charge.py "
                 f"--cleanup-only --loan-id {args.loan_id} --ids {id_list or '<none>'} "

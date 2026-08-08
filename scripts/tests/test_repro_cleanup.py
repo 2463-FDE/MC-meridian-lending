@@ -165,6 +165,76 @@ def test_default_cleanup_runs_when_no_foreign_row(monkeypatch):
     )
 
 
+def test_keep_refuses_and_prints_no_cleanup_command_when_foreign_row_present(
+    monkeypatch, capsys
+):
+    """--keep must not hand out a runnable --cleanup-only command when a foreign row is present.
+
+    The bug (this fix): under --keep, a foreign row only triggered a printed note — the script
+    still printed a runnable --cleanup-only command whose high-water was computed from
+    current_ids, which INCLUDES the foreign row. --cleanup-only only refuses rows with
+    id > high-water, so that foreign row would never trip the check; running the printed
+    command deletes this run's rows and restores the stale opening balance, silently erasing
+    the foreign payment's balance movement. The fix refuses the same way the non-keep path
+    does (refuse_cleanup) whenever a foreign row is seen, with or without --keep, and never
+    prints a --cleanup-only invocation in that case.
+    """
+    created_by_charge: set[int] = set()
+    state = {"calls": 0}
+    lock = threading.Lock()
+    ids = iter([10, 11, 12, 13, 14])
+
+    def fake_payment_ids(loan_id):
+        with lock:
+            state["calls"] += 1
+            base = {1, 2, 3} | set(created_by_charge)
+            # A concurrent, unrelated payment lands after the opening census (call 1).
+            if state["calls"] > 1:
+                base |= {99}
+            return base
+
+    def fake_charge(token, loan_id, amount):
+        with lock:
+            pid = next(ids)
+            created_by_charge.add(pid)
+        return 201, {"payment_id": pid, "status": "captured"}
+
+    calls = {"cleanup": False, "refused": None}
+    monkeypatch.setattr(
+        repro, "cleanup", lambda *a, **k: calls.__setitem__("cleanup", True)
+    )
+    monkeypatch.setattr(
+        repro,
+        "refuse_cleanup",
+        lambda loan_id, our_ids, foreign, opening: calls.__setitem__(
+            "refused", (set(our_ids), set(foreign))
+        ),
+    )
+    _wire(
+        monkeypatch,
+        payment_ids_fn=fake_payment_ids,
+        charge_fn=fake_charge,
+        argv=["repro_double_charge.py", "--keep", "--parallel", "3"],
+    )
+
+    repro.main()
+    out = capsys.readouterr().out
+
+    assert calls["cleanup"] is False, (
+        "cleanup must never run when a foreign row is present."
+    )
+    assert calls["refused"] is not None, (
+        "a foreign row under --keep must trigger refuse_cleanup, not a printed cleanup note."
+    )
+    our_ids, foreign = calls["refused"]
+    assert foreign == {99} and our_ids == {10, 11, 12, 13, 14}
+    assert "--cleanup-only" not in out, (
+        "a foreign row was present but the script still printed a runnable --cleanup-only "
+        "command — running it would restore a stale absolute balance over the foreign "
+        "payment's movement."
+    )
+
+
 def test_cleanup_only_refuses_when_a_payment_landed_after_the_keep_run(monkeypatch):
     """--cleanup-only must not restore a stale absolute balance over a later legitimate payment.
 
