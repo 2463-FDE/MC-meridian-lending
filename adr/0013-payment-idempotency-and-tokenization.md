@@ -253,16 +253,16 @@ populated pre-migration volume — neither is observable from a repository check
 
 ## Implementation plan
 
-1. Migration `0012` — idempotency columns and the partial unique index. Backward compatible;
+1. Migration `0016` — idempotency columns and the partial unique index. Backward compatible;
    legacy rows keep a `NULL` key.
-2. Migration `0013` — `payment_applications` plus its append-only trigger. Atomic apply and
+2. Migration `0017` — `payment_applications` plus its append-only trigger. Atomic apply and
    the `X-Internal-Service` gate land with it.
 3. Idempotency contract in `payment-service`, and the same enforcement path in
    `servicing-service`'s copy until it is retired.
-4. Migration `0014` — purge, drop `pan` and `cvv`, add the token columns, rewrite the table.
+4. Migration `0018` — purge, drop `pan` and `cvv`, add the token columns, rewrite the table.
    Seed scrub and docstring corrections in the same change.
 5. `no-sad-gate` in CI, blocking, before the form is written.
-6. Migration `0015` and the capability token — phase 2 only, gated on the delivery channel.
+6. Migration `0019` and the capability token — phase 2 only, gated on the delivery channel.
 7. Frontend: processor-hosted fields, then the payment form.
 
 Steps 1–5 deliver phase 1 (staff-assisted) and fix both measured defects. Step 6 onward is

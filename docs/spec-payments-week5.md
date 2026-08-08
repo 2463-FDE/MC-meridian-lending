@@ -197,7 +197,7 @@ past the window a late retry of the same intent is a new payment by definition.
 The correctness guarantee lives in the schema, not in a service. Two handlers write this
 table today, and a support engineer with `psql` is a third.
 
-`db/migrations/0012_payments_idempotency.sql` (and the matching edit to
+`db/migrations/0016_payments_idempotency.sql` (and the matching edit to
 `db/init/001_schema.sql`, which this repo keeps in step):
 
 ```sql
@@ -339,7 +339,7 @@ the only thing keeping keys from being held past their window by clients that ne
 The gateway does not forward the header from a client. This closes the money-creation path
 described in the problem statement. It is not RBAC and needs no identity model.
 
-**(b) The applied fact becomes a record, not a status.** `db/migrations/0013_payment_applications.sql`:
+**(b) The applied fact becomes a record, not a status.** `db/migrations/0017_payment_applications.sql`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS payment_applications (
@@ -459,7 +459,7 @@ itself. This is the minimum that stops captured money going unapplied while D2 w
 ### D4. PCI: no SAD, tokenized PAN
 
 **(a) Sensitive authentication data is deleted, not merely unwritten.**
-`db/migrations/0014_payments_detokenize.sql`, in this order:
+`db/migrations/0018_payments_detokenize.sql`, in this order:
 
 ```sql
 UPDATE payments SET cvv = NULL, pan = NULL;   -- clear live tuples
@@ -537,7 +537,7 @@ Borrower-facing copy follows the model: an ACH payment reads "payment submitted"
 
 ### D6. Self-serve access — the `pay:loan:{id}` capability token
 
-Extends the ADR 0010 Phase B pattern. `db/migrations/0015_payment_capability_token.sql`:
+Extends the ADR 0010 Phase B pattern. `db/migrations/0019_payment_capability_token.sql`:
 
 ```sql
 ALTER TABLE loans
@@ -752,7 +752,7 @@ it red.
 
 | # | Scenario | Expected |
 |---|---|---|
-| R-DDL | Apply `0012_payments_idempotency.sql` to a real Postgres, then run the **exact** claim insert from D2: `INSERT INTO payments (...) VALUES (...) ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id` | Both statements succeed; a first insert of key `K` returns a row, a second insert of `K` returns zero rows (key claimed). Proves the partial-index arbiter is inferable by the documented conflict target — a bare `ON CONFLICT (idempotency_key)` raises `no unique or exclusion constraint matching the ON CONFLICT specification` and fails this vector |
+| R-DDL | Apply `0016_payments_idempotency.sql` to a real Postgres, then run the **exact** claim insert from D2: `INSERT INTO payments (...) VALUES (...) ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING id` | Both statements succeed; a first insert of key `K` returns a row, a second insert of `K` returns zero rows (key claimed). Proves the partial-index arbiter is inferable by the documented conflict target — a bare `ON CONFLICT (idempotency_key)` raises `no unique or exclusion constraint matching the ON CONFLICT specification` and fails this vector |
 | R-DDL2 | Same live Postgres: insert two rows carrying the **same non-NULL** `processor_idempotency_key` | Second insert raises `duplicate key value violates unique constraint "payments_processor_idempotency_key_uniq"` and writes no row. Proves a duplicate processor key cannot be persisted locally, so a bad generator or manual SQL fails before any processor call rather than producing two Meridian rows the processor collapses to one charge. Red on a schema that leaves `processor_idempotency_key` non-unique |
 
 R-DDL runs the literal SQL string the implementation ships, against a live Postgres, not a
