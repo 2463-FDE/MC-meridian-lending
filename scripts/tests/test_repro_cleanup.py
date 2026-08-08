@@ -150,7 +150,9 @@ def test_default_cleanup_runs_when_no_foreign_row(monkeypatch):
     monkeypatch.setattr(
         repro,
         "cleanup",
-        lambda loan_id, del_ids, restore_to: deleted.update(ids=set(del_ids)),
+        lambda loan_id, del_ids, restore_to, expect_balance: deleted.update(
+            ids=set(del_ids)
+        ),
     )
     _wire(
         monkeypatch,
@@ -273,6 +275,8 @@ def test_cleanup_only_refuses_when_a_payment_landed_after_the_keep_run(monkeypat
             "24800.00",
             "--high-water",
             "119",
+            "--expect-balance",
+            "24700.00",
         ],
     )
 
@@ -294,7 +298,7 @@ def test_cleanup_only_runs_when_the_loan_has_not_moved(monkeypatch):
     monkeypatch.setattr(
         repro,
         "cleanup",
-        lambda loan_id, del_ids, restore_to: deleted.update(
+        lambda loan_id, del_ids, restore_to, expect_balance: deleted.update(
             ids=set(del_ids), restore_to=restore_to
         ),
     )
@@ -312,6 +316,8 @@ def test_cleanup_only_runs_when_the_loan_has_not_moved(monkeypatch):
             "24800.00",
             "--high-water",
             "119",
+            "--expect-balance",
+            "24700.00",
         ],
     )
 
@@ -363,7 +369,9 @@ def test_concurrent_transport_failure_does_not_orphan_successful_siblings(monkey
     monkeypatch.setattr(
         repro,
         "cleanup",
-        lambda loan_id, del_ids, restore_to: deleted.update(ids=set(del_ids)),
+        lambda loan_id, del_ids, restore_to, expect_balance: deleted.update(
+            ids=set(del_ids)
+        ),
     )
     calls = {"refused": None}
     monkeypatch.setattr(
@@ -426,7 +434,7 @@ def test_cleanup_refuses_without_mutating_on_an_id_loan_mismatch(monkeypatch):
     monkeypatch.setattr(repro, "psql", fake_psql)
 
     with pytest.raises(repro.CleanupMismatch):
-        repro.cleanup(4471, {118, 119}, 24800.00)
+        repro.cleanup(4471, {118, 119}, 24800.00, 24700.00)
 
     assert mutated["called"] is True, "the DO block must still be sent to the database"
 
@@ -442,9 +450,234 @@ def test_cleanup_deletes_and_restores_when_every_id_matches_the_loan(monkeypatch
 
     monkeypatch.setattr(repro, "psql", fake_psql)
 
-    repro.cleanup(4471, {118, 119}, 24800.00)
+    repro.cleanup(4471, {118, 119}, 24800.00, 24700.00)
 
     assert (
         "DELETE FROM payments WHERE loan_id = 4471 AND id IN (118,119)" in sent["sql"]
     )
     assert "UPDATE balances SET balance = 24800.0 WHERE loan_id = 4471" in sent["sql"]
+
+
+def test_cleanup_verifies_the_balance_in_the_same_transaction_as_the_restore(
+    monkeypatch,
+):
+    """The absolute restore must be guarded by a balance watermark check, taken under a row
+    lock in the SAME statement that deletes and restores.
+
+    The bug (this fix): the only guard on the destructive absolute restore was a payment-id
+    high-water. The balance has mutation paths that insert no `payments` row at all —
+    `POST /accounts/{loan_id}/adjust-balance` and `/waive-fee`
+    (servicing-service/app/main.py:101,113) write `balances.balance` directly. So an operator
+    could --keep, someone could adjust the balance, and the printed cleanup command would then
+    overwrite that legitimate adjustment with the stale opening value, with no ledger (D2) to
+    recover it from.
+    """
+    sent = {"sql": None}
+    monkeypatch.setattr(repro, "psql", lambda sql: sent.__setitem__("sql", sql) or "")
+
+    repro.cleanup(4471, {118, 119}, 24800.00, 24700.00)
+
+    sql = sent["sql"]
+    assert "FOR UPDATE" in sql, (
+        "the balance must be re-read under a row lock, or a concurrent writer can move it "
+        "between the check and the restore."
+    )
+    assert "24700.0" in sql and "abs(current_balance" in sql, (
+        "cleanup sent no balance-watermark comparison — the absolute restore is unguarded "
+        "against adjust-balance/waive-fee, which move the balance with no payments row."
+    )
+    # The guard has to precede both mutations, not follow them.
+    assert (
+        sql.index("abs(current_balance")
+        < sql.index("DELETE FROM payments")
+        < sql.index("UPDATE balances")
+    ), "the watermark check must raise before anything is deleted or restored."
+
+
+def test_cleanup_refuses_without_mutating_when_the_balance_drifted(monkeypatch):
+    """A drifted balance must surface as a refusal naming the drift, not as an id mismatch."""
+
+    def fake_psql(sql: str) -> str:
+        raise subprocess.CalledProcessError(
+            1,
+            ["psql"],
+            output="",
+            stderr="ERROR:  cleanup balance drift: loan 4471 balance is 24000, expected 24700",
+        )
+
+    monkeypatch.setattr(repro, "psql", fake_psql)
+
+    with pytest.raises(repro.CleanupMismatch) as exc:
+        repro.cleanup(4471, {118, 119}, 24800.00, 24700.00)
+
+    assert "balance" in str(exc.value), (
+        "a balance drift refusal must say so — reporting it as an id mismatch sends the "
+        "operator after the wrong cause."
+    )
+
+
+def test_cleanup_only_requires_the_balance_watermark(monkeypatch):
+    """--cleanup-only must refuse to run at all without the watermark the --keep run printed."""
+    monkeypatch.setattr(repro, "payment_ids", lambda loan_id: {118, 119})
+    called = {"cleanup": False}
+    monkeypatch.setattr(
+        repro, "cleanup", lambda *a, **k: called.__setitem__("cleanup", True)
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "repro_double_charge.py",
+            "--cleanup-only",
+            "--loan-id",
+            "4471",
+            "--ids",
+            "118,119",
+            "--restore-balance",
+            "24800.00",
+            "--high-water",
+            "119",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        repro.main()
+
+    assert called["cleanup"] is False
+    assert "--expect-balance" in str(exc.value), (
+        "--cleanup-only accepted a destructive absolute restore with no balance watermark."
+    )
+
+
+def test_cleanup_only_passes_the_watermark_through_to_cleanup(monkeypatch):
+    """The watermark the operator supplies must reach cleanup(), not be parsed and dropped."""
+    monkeypatch.setattr(repro, "payment_ids", lambda loan_id: {118, 119})
+    got: dict = {}
+    monkeypatch.setattr(
+        repro,
+        "cleanup",
+        lambda loan_id, del_ids, restore_to, expect_balance: got.update(
+            restore_to=restore_to, expect_balance=expect_balance
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "repro_double_charge.py",
+            "--cleanup-only",
+            "--loan-id",
+            "4471",
+            "--ids",
+            "118,119",
+            "--restore-balance",
+            "24800.00",
+            "--high-water",
+            "119",
+            "--expect-balance",
+            "24700.00",
+        ],
+    )
+
+    rc = repro.main()
+
+    assert rc == 0
+    assert got == {"restore_to": 24800.00, "expect_balance": 24700.00}
+
+
+def test_keep_prints_the_closing_balance_watermark(monkeypatch, capsys):
+    """--keep must print a --expect-balance for the cleanup command it hands the operator.
+
+    Without it the operator cannot satisfy the new requirement, and the guard would be
+    bypassed by whatever value they guessed.
+    """
+    created_by_charge: set[int] = set()
+    lock = threading.Lock()
+    ids = iter([10, 11, 12, 13, 14])
+    balances = iter([24800.00] * 20)
+
+    def fake_payment_ids(loan_id):
+        with lock:
+            return {1, 2, 3} | set(created_by_charge)
+
+    def fake_charge(token, loan_id, amount):
+        with lock:
+            pid = next(ids)
+            created_by_charge.add(pid)
+        return 201, {"payment_id": pid, "status": "captured"}
+
+    monkeypatch.setattr(repro, "balance_of", lambda loan_id: next(balances))
+    _wire(
+        monkeypatch,
+        payment_ids_fn=fake_payment_ids,
+        charge_fn=fake_charge,
+        argv=["repro_double_charge.py", "--keep", "--parallel", "3"],
+    )
+
+    repro.main()
+    out = capsys.readouterr().out
+
+    assert "--cleanup-only" in out
+    assert "--expect-balance 24800.0" in out, (
+        "--keep printed a cleanup command with no balance watermark, so the restore it "
+        "authorizes is guarded only by a payment-id high-water."
+    )
+
+
+def test_case_report_counts_only_run_owned_rows(monkeypatch, capsys):
+    """The verdict must be computed from ids this run's own responses returned.
+
+    The bug (this fix): each case reported `payment_ids(loan) - before`, a census diff. A
+    payment another actor inserted for the same loan during the case was counted as a charge
+    produced by this customer intent, so the row count and the DOUBLE-CHARGE verdict could be
+    inflated by a row that the finally block then correctly classified as foreign.
+    """
+    created_by_charge: set[int] = set()
+    state = {"calls": 0}
+    lock = threading.Lock()
+    ids = iter([10, 11, 12, 13, 14])
+
+    def fake_payment_ids(loan_id):
+        with lock:
+            state["calls"] += 1
+            base = {1, 2, 3} | set(created_by_charge)
+            # A foreign payment lands after Case A's opening census.
+            if state["calls"] > 2:
+                base |= {99}
+            return base
+
+    def fake_charge(token, loan_id, amount):
+        with lock:
+            pid = next(ids)
+            created_by_charge.add(pid)
+        return 201, {"payment_id": pid, "status": "captured"}
+
+    seen: list = []
+    real_report = repro.report
+
+    def spy_report(case, attempts, new_ids, opening, closing, amount):
+        seen.append((case, set(new_ids)))
+        return real_report(case, attempts, new_ids, opening, closing, amount)
+
+    monkeypatch.setattr(repro, "report", spy_report)
+    monkeypatch.setattr(repro, "cleanup", lambda *a, **k: None)
+    monkeypatch.setattr(repro, "refuse_cleanup", lambda *a, **k: None)
+    _wire(
+        monkeypatch,
+        payment_ids_fn=fake_payment_ids,
+        charge_fn=fake_charge,
+        argv=["repro_double_charge.py", "--parallel", "3"],
+    )
+
+    rc = repro.main()
+    out = capsys.readouterr().out
+
+    for case, reported in seen:
+        assert 99 not in reported, (
+            f"{case} counted foreign row 99 as a charge from this customer intent."
+        )
+    assert "DOUBLE-CHARGE CONFIRMED" not in out, (
+        "a contaminated run printed the branch's core verdict anyway — the evidence is not "
+        "attributable to one intent once a foreign row is in the census window."
+    )
+    assert rc != 0, "a contaminated run must not exit 0."

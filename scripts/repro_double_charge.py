@@ -34,9 +34,20 @@ rows nor the balance are touched — because deleting our rows would orphan thei
 shared balance and restoring the opening would stomp the foreign movement, and there is no
 ledger (D2) to reconcile either automatically; the full state is printed for a human.
 `--cleanup-only` cleans up after a `--keep` run and needs the explicit `--ids` list, the
-opening balance, AND the high-water id that run printed. It refuses without them, and refuses
-again at run time if any payment row for the loan has an id past the high-water — a payment
-that landed after the `--keep` run, which restoring a stale absolute balance would erase.
+opening balance, the high-water id AND the closing-balance watermark that run printed. It
+refuses without them; refuses if any payment row for the loan has an id past the high-water — a
+payment that landed after the `--keep` run, which restoring a stale absolute balance would
+erase; and refuses if the live balance no longer equals the watermark, checked under a row lock
+in the same transaction as the delete and the restore. That last check is not redundant: the
+balance also moves with no `payments` row behind it, via `POST /accounts/{id}/adjust-balance`
+and `/waive-fee` (`servicing-service/app/main.py`), so an id high-water alone would let the
+absolute restore overwrite a legitimate adjustment.
+
+Each case's verdict counts ONLY the rows this run's own responses returned, never a census
+diff: a payment another actor inserts for the same loan mid-case would otherwise be counted as
+a charge from this one customer intent and inflate the reported row count. If such a row
+appears, the case reports CONTAMINATED and the run's verdict is INVALID rather than
+DOUBLE-CHARGE CONFIRMED.
 
 This script is the pre-fix RED reproduction only. It posts the legacy `pan`/`cvv` body with
 no `Idempotency-Key`; once the Week 5 fix lands, `POST /payments` rejects that body with `400`
@@ -200,53 +211,99 @@ def report(
     return money_ok
 
 
+def invalidate(case: str, foreign: set[int]) -> None:
+    """A row this run did not create appeared inside `case`'s census window, so the case has no
+    evidentiary value: the count of charges produced by one customer intent is no longer
+    separable from another actor's writes, and the balance movement mixes both. Report the
+    contamination instead of a verdict — an inflated DOUBLE-CHARGE count is worse than no
+    count, because the whole branch rests on that number."""
+    print(f"\n  {case}")
+    print(
+        f"    CONTAMINATED: payment row(s) {sorted(foreign)} appeared on this loan during the "
+        f"case but came from no response of this run. Not counted, and no verdict reported for "
+        f"this case."
+    )
+
+
 class CleanupMismatch(Exception):
-    """Raised when the DELETE below did not remove exactly `ids` for `loan_id` — a mistyped
-    --loan-id, a stale id, or an id that belongs to a different loan. The DELETE and the
-    balance UPDATE run inside one DO block, so a mismatch raises server-side before the
-    UPDATE executes and the whole statement is rolled back: nothing is deleted or restored."""
+    """Raised when cleanup refused server-side: the DELETE below did not remove exactly `ids`
+    for `loan_id` (a mistyped --loan-id, a stale id, or an id that belongs to a different
+    loan), or the loan's balance no longer matches the watermark the caller recorded. Both
+    checks, the DELETE and the balance UPDATE run inside one DO block, so a refusal raises
+    before either mutation executes and the whole statement is rolled back: nothing is
+    deleted or restored."""
 
 
-def cleanup(loan_id: int, ids: set[int], restore_to: float) -> None:
-    # Only ever called once the caller has proven no foreign write happened to this loan:
-    # deleting our rows and restoring an absolute balance are safe together ONLY then. A
-    # foreign write present means deleting rows would leave their debit orphaned in the shared
-    # balance AND restoring the opening would stomp the foreign movement — so both callers
-    # refuse cleanup entirely in that case rather than pass a "restore or not" flag here.
+def cleanup(
+    loan_id: int, ids: set[int], restore_to: float, expect_balance: float
+) -> None:
+    """Delete this run's payment rows and restore `restore_to`, or refuse and mutate nothing.
+
+    `expect_balance` is the balance the caller last observed for this loan. It is re-read
+    FOR UPDATE inside the same DO block as the delete and the restore, and any difference
+    raises before either mutation. A payment-id high-water does NOT cover this: the balance
+    has mutation paths that insert no `payments` row at all — `POST /accounts/{id}/adjust-balance`
+    and `POST /accounts/{id}/waive-fee` (servicing-service/app/main.py:101,113) write
+    `balances.balance` directly. Restoring an absolute saved balance over such a movement
+    erases it, and there is no ledger (D2) to recover it from.
+
+    Only ever called once the caller has proven no foreign payment row appeared on this loan:
+    deleting our rows and restoring an absolute balance are safe together ONLY then. A foreign
+    write present means deleting rows would leave their debit orphaned in the shared balance
+    AND restoring the opening would stomp the foreign movement — so both callers refuse
+    cleanup entirely in that case rather than pass a "restore or not" flag here.
+    """
+    # The DELETE is scoped to loan_id (not id alone) and counts what actually came out. A
+    # mistyped --loan-id with otherwise-valid ids used to delete those payment rows (wherever
+    # they actually lived) while unconditionally resetting THIS loan_id's balance — orphaning
+    # one loan's rows and stomping another's balance in one call. Both guards and both
+    # mutations run in one DO block so every check happens before any write, in the same
+    # server-side transaction: the psql CLI has no cross-invocation transaction, so this is the
+    # only way to keep "verify before mutate" atomic against a real refusal instead of a
+    # Python-side check that runs after the DELETE has already committed.
+    delete_stanza = ""
     if ids:
-        # Delete scoped to loan_id (not id alone) and count what actually came out. A
-        # mistyped --loan-id with otherwise-valid ids used to delete those payment rows
-        # (wherever they actually lived) while unconditionally resetting THIS loan_id's
-        # balance — orphaning one loan's rows and stomping another's balance in one call.
-        # DELETE and the balance UPDATE run in one DO block so the mismatch check happens
-        # before the UPDATE, in the same server-side transaction: the psql CLI has no
-        # cross-invocation transaction, so this is the only way to keep "verify before
-        # mutate" atomic against a real refusal instead of a Python-side check that runs
-        # after the DELETE has already committed.
         id_list = ",".join(str(i) for i in sorted(ids))
-        sql = f"""
-DO $$
-DECLARE
-    deleted_count int;
-BEGIN
+        delete_stanza = f"""
     DELETE FROM payments WHERE loan_id = {loan_id} AND id IN ({id_list});
     GET DIAGNOSTICS deleted_count = ROW_COUNT;
     IF deleted_count <> {len(ids)} THEN
         RAISE EXCEPTION 'cleanup mismatch: expected % row(s) for loan %, deleted %',
             {len(ids)}, {loan_id}, deleted_count;
+    END IF;"""
+    sql = f"""
+DO $$
+DECLARE
+    deleted_count int;
+    current_balance double precision;
+BEGIN
+    SELECT balance INTO current_balance FROM balances WHERE loan_id = {loan_id} FOR UPDATE;
+    IF current_balance IS NULL THEN
+        RAISE EXCEPTION 'cleanup balance drift: loan % has no balances row', {loan_id};
     END IF;
+    IF abs(current_balance - {expect_balance}) > 0.005 THEN
+        RAISE EXCEPTION 'cleanup balance drift: loan % balance is %, expected % — a balance '
+            'change with no payment row behind it (adjust-balance / waive-fee) landed since; '
+            'refusing to restore %', {loan_id}, current_balance, {expect_balance}, {restore_to};
+    END IF;{delete_stanza}
     UPDATE balances SET balance = {restore_to} WHERE loan_id = {loan_id};
 END $$;
 """
-        try:
-            psql(sql)
-        except subprocess.CalledProcessError as exc:
+    try:
+        psql(sql)
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        if "balance drift" in stderr:
             raise CleanupMismatch(
-                f"cleanup refused: not all of {sorted(ids)} are payments on loan {loan_id} "
-                f"— nothing was deleted or restored. {(exc.stderr or '').strip()}"
+                f"cleanup refused: loan {loan_id} no longer holds the {expect_balance} this "
+                f"run recorded, so restoring {restore_to} would erase a balance change made "
+                f"since — nothing was deleted or restored. Reconcile by hand: this run's rows "
+                f"are {sorted(ids)}. {stderr}"
             ) from exc
-    else:
-        psql(f"UPDATE balances SET balance = {restore_to} WHERE loan_id = {loan_id};")
+        raise CleanupMismatch(
+            f"cleanup refused: not all of {sorted(ids)} are payments on loan {loan_id} "
+            f"— nothing was deleted or restored. {stderr}"
+        ) from exc
     print(f"\ncleanup: removed {len(ids)} row(s), balance restored to {restore_to}")
 
 
@@ -307,6 +364,15 @@ def main() -> int:
         "Any row with a larger id landed after that run and means the loan moved since — "
         "cleanup then refuses rather than restore a stale absolute balance over it.",
     )
+    ap.add_argument(
+        "--expect-balance",
+        type=float,
+        default=None,
+        help="with --cleanup-only: the CLOSING balance the --keep run printed (required). "
+        "Cleanup re-reads the balance under a row lock in the same transaction as the delete "
+        "and the restore and refuses on any difference. The payment-id high-water does not "
+        "cover this: adjust-balance and waive-fee move the balance with no payment row.",
+    )
     args = ap.parse_args()
 
     if args.cleanup_only:
@@ -320,12 +386,20 @@ def main() -> int:
         # with id greater than a high-water mark, which took any legitimate payment another
         # actor inserted for the same loan after that mark. Delete exactly the ids the --keep
         # run created and printed, nothing inferred.
-        if args.ids is None or args.restore_balance is None or args.high_water is None:
+        if (
+            args.ids is None
+            or args.restore_balance is None
+            or args.high_water is None
+            or args.expect_balance is None
+        ):
             sys.exit(
-                "--cleanup-only needs --ids, --restore-balance and --high-water. Deleting the "
-                "rows without restoring the balance leaves the loan debited with no payment "
-                "behind it; restoring a stale absolute balance over a payment that landed since "
-                "the --keep run would erase that payment. The --keep run printed all three."
+                "--cleanup-only needs --ids, --restore-balance, --high-water and "
+                "--expect-balance. Deleting the rows without restoring the balance leaves the "
+                "loan debited with no payment behind it; restoring a stale absolute balance "
+                "over a payment that landed since the --keep run would erase that payment; and "
+                "a payment-id high-water alone does not see a balance change with no payment "
+                "row behind it (adjust-balance / waive-fee), which the absolute restore would "
+                "also erase. The --keep run printed all four."
             )
         try:
             doomed = {int(x) for x in args.ids.split(",") if x.strip()}
@@ -339,12 +413,17 @@ def main() -> int:
         # own --ids are all <= high-water (they were created during the --keep run), so this
         # never flags them. On any such movement, refuse entirely: deleting our rows would
         # orphan their debit and the absolute restore would erase the newer payment.
+        #
+        # The id high-water covers only movement that INSERTED a payment row. A balance change
+        # with no such row — adjust-balance / waive-fee — is invisible to it, so cleanup() also
+        # verifies --expect-balance against the live balance under a row lock, inside the same
+        # transaction as the delete and the restore, and refuses there.
         moved = {i for i in payment_ids(args.loan_id) if i > args.high_water}
         if moved:
             refuse_cleanup(args.loan_id, doomed, moved, args.restore_balance)
             return 1
         try:
-            cleanup(args.loan_id, doomed, args.restore_balance)
+            cleanup(args.loan_id, doomed, args.restore_balance, args.expect_balance)
         except CleanupMismatch as exc:
             print(f"\n{exc}")
             return 1
@@ -366,6 +445,9 @@ def main() -> int:
     ids_before_all = payment_ids(args.loan_id)
     clean = True
     charge_failure = None
+    # Rows that appeared inside a case's census window but came from no response of ours. Their
+    # presence invalidates the run's evidence rather than adding to it.
+    contaminated_run: set[int] = set()
     # The rows this run conclusively created, keyed by the payment_id each response returned.
     # Cleanup deletes from THIS set only -- never a database census diff, which would sweep a
     # concurrent unrelated payment for the same loan into the delete set.
@@ -380,27 +462,46 @@ def main() -> int:
         # --- Case A: sequential retry ---------------------------------------------
         opening = balance_of(args.loan_id)
         before = payment_ids(args.loan_id)
+        # Per-case run-owned ids. The verdict is computed from these, NOT from a
+        # (current census - before) diff: a payment another actor inserted for this loan
+        # during the case would land in that diff and be counted as a charge produced by this
+        # one customer intent, inflating the row count and the DOUBLE-CHARGE verdict the
+        # branch's argument rests on.
+        case_ids: set[int] = set()
         for _ in range(2):
             st, _body = charge(token, args.loan_id, args.amount)
             pid = created_id(st, _body)
             if pid is not None:
+                case_ids.add(pid)
                 created_ids.add(pid)
             if st not in (200, 201):
                 charge_failure = f"charge failed ({st}): {_body}"
                 break
         if charge_failure is None:
-            clean &= report(
-                "A. RETRY (2 sequential POSTs, one intent)",
-                2,
-                payment_ids(args.loan_id) - before,
-                opening,
-                balance_of(args.loan_id),
-                args.amount,
-            )
+            after = payment_ids(args.loan_id)
+            closing = balance_of(args.loan_id)
+            contaminated_run |= (after - before) - case_ids
+            if contaminated_run:
+                invalidate(
+                    "A. RETRY (2 sequential POSTs, one intent)", contaminated_run
+                )
+            else:
+                clean &= report(
+                    "A. RETRY (2 sequential POSTs, one intent)",
+                    2,
+                    case_ids,
+                    opening,
+                    closing,
+                    args.amount,
+                )
 
-            # --- Case B: concurrent ------------------------------------------------
+        # --- Case B: concurrent ----------------------------------------------------
+        # Skipped on a Case A charge failure or on a contaminated Case A: the balance census
+        # Case B would open with is already polluted, so its arithmetic would be junk too.
+        if charge_failure is None and not contaminated_run:
             opening = balance_of(args.loan_id)
             before = payment_ids(args.loan_id)
+            case_ids = set()
             with ThreadPoolExecutor(max_workers=args.parallel) as pool:
                 futures = [
                     pool.submit(charge, token, args.loan_id, args.amount)
@@ -421,6 +522,7 @@ def main() -> int:
             for st, body in results:
                 pid = created_id(st, body)
                 if pid is not None:
+                    case_ids.add(pid)
                     created_ids.add(pid)
             codes = [st for st, _ in results]
             failures = sum(1 for st, _ in results if st is None)
@@ -432,30 +534,47 @@ def main() -> int:
                     else f"  ({failures} transport failure(s) among {args.parallel} attempts)"
                 )
             )
-            clean &= report(
-                f"B. CONCURRENT ({args.parallel} simultaneous POSTs, one intent)",
-                args.parallel,
-                payment_ids(args.loan_id) - before,
-                opening,
-                balance_of(args.loan_id),
-                args.amount,
-            )
-
-            print("\n" + "=" * 72)
-            if clean:
-                print(
-                    "VERDICT: no double-charge observed. The spec's premise does not hold here —"
-                )
-                print("         re-check the branch under test before presenting.")
+            after = payment_ids(args.loan_id)
+            closing = balance_of(args.loan_id)
+            case_b = f"B. CONCURRENT ({args.parallel} simultaneous POSTs, one intent)"
+            contaminated_run |= (after - before) - case_ids
+            if contaminated_run:
+                invalidate(case_b, contaminated_run)
             else:
-                print(
-                    "VERDICT: DOUBLE-CHARGE CONFIRMED. One customer intent, multiple charges."
+                clean &= report(
+                    case_b, args.parallel, case_ids, opening, closing, args.amount
                 )
-                print(
-                    "         Not customer confusion. Not a UI bug. Two+ successful inserts."
-                )
-                print("         See docs/scoping-payments-week5.md §3.1.")
-            print("=" * 72)
+
+        print("\n" + "=" * 72)
+        if charge_failure is not None:
+            pass  # the failure itself is reported by the sys.exit below
+        elif contaminated_run:
+            print(
+                "VERDICT: INVALID — a payment row this run did not create appeared on loan "
+                f"{args.loan_id}"
+            )
+            print(
+                f"         mid-case (rows {sorted(contaminated_run)}). One intent's charges "
+                "are no longer separable from"
+            )
+            print(
+                "         another actor's, so neither case proves anything. Re-run on a "
+                "quiet loan."
+            )
+        elif clean:
+            print(
+                "VERDICT: no double-charge observed. The spec's premise does not hold here —"
+            )
+            print("         re-check the branch under test before presenting.")
+        else:
+            print(
+                "VERDICT: DOUBLE-CHARGE CONFIRMED. One customer intent, multiple charges."
+            )
+            print(
+                "         Not customer confusion. Not a UI bug. Two+ successful inserts."
+            )
+            print("         See docs/scoping-payments-week5.md §3.1.")
+        print("=" * 72)
     finally:
         # Rows that appeared during the run but were NOT created by our own POSTs: a concurrent
         # actor writing to the same loan. Their presence makes BOTH halves of cleanup unsafe --
@@ -475,26 +594,42 @@ def main() -> int:
             # Print an EXPLICIT id list and the high-water mark: --cleanup-only deletes exactly
             # these ids and refuses if any row landed past the high-water, so neither a
             # concurrent row nor a later legitimate payment is ever taken or stomped.
+            # The CLOSING balance is the watermark for the restore: --cleanup-only re-reads the
+            # live balance and refuses if it has moved since. The high-water id alone cannot see
+            # a balance change that inserted no payment row (adjust-balance / waive-fee), which
+            # the absolute restore of `opening_all` would otherwise erase.
             id_list = ",".join(str(i) for i in sorted(created_ids))
             high_water = max(current_ids | created_ids, default=0)
+            closing_all = balance_of(args.loan_id)
             print(
                 f"\n--keep: left {len(created_ids)} row(s) {sorted(created_ids)}; "
-                f"opening balance was {opening_all}"
+                f"opening balance was {opening_all}, balance now {closing_all}"
             )
             print(
                 f"        clean up with: python3 scripts/repro_double_charge.py "
                 f"--cleanup-only --loan-id {args.loan_id} --ids {id_list or '<none>'} "
-                f"--restore-balance {opening_all} --high-water {high_water}"
+                f"--restore-balance {opening_all} --high-water {high_water} "
+                f"--expect-balance {closing_all}"
             )
         else:
             try:
-                cleanup(args.loan_id, created_ids, opening_all)
+                # The balance read here is the watermark for the restore in the same call: it
+                # makes the delete-and-restore atomic against a write that lands between this
+                # read and the DO block. A non-payment balance change made EARLIER in the run
+                # (adjust-balance / waive-fee) is not detectable from here — there is no ledger
+                # (D2) to attribute balance movement to rows — but such a run's own arithmetic
+                # is already contaminated and its verdict is reported as such.
+                cleanup(
+                    args.loan_id, created_ids, opening_all, balance_of(args.loan_id)
+                )
             except CleanupMismatch as exc:
                 print(f"\n{exc}")
 
     if charge_failure is not None:
         sys.exit(charge_failure)
-    return 0 if clean else 1
+    # A contaminated run exits non-zero even though it reported no defect: it proved nothing
+    # either way, and exit 0 would read as "the system behaved correctly".
+    return 0 if (clean and not contaminated_run) else 1
 
 
 if __name__ == "__main__":
