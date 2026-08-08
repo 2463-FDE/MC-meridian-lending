@@ -53,11 +53,21 @@ logs/
 rag_eval/.cache/
 rag_eval/eval_report.md
 
-# Claude Code local config: track the shared workflow skills the docs reference
-# (address-pr, teeth, feature-workflow, ship-thin); ignore personal/session state.
+# Claude Code config: track what a fresh clone needs, ignore personal/session state.
+#
+# EVERY skill under .claude/skills/ is tracked — the rule is a glob, not a list, so
+# anything dropped there is shared with the team by that act alone. Keep a personal
+# or experimental skill in ~/.claude/skills/ instead. (Do not re-add an enumeration
+# of skill names here: the previous comment listed four and went stale the first time
+# a fifth was added, claiming a narrower policy than the rule enforces.)
+#
 # `!.claude/skills/` re-includes the directory (its children then track fine today);
 # `!.claude/skills/**` keeps nested skill files addable even if `.claude/*` is ever
 # broadened to `.claude/**` (a recursive ignore would otherwise re-exclude them).
+# `!.claude/settings.json` tracks the SHARED hook config so a clone inherits it.
+# settings.local.json stays ignored — per-developer permission grants and plugin
+# choices, which are personal and must not be forced on a clone.
 .claude/*
 !.claude/skills/
 !.claude/skills/**
+!.claude/settings.json

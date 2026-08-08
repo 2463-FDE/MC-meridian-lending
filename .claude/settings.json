@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "i=$(cat); f=$(printf \"%s\" \"$i\" | jq -r \".tool_input.file_path // empty\"); s=$(printf \"%s\" \"$i\" | jq -r \".session_id // \\\"nosession\\\"\"); case \"$f\" in */services/*|*/frontend/*|*/db/*|*/scripts/*) m=\"${TMPDIR:-/tmp}/claude-house-rules-$s\"; [ -f \"$m\" ] || { : > \"$m\"; jq -rn \"{hookSpecificOutput:{hookEventName:\\\"PreToolUse\\\",additionalContext:\\\"Repo house rules apply to this edit. Read .claude/skills/house-rules/SKILL.md (or invoke the house-rules skill) before writing code in this repo.\\\"}}\"; };; esac; true",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
