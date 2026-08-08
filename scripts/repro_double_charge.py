@@ -53,7 +53,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 GATEWAY = "http://localhost:8000"
 # Published test number, already present in db/init/002_seed.sql. Not real cardholder data.
@@ -200,6 +200,13 @@ def report(
     return money_ok
 
 
+class CleanupMismatch(Exception):
+    """Raised when the DELETE below did not remove exactly `ids` for `loan_id` — a mistyped
+    --loan-id, a stale id, or an id that belongs to a different loan. The DELETE and the
+    balance UPDATE run inside one DO block, so a mismatch raises server-side before the
+    UPDATE executes and the whole statement is rolled back: nothing is deleted or restored."""
+
+
 def cleanup(loan_id: int, ids: set[int], restore_to: float) -> None:
     # Only ever called once the caller has proven no foreign write happened to this loan:
     # deleting our rows and restoring an absolute balance are safe together ONLY then. A
@@ -207,10 +214,39 @@ def cleanup(loan_id: int, ids: set[int], restore_to: float) -> None:
     # balance AND restoring the opening would stomp the foreign movement — so both callers
     # refuse cleanup entirely in that case rather than pass a "restore or not" flag here.
     if ids:
-        psql(
-            f"DELETE FROM payments WHERE id IN ({','.join(str(i) for i in sorted(ids))});"
-        )
-    psql(f"UPDATE balances SET balance = {restore_to} WHERE loan_id = {loan_id};")
+        # Delete scoped to loan_id (not id alone) and count what actually came out. A
+        # mistyped --loan-id with otherwise-valid ids used to delete those payment rows
+        # (wherever they actually lived) while unconditionally resetting THIS loan_id's
+        # balance — orphaning one loan's rows and stomping another's balance in one call.
+        # DELETE and the balance UPDATE run in one DO block so the mismatch check happens
+        # before the UPDATE, in the same server-side transaction: the psql CLI has no
+        # cross-invocation transaction, so this is the only way to keep "verify before
+        # mutate" atomic against a real refusal instead of a Python-side check that runs
+        # after the DELETE has already committed.
+        id_list = ",".join(str(i) for i in sorted(ids))
+        sql = f"""
+DO $$
+DECLARE
+    deleted_count int;
+BEGIN
+    DELETE FROM payments WHERE loan_id = {loan_id} AND id IN ({id_list});
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    IF deleted_count <> {len(ids)} THEN
+        RAISE EXCEPTION 'cleanup mismatch: expected % row(s) for loan %, deleted %',
+            {len(ids)}, {loan_id}, deleted_count;
+    END IF;
+    UPDATE balances SET balance = {restore_to} WHERE loan_id = {loan_id};
+END $$;
+"""
+        try:
+            psql(sql)
+        except subprocess.CalledProcessError as exc:
+            raise CleanupMismatch(
+                f"cleanup refused: not all of {sorted(ids)} are payments on loan {loan_id} "
+                f"— nothing was deleted or restored. {(exc.stderr or '').strip()}"
+            ) from exc
+    else:
+        psql(f"UPDATE balances SET balance = {restore_to} WHERE loan_id = {loan_id};")
     print(f"\ncleanup: removed {len(ids)} row(s), balance restored to {restore_to}")
 
 
@@ -307,7 +343,11 @@ def main() -> int:
         if moved:
             refuse_cleanup(args.loan_id, doomed, moved, args.restore_balance)
             return 1
-        cleanup(args.loan_id, doomed, args.restore_balance)
+        try:
+            cleanup(args.loan_id, doomed, args.restore_balance)
+        except CleanupMismatch as exc:
+            print(f"\n{exc}")
+            return 1
         return 0
 
     token = login(args.user, args.password)
@@ -362,17 +402,36 @@ def main() -> int:
             opening = balance_of(args.loan_id)
             before = payment_ids(args.loan_id)
             with ThreadPoolExecutor(max_workers=args.parallel) as pool:
-                results = list(
-                    pool.map(
-                        lambda _: charge(token, args.loan_id, args.amount),
-                        range(args.parallel),
-                    )
-                )
+                futures = [
+                    pool.submit(charge, token, args.loan_id, args.amount)
+                    for _ in range(args.parallel)
+                ]
+                results = []
+                for fut in as_completed(futures):
+                    try:
+                        results.append(fut.result())
+                    except OSError as exc:
+                        # A transport failure (timeout, connection reset, ...) on one worker
+                        # must not stop successful siblings from being recorded. The old
+                        # `list(pool.map(...))` raised this out of the whole block before any
+                        # response was processed into created_ids, so the finally clause saw
+                        # those already-inserted rows as (current_ids - ids_before_all) -
+                        # created_ids and refused cleanup on the script's own rows.
+                        results.append((None, f"transport error: {exc}"))
             for st, body in results:
                 pid = created_id(st, body)
                 if pid is not None:
                     created_ids.add(pid)
             codes = [st for st, _ in results]
+            failures = sum(1 for st, _ in results if st is None)
+            print(
+                f"    response codes     : {codes}"
+                + (
+                    "  (every attempt reported success)"
+                    if failures == 0
+                    else f"  ({failures} transport failure(s) among {args.parallel} attempts)"
+                )
+            )
             clean &= report(
                 f"B. CONCURRENT ({args.parallel} simultaneous POSTs, one intent)",
                 args.parallel,
@@ -381,7 +440,6 @@ def main() -> int:
                 balance_of(args.loan_id),
                 args.amount,
             )
-            print(f"    response codes     : {codes}  (every attempt reported success)")
 
             print("\n" + "=" * 72)
             if clean:
@@ -429,7 +487,10 @@ def main() -> int:
                 f"--restore-balance {opening_all} --high-water {high_water}"
             )
         else:
-            cleanup(args.loan_id, created_ids, opening_all)
+            try:
+                cleanup(args.loan_id, created_ids, opening_all)
+            except CleanupMismatch as exc:
+                print(f"\n{exc}")
 
     if charge_failure is not None:
         sys.exit(charge_failure)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import subprocess
 import sys
 import threading
 
@@ -319,3 +320,131 @@ def test_cleanup_only_runs_when_the_loan_has_not_moved(monkeypatch):
     assert deleted["ids"] == {118, 119}
     assert deleted["restore_to"] == 24800.00
     assert rc == 0
+
+
+def test_concurrent_transport_failure_does_not_orphan_successful_siblings(monkeypatch):
+    """A worker's transport failure (timeout/connection reset) must not stop successful
+    siblings from being recorded, and must not make the finally block misclassify their rows
+    as foreign and refuse cleanup.
+
+    The bug (this fix): `list(pool.map(...))` raised whichever worker's transport exception
+    first, before ANY response — including successful siblings that completed first — was
+    processed into created_ids. The finally block then saw those already-inserted rows as
+    (current_ids - ids_before_all) - created_ids, classified them as foreign, and refused
+    cleanup on the script's own rows. The fix submits each charge individually and collects
+    results via as_completed, catching a transport exception per-future so it cannot prevent
+    the others from being recorded.
+    """
+    # The script drives Case A (2 sequential calls) THEN Case B (3 concurrent calls) through
+    # one shared call counter — calls 1-2 are Case A's retries (must succeed, or Case B never
+    # runs); calls 3-5 are Case B's concurrent attempts. Fail exactly one of Case B's calls
+    # (call 4) regardless of which physical thread draws it.
+    created_by_charge: set[int] = set()
+    lock = threading.Lock()
+    ids = iter([10, 11, 12, 13])
+    call_count = {"n": 0}
+
+    def fake_charge(token, loan_id, amount):
+        with lock:
+            call_count["n"] += 1
+            n = call_count["n"]
+        if n == 4:
+            raise TimeoutError("simulated flaky gateway")
+        with lock:
+            pid = next(ids)
+            created_by_charge.add(pid)
+        return 201, {"payment_id": pid, "status": "captured"}
+
+    def fake_payment_ids(loan_id):
+        with lock:
+            return {1, 2, 3} | set(created_by_charge)
+
+    deleted: dict = {}
+    monkeypatch.setattr(
+        repro,
+        "cleanup",
+        lambda loan_id, del_ids, restore_to: deleted.update(ids=set(del_ids)),
+    )
+    calls = {"refused": None}
+    monkeypatch.setattr(
+        repro,
+        "refuse_cleanup",
+        lambda loan_id, our_ids, foreign, opening: calls.__setitem__(
+            "refused", (set(our_ids), set(foreign))
+        ),
+    )
+    _wire(
+        monkeypatch,
+        payment_ids_fn=fake_payment_ids,
+        charge_fn=fake_charge,
+        argv=["repro_double_charge.py", "--parallel", "3"],
+    )
+
+    repro.main()
+
+    assert calls["refused"] is None, (
+        "a transport failure on one Case B worker made the finally block treat the script's "
+        "own successful rows as foreign and refuse cleanup."
+    )
+    assert deleted.get("ids") == {10, 11, 12, 13}, (
+        "the successful charges (2 from case A, 2 of case B's 3 concurrent attempts) were "
+        "not all recorded into created_ids around the transport failure on the other worker."
+    )
+
+
+def test_cleanup_refuses_without_mutating_on_an_id_loan_mismatch(monkeypatch):
+    """cleanup() must refuse ENTIRELY — deleting nothing and updating no balance — when a
+    requested id is not actually attached to the target loan.
+
+    The bug (this fix): cleanup() ran `DELETE FROM payments WHERE id IN (...)` with no
+    loan_id predicate, then unconditionally restored loan_id's balance. A mistyped
+    --loan-id with otherwise-valid ids could delete payment rows belonging to one loan while
+    resetting a DIFFERENT loan's balance. The fix scopes the DELETE to loan_id and runs it in
+    the same DO block as the balance UPDATE, raising (and rolling back) before the UPDATE if
+    the deleted row count does not match the requested id count.
+    """
+    # Payment 118 is really on loan 4471; 119 is really on a different loan — the "mistyped
+    # --loan-id with an otherwise-valid id" scenario the finding describes.
+    payments_by_loan = {4471: {118}, 9999: {119}}
+    mutated = {"called": False}
+
+    def fake_psql(sql: str) -> str:
+        mutated["called"] = True
+        if "DELETE FROM payments" in sql:
+            requested = {118, 119}
+            actually_on_loan = payments_by_loan.get(4471, set()) & requested
+            if len(actually_on_loan) != len(requested):
+                raise subprocess.CalledProcessError(
+                    1,
+                    ["psql"],
+                    output="",
+                    stderr="cleanup mismatch: expected 2, deleted 1",
+                )
+            return ""
+        raise AssertionError(f"unexpected SQL sent to psql(): {sql}")
+
+    monkeypatch.setattr(repro, "psql", fake_psql)
+
+    with pytest.raises(repro.CleanupMismatch):
+        repro.cleanup(4471, {118, 119}, 24800.00)
+
+    assert mutated["called"] is True, "the DO block must still be sent to the database"
+
+
+def test_cleanup_deletes_and_restores_when_every_id_matches_the_loan(monkeypatch):
+    """cleanup() happy path: every id genuinely belongs to loan_id, so it deletes and
+    restores without raising."""
+    sent = {"sql": None}
+
+    def fake_psql(sql: str) -> str:
+        sent["sql"] = sql
+        return ""
+
+    monkeypatch.setattr(repro, "psql", fake_psql)
+
+    repro.cleanup(4471, {118, 119}, 24800.00)
+
+    assert (
+        "DELETE FROM payments WHERE loan_id = 4471 AND id IN (118,119)" in sent["sql"]
+    )
+    assert "UPDATE balances SET balance = 24800.0 WHERE loan_id = 4471" in sent["sql"]
