@@ -20,6 +20,20 @@ export function pct(value: number | string | null | undefined, digits = 2): stri
   return `${(n as number).toFixed(digits)}%`;
 }
 
+/**
+ * Mask an SSN for display, e.g. "123-45-6789" -> "***-**-6789". Enough for the applicant to
+ * confirm they typed the right number without putting all nine digits back on screen after
+ * the input masked them. Fails closed: anything that is not exactly nine digits (with or
+ * without dashes) is masked entirely rather than partially echoed, so a half-typed or
+ * malformed value never leaks a prefix. This decides what is DISPLAYED only — the apply
+ * wizard's own validation is what rejects a malformed SSN.
+ */
+export function maskSsn(ssn: string): string {
+  const digits = ssn.replace(/\D/g, "");
+  if (digits.length !== 9) return ssn ? "•••••••••" : "";
+  return `***-**-${digits.slice(5)}`;
+}
+
 /** Format an ISO date / date string as a short US date, e.g. "May 25, 2026". */
 export function shortDate(value: string | null | undefined): string {
   if (!value) return "—";

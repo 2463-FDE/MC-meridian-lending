@@ -319,6 +319,20 @@ input[type="range"] {
   padding: 0;
   accent-color: var(--accent);
 }
+/* Input paired with a trailing control (the SSN reveal toggle). The button keeps its natural
+   width; the input takes the rest, so it still fills a .field-row column. */
+.input-with-action {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.input-with-action input {
+  flex: 1;
+  min-width: 0;
+}
+.input-with-action button {
+  flex: 0 0 auto;
+}
 .field-error {
   color: var(--red-ink);
   font-size: 12px;
