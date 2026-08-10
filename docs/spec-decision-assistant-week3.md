@@ -4,7 +4,7 @@
 **Date:** 2026-07-15
 **Status:** Approved for build on the feature branch. Sign-off state per ADR 0008's four-owner gate: product approved (Dana's directive), engineering approved (ADR 0009); compliance/legal and data-owner reviews **pending** — both gate production rollout, not branch implementation. See ADR 0009 *Sign-off status*.
 **Source brief:** Dana's request — "wrap the new AI credit-scoring model in an assistant that decisions an application and tells the officer the result."
-**Related:** ADR 0008 (decision-record field contract, locked 2026-07-07), ADR 0005 (LLM client), ADR 0007 (identifier-free projection), CFPB Circular 2023-03.
+**Related:** ADR 0008 (decision-record field contract, locked 2026-07-07), ADR 0005 (LLM client), ADR 0007 (identifier-free projection), 12 CFR 1002.9 (Reg B adverse-action notice requirement).
 
 ---
 
@@ -27,7 +27,7 @@ agent is the deliverable; the model is a stub.
 **Surface request (Dana):** wrap the new, more accurate model in an assistant; move fast;
 the board is watching.
 
-**Real problem (Reg B / CFPB Circular 2023-03 — no AI exemption):**
+**Real problem (Reg B / 12 CFR 1002.9 — no AI exemption):**
 - Every denial today carries the same generic reason: `GENERIC_REASONS[0]` = "purchasing
   history" (`services/decision-service/app/decision.py`), a nearest-checkbox that reflects
   nothing the model weighed.

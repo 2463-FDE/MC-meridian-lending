@@ -7,7 +7,7 @@
 - **Author:** Claude Code
 - **Related:** ADR 0005 (LLM client), ADR 0006 (logging redaction), ADR 0007 (identifier-free
   projection), ADR 0008 (decision-record field contract), docs/spec-decision-assistant-week3.md,
-  CFPB Circular 2023-03
+  12 CFR 1002.9 (Reg B adverse-action notice requirement)
 
 ---
 
@@ -53,7 +53,7 @@ LLM-based scoring was considered and **rejected**:
 - Its "explanations" are generated prose, not attributions of what the computation
   actually weighed — a fluent wrong reason is worse than a generic one.
 - Fair-lending risk: an LLM encodes untestable proxies for protected classes (ECOA
-  disparate impact); CFPB Circular 2023-03 removes any "the AI decided" defense.
+  disparate impact); 12 CFR 1002.9 removes any "the AI decided" defense.
 - Ungovernable under model-risk expectations (SR 11-7): no input-range validation,
   no monotonicity guarantees, silent vendor weight changes.
 - Prompt-injectable via applicant-supplied free text.

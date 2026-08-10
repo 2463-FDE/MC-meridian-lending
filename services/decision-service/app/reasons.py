@@ -1,7 +1,7 @@
 """Model feature → specific adverse-action reason mapping (ADR 0009 §3).
 
 Reg B requires the adverse-action notice to state the specific principal reason(s) for
-the action (CFPB Circular 2023-03: no AI exemption). Reasons here are derived from the
+the action (12 CFR 1002.9: no AI exemption). Reasons here are derived from the
 model's ACTUAL top negative attributions for the applicant — never a generic fallback.
 
 Reason texts use adverse-action vocabulary and are subject to the open compliance/legal
