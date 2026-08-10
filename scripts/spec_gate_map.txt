@@ -1,0 +1,22 @@
+# spec_diff_gate.sh map — one entry per line: <code_path_glob> => <required_spec_or_adr_path>
+#
+# A line means: if any file matches <code_path_glob> in this tree, then
+# <required_spec_or_adr_path> must also exist. It does NOT require the two be
+# touched in the same PR — spec and implementation land in separate PRs/weeks
+# here on purpose (see docs/kb.md weekly cadence). This is an existence check,
+# not a diff check.
+#
+# Only list a code area once its paired spec/ADR has actually merged to main.
+# Money-moving/decisioning services with no spec merged yet (e.g.
+# servicing-service pre-week-6) are deliberately absent — adding them before
+# the pairing exists would fail this gate for work already on main.
+#
+# Add a line here when a week's spec+ADR merges and covers a code path that
+# didn't have one yet. Remove a line only if the code path is deleted.
+
+services/decision-service/app => docs/spec-decision-assistant-week3.md
+services/decision-service/app => adr/0009-decisioning-assistant-design.md
+disclosure-service/app => docs/spec-disclosure-week4.md
+disclosure-service/app => adr/0012-decimal-minor-units-and-externalized-rule-config.md
+services/payment-service/app => docs/spec-payments-week5.md
+services/payment-service/app => adr/0013-payment-idempotency-and-tokenization.md
