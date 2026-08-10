@@ -4,18 +4,20 @@
 #
 # This is an EXISTENCE check, not a same-PR diff check: spec and
 # implementation land in separate PRs/weeks here on purpose (see
-# docs/kb.md's weekly cadence). A line in scripts/spec_gate_map.txt means "if
-# any file under this code path exists in the tree, this spec/ADR path must
-# also exist" — it does not require either side be touched in the current
-# diff.
+# docs/kb.md's weekly cadence). A line in scripts/spec_gate_map.txt means "this
+# code path AND this spec/ADR path must both exist" — it does not require
+# either side be touched in the current diff.
 #
 # Only code areas whose pairing has already merged belong in the map (see the
-# comment at its top). Adding an area before its spec/ADR merges would fail
-# this gate for work already on main.
+# comment at its top), so BOTH sides of every line are required to resolve —
+# a code_glob that matches nothing is not "not yet built", it is a typo'd or
+# stale entry (e.g. `disclosure-service/app` when the real path is
+# `services/disclosure-service/app`) and must fail loud, the same as a missing
+# spec. Remove the line instead of leaving it to silently no-op.
 #
 # Usage: scripts/spec_diff_gate.sh [MAP_FILE]   (defaults to scripts/spec_gate_map.txt)
-# Exit 0 = every mapped code area's required spec/ADR exists.
-# Exit 1 = one or more required paths are missing.
+# Exit 0 = every mapped line's code path and required spec/ADR both exist.
+# Exit 1 = one or more required paths (code or spec/ADR) are missing.
 # Exit 2 = usage / map file not found.
 set -uo pipefail
 
@@ -38,7 +40,9 @@ while IFS= read -r line; do
 
   # shellcheck disable=SC2086
   if ! compgen -G "$code_glob"/* >/dev/null 2>&1 && [ ! -e "$code_glob" ]; then
-    continue  # code area doesn't exist in this tree; nothing to require
+    echo "MISSING: mapped code path does not exist: $code_glob (scripts/spec_gate_map.txt — typo, or a stale entry for deleted code)" >&2
+    fail=1
+    continue
   fi
 
   if [ ! -e "$spec_path" ]; then

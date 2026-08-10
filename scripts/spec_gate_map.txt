@@ -16,7 +16,7 @@
 
 services/decision-service/app => docs/spec-decision-assistant-week3.md
 services/decision-service/app => adr/0009-decisioning-assistant-design.md
-disclosure-service/app => docs/spec-disclosure-week4.md
-disclosure-service/app => adr/0012-decimal-minor-units-and-externalized-rule-config.md
+services/disclosure-service/app => docs/spec-disclosure-week4.md
+services/disclosure-service/app => adr/0012-decimal-minor-units-and-externalized-rule-config.md
 services/payment-service/app => docs/spec-payments-week5.md
 services/payment-service/app => adr/0013-payment-idempotency-and-tokenization.md

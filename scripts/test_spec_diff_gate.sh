@@ -59,9 +59,26 @@ check "code area with spec present passes" 0 "$repo" "services/foo-service/app =
 repo=$(new_repo)
 check "code area without required spec fails" 1 "$repo" "services/foo-service/app => spec.md"
 
-# --- 3. mapped code area absent from tree is skipped, not a failure ---------
+# --- 3. a mapped code area absent from the tree fails (never silently skips)
+# The map's own policy (see its header comment) is "only list a code area once
+# its paired spec/ADR has actually merged" — so an entry whose code path
+# resolves to nothing is either a typo (disclosure-service/app vs the real
+# services/disclosure-service/app) or a stale entry for deleted code. Either
+# way it must be loud, not swallowed.
 repo=$(new_repo)
-check "unmapped code area with no spec skipped" 0 "$repo" "services/bar-service/app => spec.md"
+check "code area absent from tree fails, not skips" 1 "$repo" "services/bar-service/app => spec.md"
+
+# --- 3b. typo'd code path (real code one level deeper) fails the same way ---
+# Reproduces the actual disclosure-service bug: the map said
+# `disclosure-service/app` while the real path is
+# `services/disclosure-service/app`. The typo'd prefix resolves to nothing, so
+# the intended spec pairing was never actually checked.
+repo=$(new_repo)
+mkdir -p "$repo/services/disclosure-service/app"
+echo "x" > "$repo/services/disclosure-service/app/main.py"
+git -C "$repo" add -A
+git -C "$repo" -c user.email=t@t -c user.name=t commit -qm "add disclosure-service"
+check "typo'd code path fails instead of silently skipping" 1 "$repo" "disclosure-service/app => spec.md"
 
 # --- 4. comments and blank lines are ignored ---------------------------------
 repo=$(new_repo)
