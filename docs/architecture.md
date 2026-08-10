@@ -68,8 +68,12 @@ the one shared Postgres.
 
 The gateway handles login (`/auth/*`) against the `users` table, mints an opaque session
 token stored in Redis, and forwards the resolved identity downstream as `X-User-*`
-headers. Downstream services trust those headers and do **not** re-check role on
-money-moving actions (the weak-authz gap).
+headers. Servicing-service trusts those headers and does **not** re-check role on
+money-moving actions (the weak-authz gap) — balance adjustments and fee waivers are
+unrestricted by role. `origination-service` is the exception: `app/authz.py` (ADR 0010)
+enforces officer-OR-owner authorization on application-scoped routes, fail-closed 404 on
+mismatch, and `app/kyc_gate.py` (ADR 0011) requires a passed KYC check before
+decision/offer/board.
 
 ## External integrations
 
@@ -86,11 +90,8 @@ These moved with the decomposition:
   (ADR 0008/0009) now persists inputs, model outputs, and reason codes; `reasons.py`
   derives reason text from the model's actual top negative feature attributions, not the
   old generic "purchasing history" fallback.
-- **Role authz**, previously "not restricted anywhere": `origination-service/app/authz.py`
-  (ADR 0010) enforces officer-OR-owner authorization on application-scoped routes,
-  fail-closed 404 on mismatch, and `app/kyc_gate.py` (ADR 0011) requires a passed KYC check
-  before decision/offer/board. Servicing-service (balance adjustments, fee waivers) is the
-  remaining gap — the gateway still does not enforce role there.
+- **Role authz on origination**, previously "not restricted anywhere" — see the *Auth*
+  section above for the current split (origination gated, servicing still not).
 
 ## Known unknowns (things the team has not had time to map)
 

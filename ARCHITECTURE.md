@@ -36,10 +36,11 @@ out to the new services over synchronous HTTP.
                                           Postgres (5432, shared)
 ```
 
-Only `gateway` (8000) and `frontend` (3000) are published to the host in
-`docker-compose.yml` (`ports:`); Postgres (5432) and Redis (6379) are also published for
-local tooling access. The six backend services are `expose:`-only on the compose network —
-not directly reachable from the host — so the gateway is the sole trust boundary in
+Of the application HTTP services, only `gateway` (8000) and `frontend` (3000) are
+published to the host in `docker-compose.yml` (`ports:`); the six backend services are
+`expose:`-only on the compose network. (Postgres 5432 and Redis 6379 are separately
+published, for local tooling access — not application traffic.) The backend services are
+not directly reachable from the host, so the gateway is the sole trust boundary in
 practice, even though it does not enforce role authorization on money actions (see *Auth &
 roles*). The port numbers in the table below are container-network ports, not host ports.
 
@@ -145,6 +146,22 @@ redaction), 0007 (RAG corpus hygiene), 0008 (retrievable decision records), 0009
 (mandatory KYC before decisioning), 0012 (Decimal minor units + externalized rule config),
 0013 (payment idempotency/tokenization — proposed, not yet implemented).
 
+## Status of major controls
+
+| Control | Status | Detail |
+|---------|--------|--------|
+| PII redactor consistency | Implemented | `redactor-drift` + `redaction-tests`, blocking |
+| Origination application authz (ADR 0010) | Implemented | officer-OR-owner, fail-closed 404 |
+| Servicing role authz | Not implemented | balance adjustments / fee waivers unrestricted by role |
+| Mandatory KYC gate (ADR 0011) | Implemented | blocks decision/offer/board pre-KYC |
+| Disclosure Decimal/minor units (ADR 0012) | Partially mitigated | `disclosures` is Decimal/`BIGINT`; `offers`/`loans`/`balances`/`payments` still `DOUBLE PRECISION` |
+| Origination fee externalized config | Implemented | `policies/fee_schedule.json`, fails closed |
+| TILA APR compute + vector gate | Implemented | `tila-vectors-gate`, blocking, pinned vector literals |
+| Decisioning assistant (LLM narrates, never scores) | Implemented | ADR 0009; credit decision stays deterministic |
+| Payment idempotency / tokenization (ADR 0013) | Proposed, not implemented | no idempotency key on `payments`; full PAN+CVV stored |
+| DB readiness gates | Implemented | `db-readiness-gate`, `decision-db-readiness-gate` |
+| LOS↔LSS boarding contract | Not implemented | direct cross-schema `INSERT`, no API/event (ADR 0002) |
+
 ## CI gates (`.github/workflows/ci.yml`)
 
 The `backend` matrix job runs pytest with `continue-on-error` — money-math test failures
@@ -154,8 +171,11 @@ there do not block the build (known-flaky, tolerated). Everything else listed is
 `gateway-trust-boundary-gate`, `compose-hardening-gate`, `kyc-enforcement-gate`,
 `tila-vectors-gate`, `db-readiness-gate`, `decision-db-readiness-gate`,
 `migration-numbering-gate`, `disclosure-lifecycle-gate`, `rag-eval-gate`, `frontend`,
-`secret-scan`, `doc-path-lint`, `docs-drift` (each with a `-tests` job guarding the gate's
-own logic). See `CLAUDE.md` for the exception to the tolerated-money-math rule
+`secret-scan`, `doc-path-lint`, `docs-drift`. Only the two doc gates carry a companion
+self-test job (`doc-path-lint-tests`, `docs-drift-tests`) that asserts the gate's own logic
+against a throwaway fixture, independent of the docs' actual state; `redaction-tests` is
+not a self-test of `redactor-drift` — it is its own independent blocking gate on the
+redaction logic. See `CLAUDE.md` for the exception to the tolerated-money-math rule
 (`tila-vectors-gate`) and what each gate protects.
 
 ## Local development
