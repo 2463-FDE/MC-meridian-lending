@@ -56,9 +56,11 @@ the one shared Postgres.
 ## Data stores
 
 - **Postgres** — users, applicants, applications, kyc_checks, decisions, offers, loans,
-  balances, payments, audit_logs. **Shared by all seven services** — the decomposition did
-  not split the schema; the extracted services reach into the same tables (kyc → kyc_checks,
-  decision → decisions, disclosure → offers, payment → payments).
+  balances, payments, audit_logs, plus Week 3+ additions decision_events (append-only
+  decisioning record, ADR 0008/0009) and disclosures (authoritative TILA record, ADR
+  0012/0007). **Shared by all seven services** — the decomposition did not split the
+  schema; the extracted services reach into the same tables (kyc → kyc_checks, decision →
+  decisions/decision_events, disclosure → offers/disclosures, payment → payments).
 - **Redis** — login sessions (gateway). Also intended for idempotency keys / jobs —
   never wired up (so `payment-service` still has no idempotency).
 
@@ -66,8 +68,12 @@ the one shared Postgres.
 
 The gateway handles login (`/auth/*`) against the `users` table, mints an opaque session
 token stored in Redis, and forwards the resolved identity downstream as `X-User-*`
-headers. Downstream services trust those headers and do **not** re-check role on
-money-moving actions (the weak-authz gap).
+headers. Servicing-service trusts those headers and does **not** re-check role on
+money-moving actions (the weak-authz gap) — balance adjustments and fee waivers are
+unrestricted by role. `origination-service` is the exception: `app/authz.py` (ADR 0010)
+enforces officer-OR-owner authorization on application-scoped routes, fail-closed 404 on
+mismatch, and `app/kyc_gate.py` (ADR 0011) requires a passed KYC check before
+decision/offer/board.
 
 ## External integrations
 
@@ -78,15 +84,20 @@ These moved with the decomposition:
 - **Card/ACH processor** — charge capture, now in `payment-service` (processor key
   hardcoded in its config).
 
+## Resolved since this doc was written
+
+- **Adverse-action reasons**, previously "we think... nowhere": `decision_events`
+  (ADR 0008/0009) now persists inputs, model outputs, and reason codes; `reasons.py`
+  derives reason text from the model's actual top negative feature attributions, not the
+  old generic "purchasing history" fallback.
+- **Role authz on origination**, previously "not restricted anywhere" — see the *Auth*
+  section above for the current split (origination gated, servicing still not).
+
 ## Known unknowns (things the team has not had time to map)
 
 - How balances are recomputed after a partial payment + a fee waiver on the same day —
   now mediated by servicing's `apply-payment`, called by `payment-service`.
 - Whether the processor settlement file actually ties out to the `payments` table.
-- Where adverse-action *reasons* are stored (we think… nowhere?) — `decision-service`
-  still records outcome only and returns a generic "purchasing history" reason.
-- Whether any servicing action is actually restricted by role (gateway still does not
-  enforce authz on money actions, across any of the seven services).
 - What happens when one of the new sync-HTTP calls (kyc/decision/disclosure, or
   payment→servicing) times out or half-fails — there is no timeout, retry, or compensation
   contract, and origination has no fallback if `decision-service` hangs.
