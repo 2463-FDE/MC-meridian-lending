@@ -80,6 +80,14 @@ git -C "$repo" add -A
 git -C "$repo" -c user.email=t@t -c user.name=t commit -qm "add disclosure-service"
 check "typo'd code path fails instead of silently skipping" 1 "$repo" "disclosure-service/app => spec.md"
 
+# --- 3c. malformed line (bare existing code path, no =>) fails loud ---------
+# Reproduces the bug this test guards: a line with no `=>` delimiter makes
+# code_glob and spec_path parse to the SAME string. If that path exists, both
+# the code-path check and the spec-path check pass — the gate reports clean
+# while requiring no spec/ADR at all.
+repo=$(new_repo)
+check "malformed line without => fails instead of self-validating" 1 "$repo" "services/foo-service/app"
+
 # --- 4. comments and blank lines are ignored ---------------------------------
 repo=$(new_repo)
 echo "spec" > "$repo/spec.md"

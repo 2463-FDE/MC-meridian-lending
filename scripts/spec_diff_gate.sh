@@ -35,8 +35,29 @@ while IFS= read -r line; do
   line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   [ -z "$line" ] && continue
 
+  case "$line" in
+    *'=>'*) ;;
+    *)
+      echo "MALFORMED: map line has no '=>' delimiter: $line (scripts/spec_gate_map.txt)" >&2
+      fail=1
+      continue
+      ;;
+  esac
+
   code_glob="$(echo "$line" | sed 's/[[:space:]]*=>.*//')"
   spec_path="$(echo "$line" | sed 's/.*=>[[:space:]]*//')"
+
+  if [ -z "$code_glob" ] || [ -z "$spec_path" ]; then
+    echo "MALFORMED: map line has empty code path or spec path: $line (scripts/spec_gate_map.txt)" >&2
+    fail=1
+    continue
+  fi
+
+  if [ "$code_glob" = "$spec_path" ]; then
+    echo "MALFORMED: map line's code path and spec path are identical: $line (scripts/spec_gate_map.txt)" >&2
+    fail=1
+    continue
+  fi
 
   # shellcheck disable=SC2086
   if ! compgen -G "$code_glob"/* >/dev/null 2>&1 && [ ! -e "$code_glob" ]; then
