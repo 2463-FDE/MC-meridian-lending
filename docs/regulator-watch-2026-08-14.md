@@ -38,6 +38,7 @@ raises them); **cross-cutting** is a standing enforcement lens, not a rule that 
 | **EFTA / Reg E** (CFPB) | `payment-service` — ACH + card-on-file recurring, auth + error resolution | active *(pending week-5 payment path)* |
 | **BSA/AML + OFAC** (FinCEN / Treasury) | `kyc-service` — CIP, sanctions screening | active |
 | **PCI-DSS** (PCI SSC — industry standard, not a govt reg) | `payment-service` — card data storage | active *(current debt: PAN/CVV plaintext — `docs/debt-log.md` D13 (stored, `payments.pan`/`cvv`) + D5 (logged); accepted in `adr/0003-store-card-data-for-convenience.md`)* |
+| **PCI-DSS SAQ eligibility** (PCI SSC — self-assessment questionnaire type, not a separate reg) | `payment-service` — determines which SAQ Meridian must complete | active *(storing PAN+CVV in `payments.pan`/`cvv` disqualifies every reduced-scope SAQ (A, A-EP, B, B-IP, C, P2PE) — those all require the merchant to NOT store cardholder data post-authorization. Current architecture is eligible only for **SAQ D**, the full ~300-control questionnaire covering all 12 PCI-DSS requirements, not a lighter form. This is a consequence of the same debt as the row above (D13/D5, `adr/0003`), not a separate gap — noted here because "which SAQ" is the concrete artifact a PCI assessor/acquirer will ask for, and the answer has been implicit rather than stated.)* |
 | **MLA + SCRA** (DoD / CFPB) | LOS pricing — 36% MAPR cap, servicemember rate caps | monitor |
 | **GLBA privacy + FTC Safeguards** | PII redactor, data-security posture | monitor |
 | **FDCPA / Reg F** (CFPB) | `servicing-service` — delinquency/collections | monitor *(only if we collect)* |
@@ -97,6 +98,11 @@ highest-signal single event on this page.
 - **Still open:** the **Reg B effects-test removal** (compliance date 2026-07-21, already
   in effect) — Priya's fair-lending-testing reassessment and adverse-action-notice-mechanics
   confirmation are not yet recorded as done. Second week carrying this open. Owner: Priya.
+- **New this issue — PCI-DSS SAQ eligibility named explicitly.** Storing PAN+CVV
+  (`docs/debt-log.md` D13/D5, accepted `adr/0003`) means Meridian is eligible only for
+  **SAQ D** — the full ~300-control questionnaire — not any reduced-scope SAQ. Not a new
+  gap; the underlying debt was already tracked. This makes the concrete downstream artifact
+  (which form an assessor/acquirer will require) explicit rather than implicit.
 - Reg Z's 2026 numbers remain resolved no-action: our intake caps loans at **$50,000**,
   below the **$73,400** TILA-exemption ceiling.
 - No CFPB circular activity in 2026.
@@ -130,5 +136,6 @@ Free to run, so the enforced thing is the freshness metric, not the tool:
 | 2026-08-07 | initial | First issue. Reg B effects-test removal (HIGH), Reg Z $73,400 exemption (MEDIUM), §1071 refocus (LOW), no 2026 circulars. Added the full **watch universe** (11 rows) — FCRA/Reg V, EFTA/Reg E and BSA/AML scoped as active but not yet swept for 2026 movement. |
 | 2026-08-07 | correction | Added **Circular 2023-03 withdrawal (2025-05-12)** as the lead *What moved* entry — the week-3 assistant cited it; recite 12 CFR 1002.9 instead. |
 | 2026-08-07 | review | Gave each unswept active row an owner, determination owner, target sweep date, and follow-up ticket slot. Grounded brownfield claims in repo paths. Moved UNVERIFIED marker onto the exact unverified claim (FR doc 2026-07804). |
-| 2026-08-14 | fix landed | Circular 2023-03 stale citations fixed at all 4 sites (branch `fix/circular-2023-03-citation`) — recited as **12 CFR 1002.9**. Closes last issue's lead correction. |
+| 2026-08-14 | fix landed | Circular 2023-03 stale citations fixed at all 4 sites (branch `docs/architecture-refresh`, commit `5994ee0`, PR open, not yet merged) — recited as **12 CFR 1002.9**. Closes last issue's lead correction. |
 | 2026-08-14 | sweep | Swept the three carried-forward active rows: **FCRA/Reg V**, **EFTA/Reg E**, **BSA/AML+OFAC** (BSA/AML pulled forward from its planned 2026-08-21 target). All three resolve **no action** for 2026 — see *What moved* and the sweep-resolution table. Reg B effects-test removal carried forward **still open** — Priya's reassessment not yet recorded as done, second week on the agenda. FR doc 2026-07804 and FR doc 2025-22772 both remain UNVERIFIED at the exact-text level (FR host blocks automated fetch); findings above are sourced to CFPB pages and search-result summaries, not a manual FR read. |
+| 2026-08-14 | addition | Added **PCI-DSS SAQ eligibility** as its own watch-universe row: storing PAN+CVV disqualifies every reduced-scope SAQ, so Meridian is eligible only for **SAQ D** (full ~300-control form). Not a new gap — same debt as the PCI-DSS row above (`docs/debt-log.md` D13/D5, `adr/0003`) — made explicit because "which SAQ" is the concrete artifact a PCI assessor/acquirer will ask for. |
