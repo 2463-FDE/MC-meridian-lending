@@ -1,6 +1,7 @@
-# ADR 0014: Servicing Money Controls — Authorization, Maker-Checker, and a Balance Ledger
+# ADR 0014: Servicing Money Controls — Authorization, a Balance Ledger, and Deferred Approval
 
-- **Status:** Proposed
+- **Status:** Proposed — the four decisions below rest on business answers Lending Ops
+  confirmed in writing on 2026-08-12; the ADR itself is awaiting engineering review
 - **Date:** 2026-08-12
 - **Deciders:** Engineering, with Lending Ops (Dana Whitfield, VP Lending Ops) as requesting
   stakeholder
@@ -26,7 +27,9 @@ and `balance.waive_fee` (`app/balance.py:35-56`) take no caller identity at all.
 authenticates the session and forwards authoritative `X-User-Id` / `X-User-Role` after
 stripping any client copy (`services/gateway/app/main.py:160-171`), but `/lss/*` and
 `/payments` gate on `_require_user` only (`gateway/app/main.py:193-197`). Borrower `maria` can
-zero a stranger's balance. Loan ids are serial, so reads
+zero a stranger's balance. **Lending Ops confirms this is externally reachable**: the borrower
+portal sits behind the same gateway as the internal application, so a borrower login is on the
+public internet. Loan ids are serial, so reads
 (`services/servicing-service/app/routers/loans.py:61-77`, `main.py:88-94`) enumerate every
 customer. This is debt **D8**, Critical, and ADR 0010 deferred it for servicing on the grounds
 that no identity was bound to the resource.
@@ -41,7 +44,8 @@ with an overwritten `updated_at` (`db/init/001_schema.sql:117-122`). No actor, d
 value, or reason is stored. `audit_logs` is an ordinary mutable table with a `deleted_at`
 column (`001_schema.sql:137-144`), no servicing code writes it, and its rows are
 `UPDATE`/`DELETE`-able — debt **D20**. So "why is account 7781 at this number?" is answerable
-today only as "that is the number", plus a timestamp. The one genuinely append-only table in
+today only as "that is the number", plus a timestamp. This is not hypothetical: a SOX
+walkthrough on the client's side assumes an adjustment trail exists. The one genuinely append-only table in
 this schema is `decision_events` (`001_schema.sql:148-179`): serial primary key, JSONB
 payload, a `BEFORE UPDATE OR DELETE` trigger and a `BEFORE TRUNCATE` trigger that both raise.
 
@@ -86,8 +90,8 @@ Applied per route:
 
 | Route | Gate |
 |---|---|
-| `POST /accounts/{id}/adjust-balance` | `_MONEY_ROLES`, and maker-checker (Decision 2) |
-| `POST /accounts/{id}/waive-fee` | `_MONEY_ROLES`, and maker-checker (Decision 2) |
+| `POST /accounts/{id}/adjust-balance` | `_MONEY_ROLES`; recorded posting (Decision 3); approval deferred (Decision 2) |
+| `POST /accounts/{id}/waive-fee` | `_MONEY_ROLES`; recorded posting (Decision 3); approval deferred (Decision 2) |
 | `POST /accounts/{id}/apply-payment` | internal-service only, per ADR 0013 |
 | `POST /accounts/{id}/late-fee` | internal-service only — rule-driven, no operator |
 | `GET /accounts/{id}/balance`, `GET /loans/{id}`, `/loans/{id}/payments`, `/loans/{id}/schedule` | `_STAFF_ROLES`, or the owning borrower |
@@ -98,9 +102,11 @@ It derives from data that exists: `loans.app_id` (`001_schema.sql:99-114`) reach
 (`001_schema.sql:6-15`). A loan whose `app_id` is `NULL` — legacy rows the partial unique
 index deliberately tolerates — has no derivable owner, so it fails closed to staff.
 
-**Both sets are the assumptions put to Lending Ops** in the week-6 client email, questions
-2(a) and 2(c): CSRs and admins move money, underwriters and borrowers do not, borrowers read
-their own account only. A different answer changes the two set literals, not the design.
+**Both sets are confirmed by Lending Ops** (2026-08-12, answering the week-6 client email):
+CSRs and admins move money, underwriters and borrowers do not, borrowers read their own account
+only, and **no supervisor role is to be invented** — none exists today and creating one is work
+the client would rather spend elsewhere. That last point is why maker and checker draw from one
+set when approval does arrive.
 
 **Options considered**
 
@@ -116,39 +122,47 @@ becomes the third repetition that would justify extraction. The divergent role s
 substantive part of that risk: a reader who assumes servicing's `authz.py` is origination's
 will assume the wrong set, so each set carries the reason it differs.
 
-### Decision 2 — Maker-checker binds the two manual discretionary moves only
+### Decision 2 — Record every discretionary move now; approve them next cycle
 
-We will require a second approver for `adjust-balance` and `waive-fee`, and for nothing else.
-A maker in `_MONEY_ROLES` records a request; a different person in the same set approves it;
-the balance moves on approval, not on request. Maker and checker are the same role set — a
-CSR's adjustment is approved by another CSR or an admin, which is what makes the control
-workable on a floor of representatives rather than dependent on a supervisor being present.
-They cannot be the same person: compared on `users.id`, not on role, so holding two roles or
-two sessions does not permit self-approval. Approval and movement commit together.
+We will make every manual balance move a recorded fact immediately, and we will not gate it on
+a second person in this cycle. Each `adjust-balance` and `waive-fee` writes the actor, the
+figure before, the figure after, and a reason (Decision 3). Nothing waits for an approval,
+because there is no approval state to wait in yet.
 
-**No override, pending one open question.** There is no break-glass path in this decision. The
-week-6 client email offers to design one — recorded and reviewed after the fact rather than
-blocked — if Lending Ops says a representative working alone must be able to move a balance.
-That is a design change rather than a configuration change, so it is named here as the one
-answer that would reopen this decision.
+Lending Ops holds the approval workflow deliberately, with the numbers to support it: about
+**30 balance adjustments and 15 fee waivers a week across 9 representatives, with 3 people who
+could approve**. A mandatory second approver at that ratio slows the floor before anything has
+been measured, and the pending state, the queue, and the break-glass path it needs are a build
+of their own rather than a flag on this one.
 
-`apply-payment` and `late-fee` are excluded on a stated principle: **maker-checker binds
-discretion, not automation.** `apply-payment` credits an amount read off a captured payment
-row (ADR 0013), and `late-fee` applies a rule. Neither has an operator-chosen amount for a
-second human to check, and both are called by another service, so a pending-approval state
-would stall a payment mid-flow.
+**The approval design is decided even though it is deferred**, so the ledger does not have to
+change shape to accept it later. When it is built: any other CSR or admin approves, never the
+same person — compared on `users.id`, not on role, so holding two roles or two sessions does
+not permit self-approval — and a break-glass move is permitted, recorded, and reviewed after
+the fact rather than blocked. `balance_postings.approved_by` exists from the first migration and
+stays `NULL` until then, so turning approval on adds a write path and a queue, not a schema
+change or a backfill.
+
+The scope ruling holds regardless of timing: **approval binds discretion, not automation.**
+`apply-payment` credits an amount read off a captured payment row (ADR 0013) and `late-fee`
+applies a rule; neither has an operator-chosen amount for a second human to check, and both are
+called by another service, so a pending state there would strand a captured payment. A
+representative reversing a late fee by hand — which happens — goes through `waive-fee` and gets
+that path's record and reason. There is no separate manual late-fee flow.
 
 **Options considered**
 
 | Option | Why rejected |
 |---|---|
-| **A. Every money-affecting endpoint** | Rejected. It puts a human approval in the middle of `apply-payment`, which is on the borrower's payment path and is invoked by `payment-service` — money would be captured and then wait. It also gold-plates two routes that have no discretionary input. |
-| **B. Threshold-based — second approval over a dollar amount** | Rejected for now. It needs a threshold nobody has set, a policy file to hold it, and a currency comparison in the gate, and it leaves small adjustments uncontrolled — which is the shape of the loss this control exists to prevent. The ledger (Decision 3) makes every move attributable regardless of size, so the threshold buys less than it costs. It is the natural later refinement once the two-approver flow is in use. |
-| **C. Chosen: manual discretionary moves only** | Smallest control that covers the operator-chosen amounts, with no effect on automated paths. |
+| **A. Mandatory second approver now, on the two manual moves** | Rejected by Lending Ops on measured operational grounds: 45 discretionary moves a week against 3 available approvers would queue the floor, and the pending state, queue, and break-glass path are a build that displaces work already committed this cycle. It is not rejected on merit — it is the next cycle's card, with its design fixed here. |
+| **B. Threshold-based — second approval over a dollar amount** | Rejected. A threshold invites splitting one adjustment into two under it, which is the client's own objection as well as ours, and it leaves small moves uncontrolled. There is a $150-per-account-per-month waiver guideline in the ops manual, but it is recorded and displayed rather than enforced (Decision 3), so it is guidance to a representative, not a gate. |
+| **C. No control at all until the dashboard is built** | Rejected. The record is the part that cannot be reconstructed afterwards, so deferring it costs history that is gone for good. Approval can start late; recording cannot start late. |
+| **D. Chosen: record now, approve next cycle, design fixed now** | Delivers the attributable trail this week, keeps the floor moving at its measured volume, and leaves the approval build additive rather than a redesign. |
 
-The accepted cost is operational: two people in `_MONEY_ROLES` are needed to correct a
-balance, so a lone representative on shift cannot. Lending Ops confirms the role sets and the
-break-glass question before build.
+The accepted cost is real and worth stating plainly: **for one cycle, a single representative
+can still move a balance alone.** What changes is that the move is attributable, reversible by a
+correcting posting, and reviewable after the fact. The control that prevents it rather than
+recording it is scheduled, not designed away.
 
 ### Decision 3 — Every balance mutation writes a row to one append-only ledger
 
@@ -162,20 +176,50 @@ CREATE TABLE balance_postings (
     loan_id       INTEGER NOT NULL REFERENCES loans(id),
     column_name   TEXT NOT NULL,        -- 'balance' | 'past_due'
     delta_minor   BIGINT NOT NULL,      -- signed, integer minor units (Decision 4)
-    reason_code   TEXT NOT NULL,
+    before_minor  BIGINT NOT NULL,      -- figure before this posting
+    after_minor   BIGINT NOT NULL,      -- figure after; before + delta, stored not derived
+    entry_type    TEXT NOT NULL,        -- 'opening' | 'adjustment' | 'waiver' | 'payment' | 'late_fee'
+    reason_code   TEXT NOT NULL,        -- ops-manual code, or 'other' with reason_text set
+    reason_text   TEXT,                 -- required when reason_code = 'other'
     detail        JSONB NOT NULL,       -- identifier-free, per ADR 0007
     made_by       INTEGER REFERENCES users(id),
-    approved_by   INTEGER REFERENCES users(id),
+    approved_by   INTEGER REFERENCES users(id),   -- NULL until the approval workflow ships
     payment_id    INTEGER REFERENCES payments(id),
     posted_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- BEFORE UPDATE OR DELETE and BEFORE TRUNCATE triggers raising, per decision_events.
 ```
 
+`before_minor` and `after_minor` are stored rather than derived. A sum can be recomputed, but
+Lending Ops asked for the figure before and the figure after on the record itself, and that is
+what a controller reads a row for — a reconstruction that depends on replaying every prior
+posting is not the same artifact.
+
+**The reason is required, and the code list is the client's.** Lending Ops sends the ops-manual
+codes; until they arrive, `reason_code = 'other'` with free-text `reason_text` is the only
+value, and `'other'` remains permanently available as the fallback once the list exists. So the
+column is a list plus an escape hatch, never a closed enum — a representative who cannot find
+their case must not be forced into a wrong code to complete a correction.
+
+**The ledger opens with a labelled opening posting.** No history exists to backfill and none can
+be reconstructed, so at cutover each account gets one `entry_type = 'opening'` posting carrying
+today's stored balance. It is labelled as the opening figure precisely because that figure may be
+wrong — the D3 concurrency defect is the same one behind the three double-charge tickets. A
+reconciliation against payment records before cutover is a separate project, carded rather than
+done, on Lending Ops' explicit preference for an honest line in the sand over a reconstructed
+history nobody can defend.
+
 `balances.balance` remains as a cached projection so read paths and the reconciliation totals
 keep working, and `SUM(delta_minor)` over the ledger is the authority. Any posting and the
 `UPDATE balances` it authorizes commit in one transaction, so a recorded movement that did not
 happen — and a movement with no record — are both unrepresentable.
+
+**The $150 waiver guideline is recorded, not enforced.** The ops manual sets $150 per account per
+month on fee waivers with escalation above it, and the system has never enforced it. This ADR
+does not start: the dashboard shows the representative the limit and the month's total to date,
+and the reason is captured either way. Enforcement is carded. Encoding an unenforced guideline as
+a hard gate would change what representatives can do on the day the ledger ships, which is a
+policy change disguised as a logging change.
 
 **On the seam with ADR 0013.** ADR 0013 calls `payment_applications` "the ledger seam: a
 future ledger reads this table rather than re-modelling". This is that ledger, and the two do
@@ -196,10 +240,11 @@ migration ships first, the payment path gains a posting insert; if this one ship
 
 ### Decision 4 — The ledger is integer minor units; `balances` stays float for now
 
-We will store `delta_minor` as `BIGINT` minor units, per ADR 0012's precedent and ADR 0013's
-rule that new money columns use minor units while existing float columns are left alone. The
-ledger is the integer of record; the `balances` projection stays `DOUBLE PRECISION` and is
-converted on write.
+We will store `delta_minor`, `before_minor`, and `after_minor` as `BIGINT` minor units, per
+ADR 0012's precedent and ADR 0013's rule that new money columns use minor units while existing
+float columns are left alone. The ledger is the integer of record; the `balances` projection
+stays `DOUBLE PRECISION` and is converted on write. The opening posting is the one place a
+float becomes the integer of record, and it is labelled as such.
 
 **Options considered**
 
@@ -220,17 +265,24 @@ compare an exact sum to a float cache with an explicit tolerance.
 
 - A borrower can no longer move money on any account, and cannot read another customer's loan.
   D8(b) closes.
-- A discretionary balance correction requires two people, and names both.
-- "Why is account 7781 at this number?" becomes answerable: every delta carries actor,
-  approver, reason, and time, in a table the database refuses to let anyone edit.
+- Every discretionary balance correction names the person who made it, from the day the ledger
+  ships.
+- "Why is account 7781 at this number?" becomes answerable from cutover forward: every posting
+  carries the actor, the figure before, the figure after, the reason, and the time, in a table
+  the database refuses to let anyone edit.
+- Lending Ops can answer Sam's SOX walkthrough with a date rather than a gap: history starts at
+  cutover, and nothing before it is claimed.
 - The reconciliation totals gain a third number that must tie out, so a future divergence is
   attributable to a loan rather than only visible in aggregate.
 - ADR 0010's servicing deferral ends without the identity programme it was waiting on.
 
 ### Negative / tradeoff (accepted)
 
-- **Two people are needed to correct a balance.** A lone representative on shift cannot, and
-  a mistake takes longer to fix than it does today.
+- **For one cycle, a single representative can still move a balance alone.** Approval is
+  deferred by the client's decision, so this cycle buys attribution rather than prevention. The
+  posting makes the move visible and a correcting posting reverses it, but nothing stops it.
+- **The $150 waiver guideline stays unenforced**, now visibly so — the dashboard shows a limit
+  the system does not hold, which is more honest than today and still not a control.
 - **A second authz copy exists**, free to drift from origination's. Logged as debt; the
   redactor's `redactor-drift` job is the precedent for holding it if it becomes a third copy.
 - **`balances` stays a mutable float column.** It is a projection now, but the float and the
@@ -248,6 +300,9 @@ compare an exact sum to a float cache with an explicit tolerance.
 - One new table and two triggers, matching `decision_events`.
 - Four routes gain a header-derived gate; two become internal-only, which ADR 0013 already
   requires for `apply-payment`.
+- `approved_by` ships `NULL` on every row until the approval workflow lands, so that build adds
+  a write path rather than a migration.
+- A manual late-fee reversal is a waiver, not a new route.
 
 ---
 
@@ -277,14 +332,18 @@ re-model it.
 
 **Cost.** Storage only.
 
-**Operational impact.** Lending Ops needs an approver roster before build, and an answer on
-the break-glass path for the case where an adjustment is urgent and one person is available.
-The runbook gains the reason-code list.
+**Operational impact.** No approver roster is needed this cycle, which is the point of the
+deferral — the floor keeps working at its measured 45 discretionary moves a week. Lending Ops
+sends the ops-manual reason codes; the runbook gains that list, the cutover date, and the
+sentence that history begins there. History is queryable from cutover forward and retained for
+seven years, which Sam confirms as the control owner.
 
 **Testing impact.** Characterization tests pin today's behaviour before any of this changes
-(the companion comprehension PR). New coverage: role and ownership matrix per route, maker
-equals checker refused, posting and projection agreeing after each mutation, the append-only
-triggers refusing `UPDATE`, `DELETE`, and `TRUNCATE`. The trigger tests need real Postgres,
+(the companion comprehension PR). New coverage: role and ownership matrix per route, posting
+and projection agreeing after each mutation, `before_minor + delta_minor = after_minor` on
+every row, a reason required on every manual move, and the append-only triggers refusing
+`UPDATE`, `DELETE`, and `TRUNCATE`. Same-person approval is not testable this cycle because
+there is no approval path; that test lands with the workflow. The trigger tests need real Postgres,
 not SQLite. Expect a dedicated blocking CI job for the authorization matrix, on the model of
 `adr-0010-authz-gate` and `kyc-enforcement-gate`.
 
@@ -294,8 +353,10 @@ not SQLite. Expect a dedicated blocking CI job for the authorization matrix, on 
 
 Later PRs, in this order. Each is independently mergeable.
 
-1. **Authorization** — `servicing-service/app/authz.py` plus the per-route gates from
-   Decision 1, and the internal-service gate on `late-fee`. No schema. Closes D8(b).
+1. **Authorization — this cycle, its own PR.** `servicing-service/app/authz.py` plus the
+   per-route gates from Decision 1, and the internal-service gate on `late-fee`. No schema.
+   Closes D8(b). Lending Ops asked for this one separately and immediately, and confirms the
+   endpoints are externally reachable, so it does not wait for anything below it.
 2. **Ledger** — migration adding `balance_postings` and its two triggers, at the next free
    number after ADR 0013's unbuilt migrations land (0013's plan cites 0016–0019 and `main`
    already holds an unrelated `0016`, so the number is read at write time, not pinned here).
@@ -304,20 +365,23 @@ Later PRs, in this order. Each is independently mergeable.
 3. **Posting on every mutation** — `balance.py` writes a posting and the projection in one
    transaction. Both `apply_payment` call sites must be covered: the HTTP route
    (`main.py:84`) and the in-process caller (`app/payments.py:79`).
-4. **Maker-checker** — the request-and-approve flow for `adjust-balance` and `waive-fee`.
-5. **Dashboard** — the original ask, now on top of gated routes and an audit trail.
+4. **Approval workflow — next cycle, carded.** The request-and-approve flow, its queue, and
+   the break-glass path, to the design fixed in Decision 2.
+5. **Dashboard** — the original ask, now on top of gated routes and a recorded trail.
 6. **Deferred, own ADR:** converting the remaining float money columns (D2), and the
    `audit_logs` append-only fix (D20).
 
-Steps 1–4 are the control. Step 1 alone removes the Critical finding, so it should not wait
-for the ledger.
+Steps 1–3 are this cycle's control. Step 1 alone removes the Critical finding, so it does not
+wait for the ledger. Steps 4 onward, plus borrower notifications, historical reconciliation, and
+waiver-limit enforcement, are carded in `docs/cards-week6-servicing.md` at Lending Ops' request
+so they are planned rather than dropped.
 
 ---
 
 ## Rollback strategy
 
-Steps 1, 3, and 4 are code and revert cleanly; behaviour returns to today's, which is why
-step 1 shipping alone is safe. Step 2 is additive: `balance_postings` can be dropped, or left
+Steps 1 and 3 are code and revert cleanly; behaviour returns to today's, which is why step 1
+shipping alone is safe. Step 2 is additive: `balance_postings` can be dropped, or left
 in place unwritten, with no effect on any existing read.
 
 The append-only triggers are the exception, and deliberately so — once postings exist they
@@ -334,10 +398,12 @@ the reason that table is trusted.
 | Owner-scoped reads break the demo or a script that calls `/lss/*` with a borrower or unset role | Run the demo flow against the gated build before merge; the authorization matrix test enumerates every route and role, including unset |
 | The projection drifts from `SUM(delta_minor)` — a write path bypasses the posting | Reconciliation compares the two with an explicit float tolerance and reports the gap; a bypass is a failing test, not a silent divergence |
 | The transaction is wrong because servicing has never needed one — `db.py` is `autocommit = True` on a module-level shared connection | Treat the transactional write as the risky part of step 3: explicit transaction, reviewed against the shared-connection lifetime, with a concurrency test that a rolled-back posting leaves the projection untouched |
-| Maker-checker is bypassed operationally — one person uses two accounts | Compare on `users.id`, record both ids on the posting, and make same-actor approval detectable in the ledger even if policy is broken |
-| A representative cannot fix a balance quickly and falls back to raw SQL, which no gate sees | Postgres role separation is out of scope here; the mitigation is operational — the runbook names the approval path and reconciliation surfaces a direct write as a projection-versus-ledger gap |
+| A representative moves a balance they should not have, during the cycle before approval exists | Accepted by the client with the volume figures on the record. Mitigated by attribution rather than prevention: actor, before, after, and reason on every posting, and a correcting posting to reverse. The approval workflow is carded, not dropped |
+| The deferral becomes permanent — the card is never picked up | It is written down with an estimate, a dependency, an owner, and a start, at the client's own request, and this ADR's Decision 2 states the design so the next cycle starts from a decision rather than a discussion |
+| A representative cannot fix a balance quickly and falls back to raw SQL, which no gate sees | Postgres role separation is out of scope here; the mitigation is operational — reconciliation surfaces a direct write as a projection-versus-ledger gap, and it is a reason the ledger ships before the approval flow rather than with it |
 | ADR 0013's migrations land in a different order and re-model the payment posting | The seam is stated in Decision 3; whichever ships second adds the missing insert to the existing transaction rather than a second table |
-| The reason code becomes a free-text field carrying PII | Fixed code list plus identifier-free JSONB per ADR 0007; the existing redaction gates cover the log path |
+| Free-text reasons carry PII — and free text is the only option until the client's code list arrives | `reason_text` is treated as operator-entered content, not a system field: identifier-free JSONB per ADR 0007 alongside it, and the existing per-service redactor covers the log path. The code list narrows the exposure to the `'other'` case once it lands |
+| The `'other'` escape hatch becomes the default and the codes go unused | Report the `'other'` share back to Lending Ops after the first month; a high share means the list is wrong, not that representatives are |
 
 ---
 
