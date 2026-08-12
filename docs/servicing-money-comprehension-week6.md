@@ -89,7 +89,7 @@ The gateway authenticates and forwards an authoritative role. `_proxy_raw` strip
 client-supplied `X-User-Id` / `X-User-Role` and re-sets both from the session
 (`services/gateway/app/main.py:160-171`), so a downstream service could trust the header. Servicing
 never reads it. The `/lss/*` proxy calls `_require_user` and nothing else
-(`gateway/app/main.py:421-425`), as does `/payments` (`:457-464`), and `_require_user`
+(`services/gateway/app/main.py:421-425`), as does `/payments` (`:457-464`), and `_require_user`
 (`:193-197`) checks only that a session exists.
 
 Inside servicing, `adjust_balance` and `waive_fee` declare `x_user_role: Optional[str] =
