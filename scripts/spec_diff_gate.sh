@@ -15,9 +15,21 @@
 # `services/disclosure-service/app`) and must fail loud, the same as a missing
 # spec. Remove the line instead of leaving it to silently no-op.
 #
+# The map is also audited for COVERAGE, because a gate that checks only what
+# someone remembered to list reports "clean" over an unguarded control: the
+# merged Week 1 LLM-client and per-service redactor pairings were absent from
+# the map, so deleting them kept this gate green. Every tracked `adr/*.md` and
+# `docs/spec-*.md` must therefore be either on the right-hand side of a map
+# line or carry an `# EXEMPT: <doc> — <reason>` line in the map. A stale
+# exemption (doc no longer tracked) or an exemption for a doc that is also
+# mapped fails too, so retiring or implementing a doc forces the map to change
+# with it.
+#
 # Usage: scripts/spec_diff_gate.sh [MAP_FILE]   (defaults to scripts/spec_gate_map.txt)
-# Exit 0 = every mapped line's code path and required spec/ADR both exist.
-# Exit 1 = one or more required paths (code or spec/ADR) are missing.
+# Exit 0 = every mapped line's code path and required spec/ADR both exist, and
+#          every spec/ADR is mapped or explicitly exempt.
+# Exit 1 = a required path (code or spec/ADR) is missing, or a spec/ADR is
+#          neither mapped nor exempt, or an exemption is malformed/stale.
 # Exit 2 = usage / map file not found.
 set -uo pipefail
 
@@ -30,7 +42,36 @@ if [ ! -f "$MAP_FILE" ]; then
 fi
 
 fail=0
+mapped=""   # newline-delimited spec/ADR paths required by some map line
+exempt=""   # newline-delimited spec/ADR paths declared to have no code path
+
 while IFS= read -r line || [ -n "$line" ]; do
+  # An exemption is read BEFORE comments are stripped: it is a comment to the
+  # pairing loop but data to the coverage audit below. The token is anchored to
+  # a line-leading '# EXEMPT:' with exactly one '# ' prefix, so the map's own
+  # header prose can describe the syntax (indented as an example, or inside
+  # backticks) without the description itself parsing as an exemption. A
+  # near-miss spelling ('#EXEMPT:', '#  EXEMPT:') is not recognized, which
+  # fails closed: the doc it meant to excuse is then reported UNMAPPED.
+  trimmed="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  case "$trimmed" in
+    '# EXEMPT:'*)
+      rest="${trimmed#*EXEMPT:}"
+      rest="$(echo "$rest" | sed 's/^[[:space:]]*//')"
+      exempt_doc="${rest%% *}"
+      # A bare em dash or hyphen is a delimiter, not a reason.
+      exempt_reason="$(echo "${rest#"$exempt_doc"}" | sed 's/^[^[:alnum:]]*//;s/[[:space:]]*$//')"
+      if [ -z "$exempt_doc" ] || [ -z "$exempt_reason" ]; then
+        echo "MALFORMED: exemption needs '<doc_path> — <reason>': $trimmed (scripts/spec_gate_map.txt)" >&2
+        fail=1
+        continue
+      fi
+      exempt="$exempt
+$exempt_doc"
+      continue
+      ;;
+  esac
+
   line="${line%%#*}"
   line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   [ -z "$line" ] && continue
@@ -59,6 +100,11 @@ while IFS= read -r line || [ -n "$line" ]; do
     continue
   fi
 
+  # Only a well-formed line grants coverage in the audit below — a malformed
+  # line must not double as the reason a spec/ADR looks mapped.
+  mapped="$mapped
+$spec_path"
+
   # shellcheck disable=SC2086
   if ! compgen -G "$code_glob"/* >/dev/null 2>&1 && [ ! -e "$code_glob" ]; then
     echo "MISSING: mapped code path does not exist: $code_glob (scripts/spec_gate_map.txt — typo, or a stale entry for deleted code)" >&2
@@ -72,7 +118,37 @@ while IFS= read -r line || [ -n "$line" ]; do
   fi
 done < "$MAP_FILE"
 
+# --- coverage audit: no spec/ADR may sit outside the map unaccounted for -----
+in_set() { printf '%s\n' "$2" | grep -qxF -- "$1"; }
+
+while IFS= read -r doc; do
+  [ -z "$doc" ] && continue
+  is_mapped=0; is_exempt=0
+  in_set "$doc" "$mapped" && is_mapped=1
+  in_set "$doc" "$exempt" && is_exempt=1
+
+  if [ "$is_mapped" -eq 1 ] && [ "$is_exempt" -eq 1 ]; then
+    echo "CONFLICT: $doc is both mapped and exempt — drop the exemption (scripts/spec_gate_map.txt)" >&2
+    fail=1
+  elif [ "$is_mapped" -eq 0 ] && [ "$is_exempt" -eq 0 ]; then
+    echo "UNMAPPED: $doc is neither mapped to a code path nor exempt — add a map line for the code it obligates, or an '# EXEMPT: $doc — <reason>' line (scripts/spec_gate_map.txt)" >&2
+    fail=1
+  fi
+done <<EOF
+$(git ls-files -- 'adr/*.md' 'docs/spec-*.md' 2>/dev/null)
+EOF
+
+while IFS= read -r doc; do
+  [ -z "$doc" ] && continue
+  if ! git ls-files --error-unmatch -- "$doc" >/dev/null 2>&1; then
+    echo "STALE: exemption names $doc, which is not a tracked file (scripts/spec_gate_map.txt)" >&2
+    fail=1
+  fi
+done <<EOF
+$exempt
+EOF
+
 if [ "$fail" -eq 0 ]; then
-  echo "spec_diff_gate: all mapped code areas have their required spec/ADR."
+  echo "spec_diff_gate: all mapped code areas have their required spec/ADR, and every spec/ADR is mapped or exempt."
 fi
 exit "$fail"

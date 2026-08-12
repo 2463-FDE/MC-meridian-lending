@@ -1,6 +1,6 @@
-# spec_diff_gate.sh map — one entry per line: <code_path_glob> => <required_spec_or_adr_path>
+# spec_diff_gate.sh map — one entry per line: <code_path> => <required_spec_or_adr_path>
 #
-# A line means: if any file matches <code_path_glob> in this tree, then
+# A line means: if <code_path> exists in this tree, then
 # <required_spec_or_adr_path> must also exist. It does NOT require the two be
 # touched in the same PR — spec and implementation land in separate PRs/weeks
 # here on purpose (see docs/kb.md weekly cadence). This is an existence check,
@@ -13,10 +13,61 @@
 #
 # Add a line here when a week's spec+ADR merges and covers a code path that
 # didn't have one yet. Remove a line only if the code path is deleted.
+#
+# COVERAGE IS AUDITED. Every tracked adr/*.md and docs/spec-*.md must appear
+# either on the right-hand side of a line below or in an `# EXEMPT:` line, or
+# the gate fails — so a merged spec/ADR with code-path obligations cannot be
+# silently left out of the map. Exemption syntax, reason mandatory:
+#     # EXEMPT: <doc_path> — <why it has no enforceable code path>
+# An EXEMPT entry for a doc that is also mapped, or for a doc that is not a
+# tracked file, fails the run: merging or retiring a doc means updating this
+# map, not leaving a stale exemption behind.
+#
+# Prefer the narrowest code path that the doc actually obligates. A directory
+# (`services/foo-service/app`) survives deletion of the one file the spec is
+# about, so name the file when the obligation is file-specific.
 
+# --- Week 1: safe LLM client + PCI/PII-safe logging -------------------------
+# docs/spec-ai-assistant-week1.md D1 (hardened Claude client) and D2 (redacting
+# log filter in all 7 services); ADR 0005 backs the client, ADR 0006 the
+# redaction strategy. Each of the 7 redactor copies is listed on its own line:
+# redactor-drift catches copies that DIVERGE, this catches a copy that is
+# DELETED, which drift comparison alone would read as one fewer copy to check.
+services/origination-service/app/llm_client.py => docs/spec-ai-assistant-week1.md
+services/origination-service/app/llm_client.py => adr/0005-llm-client-design.md
+services/gateway/app/redactor.py => adr/0006-logging-redaction-strategy.md
+services/origination-service/app/redactor.py => adr/0006-logging-redaction-strategy.md
+services/servicing-service/app/redactor.py => adr/0006-logging-redaction-strategy.md
+services/kyc-service/app/redactor.py => adr/0006-logging-redaction-strategy.md
+services/decision-service/app/redactor.py => adr/0006-logging-redaction-strategy.md
+services/disclosure-service/app/redactor.py => adr/0006-logging-redaction-strategy.md
+services/payment-service/app/redactor.py => adr/0006-logging-redaction-strategy.md
+
+# --- Week 2: RAG corpus hygiene ---------------------------------------------
+rag_eval => adr/0007-rag-corpus-hygiene.md
+
+# --- Week 3: decisioning assistant ------------------------------------------
 services/decision-service/app => docs/spec-decision-assistant-week3.md
 services/decision-service/app => adr/0009-decisioning-assistant-design.md
+services/kyc-service/app => adr/0011-mandatory-kyc-before-decisioning.md
+
+# --- Week 4: TILA/Reg-Z disclosure ------------------------------------------
 services/disclosure-service/app => docs/spec-disclosure-week4.md
 services/disclosure-service/app => adr/0012-decimal-minor-units-and-externalized-rule-config.md
+
+# --- Week 5: payments -------------------------------------------------------
 services/payment-service/app => docs/spec-payments-week5.md
 services/payment-service/app => adr/0013-payment-idempotency-and-tokenization.md
+
+# --- Brownfield structure + trust boundary ----------------------------------
+# ADR 0004's decomposition is load-bearing through origination's sync HTTP
+# client seam; ADR 0010 Phase A+B enforce officer-OR-owner at the gateway.
+services/origination-service/app/clients.py => adr/0004-decompose-origination-into-services.md
+services/gateway/app/main.py => adr/0010-application-ownership-authorization.md
+
+# --- Exemptions: docs with no code path whose deletion would violate them ---
+# EXEMPT: adr/0001-record-architecture-decisions.md — establishes the ADR process itself; obligates no source file.
+# EXEMPT: adr/0002-single-database-shared-schema.md — records the existing one-database constraint; no artifact whose deletion violates it (DDL numbering is covered by migration-numbering-gate).
+# EXEMPT: adr/0003-store-card-data-for-convenience.md — documents the PCI debt scheduled for removal; mapping it would require the violating code to keep existing.
+# EXEMPT: adr/0008-retrievable-decision-records.md — Accepted as a field contract only; its own Status defers the schema migration and write path, so there is no implementation to pin yet.
+# EXEMPT: docs/spec-rag-week2.md — Status is Draft, pending gate approval; not approved for build.

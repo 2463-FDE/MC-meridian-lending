@@ -33,15 +33,39 @@ new_repo() {
   printf '%s' "$d"
 }
 
-# check NAME EXPECTED_EXIT REPO MAP_CONTENT
+# new_repo_with_docs -> like new_repo, plus a tracked adr/0001-process.md and a
+# tracked spec.md. Used by the coverage-audit cases: the audit only grades docs
+# matching `adr/*.md` / `docs/spec-*.md`, so new_repo's bare tree has nothing to
+# grade and cannot exercise it.
+new_repo_with_docs() {
+  local d
+  d=$(new_repo)
+  mkdir -p "$d/adr"
+  echo "adr" > "$d/adr/0001-process.md"
+  echo "spec" > "$d/spec.md"
+  git -C "$d" add -A
+  git -C "$d" -c user.email=t@t -c user.name=t commit -qm "add adr + spec"
+  printf '%s' "$d"
+}
+
+# check NAME EXPECTED_EXIT REPO MAP_CONTENT [REQUIRED_OUTPUT_SUBSTRING]
+# The optional 5th argument pins WHICH failure fired: several audit cases exit 1
+# for more than one reason (a reasonless exemption is also an unmapped doc), so
+# the exit code alone would not prove the case under test is the one that failed.
 check() {
-  local name=$1 want=$2 repo=$3 map_content=$4
+  local name=$1 want=$2 repo=$3 map_content=$4 want_out=${5:-}
   local out got
   printf '%s\n' "$map_content" > "$repo/map.txt"
   out=$(cd "$repo" && "$SCRIPT" map.txt 2>&1)
   got=$?
   if [ "$got" -ne "$want" ]; then
     echo "FAIL  $name — exit $got, wanted $want"
+    printf '%s\n' "$out" | sed 's/^/        /'
+    fail=$((fail + 1))
+    return
+  fi
+  if [ -n "$want_out" ] && ! printf '%s' "$out" | grep -qF -- "$want_out"; then
+    echo "FAIL  $name — exit $got as wanted, but output lacks '$want_out'"
     printf '%s\n' "$out" | sed 's/^/        /'
     fail=$((fail + 1))
     return
@@ -137,6 +161,73 @@ else
   printf '%s\n' "$out" | sed 's/^/        /'
   fail=$((fail + 1))
 fi
+
+# --- 6. coverage audit: a spec/ADR outside the map is not silently unguarded --
+# The bug these guard: the map protected only weeks 3-5, so the already-merged
+# Week 1 LLM-client and per-service redactor pairings were absent and deleting
+# that code kept the gate green. A gate that checks only what someone remembered
+# to list must say so, not report clean.
+repo=$(new_repo_with_docs)
+check "spec/ADR neither mapped nor exempt fails" 1 "$repo" \
+  "services/foo-service/app => spec.md" \
+  "UNMAPPED: adr/0001-process.md"
+
+# --- 6b. an exemption with a reason satisfies coverage -----------------------
+repo=$(new_repo_with_docs)
+check "spec/ADR with a reasoned exemption passes" 0 "$repo" \
+  "services/foo-service/app => spec.md
+# EXEMPT: adr/0001-process.md — establishes the ADR process itself; obligates no source file."
+
+# --- 6c. an exemption with no reason is malformed ----------------------------
+# An unjustified exemption is how coverage erodes back to the original bug.
+repo=$(new_repo_with_docs)
+check "exemption without a reason fails" 1 "$repo" \
+  "services/foo-service/app => spec.md
+# EXEMPT: adr/0001-process.md" \
+  "MALFORMED: exemption needs"
+
+# --- 6c-ii. a bare dash is a delimiter, not a reason -------------------------
+repo=$(new_repo_with_docs)
+check "exemption whose reason is only a dash fails" 1 "$repo" \
+  "services/foo-service/app => spec.md
+# EXEMPT: adr/0001-process.md —" \
+  "MALFORMED: exemption needs"
+
+# --- 6d. mapped AND exempt is a contradiction -------------------------------
+# Mirrors doc_path_lint_allow.txt's policy: an exemption that has stopped being
+# necessary must fail, so implementing a doc forces the map to drop it.
+repo=$(new_repo_with_docs)
+check "doc both mapped and exempt fails" 1 "$repo" \
+  "services/foo-service/app => adr/0001-process.md
+# EXEMPT: adr/0001-process.md — no code path" \
+  "CONFLICT: adr/0001-process.md"
+
+# --- 6e. an exemption naming an untracked doc is stale ------------------------
+repo=$(new_repo_with_docs)
+check "exemption for an untracked doc fails as stale" 1 "$repo" \
+  "services/foo-service/app => adr/0001-process.md
+# EXEMPT: adr/9999-deleted.md — retired last week" \
+  "STALE: exemption names adr/9999-deleted.md"
+
+# --- 6f. header prose describing the syntax is not parsed as an exemption -----
+# Regression for a real self-inflicted failure: matching `EXEMPT:` anywhere in a
+# comment made the map's own documentation of the syntax parse as data, so the
+# gate reported STALE for the literal placeholder `<doc_path>`. Only a
+# line-leading `# EXEMPT:` counts.
+repo=$(new_repo_with_docs)
+check "prose mentioning the exemption syntax is not an exemption" 0 "$repo" \
+  "# Exemption syntax, reason mandatory:
+#     # EXEMPT: <doc_path> — <why it has no enforceable code path>
+# A doc may sit on a map line or in an \`# EXEMPT:\` line.
+services/foo-service/app => adr/0001-process.md"
+
+# --- 6g. a malformed pairing line does not grant coverage --------------------
+# A line with no '=>' already fails; it must not ALSO make the doc it mentions
+# look mapped, or one typo would hide two problems.
+repo=$(new_repo_with_docs)
+check "malformed pairing line does not count as coverage" 1 "$repo" \
+  "services/foo-service/app adr/0001-process.md" \
+  "UNMAPPED: adr/0001-process.md"
 
 # --- 5. missing map file aborts with usage exit ------------------------------
 repo=$(new_repo)
