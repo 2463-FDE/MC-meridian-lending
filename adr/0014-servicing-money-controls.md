@@ -65,46 +65,72 @@ manual paths ADR 0013 does not touch.
 
 ### Decision 1 — Servicing authorizes with the ADR 0010 module shape, copied into the service
 
-We will add `services/servicing-service/app/authz.py` mirroring
-`services/origination-service/app/authz.py`: an `_OFFICER_ROLES = {"underwriter", "admin"}`
-set, a `require_officer` that raises 403, and a `require_officer_or_owner` that denies as 404
-rather than 403-on-exists so a serial id cannot be probed for existence.
+We will add `services/servicing-service/app/authz.py` mirroring the *shape* of
+`services/origination-service/app/authz.py` — a role set, a raising `require_*` gate, and an
+owner check that denies as 404 rather than 403-on-exists so a serial id cannot be probed for
+existence — with role sets of its own:
+
+```python
+_MONEY_ROLES = {"csr", "admin"}                       # may act on a balance at all
+_STAFF_ROLES = {"csr", "underwriter", "admin"}        # may read any serviced loan
+```
+
+**The role set is servicing's own, not origination's.** Origination's
+`_OFFICER_ROLES = {"underwriter", "admin"}` is wrong here in both directions: a CSR is the
+role that actually services accounts, and an underwriter decides applications rather than
+adjusting live balances. Reusing that set would have excluded the operator this dashboard is
+for. Reads stay broader than writes because an underwriter looking at a serviced loan is
+ordinary work.
 
 Applied per route:
 
 | Route | Gate |
 |---|---|
-| `POST /accounts/{id}/adjust-balance` | officer, and maker-checker (Decision 2) |
-| `POST /accounts/{id}/waive-fee` | officer, and maker-checker (Decision 2) |
+| `POST /accounts/{id}/adjust-balance` | `_MONEY_ROLES`, and maker-checker (Decision 2) |
+| `POST /accounts/{id}/waive-fee` | `_MONEY_ROLES`, and maker-checker (Decision 2) |
 | `POST /accounts/{id}/apply-payment` | internal-service only, per ADR 0013 |
 | `POST /accounts/{id}/late-fee` | internal-service only — rule-driven, no operator |
-| `GET /accounts/{id}/balance`, `GET /loans/{id}`, `/loans/{id}/payments`, `/loans/{id}/schedule` | officer or owner |
+| `GET /accounts/{id}/balance`, `GET /loans/{id}`, `/loans/{id}/payments`, `/loans/{id}/schedule` | `_STAFF_ROLES`, or the owning borrower |
 
 Ownership needs no new column and no identity programme, which is what ADR 0010 deferred on.
 It derives from data that exists: `loans.app_id` (`001_schema.sql:99-114`) reaches
 `applications.applicant_id`, and a borrower login carries `users.applicant_id`
 (`001_schema.sql:6-15`). A loan whose `app_id` is `NULL` — legacy rows the partial unique
-index deliberately tolerates — has no derivable owner, so it fails closed to officers.
+index deliberately tolerates — has no derivable owner, so it fails closed to staff.
+
+**Both sets are the assumptions put to Lending Ops** in the week-6 client email, questions
+2(a) and 2(c): CSRs and admins move money, underwriters and borrowers do not, borrowers read
+their own account only. A different answer changes the two set literals, not the design.
 
 **Options considered**
 
 | Option | Why rejected |
 |---|---|
 | **A. Enforce roles in the gateway only** | The gateway is the wrong enforcement point for ownership: it would need the loan-to-applicant join, duplicating servicing's data access, and it leaves the service open to any in-cluster caller. CLAUDE.md records the gateway's role-free proxying as intentional; a partial exception for `/lss/*` is a second contradictory model. |
-| **B. Extract a shared authz package for both services** | Rejected as premature under this repo's YAGNI rule: two callers, not three. The per-service copy is this codebase's existing shape (the PII redactor is duplicated per service and held by the blocking `redactor-drift` job). If a third service needs it, extract then. |
+| **B. Extract a shared authz package for both services** | Rejected as premature under this repo's YAGNI rule: two callers, not three. It is also the wrong shape here — the two services need *different* role sets, so a shared module would carry a per-service configuration seam to serve one caller each. The per-service copy is this codebase's existing shape (the PII redactor is duplicated per service and held by the blocking `redactor-drift` job). If a third service needs it, extract then. |
 | **C. Accept the risk, gate in the dashboard UI** | Rejected. The endpoints stay reachable directly through the gateway, so the control lives where it can be skipped. |
-| **D. Chosen: copy the ADR 0010 module shape into servicing** | Reuses a reviewed pattern, needs no migration, and closes both halves of D8(b) — role on mutations, ownership on reads. |
+| **D. Chosen: copy the ADR 0010 module shape into servicing, with servicing's own role sets** | Reuses a reviewed pattern, needs no migration, and closes both halves of D8(b) — role on mutations, ownership on reads. |
 
 The accepted cost is a second copy that can drift from origination's. It is logged as debt and
-becomes the third repetition that would justify extraction.
+becomes the third repetition that would justify extraction. The divergent role sets are the
+substantive part of that risk: a reader who assumes servicing's `authz.py` is origination's
+will assume the wrong set, so each set carries the reason it differs.
 
 ### Decision 2 — Maker-checker binds the two manual discretionary moves only
 
 We will require a second approver for `adjust-balance` and `waive-fee`, and for nothing else.
-A maker (role `csr`, `underwriter`, or `admin`) records a request; a checker
-(`underwriter` or `admin`) approves it; the balance moves on approval, not on request. The
-checker cannot be the maker — compared on `users.id`, so one person holding two roles cannot
-self-approve. Approval and movement commit together.
+A maker in `_MONEY_ROLES` records a request; a different person in the same set approves it;
+the balance moves on approval, not on request. Maker and checker are the same role set — a
+CSR's adjustment is approved by another CSR or an admin, which is what makes the control
+workable on a floor of representatives rather than dependent on a supervisor being present.
+They cannot be the same person: compared on `users.id`, not on role, so holding two roles or
+two sessions does not permit self-approval. Approval and movement commit together.
+
+**No override, pending one open question.** There is no break-glass path in this decision. The
+week-6 client email offers to design one — recorded and reviewed after the fact rather than
+blocked — if Lending Ops says a representative working alone must be able to move a balance.
+That is a design change rather than a configuration change, so it is named here as the one
+answer that would reopen this decision.
 
 `apply-payment` and `late-fee` are excluded on a stated principle: **maker-checker binds
 discretion, not automation.** `apply-payment` credits an amount read off a captured payment
@@ -120,8 +146,9 @@ would stall a payment mid-flow.
 | **B. Threshold-based — second approval over a dollar amount** | Rejected for now. It needs a threshold nobody has set, a policy file to hold it, and a currency comparison in the gate, and it leaves small adjustments uncontrolled — which is the shape of the loss this control exists to prevent. The ledger (Decision 3) makes every move attributable regardless of size, so the threshold buys less than it costs. It is the natural later refinement once the two-approver flow is in use. |
 | **C. Chosen: manual discretionary moves only** | Smallest control that covers the operator-chosen amounts, with no effect on automated paths. |
 
-The accepted cost is operational: two staff are needed to correct a balance, and a
-single-officer shift cannot. Lending Ops confirms the approver set before build.
+The accepted cost is operational: two people in `_MONEY_ROLES` are needed to correct a
+balance, so a lone representative on shift cannot. Lending Ops confirms the role sets and the
+break-glass question before build.
 
 ### Decision 3 — Every balance mutation writes a row to one append-only ledger
 
@@ -202,15 +229,16 @@ compare an exact sum to a float cache with an explicit tolerance.
 
 ### Negative / tradeoff (accepted)
 
-- **Two people are needed to correct a balance.** A single-officer shift cannot, and a
-  mistake takes longer to fix than it does today.
+- **Two people are needed to correct a balance.** A lone representative on shift cannot, and
+  a mistake takes longer to fix than it does today.
 - **A second authz copy exists**, free to drift from origination's. Logged as debt; the
   redactor's `redactor-drift` job is the precedent for holding it if it becomes a third copy.
 - **`balances` stays a mutable float column.** It is a projection now, but the float and the
   mutability both remain. D2 is narrowed again, not closed.
-- **Reads become owner-scoped, which changes existing behaviour.** Any script or demo step
-  calling `/lss/*` without an officer role stops working.
-- **A `NULL`-`app_id` loan is officer-only forever**, because no owner is derivable. Correct,
+- **Reads become role-and-owner-scoped, which changes existing behaviour.** Any script or
+  demo step calling `/lss/*` with no role, or as a borrower against another loan, stops
+  working.
+- **A `NULL`-`app_id` loan is staff-only forever**, because no owner is derivable. Correct,
   and invisible until someone asks why a borrower cannot see an old loan.
 - **The dashboard is not built by this ADR.** Lending Ops' original ask is still outstanding
   after this work; what changes is that building it no longer ships an unguarded money route.
@@ -225,8 +253,8 @@ compare an exact sum to a float cache with an explicit tolerance.
 
 ## Cross-cutting concerns
 
-**Security.** The gate fails closed: an absent or unrecognized role is not an officer, and a
-non-owner is denied as 404 so ids cannot be probed. The trust boundary is unchanged — the
+**Security.** The gate fails closed: an absent or unrecognized role is in neither role set,
+and a non-owner is denied as 404 so ids cannot be probed. The trust boundary is unchanged — the
 gateway strips inbound `X-User-Id` / `X-User-Role` and re-sets them from the session
 (`gateway/app/main.py:160-171`), which is what makes the header trustworthy inside servicing;
 the existing `gateway-trust-boundary-gate` holds that. Ledger `detail` is JSONB and must stay
@@ -249,9 +277,9 @@ re-model it.
 
 **Cost.** Storage only.
 
-**Operational impact.** Lending Ops needs an approver roster before build, and a documented
-path for the case where an approval is genuinely urgent and one officer is available. The
-runbook gains the reason-code list.
+**Operational impact.** Lending Ops needs an approver roster before build, and an answer on
+the break-glass path for the case where an adjustment is urgent and one person is available.
+The runbook gains the reason-code list.
 
 **Testing impact.** Characterization tests pin today's behaviour before any of this changes
 (the companion comprehension PR). New coverage: role and ownership matrix per route, maker
