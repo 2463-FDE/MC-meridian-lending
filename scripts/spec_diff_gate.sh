@@ -66,8 +66,8 @@ while IFS= read -r line; do
     continue
   fi
 
-  if [ ! -e "$spec_path" ]; then
-    echo "MISSING: $code_glob exists but $spec_path does not (scripts/spec_gate_map.txt)" >&2
+  if [ ! -f "$spec_path" ] || [ -L "$spec_path" ] || ! git ls-files --error-unmatch -- "$spec_path" >/dev/null 2>&1; then
+    echo "MISSING: $code_glob exists but $spec_path is not a tracked regular file (scripts/spec_gate_map.txt)" >&2
     fail=1
   fi
 done < "$MAP_FILE"

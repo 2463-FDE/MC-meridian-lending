@@ -53,6 +53,8 @@ check() {
 # --- 1. code area with its required spec present passes ---------------------
 repo=$(new_repo)
 echo "spec" > "$repo/spec.md"
+git -C "$repo" add -A
+git -C "$repo" -c user.email=t@t -c user.name=t commit -qm "add spec.md"
 check "code area with spec present passes" 0 "$repo" "services/foo-service/app => spec.md"
 
 # --- 2. code area without its required spec fails ---------------------------
@@ -88,9 +90,31 @@ check "typo'd code path fails instead of silently skipping" 1 "$repo" "disclosur
 repo=$(new_repo)
 check "malformed line without => fails instead of self-validating" 1 "$repo" "services/foo-service/app"
 
+# --- 3d. spec path is a directory, not a file, fails --------------------------
+# `-e` passes for anything at the pathname. A deleted spec replaced by a
+# directory of the same name must still fail, not report the pairing intact.
+repo=$(new_repo)
+mkdir -p "$repo/spec.md"
+echo "x" > "$repo/spec.md/placeholder.txt"
+git -C "$repo" add -A
+git -C "$repo" -c user.email=t@t -c user.name=t commit -qm "replace spec.md with a directory"
+check "spec path that is a directory fails, not passes" 1 "$repo" "services/foo-service/app => spec.md"
+
+# --- 3e. spec path is a symlink, fails -----------------------------------------
+# A symlink at the spec path is not the tracked document itself, even if it
+# resolves to a real file.
+repo=$(new_repo)
+echo "real spec" > "$repo/real_spec.md"
+ln -s real_spec.md "$repo/spec.md"
+git -C "$repo" add -A
+git -C "$repo" -c user.email=t@t -c user.name=t commit -qm "add symlinked spec.md"
+check "spec path that is a symlink fails, not passes" 1 "$repo" "services/foo-service/app => spec.md"
+
 # --- 4. comments and blank lines are ignored ---------------------------------
 repo=$(new_repo)
 echo "spec" > "$repo/spec.md"
+git -C "$repo" add -A
+git -C "$repo" -c user.email=t@t -c user.name=t commit -qm "add spec.md"
 check "comments and blanks ignored" 0 "$repo" "# a comment
 
 services/foo-service/app => spec.md
