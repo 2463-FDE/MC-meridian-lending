@@ -191,7 +191,7 @@ no window tolerance can hide it. On the sample it reports one pair: loan 5582, 4
 
 `DUPLICATE_SUSPECT` is a *signal*, not a variance — it is not added to any variance figure,
 because the duplicate's money is already accounted for on whichever side it landed. Counting it
-twice would be the netting error in a new costume.
+twice would double-count the same money, which is the netting error stated in reverse.
 
 **(f) Break classification.** Every row that does not match lands in exactly one class:
 
