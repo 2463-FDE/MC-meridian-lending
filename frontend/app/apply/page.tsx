@@ -110,11 +110,30 @@ interface AppResult {
   // logged-out applicant via an HttpOnly resume cookie the client cannot read.
 }
 
+interface PrincipalReason {
+  code?: string;
+  reason: string;
+}
+
 interface DecisionResult {
   app_id: string | number;
   decision: string;
   score?: number;
+  // The FIRST principal reason only (legacy field). Kept as a fallback for a response
+  // that carries no list — never as the thing rendered when a list is present.
   adverse_action_reason?: string;
+  principal_reasons?: PrincipalReason[];
+}
+
+// 12 CFR 1002.9 requires the specific principal reason(s) actually used, and
+// decision-service ranks up to four. Rendering `adverse_action_reason` alone told an
+// applicant denied for three reasons about one of them. Prefer the full list; fall back
+// to the legacy single field so an older response still shows a reason rather than none.
+function adverseActionReasons(d: DecisionResult | null): PrincipalReason[] {
+  if (!d) return [];
+  const listed = (d.principal_reasons ?? []).filter((r) => r?.reason);
+  if (listed.length > 0) return listed;
+  return d.adverse_action_reason ? [{ reason: d.adverse_action_reason }] : [];
 }
 
 interface Disclosure {
@@ -807,10 +826,18 @@ export default function ApplyPage() {
                     {typeof decision.score === "number" ? (
                       <p className="hint">Model score: {decision.score}</p>
                     ) : null}
-                    {decision.adverse_action_reason ? (
+                    {adverseActionReasons(decision).length > 0 ? (
                       <div className="alert alert-warn">
-                        <strong>Adverse action reason:</strong>{" "}
-                        {decision.adverse_action_reason}
+                        <strong>
+                          {adverseActionReasons(decision).length > 1
+                            ? "Adverse action reasons:"
+                            : "Adverse action reason:"}
+                        </strong>
+                        <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                          {adverseActionReasons(decision).map((r, i) => (
+                            <li key={r.code ?? i}>{r.reason}</li>
+                          ))}
+                        </ul>
                       </div>
                     ) : null}
 

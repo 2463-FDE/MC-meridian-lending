@@ -612,6 +612,10 @@ def run_decision(
         decision=resp["outcome"],
         score=int(round(resp.get("score") or 0)),  # DecisionOut.score is int
         adverse_action_reason=resp.get("reason"),
+        # `reason` is decision-service's FIRST principal reason only; the full ranked set
+        # is `principal_reasons`. Forward both — the screens read the list, and callers
+        # already reading the single field keep working.
+        principal_reasons=resp.get("principal_reasons") or [],
     )
 
 

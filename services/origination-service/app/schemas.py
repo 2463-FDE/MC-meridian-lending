@@ -218,7 +218,14 @@ class DecisionOut(BaseModel):
     app_id: int
     decision: str
     score: int
+    # First principal reason only (legacy field, kept for callers reading it). Mirrors
+    # decision-service's DecisionOut.reason.
     adverse_action_reason: Optional[str] = None
+    # Every specific Reg B principal reason, ranked worst-first: [{code, reason, feature}].
+    # 12 CFR 1002.9 requires the reason(s) actually used, and decision-service ranks up to
+    # four; forwarding only the legacy field above told an applicant denied for three
+    # reasons about one of them while decision_events recorded all three.
+    principal_reasons: list = []
 
 
 class ScheduleRow(BaseModel):

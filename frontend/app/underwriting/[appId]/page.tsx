@@ -108,12 +108,27 @@ interface DecisionResult {
   app_id: string | number;
   decision: string;
   score?: number;
+  // The FIRST principal reason only (legacy field). Kept as a fallback for a response
+  // that carries no list — never as the thing rendered when a list is present.
   adverse_action_reason?: string;
+  principal_reasons?: AssistantReason[];
 }
 
 interface AssistantReason {
-  code: string;
+  code?: string;
   reason: string;
+}
+
+// 12 CFR 1002.9 requires the specific principal reason(s) actually used, and
+// decision-service ranks up to four. Rendering `adverse_action_reason` alone showed the
+// officer one reason of up to four while decision_events recorded all of them. Prefer the
+// full list; fall back to the legacy single field so an older response still shows a
+// reason rather than none.
+function adverseActionReasons(d: DecisionResult | null): AssistantReason[] {
+  if (!d) return [];
+  const listed = (d.principal_reasons ?? []).filter((r) => r?.reason);
+  if (listed.length > 0) return listed;
+  return d.adverse_action_reason ? [{ reason: d.adverse_action_reason }] : [];
 }
 
 interface AssistantResult {
@@ -398,19 +413,23 @@ export default function UnderwritingDetailPage() {
   // Run and Explain. Both report the same append-only decision record, so the panel must
   // show the same record-derived facts either way; a single copy is what keeps the two
   // paths from drifting apart on regulated fields. Everything here is record-derived
-  // (recorded facts win, ADR 0009 §5). Reason parity: DecisionOut.reason is the FIRST
-  // principal reason; score parity: DecisionOut.score is an int. Returns false when the
-  // response carries no recorded outcome so the caller can fail closed rather than
-  // half-update the panel.
+  // (recorded facts win, ADR 0009 §5). Reason parity: carry EVERY principal reason the
+  // record holds, matching what the manual decision route now returns — mapping only
+  // `principal_reasons[0]` here reintroduced the same first-only truncation on this path
+  // that origination had on the other. Score parity: DecisionOut.score is an int. Returns
+  // false when the response carries no recorded outcome so the caller can fail closed
+  // rather than half-update the panel.
   function applyRecordedDecision(res: AssistantResult): boolean {
     const outcome = res.outcome;
     if (!outcome) return false;
     setApp((prev) => (prev ? { ...prev, decision: outcome } : prev));
+    const reasons = res.principal_reasons ?? [];
     setDecision({
       app_id: res.application_id,
       decision: outcome,
       score: typeof res.score === "number" ? Math.round(res.score) : undefined,
-      adverse_action_reason: res.principal_reasons?.[0]?.reason,
+      adverse_action_reason: reasons[0]?.reason,
+      principal_reasons: reasons,
     });
     return true;
   }
@@ -821,10 +840,18 @@ export default function UnderwritingDetailPage() {
                 Model score: {decision.score}
               </p>
             ) : null}
-            {decision?.adverse_action_reason ? (
+            {adverseActionReasons(decision).length > 0 ? (
               <div className="alert alert-warn">
-                <strong>Adverse action reason:</strong>{" "}
-                {decision.adverse_action_reason}
+                <strong>
+                  {adverseActionReasons(decision).length > 1
+                    ? "Adverse action reasons:"
+                    : "Adverse action reason:"}
+                </strong>
+                <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                  {adverseActionReasons(decision).map((r, i) => (
+                    <li key={r.code ?? i}>{r.reason}</li>
+                  ))}
+                </ul>
               </div>
             ) : null}
           </div>

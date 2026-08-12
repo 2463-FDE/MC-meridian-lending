@@ -7,7 +7,13 @@
 
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import ApplyPage from "./page";
 
 vi.mock("next/link", () => ({
@@ -144,5 +150,76 @@ describe("apply — acceptance gates on the delivered document, not a status fla
         )
       ).toBe(false)
     );
+  });
+});
+
+// --- Reg B principal reasons: plural, not the legacy first-only field ------------------
+//
+// decision-service ranks up to four specific principal reasons and origination forwards
+// them as `principal_reasons`; its `adverse_action_reason` is the FIRST one only. The
+// applicant screen rendered that single field, so someone denied for three reasons was
+// told one of them while decision_events recorded all three. 12 CFR 1002.9 requires the
+// specific principal reason(s).
+
+const THREE_REASONS = [
+  { code: "R02", reason: "Excessive obligations in relation to income" },
+  { code: "R03", reason: "Income insufficient for amount of credit requested" },
+  { code: "R04", reason: "Length of employment" },
+];
+
+const AWAITING_DECISION_APP = {
+  status: "submitted",
+  kyc: {
+    name_verified: true,
+    dob_verified: true,
+    address_verified: true,
+    ssn_verified: true,
+  },
+};
+
+describe("apply — every principal reason reaches the applicant", () => {
+  it("shows all principal reasons on a denial, not only the first", async () => {
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === "/los/applications/1") return AWAITING_DECISION_APP;
+      throw new Error(`unexpected GET ${path}`);
+    });
+    apiPost.mockImplementation(async (path: string) => {
+      if (path === "/los/applications/1/decision")
+        return {
+          app_id: 1,
+          decision: "deny",
+          score: 518,
+          adverse_action_reason: THREE_REASONS[0].reason,
+          principal_reasons: THREE_REASONS,
+        };
+      throw new Error(`unexpected POST ${path}`);
+    });
+
+    render(<ApplyPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /get decision/i }));
+
+    for (const r of THREE_REASONS) {
+      expect(await screen.findByText(r.reason)).toBeTruthy();
+    }
+  });
+
+  it("falls back to the legacy single reason when no list is returned", async () => {
+    // A decision-service predating the field, or a replayed older record: show the one
+    // reason we have rather than nothing. Never regress to a silent denial.
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === "/los/applications/1") return AWAITING_DECISION_APP;
+      throw new Error(`unexpected GET ${path}`);
+    });
+    apiPost.mockImplementation(async () => ({
+      app_id: 1,
+      decision: "deny",
+      score: 518,
+      adverse_action_reason: THREE_REASONS[0].reason,
+    }));
+
+    render(<ApplyPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /get decision/i }));
+
+    expect(await screen.findByText(THREE_REASONS[0].reason)).toBeTruthy();
   });
 });

@@ -102,3 +102,64 @@ def test_downstream_conflict_maps_to_409_not_503(monkeypatch):
             42, idempotency_key="reused-key", x_user_role="underwriter"
         )
     assert exc.value.status_code == 409
+
+
+# --- Reg B principal reasons: plural, not the legacy first-only field -----------------
+#
+# decision-service ranks up to four specific principal reasons (reasons.MAX_REASONS) and
+# returns them in `principal_reasons`; its `reason` field is documented as the FIRST one
+# only, kept for legacy callers (decision-service schemas.py:29-33). Forwarding `reason`
+# alone means an applicant denied for three reasons is told one of them, while the
+# decision_events row an examiner reads carries all three. 12 CFR 1002.9 requires the
+# specific principal reason(s), and policies/underwriting_guidelines.md:22-28 says the
+# same. The truncation happened in this route, not in decision-service.
+
+_THREE_REASONS = [
+    {
+        "code": "R02",
+        "reason": "Excessive obligations in relation to income",
+        "feature": "payment_burden",
+    },
+    {
+        "code": "R03",
+        "reason": "Income insufficient for amount of credit requested",
+        "feature": "income_sufficiency",
+    },
+    {"code": "R04", "reason": "Length of employment", "feature": "employment_tenure"},
+]
+
+
+def _stub_decision(monkeypatch, response):
+    monkeypatch.setattr(
+        applications,
+        "decision_request_payload",
+        lambda app_id: {"application_id": app_id},
+    )
+    monkeypatch.setattr(
+        applications.clients, "post", lambda base, path, payload: response
+    )
+
+
+def test_every_principal_reason_reaches_the_response(monkeypatch):
+    _stub_decision(
+        monkeypatch,
+        {
+            "outcome": "deny",
+            "score": 518,
+            "reason": _THREE_REASONS[0]["reason"],
+            "principal_reasons": _THREE_REASONS,
+        },
+    )
+    out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
+    assert out.principal_reasons == _THREE_REASONS
+    # The legacy single-string field keeps its meaning for callers already reading it.
+    assert out.adverse_action_reason == _THREE_REASONS[0]["reason"]
+
+
+def test_absent_principal_reasons_is_an_empty_list_not_none(monkeypatch):
+    # An approve carries no reasons, and a decision-service predating the field carries
+    # none either. Both must give the screens an empty list to iterate, never null.
+    _stub_decision(monkeypatch, {"outcome": "approve", "score": 712})
+    out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
+    assert out.principal_reasons == []
+    assert out.adverse_action_reason is None

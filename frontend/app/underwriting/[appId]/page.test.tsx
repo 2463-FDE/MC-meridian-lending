@@ -536,3 +536,63 @@ describe("underwriting detail — disclosure actions across a route change", () 
     expect(screen.queryByText(/9\.584%/)).toBeNull();
   });
 });
+
+// --- Reg B principal reasons: plural, not the legacy first-only field ------------------
+//
+// Two truncation sites fed this one panel. The manual decision path rendered
+// origination's `adverse_action_reason`, which is decision-service's FIRST principal
+// reason only; the assistant path built the same field itself with
+// `res.principal_reasons?.[0]?.reason`. Either way an officer reviewing a denial saw one
+// of up to four reasons, while the decision_events row an examiner reads carried all of
+// them. 12 CFR 1002.9 requires the specific principal reason(s).
+
+const OFFICER_REASONS = [
+  { code: "R02", reason: "Excessive obligations in relation to income" },
+  { code: "R03", reason: "Income insufficient for amount of credit requested" },
+  { code: "R04", reason: "Length of employment" },
+];
+
+describe("underwriting detail — every principal reason reaches the officer", () => {
+  it("shows all reasons from a manual decision, not only the first", async () => {
+    apiPost.mockImplementation(async (path: string) => {
+      if (path === "/los/applications/1/decision")
+        return {
+          app_id: 1,
+          decision: "deny",
+          score: 518,
+          adverse_action_reason: OFFICER_REASONS[0].reason,
+          principal_reasons: OFFICER_REASONS,
+        };
+      throw new Error(`unexpected POST ${path}`);
+    });
+
+    render(<UnderwritingDetailPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /run decision/i }));
+
+    for (const r of OFFICER_REASONS) {
+      expect(await screen.findByText(r.reason)).toBeTruthy();
+    }
+  });
+
+  it("shows all reasons from the assistant path, not only the first", async () => {
+    apiPost.mockImplementation(async (path: string) => {
+      if (path === "/los/assistant/decisions/1")
+        return {
+          ...assistantResultFor(1),
+          outcome: "deny",
+          principal_reasons: OFFICER_REASONS,
+        };
+      throw new Error(`unexpected POST ${path}`);
+    });
+
+    render(<UnderwritingDetailPage />);
+    await screen.findAllByText("Maria Alvarez");
+    fireEvent.click(screen.getByRole("button", { name: "Run AI assistant" }));
+
+    // findAllByText: the assistant card lists the same reasons alongside the primary
+    // decision panel, so each text is on screen more than once.
+    for (const r of OFFICER_REASONS) {
+      expect((await screen.findAllByText(r.reason)).length).toBeGreaterThan(0);
+    }
+  });
+});
