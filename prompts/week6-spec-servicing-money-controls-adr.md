@@ -36,8 +36,8 @@ Ground truth to cite as evidence (verify each still holds before citing):
   column.
 - `db/init/001_schema.sql:148-179` — `decision_events`, the one true append-only table in this
   schema (SERIAL PK, JSONB payload, trigger-enforced immutability) — the pattern to mirror.
-- `gateway/app/main.py:171` — gateway forwards authoritative `X-User-Role`/`X-User-Id`; servicing
-  reads neither.
+- `services/gateway/app/main.py:171` — gateway forwards authoritative `X-User-Role`/`X-User-Id`;
+  servicing reads neither.
 - `services/origination-service/app/authz.py` — existing RBAC shape (`require_officer`,
   `_OFFICER_ROLES = {"underwriter","admin"}`, 403) to reuse rather than inventing a new pattern.
 - `adr/0010-application-ownership-authorization.md` — prior RBAC seed; its consequences section

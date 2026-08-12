@@ -13,7 +13,13 @@ change any endpoint/authz/schema code in this PR.
 
 Branch from `main`: `docs/servicing-comprehension-week6`.
 
-## Ground truth (already dug, embed in the report — do not re-derive from scratch, verify then cite)
+## Checkpoints — expected answers, not evidence (verify each in code first, then cite)
+
+These are the conclusions a prior dig reached. They are **hints to check against**, not findings
+to copy. For each bullet: open the cited file:line, confirm the claim still holds, and write the
+report from what you read — citing the line you actually opened. If a checkpoint disagrees with
+the code, the code wins: say so in the report and correct the citation. A report that restates
+this section without opening the files has done none of the work.
 
 - Money endpoints accept ANY authenticated caller. `adjust_balance` / `waive_fee` *declare*
   `x_user_role` (`services/servicing-service/app/main.py:103,114`) but never read it. Zero
@@ -26,7 +32,7 @@ Branch from `main`: `docs/servicing-comprehension-week6`.
   balance code. Only true append-only table in this schema = `decision_events`
   (`001_schema.sql:148-179`).
 - `apply_payment` has TWO callers: HTTP route (`main.py:84`) + in-process `payments.py:79`.
-- Gateway forwards authoritative `X-User-Role` / `X-User-Id` (`gateway/app/main.py:171`);
+- Gateway forwards authoritative `X-User-Role` / `X-User-Id` (`services/gateway/app/main.py:171`);
   servicing reads neither.
 - Debt log ties: **D8** (servicing enforces no authz, Critical), **D2** (float everywhere incl.
   balances, no ledger), **D20** (`audit_logs` mutable). See `docs/debt-log.md`.
@@ -40,11 +46,16 @@ final = last writer, first delta lost (500-100-200 should be 200; comes out 300)
 non-atomic read-modify-write (`balance.py:23-32`), no `FOR UPDATE`, no version, autocommit per
 statement (`db.py:13`).
 
-## Report findings to answer (verify each against current code before writing)
+## Report findings to answer
+
+Same rule as the checkpoints above: each "Answer" below is the expected conclusion, not the
+deliverable. Reach it from the code yourself and cite what you opened; flag any that no longer
+holds.
 
 **Q1 — Who can move money / waive a fee? Is there a second approver?**
 Answer: nobody is gated. Gateway gates auth only, no role — `_require_user`
-(`gateway/app/main.py:193-197`); `/lss/*` (`:421-424`) and `/payments` (`:457-463`) call only it.
+(`services/gateway/app/main.py:193-197`); `/lss/*` (`:421-424`) and `/payments` (`:457-463`)
+call only it.
 Servicing declares `x_user_role` on `adjust_balance`/`waive_fee` but never inspects it
 (`balance.py:35-56` take no caller identity). All four demo roles including borrower `maria` can
 hit these on any `loan_id` (IDOR). Ties to debt **D8** (Critical).
@@ -88,8 +99,11 @@ discretionary moves.
    payment+waiver pair does not collide), separate connections, interleaved
    read→read→write→write, assert the final balance is wrong. This test is meant to stay red — it
    documents the defect, it is not a `make prove` red/green pair, and no fix ships this week.
-   Mark it clearly as intentionally-failing (mirror how `test_money.py::test_float_payment_drift`
-   is handled under the tolerated matrix, if that pattern exists — check first).
+   Mark it intentionally-failing the way this service already marks one: a module docstring
+   stating it currently FAILS and why, and **no** `xfail`/`skip` marker — `test_money.py` uses
+   exactly that shape, and this service has no `pytest.ini`/`pyproject.toml` to configure markers
+   in. A real red is the deliverable; an `xfail` would report green and hide the defect. Add it
+   to the tolerated-red matrix in Verification below.
 
 ## Explicitly out of scope (say so in the report, and don't touch)
 
@@ -100,15 +114,30 @@ fix. Those land later, driven by the companion ADR.
 
 - `services/servicing-service/app/main.py`, `app/balance.py`, `app/payments.py`, `app/db.py`
 - `services/servicing-service/tests/` (existing test idiom — copy its shape)
-- `gateway/app/main.py` (auth/role forwarding, lines cited above)
+- `services/gateway/app/main.py` (auth/role forwarding, lines cited above)
 - `db/init/001_schema.sql` (`balances`, `payments`, `audit_logs`, `decision_events` DDL)
 - `docs/debt-log.md` (D8, D2, D20 — quote, don't paraphrase from memory)
 
 ## Verification before opening the PR
 
-- `cd services/servicing-service && python -m pytest -q` — characterization tests pass;
-  `test_lost_update.py` fails red as designed. Run the lost-update test a few times to confirm it
-  reproduces the race reliably, not a flake.
+**Tolerated-red matrix.** A bare `python -m pytest -q` in this service exits 1 *before* this PR:
+`tests/test_money.py::test_float_payment_drift` is intentionally failing (its module docstring
+says so; the CI `backend` matrix runs servicing under `continue-on-error` + `|| true`). This PR
+adds a second intentionally-failing test. So never grade the suite on its exit code — run the
+green set and the red set as separate commands and check each against its expected result:
+
+| Command (from `services/servicing-service`) | Expected |
+|---|---|
+| `python -m pytest -q --ignore=tests/test_money.py --ignore=tests/test_lost_update.py` | **all pass**, exit 0 — includes the new `test_characterization_balance.py` |
+| `python -m pytest -q tests/test_characterization_balance.py` | **all pass**, exit 0 |
+| `python -m pytest -q tests/test_lost_update.py` | **fails red as designed**, exit 1 — the deliverable, not a regression |
+| `python -m pytest -q tests/test_money.py` | **fails red, pre-existing** — unchanged by this PR, do not "fix" it |
+
+- Run `python -m pytest -q tests/test_lost_update.py` several times (5+) and confirm it fails
+  every run — it must reproduce the race reliably, not flake. A run that passes means the test
+  does not force the interleaving and needs rewriting.
+- Record this matrix in the report so a reader who runs the bare suite knows which two failures
+  are expected and why.
 - Every file:line reference in the report resolves in this branch's tree. If the report gets
   backticked paths, run `./scripts/check_doc_paths.sh` (matches the `doc-path-lint` CI gate).
 - Diff stays under ~400 changed lines (W7-10 size rule).
