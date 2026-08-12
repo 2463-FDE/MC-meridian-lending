@@ -120,6 +120,24 @@ check "comments and blanks ignored" 0 "$repo" "# a comment
 services/foo-service/app => spec.md
 "
 
+# --- 4b. final map line without a trailing newline is still checked ---------
+# `while IFS= read -r line` skips the loop body for a final unterminated
+# line, so a map missing its trailing newline would silently skip the last
+# pairing. Write the map with printf '%s' (no trailing \n) so the last line
+# is unterminated, and require a missing spec on that line to still fail.
+repo=$(new_repo)
+printf '%s' "services/foo-service/app => spec.md" > "$repo/map.txt"
+out=$(cd "$repo" && "$SCRIPT" map.txt 2>&1)
+got=$?
+if [ "$got" -eq 1 ]; then
+  echo "ok    final line without trailing newline is still checked"
+  pass=$((pass + 1))
+else
+  echo "FAIL  final line without trailing newline is still checked — exit $got, wanted 1"
+  printf '%s\n' "$out" | sed 's/^/        /'
+  fail=$((fail + 1))
+fi
+
 # --- 5. missing map file aborts with usage exit ------------------------------
 repo=$(new_repo)
 out=$(cd "$repo" && "$SCRIPT" nonexistent.txt 2>&1)

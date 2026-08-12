@@ -30,7 +30,7 @@ if [ ! -f "$MAP_FILE" ]; then
 fi
 
 fail=0
-while IFS= read -r line; do
+while IFS= read -r line || [ -n "$line" ]; do
   line="${line%%#*}"
   line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   [ -z "$line" ] && continue
