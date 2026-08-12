@@ -13,6 +13,14 @@ change any endpoint/authz/schema code in this PR.
 
 Branch from `main`: `docs/servicing-comprehension-week6`.
 
+## Success looks like
+
+- `docs/servicing-money-comprehension-week6.md` exists with all sections listed under Deliverables.
+- `test_characterization_balance.py` and `test_lost_update.py` exist; no other code file changed.
+- The four-row tolerated-red matrix below has actually been run and matches its Expected column.
+- Every file:line cited in the report is a line you opened in this branch's tree, not a number
+  copied from this prompt (see the note under Checkpoints).
+
 ## Checkpoints — expected answers, not evidence (verify each in code first, then cite)
 
 These are the conclusions a prior dig reached. They are **hints to check against**, not findings
@@ -140,5 +148,8 @@ green set and the red set as separate commands and check each against its expect
   are expected and why.
 - Every file:line reference in the report resolves in this branch's tree. If the report gets
   backticked paths, run `./scripts/check_doc_paths.sh` (matches the `doc-path-lint` CI gate).
+- Line numbers throughout this prompt (Checkpoints, correction, Q1-Q4) are as of prompt-authoring
+  time and may have drifted. The report must cite the line you actually verified in the current
+  tree, never a number copied straight from this prompt.
 - Diff stays under ~400 changed lines (W7-10 size rule).
 - Do not touch `adr/`, migrations, or any `.py` outside the two new test files.

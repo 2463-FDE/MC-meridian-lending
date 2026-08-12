@@ -16,6 +16,14 @@ Branch from `main`: `docs/servicing-money-controls-adr-week6`.
 **ADR number: check `adr/` for the current highest number before writing — do not hardcode 0013,
 it may already be taken by unrelated work by the time this spec runs. Use highest+1.**
 
+## Success looks like
+
+- One new `adr/NNNN-servicing-money-controls.md`, numbered highest-existing-ADR + 1 at write time.
+- All four decision points below each carry 3+ options with explicit rejection reasons.
+- No file under `db/`, `services/`, `frontend/`, or `scripts/` touched.
+- Every file:line cited is re-verified against current code, not copied from this prompt's Ground
+  truth list (see the note there).
+
 ## Business problem (state this before any technical solution, per ADR format rules)
 
 Servicing money endpoints (`adjust-balance`, `waive-fee`, `apply-payment`, `late-fee`) have no
@@ -102,3 +110,6 @@ outline as future work, not build now.
 - If the ADR file gets backticked repo-paths, run `./scripts/check_doc_paths.sh` to satisfy
   `doc-path-lint`.
 - Diff stays under ~400 changed lines (W7-10 size rule) — one new file, no code.
+- Line numbers in the Ground truth list above are as of prompt-authoring time and may have
+  drifted. The ADR must cite the line you actually verified in the current tree, never a number
+  copied straight from this prompt.
