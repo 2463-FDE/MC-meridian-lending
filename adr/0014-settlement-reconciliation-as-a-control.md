@@ -166,7 +166,27 @@ We will carry a `request_id` across the charge and the cross-service apply hop, 
 Servicing logs `request_id=-` when the header is absent, so an uncorrelated direct call is
 visible as such rather than indistinguishable from a correlated one.
 
-### Decision 7 — The job is read-only
+### Decision 7 — The break report is closed to the public internet by header, not by role
+
+We will require `X-Internal-Service` on `GET /reconciliation/peek`, matching the pattern in
+`kyc-service`, `decision-service` and `disclosure-service`. The gateway does not forward that
+header from a client.
+
+The break report lists loan ids, amounts, dates and processor references across every loan in
+the window. The client's answer to the week-6 servicing questions establishes that the borrower
+portal sits behind the same gateway as the internal app, so a borrower login reaches this
+service from the public internet, and that borrowers read their own account only. Publishing a
+portfolio-wide report there would create a cross-account data disclosure in the same change that
+improves money visibility.
+
+| Option | Rejected because |
+|---|---|
+| A. Leave `peek` as it is | It becomes a portfolio-wide report on an internet-reachable service. The exposure is created by this change, so it is this change's to close. |
+| B. Add a role check — officer-only | Pre-empts the week-6 servicing authorization ADR, which is deciding the role model now (CSR and admin adjust and waive, underwriter no, borrower reads own account only). Two role checks written a week apart in the same service is the divergence this repository already pays for elsewhere. |
+| C. Remove the endpoint | The command in D3(a) is the interface, so removal is defensible — but it breaks an unknown caller for no gain over gating it, and the runbook cites it today. |
+| **D. Chosen: `X-Internal-Service`** | Closes the exposure with a pattern three services already use, decides nothing about roles, and leaves the role model to the ADR that owns it. |
+
+### Decision 8 — The job is read-only
 
 We will issue `SELECT` only. The job does not correct a balance, insert a payment, or write any
 table.

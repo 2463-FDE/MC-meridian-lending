@@ -99,6 +99,34 @@ Three defect classes, established from the handed-over artifacts:
 
 ---
 
+### P5. Terminology, fixed here because two specs disagree
+
+**"Ledger" in this document means the `payments` table**, the record of captures. The week-6
+servicing work is building an *append-only ledger* of balance movements — a different table
+answering a different question. Where this spec needs to be unambiguous it says "the `payments`
+table" or "the capture side". No reader should have to infer which one is meant.
+
+### P6. What this control does not cover
+
+Reconciliation compares captures to settlement. It never reads `balances`.
+
+Two servicing endpoints move money without producing a `payments` row:
+`balance.adjust_balance` sets the balance outright — *"Set the balance directly. No ledger entry;
+the prior value is gone forever."* — and `balance.waive_fee` reduces `past_due` with an unlocked
+read-modify-write. The client reports roughly **30 balance adjustments and 15 fee waivers a
+week** across 9 representatives.
+
+Two consequences, both stated in the report rather than left for a reader to discover:
+
+- **No false breaks.** Adjustments and waivers cannot appear as variances, because they create
+  no capture to be unmatched. This is why the scope is correct.
+- **A manual adjustment can conceal a discrepancy from this control.** A representative who
+  adjusts a balance so it "looks right" changes nothing this job reads. Detecting that requires
+  the week-6 ledger — actor, before, after, reason — which is exactly what that cycle is
+  building. The two controls are complementary and neither substitutes for the other.
+
+---
+
 ## Deliverables (In Scope)
 
 ### D1. A correlation id across the payment span
@@ -115,9 +143,22 @@ introduce a second vocabulary (`trace_id`, `correlation_id`) for the same concep
 `{"amount": ..., "payment_id": ...}`. The body is the payments spec's territory (week 5 D3(d)
 removes `amount` from it), and changing it here would collide with that work.
 
-**(c) Both sides log it.** Every log line on the charge path and on servicing's
-`apply_payment` handler carries `request_id=<id>`. Servicing reads the header, defaulting to
-`"-"` when absent so a direct call is visibly uncorrelated rather than silently untraceable.
+**(c) Both sides log it, as named fields.** Every log line on the charge path and on servicing's
+`apply_payment` handler carries a fixed set of `key=value` fields — `request_id`, `loan_id`,
+`payment_id`, `outcome` — in a documented order, so a payment span can be extracted by field
+rather than by reading prose. Servicing reads the header, defaulting `request_id` to `"-"` when
+absent so a direct call is visibly uncorrelated rather than silently untraceable.
+
+**This is structured fields inside a text log line, not JSON logging, and that is a deliberate
+reduction against the client's wording ("structured tracing").** The formatter is
+`RedactingFormatter("%(levelname)s %(asctime)s %(message)s")` and the PII redactor operates on
+the *formatted message*. Re-encoding messages as JSON changes the byte sequence the redactor
+scans, under two blocking CI gates (`redaction-tests`, `redactor-drift`), and the redactor has
+already produced one class of defect exactly there — a Luhn-valid timestamp digit run masked as
+a false PAN. Changing the log encoding is a change to a security control, not to logging, and it
+is not costed in this week. Named fields deliver the tracing outcome — find every line
+for one payment — without touching that surface. Recorded in the client reply as a reduction,
+not delivered silently.
 
 **(d) The success line moves.** `payments.py:69` currently logs `-> ok` before the INSERT. It
 becomes two lines: an entry line at the start of the span, and an outcome line after the INSERT
@@ -236,10 +277,16 @@ balance" is the obvious next suggestion and the answer is no.
 **(a) Invocation.** A module entrypoint on servicing —
 `python -m app.reconcile --from YYYY-MM-DD --to YYYY-MM-DD` — runnable inside the container and
 in CI. There is no scheduler in this stack (compose runs no cron, and `db/migrations` are
-hand-applied), and this spec does **not** introduce one. "Daily" is an operational convention
-documented in the runbook plus whatever cron the operator already has, not a new service.
-Building a scheduler to prove a control works would be the larger half of the week spent on the
-smaller half of the problem.
+hand-applied), and this spec does **not** introduce one.
+
+**This is the second deliberate reduction against the client's wording ("a *daily*
+reconciliation job").** What ships is schedulable, not scheduled: deterministic exit codes, no
+interactive input, no state between runs, and a copy-paste `crontab` line in the runbook. Dana's
+operator gets "daily" from the cron they already run. Building and operating a scheduler inside
+this stack — a new container, its own failure modes, its own alert for "the scheduler stopped" —
+would be more work than the control it exists to trigger, and a scheduler that silently stops is
+the same defect class as a comparison that silently reads nothing. Recorded in the client reply
+as a reduction.
 
 **(b) Output.** One JSON document on stdout, and a human summary on stderr so a terminal run is
 readable and a piped run is parseable. The JSON carries: the window, per-side row counts and
@@ -263,12 +310,27 @@ mistake — a figure that looks like a measurement but is partly an artifact of 
 chose. The two coincide at ±1 day on this sample; that is a coincidence of the data, not a
 property, and the report must not let a reader infer otherwise.
 
-**(d) `peek` stops lying.** `GET /reconciliation/peek` (`main.py:124`) is rewritten to return
-the break summary for the default window from the same code path as (b), and its
-"not a real control" comment is deleted because it is no longer true. Keeping a second,
-weaker comparison alive next to the real one reproduces the drift the fee-schedule loader was
-built to end. `ledger_total()` and `settlement_total()` are removed rather than left beside
-their replacement.
+**(d) `peek` is rewritten and closed to the public internet.** `GET /reconciliation/peek`
+(`main.py:124`) returns the break summary for the default window from the same code path as (b),
+and its "not a real control" comment is deleted because it is no longer true. Keeping a second,
+weaker comparison beside the real one reproduces the drift the fee-schedule loader was built to
+end, so `ledger_total()` and `settlement_total()` are removed rather than left in place.
+
+**The endpoint requires `X-Internal-Service`**, matching `kyc-service/app/routers/kyc.py`,
+`decision-service/app/routers/decisions.py` and `disclosure-service/app/routers/offers.py`; the
+gateway does not forward that header from a client. This is not a role model and needs no
+identity work — it is the pattern three services already use.
+
+The reason is the client's own answer to the week-6 questions: the borrower portal sits behind
+the same gateway as the internal app, so a borrower login is on the public internet, and
+borrowers read **their own account only**. The break report lists loan ids, amounts, dates and
+processor references **across every loan in the window**. Serving that from an endpoint on that
+gateway with no gate would create a cross-account data disclosure in the same change that fixes
+a money-visibility problem.
+
+The interface for this control is the command in (a). The endpoint is a legacy caller kept
+working, not the delivery mechanism, which is why header-gating it costs nothing here and why
+the role matrix stays where it belongs — the week-6 servicing authorization work.
 
 ### D4. One alert
 
@@ -299,9 +361,11 @@ channel consuming the exit code — no new alerting infrastructure.
 
 ### D5. ADR 0014
 
-Records the decisions this spec makes: heuristic matching under a named successor, minor units,
-break taxonomy, read-only posture, fail-closed abort, log-only correlation. Three or more
-options per decision with rejection reasons, per the repo's ADR standard.
+Records the eight decisions this spec makes: heuristic matching under a named successor,
+matching-independent duplicate detection, the three labelled variance figures, fail-closed
+abort, one alert on the matching-independent figure, log-only correlation, header-gating the
+break report, and the read-only posture. Three or more options per decision with rejection
+reasons, per the repo's ADR standard.
 
 ### D6. Documentation
 
@@ -335,8 +399,14 @@ a schedule. Finance reconciles by hand in a spreadsheet."*) is replaced rather t
   and unchanged here.
 - **Correcting the balances the report finds wrong.** D2(h). Remediation of the $500 on loan
   4471 is a business action, raised in the client-asks draft.
-- **RBAC on the reconciliation endpoint.** `peek` inherits whatever `servicing-service` has
-  today. D8 / ADR 0010 territory.
+- **The servicing role model.** `peek` is gated with `X-Internal-Service` (D3(d)), which closes
+  the cross-account exposure without deciding who may do what. Roles — CSR and admin adjust and
+  waive, underwriter no, borrower reads own account only — are the week-6 servicing
+  authorization work, D8 / ADR 0010. This spec must not pre-empt that ADR by inventing a second
+  role check.
+- **Adjustments and fee waivers.** See "What this control does not cover" below. They move
+  balances without producing a `payments` row, so reconciliation is blind to them by
+  construction; recording them is the week-6 ledger.
 
 ---
 
@@ -365,6 +435,10 @@ Criteria 1–10 are what the implementation must satisfy. 11–13 are what the w
 9. The job performs no write. Verified by asserting the executed statements are all `SELECT`.
 10. `GET /reconciliation/peek` returns the break summary, and `ledger_total` /
     `settlement_total` no longer exist.
+9a. `GET /reconciliation/peek` returns 403 without `X-Internal-Service`, and the gateway does
+   not forward that header from a client. A borrower session cannot reach the break report.
+9b. Every payment-path log line carries `request_id`, `loan_id`, `payment_id` and `outcome` as
+   named fields, and a single payment's span is recoverable by field extraction alone.
 11. ADR 0014 committed, 3+ options per decision with rejection reasons.
 12. Runbook updated; the stale month-end entry replaced.
 13. Every regression test watched fail before its fix, per the repo's prove-before-fix rule;
@@ -439,6 +513,23 @@ must print no PAN, CVV, or SSN. `payments.pan` and `payments.cvv` are never sele
 per-service redactor still applies to any log line the job emits; the report itself is stdout
 and is not redactor-covered, which is why the column list is a review point rather than an
 assumption.
+
+---
+
+## Stated scope reductions
+
+The client's deliverable reads: *"structured tracing on the payment span, a daily reconciliation
+job + break-report (ledger vs settlement), and one alert."* Two of those four are delivered
+smaller than worded. Both go in the reply in these terms, because a reduction the client learns
+about at the demo is a reduction they did not agree to.
+
+| Client wording | Delivered | Why |
+|---|---|---|
+| "structured tracing" | Named `key=value` fields in text log lines, not JSON logs, and no span/parent/duration semantics | The redactor operates on the formatted message under two blocking gates; re-encoding is a change to a security control (D1(c)) |
+| "daily … job" | Schedulable, not scheduled: exit codes plus a runbook `crontab` line | No scheduler exists in the stack; operating one exceeds the control it triggers (D3(a)) |
+| "break-report (ledger vs settlement)" | Delivered in full | — |
+| "one alert" | Delivered in full | — |
+| "sampled month, not full history" | Delivered — bounded window is mandatory, not optional | — |
 
 ---
 
