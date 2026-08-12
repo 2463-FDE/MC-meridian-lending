@@ -1,4 +1,4 @@
-# ADR 0014: Settlement Reconciliation as a Control, and Correlation on the Payment Span
+# ADR 0015: Settlement Reconciliation as a Control, and Correlation on the Payment Span
 
 - **Status:** **Proposed** — spec week. Implementation is scoped, not built.
 - **Date:** 2026-08-12

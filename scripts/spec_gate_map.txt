@@ -92,7 +92,7 @@ services/servicing-service/app/routers/loans.py => adr/0014-servicing-money-cont
 # so deleting it must fail this gate even though the week's own implementation
 # has not merged yet.
 services/servicing-service/app => docs/spec-observability-week7.md
-services/servicing-service/app => adr/0014-settlement-reconciliation-as-a-control.md
+services/servicing-service/app => adr/0015-settlement-reconciliation-as-a-control.md
 
 # --- Brownfield structure + trust boundary ----------------------------------
 # ADR 0004's decomposition is load-bearing through origination's sync HTTP

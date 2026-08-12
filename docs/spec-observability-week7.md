@@ -4,7 +4,7 @@
 **Client ask:** observability / SRE / guardrails — "Payments feel flaky, and my finance team
 grumbles about 'noise' at month-end that they just write off."
 **Companion docs:** `docs/client-asks-2026-08-12-observability.md` (the asks and the evidence),
-ADR 0014 (the decisions), `docs/debt-log.md` (D7).
+ADR 0015 (the decisions), `docs/debt-log.md` (D7).
 
 ---
 
@@ -84,7 +84,7 @@ integration exists**: `PROCESSOR_BASE_URL` is defined in `payment-service/app/co
 and `servicing-service/app/config.py:189` and referenced by no code path.
 
 So matching this week is necessarily inexact. That constraint is a decision, not an oversight —
-see D2 and ADR 0014.
+see D2 and ADR 0015.
 
 ### P4. What the data actually contains
 
@@ -359,7 +359,7 @@ The threshold's value is a client decision and is not invented here; the pipelin
 until it is set (open question, see Client Questions). Delivery is the operator's existing
 channel consuming the exit code — no new alerting infrastructure.
 
-### D5. ADR 0014
+### D5. ADR 0015
 
 Records the eight decisions this spec makes: heuristic matching under a named successor,
 matching-independent duplicate detection, the three labelled variance figures, fail-closed
@@ -439,7 +439,7 @@ Criteria 1–10 are what the implementation must satisfy. 11–13 are what the w
    not forward that header from a client. A borrower session cannot reach the break report.
 9b. Every payment-path log line carries `request_id`, `loan_id`, `payment_id` and `outcome` as
    named fields, and a single payment's span is recoverable by field extraction alone.
-11. ADR 0014 committed, 3+ options per decision with rejection reasons.
+11. ADR 0015 committed, 3+ options per decision with rejection reasons.
 12. Runbook updated; the stale month-end entry replaced.
 13. Every regression test watched fail before its fix, per the repo's prove-before-fix rule;
     `make prove` green from a detached worktree.
@@ -553,5 +553,5 @@ constant rather than a design.
 
 ## Status
 
-Draft. ADR 0014 next. Implementation follows the repo's prove-before-fix rule: every regression
+Draft. ADR 0015 next. Implementation follows the repo's prove-before-fix rule: every regression
 test is watched failing before the code that satisfies it exists.
