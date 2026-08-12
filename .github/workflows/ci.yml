@@ -528,6 +528,9 @@ jobs:
     # repo in $TMPDIR — so it asserts the gate's own logic, never the state of the
     # repo's specs. The load-bearing case is `code area without required spec fails`:
     # without it the gate could pass unconditionally and nothing here would notice.
+    # One case is deliberately NOT hermetic (`audit globs still match this repo's
+    # tree`): the coverage audit's `adr/*.md` / `docs/spec-*.md` globs are a claim
+    # about THIS layout, and a fixture cannot catch them drifting off it.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

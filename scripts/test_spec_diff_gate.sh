@@ -229,6 +229,57 @@ check "malformed pairing line does not count as coverage" 1 "$repo" \
   "services/foo-service/app adr/0001-process.md" \
   "UNMAPPED: adr/0001-process.md"
 
+# --- 6h. the coverage audit cannot be skipped while the gate exits 0 ---------
+# The audit input used to be a here-document fed by `$(git ls-files ...)`, which
+# discarded both the listing's exit status and the temp file the here-doc needs.
+# Either failure skipped the whole audit, left `fail` at 0, and printed the
+# success line — coverage reported over an audit that never ran. Both cases must
+# ABORT (exit 2), never 0.
+#
+# audit_stub_dir NAME BODY -> prints a dir holding an executable `git` shim.
+audit_stub_dir() {
+  local d
+  d=$(mktemp -d "$TMPROOT/stub.XXXXXX")
+  printf '%s\n' "#!/usr/bin/env bash" "$1" 'exec '"$(command -v git)"' "$@"' > "$d/git"
+  chmod +x "$d/git"
+  printf '%s' "$d"
+}
+
+# The shim fails ONLY the audit listing (`ls-files -- <globs>`) and passes every
+# other git call — including `rev-parse --show-toplevel` and the per-line
+# `ls-files --error-unmatch` — through to the real binary, so the case isolates
+# the audit input rather than breaking the script at its first git call.
+repo=$(new_repo_with_docs)
+stub=$(audit_stub_dir 'if [ "$1" = "ls-files" ] && [ "$2" = "--" ]; then exit 1; fi')
+printf '%s\n' "services/foo-service/app => adr/0001-process.md
+# EXEMPT: spec.md — not a graded doc pattern" > "$repo/map.txt"
+out=$(cd "$repo" && PATH="$stub:$PATH" "$SCRIPT" map.txt 2>&1)
+got=$?
+if [ "$got" -eq 2 ] && printf '%s' "$out" | grep -qF "ABORT: coverage audit input failed"; then
+  echo "ok    audit-listing failure aborts instead of reporting clean (exit 2)"
+  pass=$((pass + 1))
+else
+  echo "FAIL  audit-listing failure aborts — exit $got, wanted 2 with 'ABORT: coverage audit input failed'"
+  printf '%s\n' "$out" | sed 's/^/        /'
+  fail=$((fail + 1))
+fi
+
+# The audit's own globs are the other way it can silently grade nothing: if
+# `adr/*.md` / `docs/spec-*.md` stopped matching this repo's layout, every
+# coverage case above would still pass on its fixtures while the real gate
+# certified zero docs. An empty listing is deliberately NOT an abort in the
+# script (the map-syntax fixtures are legitimately doc-free, and aborting would
+# mask a pairing failure's exit 1), so assert non-emptiness here, against the
+# real tree, where it is actually a claim about coverage.
+real_docs=$(git -C "$(dirname "$SCRIPT")/.." ls-files -- 'adr/*.md' 'docs/spec-*.md')
+if [ -n "$real_docs" ]; then
+  echo "ok    audit globs still match this repo's tree ($(printf '%s\n' "$real_docs" | wc -l | tr -d ' ') docs graded)"
+  pass=$((pass + 1))
+else
+  echo "FAIL  audit globs match nothing in this repo — the coverage audit grades zero docs"
+  fail=$((fail + 1))
+fi
+
 # --- 5. missing map file aborts with usage exit ------------------------------
 repo=$(new_repo)
 out=$(cd "$repo" && "$SCRIPT" nonexistent.txt 2>&1)

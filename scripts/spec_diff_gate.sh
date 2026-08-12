@@ -30,7 +30,9 @@
 #          every spec/ADR is mapped or explicitly exempt.
 # Exit 1 = a required path (code or spec/ADR) is missing, or a spec/ADR is
 #          neither mapped nor exempt, or an exemption is malformed/stale.
-# Exit 2 = usage / map file not found.
+# Exit 2 = ABORT — the gate could not run its check: usage / map file not found,
+#          or the coverage audit's input could not be built. "Could not check"
+#          is never reported as 0; see the audit's comment.
 set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)" 2>/dev/null || { echo "ABORT: not in a git repo." >&2; exit 2; }
@@ -119,9 +121,32 @@ $spec_path"
 done < "$MAP_FILE"
 
 # --- coverage audit: no spec/ADR may sit outside the map unaccounted for -----
+# The audit input is built and CHECKED before the loop runs, and iterated
+# without a here-document. Both halves matter: a `while read ... <<EOF
+# $(git ls-files ...) EOF` loses the listing's exit status AND needs a temp
+# file, so a git failure or an unwritable TMPDIR skipped this entire audit
+# while `fail` stayed 0 and the success line still printed — the gate reporting
+# coverage it never checked, which is the failure mode it exists to prevent. A
+# pipe would restore the status check but run the loop body in a subshell where
+# `fail=1` is discarded, so iteration is a newline-IFS `for` (no subshell, no
+# temp file; globbing off so a path is never expanded).
 in_set() { printf '%s\n' "$2" | grep -qxF -- "$1"; }
 
-while IFS= read -r doc; do
+if ! audit_docs="$(git ls-files -- 'adr/*.md' 'docs/spec-*.md')"; then
+  echo "ABORT: coverage audit input failed: git ls-files could not list 'adr/*.md' 'docs/spec-*.md' — refusing to report coverage over an audit that did not run." >&2
+  exit 2
+fi
+# An empty listing is NOT an abort: `git ls-files` exiting 0 with no output is a
+# truthful "this tree has no graded doc" (the map-syntax fixtures are exactly
+# that), and aborting on it would also mask a pairing failure the loop above
+# already recorded by replacing its exit 1 with a 2. The case that must fail
+# closed is the one above — the listing could not be produced at all. That the
+# globs still match THIS repo's tree is asserted in test_spec_diff_gate.sh.
+audit_ifs=$IFS
+IFS='
+'
+set -f
+for doc in $audit_docs; do
   [ -z "$doc" ] && continue
   is_mapped=0; is_exempt=0
   in_set "$doc" "$mapped" && is_mapped=1
@@ -134,19 +159,19 @@ while IFS= read -r doc; do
     echo "UNMAPPED: $doc is neither mapped to a code path nor exempt — add a map line for the code it obligates, or an '# EXEMPT: $doc — <reason>' line (scripts/spec_gate_map.txt)" >&2
     fail=1
   fi
-done <<EOF
-$(git ls-files -- 'adr/*.md' 'docs/spec-*.md' 2>/dev/null)
-EOF
+done
 
-while IFS= read -r doc; do
+# Same iteration shape for the same reason; `$exempt` may legitimately be empty
+# (a map with no exemptions), so emptiness is not an abort here.
+for doc in $exempt; do
   [ -z "$doc" ] && continue
   if ! git ls-files --error-unmatch -- "$doc" >/dev/null 2>&1; then
     echo "STALE: exemption names $doc, which is not a tracked file (scripts/spec_gate_map.txt)" >&2
     fail=1
   fi
-done <<EOF
-$exempt
-EOF
+done
+set +f
+IFS=$audit_ifs
 
 if [ "$fail" -eq 0 ]; then
   echo "spec_diff_gate: all mapped code areas have their required spec/ADR, and every spec/ADR is mapped or exempt."
