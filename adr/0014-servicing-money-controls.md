@@ -1,7 +1,8 @@
 # ADR 0014: Servicing Money Controls — Authorization, a Balance Ledger, and Deferred Approval
 
 - **Status:** Proposed — the four decisions below rest on business answers Lending Ops
-  confirmed in writing on 2026-08-12; the ADR itself is awaiting engineering review
+  confirmed in writing on 2026-08-12, transcribed in `docs/client-answers-week6-servicing.md`
+  with the questions that produced them; the ADR itself is awaiting engineering review
 - **Date:** 2026-08-12
 - **Deciders:** Engineering, with Lending Ops (Dana Whitfield, VP Lending Ops) as requesting
   stakeholder
