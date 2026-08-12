@@ -29,7 +29,10 @@ stripping any client copy (`services/gateway/app/main.py:160-171`), but `/lss/*`
 `/payments` gate on `_require_user` only (`gateway/app/main.py:193-197`). Borrower `maria` can
 zero a stranger's balance. **Lending Ops confirms this is externally reachable**: the borrower
 portal sits behind the same gateway as the internal application, so a borrower login is on the
-public internet. Loan ids are serial, so reads
+public internet. That answer changes the risk class rather than the finding — the same defect
+read as an internal-misuse problem while the endpoints were assumed to be reachable only from
+inside, and reads as an internet-facing one now. It is why the client asked for the
+authorization fix as its own immediate change rather than as part of the dashboard work. Loan ids are serial, so reads
 (`services/servicing-service/app/routers/loans.py:61-77`, `main.py:88-94`) enumerate every
 customer. This is debt **D8**, Critical, and ADR 0010 deferred it for servicing on the grounds
 that no identity was bound to the resource.
@@ -196,8 +199,8 @@ what a controller reads a row for — a reconstruction that depends on replaying
 posting is not the same artifact.
 
 **The reason is required, and the code list is the client's.** Lending Ops sends the ops-manual
-codes; until they arrive, `reason_code = 'other'` with free-text `reason_text` is the only
-value, and `'other'` remains permanently available as the fallback once the list exists. So the
+codes on Friday 2026-08-14; until they arrive, `reason_code = 'other'` with free-text
+`reason_text` is the only value, and `'other'` remains permanently available as the fallback once the list exists. So the
 column is a list plus an escape hatch, never a closed enum — a representative who cannot find
 their case must not be forced into a wrong code to complete a correction.
 
@@ -239,6 +242,11 @@ migration ships first, the payment path gains a posting insert; if this one ship
 | **D. Chosen: one append-only ledger plus a projection** | Reuses a pattern already enforced in this schema, keeps read paths intact, and makes actor, delta, prior value, and reason recoverable for every mutation. |
 
 ### Decision 4 — The ledger is integer minor units; `balances` stays float for now
+
+This decision is ours alone. It was never put to Lending Ops, because how money is represented
+in storage is not a business question — the client's interest is that the figures are right, and
+the cross-cutting cost of getting it wrong (D2) is already documented. So unlike Decisions 1–3,
+nothing here rests on a client answer, and nothing changes if one arrives.
 
 We will store `delta_minor`, `before_minor`, and `after_minor` as `BIGINT` minor units, per
 ADR 0012's precedent and ADR 0013's rule that new money columns use minor units while existing
