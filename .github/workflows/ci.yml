@@ -523,6 +523,34 @@ jobs:
       - name: Backticked doc paths resolve in this tree
         run: ./scripts/check_doc_paths.sh
 
+  spec-diff-gate-tests:
+    # BLOCKING, like doc-path-lint-tests. Hermetic — each case builds a throwaway git
+    # repo in $TMPDIR — so it asserts the gate's own logic, never the state of the
+    # repo's specs. The load-bearing case is `code area without required spec fails`:
+    # without it the gate could pass unconditionally and nothing here would notice.
+    # One case is deliberately NOT hermetic (`audit globs still match this repo's
+    # tree`): the coverage audit's `adr/*.md` / `docs/spec-*.md` globs are a claim
+    # about THIS layout, and a fixture cannot catch them drifting off it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: spec_diff_gate.sh tests
+        run: ./scripts/test_spec_diff_gate.sh
+
+  spec-diff-gate:
+    # A code area with a merged spec/ADR must keep one — existence, not a same-PR
+    # diff: spec and implementation land in separate PRs/weeks here on purpose (see
+    # docs/kb.md's weekly cadence). scripts/spec_gate_map.txt lists the pairings that
+    # have already merged. BLOCKING. Passes on main today (decision-service,
+    # disclosure-service, payment-service each still have their paired spec+ADR), so
+    # this costs nothing now. Add a code area to the map only once its spec/ADR has
+    # actually merged — servicing-service (week 6) is deliberately absent until then.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mapped code areas still have their required spec/ADR
+        run: ./scripts/spec_diff_gate.sh
+
   docs-drift-tests:
     # BLOCKING, like doc-path-lint-tests. Hermetic — each case builds a throwaway git
     # repo in $TMPDIR — so it asserts the gate's own logic, never the state of the docs.
