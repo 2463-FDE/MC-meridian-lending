@@ -62,7 +62,12 @@ services/payment-service/app => adr/0013-payment-idempotency-and-tokenization.md
 # --- Week 6: servicing money controls ---------------------------------------
 # ADR 0014 is Proposed and ships no code, but it is mapped rather than exempt
 # because the code path it obligates already exists — the endpoints are live and
-# unguarded today, which is the finding. Each file it obligates is listed
+# unguarded today, which is the finding. Proposed is not a blocker for a gate
+# anchor: this gate's own rule (see the top of this file, and
+# spec_diff_gate.sh's docstring) is "has the doc merged to main", not "is the
+# ADR Accepted" — ADR 0012 and ADR 0013 are mapped below on the same basis
+# while Proposed, so this is established precedent, not a one-off exception.
+# Each file it obligates is listed
 # separately rather than mapping `services/servicing-service/app`, because the
 # directory outlives every file in it: a directory-level line stays green after
 # balance.py is deleted, and the balance mutations are the surface the ADR is

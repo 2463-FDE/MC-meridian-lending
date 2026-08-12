@@ -12,6 +12,13 @@
   pattern this reuses), debt **D8**, **D3**, **D2**, **D20**
 - **Scope note:** This ADR decides. It ships no code, no schema, and no migration. SQL below
   is illustrative of the shape, not a migration file.
+- **On being a gate anchor while Proposed:** `scripts/spec_gate_map.txt` maps the four
+  servicing files this ADR obligates to this document. `spec_diff_gate.sh` is an existence
+  check keyed on "has this spec/ADR merged to main", not on ADR `Status`, so a merged-but-
+  Proposed document is a valid anchor by the gate's own stated rule (see the map's header
+  comment and the script's docstring) — the same pattern already holds for ADR 0012 and ADR
+  0013, both merged while Proposed. Flip this line to Accepted when engineering review closes;
+  the gate does not require it.
 
 ---
 
@@ -48,8 +55,12 @@ with an overwritten `updated_at` (`db/init/001_schema.sql:117-122`). No actor, d
 value, or reason is stored. `audit_logs` is an ordinary mutable table with a `deleted_at`
 column (`001_schema.sql:137-144`), no servicing code writes it, and its rows are
 `UPDATE`/`DELETE`-able — debt **D20**. So "why is account 7781 at this number?" is answerable
-today only as "that is the number", plus a timestamp. This is not hypothetical: a SOX
-walkthrough on the client's side assumes an adjustment trail exists. The one genuinely append-only table in
+today only as "that is the number", plus a timestamp. This is not hypothetical: `README.md`
+names Sam as the client's SOX/reconciliation contact (repo-observed fact); no one asked Sam
+whether a walkthrough assumes an adjustment trail exists, so that inference is engineering's,
+not a client-stated answer — `docs/client-answers-week6-servicing.md` does not carry it. The
+retention answer Sam did give (Q7, seven years) is cited on its own terms below. The one
+genuinely append-only table in
 this schema is `decision_events` (`001_schema.sql:148-179`): serial primary key, JSONB
 payload, a `BEFORE UPDATE OR DELETE` trigger and a `BEFORE TRUNCATE` trigger that both raise.
 
@@ -366,11 +377,16 @@ Later PRs, in this order. Each is independently mergeable.
    per-route gates from Decision 1, and the internal-service gate on `late-fee`. No schema.
    Closes D8(b). Lending Ops asked for this one separately and immediately, and confirms the
    endpoints are externally reachable, so it does not wait for anything below it.
-2. **Ledger** — migration adding `balance_postings` and its two triggers, at the next free
-   number after ADR 0013's unbuilt migrations land (0013's plan cites 0016–0019 and `main`
-   already holds an unrelated `0016`, so the number is read at write time, not pinned here).
-   Backfill is not attempted: the history does not exist to backfill, and the ledger starts at
-   its first posting with that stated in the runbook.
+2. **Ledger** — migration adding `balance_postings` and its two triggers. **This ADR reserves
+   no migration number.** 0013's plan cites 0016–0019 for its own migrations, and `main`
+   already holds an unrelated `0016` (`db/migrations/0016_provenance_disclosure_outcome.sql`),
+   so any number pinned by either ADR is stale the moment the other lands first. The
+   implementing PR must read the current migration head off `db/migrations/` (or `main` at
+   merge time, whichever is later) and take the next free number then — not copy a number
+   cited by this ADR, 0013, or any other doc. `migration-numbering-gate` enforces the result;
+   it does not enforce intent, so this line is the intent. Backfill is not attempted: the
+   history does not exist to backfill, and the ledger starts at its first posting with that
+   stated in the runbook.
 3. **Posting on every mutation** — `balance.py` writes a posting and the projection in one
    transaction. Both `apply_payment` call sites must be covered: the HTTP route
    (`main.py:84`) and the in-process caller (`app/payments.py:79`).
