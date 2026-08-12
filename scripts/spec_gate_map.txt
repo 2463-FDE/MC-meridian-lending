@@ -59,6 +59,32 @@ services/disclosure-service/app => adr/0012-decimal-minor-units-and-externalized
 services/payment-service/app => docs/spec-payments-week5.md
 services/payment-service/app => adr/0013-payment-idempotency-and-tokenization.md
 
+# --- Week 6: servicing money controls ---------------------------------------
+# ADR 0014 is Proposed and ships no code, but it is mapped rather than exempt
+# because the code path it obligates already exists — the endpoints are live and
+# unguarded today, which is the finding. Proposed is not a blocker for a gate
+# anchor: this gate's own rule (see the top of this file, and
+# spec_diff_gate.sh's docstring) is "has the doc merged to main", not "is the
+# ADR Accepted" — ADR 0012 and ADR 0013 are mapped below on the same basis
+# while Proposed, so this is established precedent, not a one-off exception.
+# Each file it obligates is listed
+# separately rather than mapping `services/servicing-service/app`, because the
+# directory outlives every file in it: a directory-level line stays green after
+# balance.py is deleted, and the balance mutations are the surface the ADR is
+# about.
+#   main.py         — the four money endpoints (adjust-balance, waive-fee,
+#                     apply-payment, late-fee) that Decision 1 gates per route
+#   balance.py      — the mutations behind them; Decision 3's posting-plus-
+#                     projection transaction lands here (plan step 3)
+#   payments.py     — the in-process apply_payment caller, the second call site
+#                     step 3 must cover alongside the HTTP route
+#   routers/loans.py — the owner-scoped reads Decision 1 puts behind
+#                     _STAFF_ROLES-or-owner; serial ids enumerate today
+services/servicing-service/app/main.py => adr/0014-servicing-money-controls.md
+services/servicing-service/app/balance.py => adr/0014-servicing-money-controls.md
+services/servicing-service/app/payments.py => adr/0014-servicing-money-controls.md
+services/servicing-service/app/routers/loans.py => adr/0014-servicing-money-controls.md
+
 # --- Brownfield structure + trust boundary ----------------------------------
 # ADR 0004's decomposition is load-bearing through origination's sync HTTP
 # client seam; ADR 0010 Phase A+B enforce officer-OR-owner at the gateway.

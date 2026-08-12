@@ -544,7 +544,7 @@ jobs:
     # have already merged. BLOCKING. Passes on main today (decision-service,
     # disclosure-service, payment-service each still have their paired spec+ADR), so
     # this costs nothing now. Add a code area to the map only once its spec/ADR has
-    # actually merged — servicing-service (week 6) is deliberately absent until then.
+    # actually merged — servicing-service joined the map with ADR 0014 (week 6).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
