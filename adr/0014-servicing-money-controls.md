@@ -1,8 +1,7 @@
 # ADR 0014: Servicing Money Controls — Authorization, a Balance Ledger, and Deferred Approval
 
 - **Status:** Proposed — the four decisions below rest on business answers Lending Ops
-  confirmed in writing on 2026-08-12, transcribed in `docs/client-answers-week6-servicing.md`
-  with the questions that produced them; the ADR itself is awaiting engineering review
+  confirmed in writing on 2026-08-12; the ADR itself is awaiting engineering review
 - **Date:** 2026-08-12
 - **Deciders:** Engineering, with Lending Ops (Dana Whitfield, VP Lending Ops) as requesting
   stakeholder
@@ -27,7 +26,7 @@ authorization module. `adjust_balance` and `waive_fee` declare `x_user_role`
 and `balance.waive_fee` (`app/balance.py:35-56`) take no caller identity at all. The gateway
 authenticates the session and forwards authoritative `X-User-Id` / `X-User-Role` after
 stripping any client copy (`services/gateway/app/main.py:160-171`), but `/lss/*` and
-`/payments` gate on `_require_user` only (`gateway/app/main.py:193-197`). Borrower `maria` can
+`/payments` gate on `_require_user` only (`services/gateway/app/main.py:193-197`). Borrower `maria` can
 zero a stranger's balance. **Lending Ops confirms this is externally reachable**: the borrower
 portal sits behind the same gateway as the internal application, so a borrower login is on the
 public internet. That answer changes the risk class rather than the finding — the same defect
@@ -320,7 +319,7 @@ compare an exact sum to a float cache with an explicit tolerance.
 **Security.** The gate fails closed: an absent or unrecognized role is in neither role set,
 and a non-owner is denied as 404 so ids cannot be probed. The trust boundary is unchanged — the
 gateway strips inbound `X-User-Id` / `X-User-Role` and re-sets them from the session
-(`gateway/app/main.py:160-171`), which is what makes the header trustworthy inside servicing;
+(`services/gateway/app/main.py:160-171`), which is what makes the header trustworthy inside servicing;
 the existing `gateway-trust-boundary-gate` holds that. Ledger `detail` is JSONB and must stay
 identifier-free per ADR 0007, so a reason string cannot become a new PII store.
 
