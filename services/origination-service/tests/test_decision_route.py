@@ -102,3 +102,157 @@ def test_downstream_conflict_maps_to_409_not_503(monkeypatch):
             42, idempotency_key="reused-key", x_user_role="underwriter"
         )
     assert exc.value.status_code == 409
+
+
+# --- Reg B principal reasons: plural, not the legacy first-only field -----------------
+#
+# decision-service ranks up to four specific principal reasons (reasons.MAX_REASONS) and
+# returns them in `principal_reasons`; its `reason` field is documented as the FIRST one
+# only, kept for legacy callers (decision-service schemas.py:29-33). Forwarding `reason`
+# alone means an applicant denied for three reasons is told one of them, while the
+# decision_events row an examiner reads carries all three. 12 CFR 1002.9 requires the
+# specific principal reason(s), and policies/underwriting_guidelines.md:22-28 says the
+# same. The truncation happened in this route, not in decision-service.
+
+_THREE_REASONS = [
+    {
+        "code": "R02",
+        "reason": "Excessive obligations in relation to income",
+        "feature": "payment_burden",
+    },
+    {
+        "code": "R03",
+        "reason": "Income insufficient for amount of credit requested",
+        "feature": "income_sufficiency",
+    },
+    {"code": "R04", "reason": "Length of employment", "feature": "employment_tenure"},
+]
+
+
+def _stub_decision(monkeypatch, response):
+    monkeypatch.setattr(
+        applications,
+        "decision_request_payload",
+        lambda app_id: {"application_id": app_id},
+    )
+    monkeypatch.setattr(
+        applications.clients, "post", lambda base, path, payload: response
+    )
+
+
+def test_every_principal_reason_reaches_the_response(monkeypatch):
+    _stub_decision(
+        monkeypatch,
+        {
+            "outcome": "deny",
+            "score": 518,
+            "reason": _THREE_REASONS[0]["reason"],
+            "principal_reasons": _THREE_REASONS,
+        },
+    )
+    out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
+    assert [r.model_dump() for r in out.principal_reasons] == _THREE_REASONS
+    # The legacy single-string field keeps its meaning for callers already reading it.
+    assert out.adverse_action_reason == _THREE_REASONS[0]["reason"]
+
+
+def test_absent_principal_reasons_is_an_empty_list_not_none(monkeypatch):
+    # An approve carries no reasons, and a decision-service predating the field carries
+    # none either. Both must give the screens an empty list to iterate, never null.
+    _stub_decision(monkeypatch, {"outcome": "approve", "score": 712})
+    out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
+    assert out.principal_reasons == []
+    assert out.adverse_action_reason is None
+
+
+# --- Malformed downstream principal_reasons must not reach the response verbatim -----
+#
+# decision-service can rebuild principal_reasons from the persisted decision_events row
+# on idempotency replay (unconstrained JSONB, decision.py:198), and GET application
+# detail already allowlists that same column to {code, reason, feature}. This route must
+# sanitize identically instead of forwarding resp["principal_reasons"] verbatim, or a
+# malformed/backfilled/hand-edited event leaks extra internal keys or non-dict items to
+# a borrower or officer calling decisioning (PR 34 review).
+
+
+def test_malformed_principal_reasons_are_sanitized_not_forwarded(monkeypatch):
+    _stub_decision(
+        monkeypatch,
+        {
+            "outcome": "deny",
+            "score": 518,
+            "reason": "Excessive obligations in relation to income",
+            "principal_reasons": [
+                {
+                    "code": "R02",
+                    "reason": "Excessive obligations in relation to income",
+                    "feature": "payment_burden",
+                    "internal_model_weight": 0.83,  # unknown key must be dropped
+                },
+                "not-a-reason-object",  # non-dict item must be dropped entirely
+                {
+                    "code": 7,
+                    "reason": None,
+                    "feature": "income_sufficiency",
+                },  # non-string values, then reasonless -- item dropped entirely
+            ],
+        },
+    )
+    out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
+    assert len(out.principal_reasons) == 1
+    first = out.principal_reasons[0]
+    assert first.model_dump() == {
+        "code": "R02",
+        "reason": "Excessive obligations in relation to income",
+        "feature": "payment_burden",
+    }
+    assert not hasattr(first, "internal_model_weight")
+
+
+def test_reasonless_first_item_is_dropped_not_forwarded(monkeypatch):
+    # Shares _normalize_principal_reasons with get_application, whose legacy
+    # adverse_action_reason is derived from principal_reasons[0].reason -- a leading
+    # code-only row must not survive into that slot even on the fresh decision path
+    # (Codex review, PR 34).
+    _stub_decision(
+        monkeypatch,
+        {
+            "outcome": "deny",
+            "score": 518,
+            "reason": "Income insufficient for amount of credit requested",
+            "principal_reasons": [
+                {"code": "R02"},  # no reason text
+                {
+                    "code": "R03",
+                    "reason": "Income insufficient for amount of credit requested",
+                    "feature": "income_sufficiency",
+                },
+            ],
+        },
+    )
+    out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
+    assert len(out.principal_reasons) == 1
+    assert out.principal_reasons[0].code == "R03"
+
+
+# --- A malformed downstream score must not raise or fabricate a value ----------------
+#
+# decision-service's score is unvalidated downstream JSON, same risk class as
+# ApplicationDetail's drivers.model_score: `int(round(resp.get("score") or 0))` either
+# raises on a nonnumeric value or silently reports 0 for an absent/falsy one (PR 34
+# review).
+
+
+def test_nonnumeric_score_degrades_to_none_not_a_500(monkeypatch):
+    _stub_decision(
+        monkeypatch,
+        {"outcome": "deny", "score": "518", "reason": "Excessive obligations"},
+    )
+    out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
+    assert out.score is None
+
+
+def test_absent_score_is_none_not_a_fabricated_zero(monkeypatch):
+    _stub_decision(monkeypatch, {"outcome": "approve"})
+    out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
+    assert out.score is None

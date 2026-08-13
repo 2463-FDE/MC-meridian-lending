@@ -110,11 +110,30 @@ interface AppResult {
   // logged-out applicant via an HttpOnly resume cookie the client cannot read.
 }
 
+interface PrincipalReason {
+  code?: string;
+  reason: string;
+}
+
 interface DecisionResult {
   app_id: string | number;
   decision: string;
   score?: number;
+  // The FIRST principal reason only (legacy field). Kept as a fallback for a response
+  // that carries no list — never as the thing rendered when a list is present.
   adverse_action_reason?: string;
+  principal_reasons?: PrincipalReason[];
+}
+
+// 12 CFR 1002.9 requires the specific principal reason(s) actually used, and
+// decision-service ranks up to four. Rendering `adverse_action_reason` alone told an
+// applicant denied for three reasons about one of them. Prefer the full list; fall back
+// to the legacy single field so an older response still shows a reason rather than none.
+function adverseActionReasons(d: DecisionResult | null): PrincipalReason[] {
+  if (!d) return [];
+  const listed = (d.principal_reasons ?? []).filter((r) => r?.reason);
+  if (listed.length > 0) return listed;
+  return d.adverse_action_reason ? [{ reason: d.adverse_action_reason }] : [];
 }
 
 interface Disclosure {
@@ -231,6 +250,9 @@ export default function ApplyPage() {
           status?: string;
           kyc?: Kyc | null;
           decision?: string | null;
+          score?: number | null;
+          adverse_action_reason?: string | null;
+          principal_reasons?: PrincipalReason[] | null;
           offer?: Disclosure | null;
         };
         if (cancelled) return;
@@ -241,7 +263,17 @@ export default function ApplyPage() {
           // No persisted KYC row -> the check never completed (outage) -> offer the retry.
           kyc_checked: !!d.kyc,
         });
-        if (d.decision) setDecision({ app_id: saved.app_id, decision: d.decision });
+        // Same fields the fresh POST /decision response carries (score, adverse_action_reason,
+        // principal_reasons) -- without them a resumed denied application showed the status
+        // with no Reg B reasons (PR review).
+        if (d.decision)
+          setDecision({
+            app_id: saved.app_id,
+            decision: d.decision,
+            score: d.score ?? undefined,
+            adverse_action_reason: d.adverse_action_reason ?? undefined,
+            principal_reasons: d.principal_reasons ?? undefined,
+          });
         if (d.offer) setDisclosure(d.offer);
         setStep(5);
       } catch {
@@ -807,10 +839,18 @@ export default function ApplyPage() {
                     {typeof decision.score === "number" ? (
                       <p className="hint">Model score: {decision.score}</p>
                     ) : null}
-                    {decision.adverse_action_reason ? (
+                    {adverseActionReasons(decision).length > 0 ? (
                       <div className="alert alert-warn">
-                        <strong>Adverse action reason:</strong>{" "}
-                        {decision.adverse_action_reason}
+                        <strong>
+                          {adverseActionReasons(decision).length > 1
+                            ? "Adverse action reasons:"
+                            : "Adverse action reason:"}
+                        </strong>
+                        <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                          {adverseActionReasons(decision).map((r, i) => (
+                            <li key={r.code ?? i}>{r.reason}</li>
+                          ))}
+                        </ul>
                       </div>
                     ) : null}
 

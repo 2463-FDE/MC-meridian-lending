@@ -23,6 +23,7 @@ from ..schemas import (
     KycOut,
     MonthlyDebtIn,
     Page,
+    PrincipalReason,
 )
 
 log = get_logger("applications")
@@ -262,6 +263,35 @@ def list_applications(
     return Page(items=items, total=total, limit=limit, offset=offset)
 
 
+def _normalize_principal_reasons(raw: object) -> list[PrincipalReason]:
+    """Allowlist a decision_events.principal_reasons JSONB value to {code, reason, feature}.
+
+    That column is unconstrained JSONB, written only by decision-service's reasons.py
+    but readable by any legacy/backfill/hand-edit, and reaches borrower-readable
+    responses both on GET detail and on the POST decision path (idempotency replay
+    rebuilds it from the same persisted row) -- both must sanitize identically
+    (Codex review). An item with no non-empty `reason` string is dropped entirely,
+    not kept with `reason=None`: get_application derives the legacy single-string
+    adverse_action_reason from the FIRST normalized item, so a leading code-only row
+    (e.g. a legacy/backfilled `{"code": "R02"}`) would otherwise silently suppress the
+    borrower's denial explanation even when a later item carries real text (Codex
+    review, PR 34).
+    """
+    items = raw if isinstance(raw, list) else []
+    normalized = [
+        PrincipalReason(
+            **{
+                k: v
+                for k, v in item.items()
+                if k in ("code", "reason", "feature") and isinstance(v, str)
+            }
+        )
+        for item in items
+        if isinstance(item, dict)
+    ]
+    return [r for r in normalized if r.reason]
+
+
 @router.get("/{app_id}", response_model=ApplicationDetail)
 def get_application(
     app_id: int,
@@ -294,6 +324,51 @@ def get_application(
         .where(models.Offer.app_id == app_id)
         .order_by(models.Offer.id.desc())
     )
+    # `decisions` is outcome-only (models.Decision, debt D4); the score and Reg B principal
+    # reasons live on the append-only `decision_events` row (ADR 0009). Without this, resuming
+    # a denied application, or an officer opening one without rerunning decisioning, showed
+    # "denied" with no reasons (PR review). Latest event wins, mirroring
+    # disclosure_coordinator.gather_disclosure_context's own read of this table.
+    #
+    # `outcome` is selected from decision_events here too, not read off `dec` above (Codex
+    # review): decision-service writes decision_events and decisions in ONE atomic statement
+    # (decision-service/app/decision.py::_persist_event), so the two tables are never
+    # inconsistent AT WRITE TIME -- but `dec` and this query are two separate reads on two
+    # separate connections with no shared snapshot, and an officer can redecide with no
+    # idempotency key at any time. A redecision landing between the two reads paired a stale
+    # `dec.outcome` with the NEW event's score/reasons -- a regulated, borrower-visible
+    # mismatch (e.g. showing "denied" reasons for an application that was just approved).
+    # Sourcing outcome from the same row as the reasons/score closes that window: this
+    # response is now internally consistent by construction, whichever event the query
+    # happens to land on. `dec.outcome` remains only as the fallback for a legacy row with
+    # `decisions.outcome` set but no matching decision_events (seed apps 6012/6013) -- a case
+    # with no reasons to mismatch against.
+    events = db.query(
+        "SELECT outcome, principal_reasons, drivers FROM decision_events WHERE app_id = %s "
+        "ORDER BY decided_at DESC, id DESC LIMIT 1",
+        (app_id,),
+    )
+    latest_event = events[0] if events else None
+    decision_outcome = (
+        latest_event["outcome"] if latest_event else (dec.outcome if dec else None)
+    )
+    # Normalize by TYPE, not just truthiness (teeth review round 2): `x or []` passes a
+    # non-list/non-dict JSONB value straight through (an object where a list was expected,
+    # or vice versa), and `principal_reasons[0]` / `drivers.get(...)` below would then
+    # raise on the container itself, before the guard on individual reason items even runs.
+    raw_reasons = latest_event["principal_reasons"] if latest_event else None
+    raw_drivers = latest_event["drivers"] if latest_event else None
+    drivers = raw_drivers if isinstance(raw_drivers, dict) else {}
+    principal_reasons = _normalize_principal_reasons(raw_reasons)
+    adverse_action_reason = principal_reasons[0].reason if principal_reasons else None
+    # model_score is likewise unvalidated JSONB (Codex review): a string, dict, or bool
+    # must degrade to no score, not raise out of round().
+    raw_score = drivers.get("model_score")
+    model_score = (
+        raw_score
+        if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool)
+        else None
+    )
     return ApplicationDetail(
         id=a.id,
         applicant=ApplicantOut(
@@ -320,7 +395,10 @@ def get_application(
         )
         if kyc_row
         else None,
-        decision=dec.outcome if dec else None,
+        decision=decision_outcome,
+        score=int(round(model_score)) if model_score is not None else None,
+        adverse_action_reason=adverse_action_reason,
+        principal_reasons=principal_reasons,
         offer=Disclosure(
             apr=offer.apr or 0,
             finance_charge=offer.finance_charge or 0,
@@ -607,11 +685,28 @@ def run_decision(
         # assistant route's handling).
         log.error("decision-service refused decision for app_id=%s: %s", app_id, exc)
         raise HTTPException(status_code=503, detail="decisioning unavailable") from exc
+    # score is unvalidated downstream JSON, same as get_application's drivers.model_score
+    # (Codex review): decision-service can rebuild this response from persisted
+    # decision_events on idempotency replay, so a nonnumeric value must degrade to no
+    # score instead of raising out of round() or `or 0` fabricating a zero.
+    raw_score = resp.get("score")
+    score = (
+        int(round(raw_score))
+        if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool)
+        else None
+    )
     return DecisionOut(
         app_id=app_id,
         decision=resp["outcome"],
-        score=int(round(resp.get("score") or 0)),  # DecisionOut.score is int
+        score=score,
         adverse_action_reason=resp.get("reason"),
+        # `reason` is decision-service's FIRST principal reason only; the full ranked set
+        # is `principal_reasons`. Forward both — the screens read the list, and callers
+        # already reading the single field keep working. decision-service can rebuild
+        # this list from the persisted decision_events row on idempotency replay, so it
+        # carries the same unconstrained-JSONB risk as the GET detail route's read of
+        # that table -- normalize through the same allowlist (Codex review, PR 34).
+        principal_reasons=_normalize_principal_reasons(resp.get("principal_reasons")),
     )
 
 

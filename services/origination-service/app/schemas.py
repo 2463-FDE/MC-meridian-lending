@@ -214,11 +214,33 @@ class ApplicationListItem(BaseModel):
     created_at: Optional[str] = None
 
 
+class PrincipalReason(BaseModel):
+    # Allowlisted shape for a decision_events.principal_reasons item (Codex review):
+    # that column is unconstrained JSONB, and origination-service is the first place a
+    # legacy/backfilled/hand-edited row's reasons reach a borrower-readable response. A
+    # bare `list` field forwards whatever extra keys the row happens to carry; this
+    # schema drops anything not in {code, reason, feature}.
+    code: Optional[str] = None
+    reason: Optional[str] = None
+    feature: Optional[str] = None
+
+
 class DecisionOut(BaseModel):
     app_id: int
     decision: str
-    score: int
+    # Optional (Codex review): decision-service's score is unvalidated downstream JSON,
+    # same risk class as ApplicationDetail.score below -- a nonnumeric or missing value
+    # must report no score, not raise or fabricate 0.
+    score: Optional[int] = None
+    # First principal reason only (legacy field, kept for callers reading it). Mirrors
+    # decision-service's DecisionOut.reason.
     adverse_action_reason: Optional[str] = None
+    # Every specific Reg B principal reason, ranked worst-first: [{code, reason, feature}].
+    # 12 CFR 1002.9 requires the reason(s) actually used, and decision-service ranks up to
+    # four; forwarding only the legacy field above told an applicant denied for three
+    # reasons about one of them while decision_events recorded all three. Typed (not a
+    # bare list) so a caller forwarding raw JSONB without normalizing it fails at parse.
+    principal_reasons: list[PrincipalReason] = []
 
 
 class ScheduleRow(BaseModel):
@@ -255,6 +277,12 @@ class ApplicationDetail(BaseModel):
     job_title: Optional[str] = None
     kyc: Optional[KycOut] = None
     decision: Optional[str] = None
+    # Latest decision_events row's score/reasons (PR review): decision was outcome-only,
+    # so resuming a denied application, or an officer opening one without rerunning
+    # decisioning, showed the status with no Reg B reasons. Same shape as DecisionOut.
+    score: Optional[int] = None
+    adverse_action_reason: Optional[str] = None
+    principal_reasons: list[PrincipalReason] = []
     offer: Optional[Disclosure] = None
 
 
