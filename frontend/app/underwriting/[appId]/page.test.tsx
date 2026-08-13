@@ -595,4 +595,30 @@ describe("underwriting detail — every principal reason reaches the officer", (
       expect((await screen.findAllByText(r.reason)).length).toBeGreaterThan(0);
     }
   });
+
+  it("shows every reason on initial load, without rerunning decisioning (PR review)", async () => {
+    // The page never hydrated `decision` from the detail response on load — only from
+    // rerunning decisioning or the assistant — while the reasons panel reads only
+    // `decision`, not `app.decision`. An officer opening an already-denied application
+    // saw the status with no recorded reasons.
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === "/los/applications/1")
+        return {
+          ...APP_1,
+          status: "denied",
+          decision: "deny",
+          score: 518,
+          adverse_action_reason: OFFICER_REASONS[0].reason,
+          principal_reasons: OFFICER_REASONS,
+        };
+      throw new Error(`unexpected GET ${path}`);
+    });
+
+    render(<UnderwritingDetailPage />);
+
+    for (const r of OFFICER_REASONS) {
+      expect(await screen.findByText(r.reason)).toBeTruthy();
+    }
+    expect(apiPost).not.toHaveBeenCalled();
+  });
 });

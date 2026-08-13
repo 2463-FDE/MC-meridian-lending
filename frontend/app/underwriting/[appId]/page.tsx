@@ -46,6 +46,9 @@ interface Application {
   created_at?: string;
   kyc?: Kyc;
   decision?: string;
+  score?: number;
+  adverse_action_reason?: string;
+  principal_reasons?: AssistantReason[];
   offer?: Offer;
 }
 
@@ -303,6 +306,17 @@ export default function UnderwritingDetailPage() {
       if (routeGenRef.current !== gen) return;
       setApp(a);
       if (a.offer) setOffer(a.offer);
+      // Initial load never populated `decision`, so the reasons panel (which reads only
+      // `decision`, not `app.decision`) showed an already-denied application's status with
+      // no Reg B reasons until the officer reran decisioning (PR review).
+      if (a.decision)
+        setDecision({
+          app_id: appId,
+          decision: a.decision,
+          score: a.score,
+          adverse_action_reason: a.adverse_action_reason,
+          principal_reasons: a.principal_reasons,
+        });
     } catch (err) {
       if (routeGenRef.current !== gen) return;
       setError(errMsg(err, "Could not load this application."));

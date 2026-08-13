@@ -294,6 +294,22 @@ def get_application(
         .where(models.Offer.app_id == app_id)
         .order_by(models.Offer.id.desc())
     )
+    # `decisions` is outcome-only (models.Decision, debt D4); the score and Reg B principal
+    # reasons live on the append-only `decision_events` row (ADR 0009). Without this, resuming
+    # a denied application, or an officer opening one without rerunning decisioning, showed
+    # "denied" with no reasons (PR review). Latest event wins, mirroring
+    # disclosure_coordinator.gather_disclosure_context's own read of this table.
+    events = db.query(
+        "SELECT principal_reasons, drivers FROM decision_events WHERE app_id = %s "
+        "ORDER BY decided_at DESC, id DESC LIMIT 1",
+        (app_id,),
+    )
+    latest_event = events[0] if events else None
+    principal_reasons = (
+        (latest_event["principal_reasons"] or []) if latest_event else []
+    )
+    drivers = (latest_event["drivers"] or {}) if latest_event else {}
+    model_score = drivers.get("model_score")
     return ApplicationDetail(
         id=a.id,
         applicant=ApplicantOut(
@@ -321,6 +337,11 @@ def get_application(
         if kyc_row
         else None,
         decision=dec.outcome if dec else None,
+        score=int(round(model_score)) if model_score is not None else None,
+        adverse_action_reason=principal_reasons[0]["reason"]
+        if principal_reasons
+        else None,
+        principal_reasons=principal_reasons,
         offer=Disclosure(
             apr=offer.apr or 0,
             finance_charge=offer.finance_charge or 0,

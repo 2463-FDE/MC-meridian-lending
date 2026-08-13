@@ -262,6 +262,12 @@ class ApplicationDetail(BaseModel):
     job_title: Optional[str] = None
     kyc: Optional[KycOut] = None
     decision: Optional[str] = None
+    # Latest decision_events row's score/reasons (PR review): decision was outcome-only,
+    # so resuming a denied application, or an officer opening one without rerunning
+    # decisioning, showed the status with no Reg B reasons. Same shape as DecisionOut.
+    score: Optional[int] = None
+    adverse_action_reason: Optional[str] = None
+    principal_reasons: list = []
     offer: Optional[Disclosure] = None
 
 

@@ -250,6 +250,9 @@ export default function ApplyPage() {
           status?: string;
           kyc?: Kyc | null;
           decision?: string | null;
+          score?: number | null;
+          adverse_action_reason?: string | null;
+          principal_reasons?: PrincipalReason[] | null;
           offer?: Disclosure | null;
         };
         if (cancelled) return;
@@ -260,7 +263,17 @@ export default function ApplyPage() {
           // No persisted KYC row -> the check never completed (outage) -> offer the retry.
           kyc_checked: !!d.kyc,
         });
-        if (d.decision) setDecision({ app_id: saved.app_id, decision: d.decision });
+        // Same fields the fresh POST /decision response carries (score, adverse_action_reason,
+        // principal_reasons) -- without them a resumed denied application showed the status
+        // with no Reg B reasons (PR review).
+        if (d.decision)
+          setDecision({
+            app_id: saved.app_id,
+            decision: d.decision,
+            score: d.score ?? undefined,
+            adverse_action_reason: d.adverse_action_reason ?? undefined,
+            principal_reasons: d.principal_reasons ?? undefined,
+          });
         if (d.offer) setDisclosure(d.offer);
         setStep(5);
       } catch {

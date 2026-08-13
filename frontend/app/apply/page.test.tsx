@@ -222,4 +222,35 @@ describe("apply — every principal reason reaches the applicant", () => {
 
     expect(await screen.findByText(THREE_REASONS[0].reason)).toBeTruthy();
   });
+
+  it("shows every reason on resume, without rerunning decisioning (PR review)", async () => {
+    // /los/applications/{id} used to return only `{ app_id, decision }`, so a borrower who
+    // refreshed an already-denied application saw the status with no reasons — the resume
+    // path never carried score/adverse_action_reason/principal_reasons the way a fresh
+    // POST /decision response does.
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === "/los/applications/1")
+        return {
+          status: "denied",
+          kyc: {
+            name_verified: true,
+            dob_verified: true,
+            address_verified: true,
+            ssn_verified: true,
+          },
+          decision: "deny",
+          score: 518,
+          adverse_action_reason: THREE_REASONS[0].reason,
+          principal_reasons: THREE_REASONS,
+        };
+      throw new Error(`unexpected GET ${path}`);
+    });
+
+    render(<ApplyPage />);
+
+    for (const r of THREE_REASONS) {
+      expect(await screen.findByText(r.reason)).toBeTruthy();
+    }
+    expect(apiPost).not.toHaveBeenCalled();
+  });
 });
