@@ -251,6 +251,17 @@ class OfferOut(BaseModel):
     disclosure: Disclosure
 
 
+class PrincipalReason(BaseModel):
+    # Allowlisted shape for a decision_events.principal_reasons item (Codex review):
+    # that column is unconstrained JSONB, and this route is the first place a legacy/
+    # backfilled/hand-edited row's reasons reach a borrower-readable response. A bare
+    # `list` field forwards whatever extra keys the row happens to carry; this schema
+    # drops anything not in {code, reason, feature}.
+    code: Optional[str] = None
+    reason: Optional[str] = None
+    feature: Optional[str] = None
+
+
 class ApplicationDetail(BaseModel):
     id: int
     applicant: Optional[ApplicantOut] = None
@@ -267,7 +278,7 @@ class ApplicationDetail(BaseModel):
     # decisioning, showed the status with no Reg B reasons. Same shape as DecisionOut.
     score: Optional[int] = None
     adverse_action_reason: Optional[str] = None
-    principal_reasons: list = []
+    principal_reasons: list[PrincipalReason] = []
     offer: Optional[Disclosure] = None
 
 

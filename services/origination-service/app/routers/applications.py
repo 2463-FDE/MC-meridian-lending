@@ -23,6 +23,7 @@ from ..schemas import (
     KycOut,
     MonthlyDebtIn,
     Page,
+    PrincipalReason,
 )
 
 log = get_logger("applications")
@@ -310,17 +311,33 @@ def get_application(
     # or vice versa), and `principal_reasons[0]` / `drivers.get(...)` below would then
     # raise on the container itself, before the guard on individual reason items even runs.
     raw_reasons = latest_event["principal_reasons"] if latest_event else None
-    principal_reasons = raw_reasons if isinstance(raw_reasons, list) else []
+    raw_reasons = raw_reasons if isinstance(raw_reasons, list) else []
     raw_drivers = latest_event["drivers"] if latest_event else None
     drivers = raw_drivers if isinstance(raw_drivers, dict) else {}
-    model_score = drivers.get("model_score")
-    # decision_events is written only by decision-service's own reasons.py, which always
-    # emits {code, reason, feature} -- but the column itself is unconstrained JSONB (teeth
-    # review), so a legacy/backfilled/hand-edited row missing "reason" must not 500 the
-    # whole detail view. .get() over [0]["reason"]; isinstance guards a non-dict element.
-    first_reason = principal_reasons[0] if principal_reasons else None
-    adverse_action_reason = (
-        first_reason.get("reason") if isinstance(first_reason, dict) else None
+    # This route is the first place decision_events -- unconstrained JSONB written only
+    # by decision-service's reasons.py, but readable by any legacy/backfill/hand-edit --
+    # reaches a borrower-readable response (Codex review). Allowlist each item to
+    # {code, reason, feature} with string values only, dropping unknown keys and any
+    # non-dict item entirely, rather than forwarding the row verbatim.
+    principal_reasons = [
+        PrincipalReason(
+            **{
+                k: v
+                for k, v in item.items()
+                if k in ("code", "reason", "feature") and isinstance(v, str)
+            }
+        )
+        for item in raw_reasons
+        if isinstance(item, dict)
+    ]
+    adverse_action_reason = principal_reasons[0].reason if principal_reasons else None
+    # model_score is likewise unvalidated JSONB (Codex review): a string, dict, or bool
+    # must degrade to no score, not raise out of round().
+    raw_score = drivers.get("model_score")
+    model_score = (
+        raw_score
+        if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool)
+        else None
     )
     return ApplicationDetail(
         id=a.id,

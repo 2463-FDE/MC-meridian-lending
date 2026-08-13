@@ -51,6 +51,12 @@ class _FakeSession:
         return self._offer_row
 
 
+def _dump(reasons):
+    """`out.principal_reasons` is now list[PrincipalReason] (Codex review), not raw
+    dicts -- dump back to plain dicts (dropping unset fields) for comparison."""
+    return [r.model_dump(exclude_unset=True) for r in reasons]
+
+
 def _app_row(**overrides):
     base = dict(
         id=1,
@@ -97,7 +103,7 @@ def test_detail_carries_every_principal_reason_from_the_latest_event(monkeypatch
 
     assert out.decision == "deny"
     assert out.score == 518
-    assert out.principal_reasons == _THREE_REASONS
+    assert _dump(out.principal_reasons) == _THREE_REASONS
     # Legacy single-string field keeps its meaning for callers already reading it.
     assert out.adverse_action_reason == _THREE_REASONS[0]["reason"]
 
@@ -151,7 +157,7 @@ def test_reason_item_missing_reason_key_does_not_500(monkeypatch):
     )
 
     assert out.decision == "deny"
-    assert out.principal_reasons == [{"code": "R02"}]
+    assert _dump(out.principal_reasons) == [{"code": "R02"}]
     assert out.adverse_action_reason is None
 
 
@@ -172,6 +178,7 @@ def test_reason_item_not_a_dict_does_not_500(monkeypatch):
     )
 
     assert out.adverse_action_reason is None
+    assert out.principal_reasons == []  # the non-dict item is dropped, not forwarded
 
 
 # --- malformed decision_events CONTAINERS (not just items) must not 500 either ---------
@@ -244,4 +251,120 @@ def test_drivers_as_non_dict_falls_back_to_no_score(monkeypatch):
 
     assert out.score is None
     # principal_reasons itself was well-formed and independent of the malformed drivers.
-    assert out.principal_reasons == _THREE_REASONS
+    assert _dump(out.principal_reasons) == _THREE_REASONS
+
+
+# --- malformed model_score must not 500 either (Codex review round 3) ------------------
+#
+# `int(round(model_score))` raised on anything round() doesn't accept -- a string, a
+# dict, a list -- taking down the whole detail response for the same malformed-row class
+# the fixes above already tolerate for principal_reasons.
+
+
+def test_model_score_as_numeric_string_falls_back_to_no_score(monkeypatch):
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        lambda sql, params=None: [
+            {"principal_reasons": [], "drivers": {"model_score": "518"}}
+        ],
+    )
+    session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
+
+    out = applications.get_application(
+        1,
+        session=session,
+        x_user_role="underwriter",
+        x_user_id=None,
+        x_application_token=None,
+    )
+
+    assert out.score is None
+
+
+def test_model_score_as_object_falls_back_to_no_score(monkeypatch):
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        lambda sql, params=None: [
+            {"principal_reasons": [], "drivers": {"model_score": {"nested": True}}}
+        ],
+    )
+    session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
+
+    out = applications.get_application(
+        1,
+        session=session,
+        x_user_role="underwriter",
+        x_user_id=None,
+        x_application_token=None,
+    )
+
+    assert out.score is None
+
+
+def test_model_score_as_float_still_rounds(monkeypatch):
+    # Confirms the guard only rejects non-numeric types, not the legitimate float case.
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        lambda sql, params=None: [
+            {"principal_reasons": [], "drivers": {"model_score": 517.6}}
+        ],
+    )
+    session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
+
+    out = applications.get_application(
+        1,
+        session=session,
+        x_user_role="underwriter",
+        x_user_id=None,
+        x_application_token=None,
+    )
+
+    assert out.score == 518
+
+
+# --- principal_reasons items are allowlisted to {code, reason, feature} (Codex review) -
+#
+# This detail route is borrower-readable (the applicant resume path), so an internal or
+# future field on a decision_events row must not reach that response just because it
+# happens to be present in the JSONB.
+
+
+def test_extra_fields_on_a_reason_item_are_dropped(monkeypatch):
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        lambda sql, params=None: [
+            {
+                "principal_reasons": [
+                    {
+                        "code": "R02",
+                        "reason": "Excessive obligations in relation to income",
+                        "feature": "payment_burden",
+                        "internal_note": "do not show borrower",
+                        "contribution": -0.42,
+                    }
+                ],
+                "drivers": {"model_score": 518},
+            }
+        ],
+    )
+    session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
+
+    out = applications.get_application(
+        1,
+        session=session,
+        x_user_role="underwriter",
+        x_user_id=None,
+        x_application_token=None,
+    )
+
+    assert len(out.principal_reasons) == 1
+    reason = out.principal_reasons[0]
+    assert reason.code == "R02"
+    assert reason.reason == "Excessive obligations in relation to income"
+    assert reason.feature == "payment_burden"
+    assert not hasattr(reason, "internal_note")
+    assert not hasattr(reason, "contribution")
