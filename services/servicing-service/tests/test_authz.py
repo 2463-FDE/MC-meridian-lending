@@ -430,3 +430,55 @@ def test_post_payment_allowed_for_owner(monkeypatch):
         headers={"X-User-Role": "borrower", "X-User-Id": "5"},
     )
     assert resp.status_code == 200
+
+
+def test_post_payment_denied_for_underwriter_on_arbitrary_loan(monkeypatch):
+    # An underwriter is staff but NOT a money role (_MONEY_ROLES = {csr, admin}):
+    # charging a card is a money-moving write like adjust-balance/waive-fee, so a
+    # blanket staff pass here would let an underwriter charge any borrower's loan
+    # with no ownership check -- the same class of gap review comment 2 closed for
+    # borrowers. A staff login carries no applicant_id, so the ownership fallback
+    # denies it.
+    def _q(sql, params=None):
+        if "FROM loans l JOIN applications app" in sql:
+            return [{"applicant_id": 7}]
+        if "FROM users" in sql:
+            return [{"applicant_id": None}]  # staff login: no applicant_id
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(authz.db, "query", _q)
+
+    def _boom(*a, **k):
+        raise AssertionError("denied caller must never reach charge()")
+
+    monkeypatch.setattr("app.payments.charge", _boom)
+    resp = TestClient(app).post(
+        "/payments",
+        json={"loan_id": 1, "amount": 500.0},
+        headers={"X-User-Role": "underwriter", "X-User-Id": "12"},
+    )
+    assert resp.status_code == 404
+
+
+def test_post_payment_allowed_for_money_role_without_db(monkeypatch):
+    # CSR/admin short-circuit like adjust-balance/waive-fee -- no DB read needed
+    # and no ownership tie to a specific loan.
+    def _boom(*a, **k):
+        raise AssertionError("money-role path must not query the database")
+
+    monkeypatch.setattr(authz.db, "query", _boom)
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
+    monkeypatch.setattr(
+        "app.payments.charge",
+        lambda loan_id, pan, cvv, amount, ssn, name, method: {
+            "loan_id": loan_id,
+            "amount": amount,
+            "balance": 0.0,
+        },
+    )
+    resp = TestClient(app).post(
+        "/payments",
+        json={"loan_id": 1, "amount": 50.0},
+        headers={"X-User-Role": "csr"},
+    )
+    assert resp.status_code == 200

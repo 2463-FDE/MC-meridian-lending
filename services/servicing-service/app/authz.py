@@ -134,6 +134,26 @@ def require_staff_or_owner(
         raise HTTPException(status_code=404, detail="loan not found")
 
 
+def require_money_role_or_owner(
+    loan_id: int, x_user_role: str | None, x_user_id: str | None
+) -> None:
+    """Authorize a payment write (POST /payments) for a money role or the owner.
+
+    A charge is a money-moving write, not a read: unlike require_staff_or_owner,
+    only the money roles adjust-balance/waive-fee already trust (CSR/admin)
+    short-circuit here. An underwriter is deliberately NOT a money role
+    (_MONEY_ROLES), so it falls through to the ownership check like any other
+    non-money caller -- and is denied, since a staff login carries no
+    applicant_id and can never own a loan. Denied as 404, mirroring the
+    loan-scoped reads (no existence oracle for the borrower path).
+    """
+    if _is_money_role(x_user_role):
+        return
+    user_id = _as_int(x_user_id)
+    if user_id is None or not _owns_loan(loan_id, user_id):
+        raise HTTPException(status_code=404, detail="loan not found")
+
+
 def require_staff(x_user_role: str | None) -> None:
     """Restrict a route that is not scoped to one loan, so ownership cannot narrow it.
 

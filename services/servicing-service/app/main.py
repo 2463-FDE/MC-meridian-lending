@@ -69,9 +69,12 @@ def post_payment(
     x_user_id: Optional[str] = Header(None),
 ):
     # Same class of authorization failure closed elsewhere in this file (ADR 0014
-    # Decision 1): staff, or the borrower who owns the loan being charged. Denied as
-    # 404 so a serial loan id cannot be probed for existence.
-    authz.require_staff_or_owner(body.loan_id, x_user_role, x_user_id)
+    # Decision 1): a money role (CSR/admin), or the borrower who owns the loan
+    # being charged. NOT any staff role -- charging a card is a money-moving write
+    # like adjust-balance/waive-fee, not a read, so an underwriter (staff but not
+    # a money role) does not get a blanket pass here. Denied as 404 so a serial
+    # loan id cannot be probed for existence.
+    authz.require_money_role_or_owner(body.loan_id, x_user_role, x_user_id)
     # Fail closed without a processor credential: charge() inserts the payment and
     # mutates the balance, recording a 'captured' payment no processor authorized.
     if not config.processor_configured():
