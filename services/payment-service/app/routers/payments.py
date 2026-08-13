@@ -1,4 +1,5 @@
 """Payment capture API. POST /payments charges a card/ACH and applies it to the balance."""
+
 from fastapi import APIRouter, HTTPException
 
 from .. import config, payments
@@ -23,6 +24,17 @@ def post_payment(body: PaymentIn):
         raise HTTPException(
             status_code=503,
             detail="payment processor not configured (PROCESSOR_API_KEY unset)",
+        )
+    # Fail closed on a missing/non-ASCII internal-service token too: without it,
+    # charge() captures the payment and _apply_via_servicing's call to servicing
+    # either gets denied (403) or, for a non-ASCII token, raises UnicodeEncodeError
+    # inside httpx -- both swallowed by the same broad except, leaving the balance
+    # unapplied behind a "captured" response. (readiness also flags this)
+    if not config.internal_service_token_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="internal service token not configured (INTERNAL_SERVICE_TOKEN "
+            "unset or non-ASCII)",
         )
     # No idempotency key accepted or checked. Retried POST = second charge. (debt D2)
     return payments.charge(

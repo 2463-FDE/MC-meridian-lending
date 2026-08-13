@@ -157,7 +157,7 @@ def missing_required_secrets() -> list:
     # Decision 1). Unset here means every captured charge silently fails to reduce
     # the loan balance (_apply_via_servicing swallows the 403) -- that must read as
     # unhealthy rather than surface only as a money/state divergence nobody sees.
-    if not INTERNAL_SERVICE_TOKEN:
+    if not internal_service_token_configured():
         missing.append("INTERNAL_SERVICE_TOKEN")
     return missing
 
@@ -185,4 +185,17 @@ SERVICING_URL = os.getenv("SERVICING_URL", "http://servicing-service:8002")
 # (ADR 0014 Decision 1). Env only, no committed default; unset makes apply-payment
 # fail closed on servicing's side. Same variable name servicing-service reads.
 INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
+
+
+def internal_service_token_configured() -> bool:
+    """The token must be set AND ASCII -- httpx encodes header values as ASCII by
+    default, so a non-ASCII token raises UnicodeEncodeError inside
+    _apply_via_servicing's httpx.post call. That exception is caught by the same
+    broad except that handles servicing being unreachable, so a non-ASCII token
+    would silently fall into the exact captured-but-not-applied failure this gate
+    exists to close, with a log line that reads as an encoding error rather than a
+    config problem. Fail closed here instead so it surfaces at /health."""
+    return bool(INTERNAL_SERVICE_TOKEN) and INTERNAL_SERVICE_TOKEN.isascii()
+
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

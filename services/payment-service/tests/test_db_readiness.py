@@ -268,6 +268,7 @@ def test_payments_503_without_processor_key(monkeypatch):
 
 def test_payments_allowed_with_processor_key(monkeypatch):
     monkeypatch.setattr(config, "PROCESSOR_API_KEY", "proc_test")
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
     from app import payments
 
     monkeypatch.setattr(
@@ -298,3 +299,37 @@ def test_missing_internal_service_token_flags_readiness(monkeypatch):
 def test_present_internal_service_token_not_flagged(monkeypatch):
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
     assert "INTERNAL_SERVICE_TOKEN" not in config.missing_required_secrets()
+
+
+def test_non_ascii_internal_service_token_flags_readiness(monkeypatch):
+    # httpx encodes header values as ASCII by default -- a non-ASCII token would
+    # raise UnicodeEncodeError inside _apply_via_servicing's httpx.post call,
+    # swallowed by the same broad except that handles servicing being unreachable.
+    # Fail closed at readiness instead of hitting that mid-charge.
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret-üñîçødé")
+    assert config.internal_service_token_configured() is False
+    assert "INTERNAL_SERVICE_TOKEN" in config.missing_required_secrets()
+
+
+def test_payments_503_without_internal_service_token(monkeypatch):
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "proc_test")
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "")
+    from fastapi import HTTPException
+    from app.routers.payments import post_payment
+    from app.schemas import PaymentIn
+
+    with pytest.raises(HTTPException) as exc_info:
+        post_payment(PaymentIn(loan_id=1, amount=100.0))
+    assert exc_info.value.status_code == 503
+
+
+def test_payments_503_with_non_ascii_internal_service_token(monkeypatch):
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "proc_test")
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret-üñîçødé")
+    from fastapi import HTTPException
+    from app.routers.payments import post_payment
+    from app.schemas import PaymentIn
+
+    with pytest.raises(HTTPException) as exc_info:
+        post_payment(PaymentIn(loan_id=1, amount=100.0))
+    assert exc_info.value.status_code == 503
