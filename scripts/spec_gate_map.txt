@@ -85,6 +85,15 @@ services/servicing-service/app/balance.py => adr/0014-servicing-money-controls.m
 services/servicing-service/app/payments.py => adr/0014-servicing-money-controls.md
 services/servicing-service/app/routers/loans.py => adr/0014-servicing-money-controls.md
 
+# --- Week 7: payment observability + settlement reconciliation --------------
+# Both docs obligate servicing's reconciliation module and the apply-payment
+# handler. Mapped rather than exempt, on the same footing as week 5 above: the
+# code area exists today (reconciliation.py, main.py, balance.py all live here),
+# so deleting it must fail this gate even though the week's own implementation
+# has not merged yet.
+services/servicing-service/app => docs/spec-observability-week7.md
+services/servicing-service/app => adr/0015-settlement-reconciliation-as-a-control.md
+
 # --- Brownfield structure + trust boundary ----------------------------------
 # ADR 0004's decomposition is load-bearing through origination's sync HTTP
 # client seam; ADR 0010 Phase A+B enforce officer-OR-owner at the gateway.
