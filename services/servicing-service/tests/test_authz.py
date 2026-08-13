@@ -226,6 +226,37 @@ def test_late_fee_denied_without_internal_token(monkeypatch):
     assert resp.status_code == 403
 
 
+def test_reconciliation_peek_denied_without_internal_token(monkeypatch):
+    """`GET /reconciliation/peek` returns portfolio-wide figures, not one caller's row.
+
+    The borrower portal sits behind the same gateway as the internal app, so a borrower
+    login is on the public internet and reads their own account only. This route reports
+    across every loan, and it was reachable with no gate at all.
+    """
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    resp = TestClient(app).get("/reconciliation/peek")
+    assert resp.status_code == 403
+
+
+def test_reconciliation_peek_denied_with_wrong_internal_token(monkeypatch):
+    """Presence of the header is not the check — the value is compared."""
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    resp = TestClient(app).get(
+        "/reconciliation/peek", headers={"X-Internal-Service": "not-the-token"}
+    )
+    assert resp.status_code == 403
+
+
+def test_reconciliation_peek_allowed_with_internal_token(monkeypatch):
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    monkeypatch.setattr("app.reconciliation.ledger_total", lambda: 0.0)
+    monkeypatch.setattr("app.reconciliation.settlement_total", lambda: 0.0)
+    resp = TestClient(app).get(
+        "/reconciliation/peek", headers={"X-Internal-Service": "sekret"}
+    )
+    assert resp.status_code == 200
+
+
 def test_get_balance_denied_for_non_owner_borrower(monkeypatch):
     def _q(sql, params=None):
         if "FROM loans l JOIN applications app" in sql:
