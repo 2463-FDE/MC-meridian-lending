@@ -136,6 +136,9 @@ def test_detail_has_no_reasons_when_no_decision_event_recorded(monkeypatch):
 
 
 def test_reason_item_missing_reason_key_does_not_500(monkeypatch):
+    # A reasonless item is dropped entirely (Codex review, PR 34), not kept with
+    # reason=None -- see test_reasonless_first_item_does_not_suppress_a_later_reason
+    # below for why: a leading code-only row must not blank out real text behind it.
     monkeypatch.setattr(
         applications.db,
         "query",
@@ -157,8 +160,49 @@ def test_reason_item_missing_reason_key_does_not_500(monkeypatch):
     )
 
     assert out.decision == "deny"
-    assert _dump(out.principal_reasons) == [{"code": "R02"}]
+    assert out.principal_reasons == []
     assert out.adverse_action_reason is None
+
+
+def test_reasonless_first_item_does_not_suppress_a_later_reason(monkeypatch):
+    # get_application derives the legacy adverse_action_reason from
+    # principal_reasons[0].reason. A leading code-only row (legacy/backfill/hand-edit)
+    # must not blank out a real reason that follows it -- that would silently suppress
+    # the borrower's denial explanation even though decision_events recorded one
+    # (Codex review, PR 34).
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        lambda sql, params=None: [
+            {
+                "principal_reasons": [
+                    {"code": "R02"},  # no reason text -- must not win the legacy slot
+                    {
+                        "code": "R03",
+                        "reason": "Income insufficient for amount of credit requested",
+                        "feature": "income_sufficiency",
+                    },
+                ],
+                "drivers": {"model_score": 518},
+            }
+        ],
+    )
+    session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
+
+    out = applications.get_application(
+        1,
+        session=session,
+        x_user_role="underwriter",
+        x_user_id=None,
+        x_application_token=None,
+    )
+
+    assert len(out.principal_reasons) == 1
+    assert out.principal_reasons[0].code == "R03"
+    assert (
+        out.adverse_action_reason
+        == "Income insufficient for amount of credit requested"
+    )
 
 
 def test_reason_item_not_a_dict_does_not_500(monkeypatch):

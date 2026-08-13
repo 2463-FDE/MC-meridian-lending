@@ -194,12 +194,12 @@ def test_malformed_principal_reasons_are_sanitized_not_forwarded(monkeypatch):
                     "code": 7,
                     "reason": None,
                     "feature": "income_sufficiency",
-                },  # non-string values dropped
+                },  # non-string values, then reasonless -- item dropped entirely
             ],
         },
     )
     out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
-    assert len(out.principal_reasons) == 2
+    assert len(out.principal_reasons) == 1
     first = out.principal_reasons[0]
     assert first.model_dump() == {
         "code": "R02",
@@ -207,12 +207,32 @@ def test_malformed_principal_reasons_are_sanitized_not_forwarded(monkeypatch):
         "feature": "payment_burden",
     }
     assert not hasattr(first, "internal_model_weight")
-    second = out.principal_reasons[1]
-    assert second.model_dump() == {
-        "code": None,
-        "reason": None,
-        "feature": "income_sufficiency",
-    }
+
+
+def test_reasonless_first_item_is_dropped_not_forwarded(monkeypatch):
+    # Shares _normalize_principal_reasons with get_application, whose legacy
+    # adverse_action_reason is derived from principal_reasons[0].reason -- a leading
+    # code-only row must not survive into that slot even on the fresh decision path
+    # (Codex review, PR 34).
+    _stub_decision(
+        monkeypatch,
+        {
+            "outcome": "deny",
+            "score": 518,
+            "reason": "Income insufficient for amount of credit requested",
+            "principal_reasons": [
+                {"code": "R02"},  # no reason text
+                {
+                    "code": "R03",
+                    "reason": "Income insufficient for amount of credit requested",
+                    "feature": "income_sufficiency",
+                },
+            ],
+        },
+    )
+    out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
+    assert len(out.principal_reasons) == 1
+    assert out.principal_reasons[0].code == "R03"
 
 
 # --- A malformed downstream score must not raise or fabricate a value ----------------

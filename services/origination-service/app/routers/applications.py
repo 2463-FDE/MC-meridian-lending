@@ -270,10 +270,15 @@ def _normalize_principal_reasons(raw: object) -> list[PrincipalReason]:
     but readable by any legacy/backfill/hand-edit, and reaches borrower-readable
     responses both on GET detail and on the POST decision path (idempotency replay
     rebuilds it from the same persisted row) -- both must sanitize identically
-    (Codex review).
+    (Codex review). An item with no non-empty `reason` string is dropped entirely,
+    not kept with `reason=None`: get_application derives the legacy single-string
+    adverse_action_reason from the FIRST normalized item, so a leading code-only row
+    (e.g. a legacy/backfilled `{"code": "R02"}`) would otherwise silently suppress the
+    borrower's denial explanation even when a later item carries real text (Codex
+    review, PR 34).
     """
     items = raw if isinstance(raw, list) else []
-    return [
+    normalized = [
         PrincipalReason(
             **{
                 k: v
@@ -284,6 +289,7 @@ def _normalize_principal_reasons(raw: object) -> list[PrincipalReason]:
         for item in items
         if isinstance(item, dict)
     ]
+    return [r for r in normalized if r.reason]
 
 
 @router.get("/{app_id}", response_model=ApplicationDetail)
