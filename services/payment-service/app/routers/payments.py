@@ -41,8 +41,9 @@ def post_payment(
     # Fail closed on a missing/non-ASCII internal-service token too: without it,
     # charge() captures the payment and _apply_via_servicing's call to servicing
     # either gets denied (403) or, for a non-ASCII token, raises UnicodeEncodeError
-    # inside httpx -- both swallowed by the same broad except, leaving the balance
-    # unapplied behind a "captured" response. (readiness also flags this)
+    # inside httpx -- both now correctly report captured_unapplied (below), but
+    # catching it here instead gives a clear config diagnostic at request time
+    # rather than a 424 on every single payment attempt. (readiness also flags this)
     if not config.internal_service_token_configured():
         raise HTTPException(
             status_code=503,

@@ -82,10 +82,11 @@ export default function MyLoanPage() {
         </p>
       ) : items.length === 0 && !error ? (
         <div className="card" style={{ marginTop: 20 }}>
-          <h3 style={{ marginBottom: 6 }}>No loans yet</h3>
+          <h3 style={{ marginBottom: 6 }}>No loans found under your account</h3>
           <p className="muted" style={{ marginTop: 0 }}>
-            You don&apos;t have an active loan. Check your rate and apply in a
-            few minutes.
+            If you haven&apos;t applied yet, check your rate and apply in a few
+            minutes. Already have a loan but don&apos;t see it here? Contact
+            support to link it to your account.
           </p>
           <Link href="/apply" className="btn" style={{ marginTop: 8 }}>
             Apply for a loan
