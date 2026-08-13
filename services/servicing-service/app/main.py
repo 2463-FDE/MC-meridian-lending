@@ -184,7 +184,15 @@ def reconciliation_peek(
     # borrower — on the same gateway, on the public internet — reads their own account
     # only. Whatever this returns, it is not one caller's own record.
     authz.require_internal_caller(x_internal_service)
+    try:
+        settlement = reconciliation.settlement_total()
+    except reconciliation.ReconciliationAbort as exc:
+        # The settlement file could not be read, so there is no total to report. A 200
+        # carrying 0.0 here was the fail-open: a successful-looking answer for a file
+        # nobody opened.
+        log.error("reconciliation aborted: %s", exc)
+        raise HTTPException(status_code=503, detail=f"reconciliation aborted: {exc}")
     return {
         "ledger_total": reconciliation.ledger_total(),
-        "settlement_total": reconciliation.settlement_total(),
+        "settlement_total": settlement,
     }
