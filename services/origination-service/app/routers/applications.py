@@ -662,10 +662,20 @@ def run_decision(
         # assistant route's handling).
         log.error("decision-service refused decision for app_id=%s: %s", app_id, exc)
         raise HTTPException(status_code=503, detail="decisioning unavailable") from exc
+    # score is unvalidated downstream JSON, same as get_application's drivers.model_score
+    # (Codex review): decision-service can rebuild this response from persisted
+    # decision_events on idempotency replay, so a nonnumeric value must degrade to no
+    # score instead of raising out of round() or `or 0` fabricating a zero.
+    raw_score = resp.get("score")
+    score = (
+        int(round(raw_score))
+        if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool)
+        else None
+    )
     return DecisionOut(
         app_id=app_id,
         decision=resp["outcome"],
-        score=int(round(resp.get("score") or 0)),  # DecisionOut.score is int
+        score=score,
         adverse_action_reason=resp.get("reason"),
         # `reason` is decision-service's FIRST principal reason only; the full ranked set
         # is `principal_reasons`. Forward both — the screens read the list, and callers

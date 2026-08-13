@@ -213,3 +213,26 @@ def test_malformed_principal_reasons_are_sanitized_not_forwarded(monkeypatch):
         "reason": None,
         "feature": "income_sufficiency",
     }
+
+
+# --- A malformed downstream score must not raise or fabricate a value ----------------
+#
+# decision-service's score is unvalidated downstream JSON, same risk class as
+# ApplicationDetail's drivers.model_score: `int(round(resp.get("score") or 0))` either
+# raises on a nonnumeric value or silently reports 0 for an absent/falsy one (PR 34
+# review).
+
+
+def test_nonnumeric_score_degrades_to_none_not_a_500(monkeypatch):
+    _stub_decision(
+        monkeypatch,
+        {"outcome": "deny", "score": "518", "reason": "Excessive obligations"},
+    )
+    out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
+    assert out.score is None
+
+
+def test_absent_score_is_none_not_a_fabricated_zero(monkeypatch):
+    _stub_decision(monkeypatch, {"outcome": "approve"})
+    out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
+    assert out.score is None

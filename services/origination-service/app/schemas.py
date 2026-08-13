@@ -228,7 +228,10 @@ class PrincipalReason(BaseModel):
 class DecisionOut(BaseModel):
     app_id: int
     decision: str
-    score: int
+    # Optional (Codex review): decision-service's score is unvalidated downstream JSON,
+    # same risk class as ApplicationDetail.score below -- a nonnumeric or missing value
+    # must report no score, not raise or fabricate 0.
+    score: Optional[int] = None
     # First principal reason only (legacy field, kept for callers reading it). Mirrors
     # decision-service's DecisionOut.reason.
     adverse_action_reason: Optional[str] = None
