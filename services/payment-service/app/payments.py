@@ -113,13 +113,14 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
     reported captured and reconciled later (D7), matching this module's
     original documented design.
 
-    Returns False only when servicing was REACHED and REJECTED the call (any
-    non-2xx status, e.g. 403 on a mismatched INTERNAL_SERVICE_TOKEN). That is a
-    deterministic rejection, not a transient blip, and charge() must not report
-    it as applied -- the prior version called resp.raise_for_status() inside
-    the same try/except as network errors, so a 403 was swallowed identically
-    to "servicing unreachable" and charge() always returned status "captured"
-    regardless.
+    Returns False only when servicing was REACHED and did not return a 2xx (a
+    deterministic rejection or a redirect, not a transient blip), and charge()
+    must not report it as applied. httpx does not follow redirects by default,
+    so a 3xx here means the apply-payment handler never ran, the same as a
+    403 -- checking only `>= 400` let a 3xx fall through to the success branch
+    (Codex review, PR 32, second round). The prior version also called
+    resp.raise_for_status() inside the same try/except as network errors, so a
+    403 was swallowed identically to "servicing unreachable" (first round).
     """
     url = f"{SERVICING_URL}/accounts/{loan_id}/apply-payment"
     try:
@@ -137,7 +138,7 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
             exc,
         )
         return True
-    if resp.status_code >= 400:
+    if not (200 <= resp.status_code < 300):
         log.error(
             "apply-payment REJECTED by servicing status=%s loan_id=%s payment_id=%s",
             resp.status_code,

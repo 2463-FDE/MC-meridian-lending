@@ -175,3 +175,42 @@ def test_post_payment_allowed_for_money_role_without_db(monkeypatch):
         headers={"X-User-Role": "csr"},
     )
     assert resp.status_code == 200
+
+
+# --- captured_unapplied is not a plain 200 -----------------------------------------
+#
+# The frontend discards the /payments response body and shows a flat "submitted"
+# message on any call that does not throw; with no idempotency key (D2), a caller
+# who read status="captured_unapplied" as a normal 200 could retry and double-charge
+# the card. The route must make this state impossible to mistake for success.
+
+
+def test_post_payment_502_when_captured_unapplied(monkeypatch):
+    def _q(sql, params=None):
+        if "FROM loans l JOIN applications app" in sql:
+            return [{"applicant_id": 7}]
+        if "FROM users" in sql:
+            return [{"applicant_id": 7}]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(authz.db, "query", _q)
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    monkeypatch.setattr(
+        "app.payments.charge",
+        lambda loan_id, pan, cvv, amount, ssn, name, method: {
+            "payment_id": 42,
+            "loan_id": loan_id,
+            "status": "captured_unapplied",
+            "applied_amount": 0.0,
+        },
+    )
+    resp = TestClient(app).post(
+        "/payments",
+        json={"loan_id": 1, "amount": 50.0},
+        headers={"X-User-Role": "borrower", "X-User-Id": "5"},
+    )
+    assert resp.status_code == 502
+    body = resp.json()
+    assert "42" in body["detail"]
+    assert "not retry" in body["detail"].lower()

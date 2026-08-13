@@ -50,6 +50,22 @@ def post_payment(
             "unset or non-ASCII)",
         )
     # No idempotency key accepted or checked. Retried POST = second charge. (debt D2)
-    return payments.charge(
+    result = payments.charge(
         body.loan_id, body.pan, body.cvv, body.amount, body.ssn, body.name, body.method
     )
+    if result["status"] == "captured_unapplied":
+        # A 200 here would be indistinguishable from a real success to the
+        # existing frontend, which discards the response body and shows a flat
+        # "submitted" message on any non-throwing call -- and with no
+        # idempotency key (D2), a caller who read this as "try again" would
+        # double-charge the card. Force it through the error path instead, with
+        # wording that explicitly rules out a retry (Codex review, PR 32).
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Payment captured (payment_id={result['payment_id']}) but "
+                "could not be applied to your balance. Do not retry -- contact "
+                "support to reconcile this payment."
+            ),
+        )
+    return result

@@ -64,6 +64,24 @@ def test_apply_via_servicing_rejected_reports_not_applied(monkeypatch):
     assert errors, "a denied apply-payment call must be logged, not silently ignored"
 
 
+def test_apply_via_servicing_redirect_reports_not_applied(monkeypatch):
+    # httpx does not follow redirects by default: a 3xx means the apply-payment
+    # handler on servicing never ran, same as a 403 -- checking only
+    # `status_code >= 400` let this fall through to the success branch
+    # (Codex review, PR 32, second round).
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    monkeypatch.setattr(payments, "INTERNAL_SERVICE_TOKEN", "sekret")
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        return _FakeResponse(307)
+
+    monkeypatch.setattr(payments.httpx, "post", fake_post)
+
+    applied = payments._apply_via_servicing(loan_id=1, amount=50.0, payment_id=7)
+
+    assert applied is False
+
+
 def test_apply_via_servicing_unreachable_still_reports_applied(monkeypatch):
     # Network-level failure (unreachable/timeout/DNS) is NOT the same as a
     # rejection: the card was already charged, so this stays "captured" and

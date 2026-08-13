@@ -223,3 +223,26 @@ describe("loan detail — per-loan state scoping", () => {
     expect(screen.queryByText("Payment of $250.00 submitted.")).toBeNull();
   });
 });
+
+describe("loan detail — captured but unapplied payment", () => {
+  it("does not show a success message when the apply is rejected", async () => {
+    // The backend now returns a non-2xx (502) with a captured_unapplied detail
+    // instead of a plain 200 (Codex review, PR 32) -- apiPost throws on any
+    // non-2xx, so this must land in the catch branch, never the success one.
+    apiPost.mockRejectedValue({
+      detail:
+        "Payment captured (payment_id=42) but could not be applied to your " +
+        "balance. Do not retry -- contact support to reconcile this payment.",
+    });
+
+    render(<LoanDetailPage />);
+    await screen.findByText("Maria Alvarez");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Pay with card on file" })
+    );
+
+    await screen.findByText(/could not be applied to your balance/);
+    expect(screen.queryByText(/submitted\.$/)).toBeNull();
+  });
+});
