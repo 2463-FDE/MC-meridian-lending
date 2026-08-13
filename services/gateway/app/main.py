@@ -458,11 +458,25 @@ async def disclosure(
 async def payments(request: Request, authorization: str | None = Header(None)):
     # Taking a payment is a money-moving action: authenticated, but (brownfield)
     # the gateway still does NOT enforce a specific role — same gap as /lss.
-    # payment-service exposes exactly one caller-facing route, POST /payments,
-    # which coincides with this proxy's own mount point -- unlike /lss or /kyc,
-    # a {path:path} catch-all forwarding f"/{path}" strips that segment, so a
-    # bare POST /payments (redirected by FastAPI's redirect_slashes to
-    # /payments/, path="") proxied to the service ROOT ("/"), which does not
-    # exist there, and 404d every real charge. Forward the fixed path instead.
+    # payment-service's charge route is POST /payments, which coincides with
+    # this proxy's own mount point -- unlike /lss or /kyc, a {path:path}
+    # catch-all alone forwarding f"/{path}" strips that segment, so a bare
+    # POST /payments (redirected by FastAPI's redirect_slashes to /payments/,
+    # path="") proxied to the service ROOT ("/"), which does not exist there,
+    # and 404d every real charge. This exact route covers that bare call; the
+    # wildcard below still covers /payments/health and other subpaths (Codex
+    # review, PR 32 -- the first fix here removed the wildcard entirely and
+    # broke those, including scripts/repro_double_charge.py's health probe).
     user = _require_user(authorization)
     return await _proxy(PAYMENT_URL, "/payments", request, user)
+
+
+@app.api_route("/payments/{path:path}", methods=["GET", "POST"])
+async def payments_subpath(
+    path: str, request: Request, authorization: str | None = Header(None)
+):
+    # /payments/health -> payment-service's /health; /payments/payments (the
+    # repro script's pre-existing workaround for the bare-call bug above) ->
+    # payment-service's /payments, same target as the exact route.
+    user = _require_user(authorization)
+    return await _proxy(PAYMENT_URL, f"/{path}", request, user)
