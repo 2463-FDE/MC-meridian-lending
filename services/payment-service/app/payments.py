@@ -6,7 +6,9 @@ payments row and applies the amount twice (double-charge). (D2, D5, #4, #7)
 
 The amount is applied to the balance by calling servicing-service over HTTP (the
 servicing /accounts/{loan_id}/apply-payment endpoint). If servicing is unreachable the
-charge is still reported captured so this service stands alone.
+charge is still reported captured so this service stands alone; if servicing REJECTS
+the call (e.g. a mismatched INTERNAL_SERVICE_TOKEN), that is not the same thing, and
+the response says "captured_unapplied" instead -- see _apply_via_servicing.
 """
 
 import json
@@ -88,18 +90,37 @@ def charge(
     )
     payment_id = rows[0]["id"] if rows else None
 
-    # Apply the captured amount to the balance via servicing-service.
-    _apply_via_servicing(loan_id, amount, payment_id)
+    # Apply the captured amount to the balance via servicing-service. A REJECTED
+    # apply (e.g. a mismatched INTERNAL_SERVICE_TOKEN between the two services)
+    # is not the same as servicing being unreachable -- it means the balance
+    # definitely was not updated, and the response must say so rather than
+    # report a normal "captured" success (Codex review, PR 32).
+    applied = _apply_via_servicing(loan_id, amount, payment_id)
     return {
         "payment_id": payment_id,
         "loan_id": loan_id,
-        "status": "captured",
-        "applied_amount": float(amount),
+        "status": "captured" if applied else "captured_unapplied",
+        "applied_amount": float(amount) if applied else 0.0,
     }
 
 
-def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> None:
-    """Tell servicing-service to apply this payment to the loan balance."""
+def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
+    """Tell servicing-service to apply this payment to the loan balance.
+
+    Returns True when the apply is handled -- either it actually succeeded, or
+    the call could not be made at all (network unreachable, timeout, DNS): the
+    card was already charged and the row written, so that case is still
+    reported captured and reconciled later (D7), matching this module's
+    original documented design.
+
+    Returns False only when servicing was REACHED and REJECTED the call (any
+    non-2xx status, e.g. 403 on a mismatched INTERNAL_SERVICE_TOKEN). That is a
+    deterministic rejection, not a transient blip, and charge() must not report
+    it as applied -- the prior version called resp.raise_for_status() inside
+    the same try/except as network errors, so a 403 was swallowed identically
+    to "servicing unreachable" and charge() always returned status "captured"
+    regardless.
+    """
     url = f"{SERVICING_URL}/accounts/{loan_id}/apply-payment"
     try:
         resp = httpx.post(
@@ -108,19 +129,26 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> None:
             headers={"X-Internal-Service": INTERNAL_SERVICE_TOKEN},
             timeout=5.0,
         )
-        resp.raise_for_status()
-        log.info(
-            "applied payment via servicing loan_id=%s payment_id=%s amount=%s -> ok",
-            loan_id,
-            payment_id,
-            amount,
-        )
     except Exception as exc:
-        # Servicing unreachable / errored — the card was already charged and the row
-        # written, so we still report the charge captured. (apply reconciled later)
         log.error(
-            "apply-payment call to servicing failed loan_id=%s payment_id=%s: %s",
+            "apply-payment call to servicing unreachable loan_id=%s payment_id=%s: %s",
             loan_id,
             payment_id,
             exc,
         )
+        return True
+    if resp.status_code >= 400:
+        log.error(
+            "apply-payment REJECTED by servicing status=%s loan_id=%s payment_id=%s",
+            resp.status_code,
+            loan_id,
+            payment_id,
+        )
+        return False
+    log.info(
+        "applied payment via servicing loan_id=%s payment_id=%s amount=%s -> ok",
+        loan_id,
+        payment_id,
+        amount,
+    )
+    return True
