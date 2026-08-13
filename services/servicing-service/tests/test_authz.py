@@ -482,3 +482,75 @@ def test_post_payment_allowed_for_money_role_without_db(monkeypatch):
         headers={"X-User-Role": "csr"},
     )
     assert resp.status_code == 200
+
+
+# --- GET /loans/mine (borrower self-service lookup) -----------------------------
+#
+# The frontend's "My Loan" page had no way to find a borrower's own loan id except
+# the portfolio list, client-side filtered -- which meant any borrower could read
+# every OTHER borrower's loans and balances too, before require_staff closed
+# GET /loans to staff only. This route replaces that: scoped server-side to the
+# caller's own applicant_id, mirroring authz._owns_loan's join.
+
+
+def test_list_my_loans_returns_only_the_owners_rows(monkeypatch):
+    from app import db
+
+    def _q(sql, params=None):
+        assert params == (5,)
+        assert "WHERE u.id = %s" in sql
+        return [
+            {
+                "id": 4471,
+                "applicant_name": "Maria Gonzalez",
+                "principal": 18000.0,
+                "apr": 7.14,
+                "term_months": 48,
+                "status": "current",
+                "opened_at": None,
+                "balance": 12200.0,
+                "past_due": 0.0,
+            }
+        ]
+
+    monkeypatch.setattr(db, "query", _q)
+    resp = TestClient(app).get("/loans/mine", headers={"X-User-Id": "5"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["id"] == 4471
+    assert body["items"][0]["balance"] == 12200.0
+
+
+def test_list_my_loans_empty_without_user_id(monkeypatch):
+    from app import db
+
+    def _boom(*a, **k):
+        raise AssertionError("no X-User-Id must never reach the database")
+
+    monkeypatch.setattr(db, "query", _boom)
+    resp = TestClient(app).get("/loans/mine")
+    assert resp.status_code == 200
+    assert resp.json() == {"items": [], "total": 0, "limit": 200, "offset": 0}
+
+
+def test_list_my_loans_empty_for_non_numeric_user_id(monkeypatch):
+    from app import db
+
+    def _boom(*a, **k):
+        raise AssertionError("a non-numeric id must never reach the database")
+
+    monkeypatch.setattr(db, "query", _boom)
+    resp = TestClient(app).get("/loans/mine", headers={"X-User-Id": "not-a-number"})
+    assert resp.status_code == 200
+    assert resp.json()["items"] == []
+
+
+def test_mine_route_wins_over_loan_id_path_param(monkeypatch):
+    # /mine is registered before /{loan_id}; a request for the literal "mine"
+    # segment must hit this route, not 422 on int-parsing "mine" as a loan id.
+    from app import db
+
+    monkeypatch.setattr(db, "query", lambda sql, params=None: [])
+    resp = TestClient(app).get("/loans/mine", headers={"X-User-Id": "5"})
+    assert resp.status_code == 200

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import authz, models, schedule
+from .. import authz, db, models, schedule
 from ..database import get_session
 from ..schemas import (
     LoanDetail,
@@ -59,6 +59,53 @@ def list_loans(
         for loan, bal in session.execute(stmt).all()
     ]
     return Page(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.get("/mine", response_model=Page[LoanListItem])
+def list_my_loans(x_user_id: str | None = Header(default=None)):
+    # Registered before /{loan_id} so this literal segment wins the route match --
+    # otherwise Starlette would try to bind "mine" to loan_id:int and 422 first.
+    #
+    # There is no borrower-scoped read anywhere else in this router: every other
+    # route is scoped to a loan_id the caller already has (from a link or a
+    # direct fetch), and the portfolio list is staff-only (require_staff above).
+    # A borrower landing on their own servicing page has no loan_id yet and no
+    # other endpoint to get one from -- this is that lookup, scoped server-side
+    # to the caller's own applicant_id (mirrors authz._owns_loan's join) rather
+    # than the old approach of handing back the FULL portfolio for the client to
+    # filter, which let any borrower read every other borrower's loans.
+    try:
+        user_id = int(x_user_id) if x_user_id is not None else None
+    except (TypeError, ValueError):
+        user_id = None
+    if user_id is None:
+        return Page(items=[], total=0, limit=200, offset=0)
+    rows = db.query(
+        "SELECT l.id, l.applicant_name, l.principal, l.apr, l.term_months, "
+        "l.status, l.opened_at, b.balance, b.past_due "
+        "FROM loans l "
+        "JOIN applications app ON app.id = l.app_id "
+        "JOIN users u ON u.applicant_id = app.applicant_id "
+        "LEFT JOIN balances b ON b.loan_id = l.id "
+        "WHERE u.id = %s "
+        "ORDER BY l.id",
+        (user_id,),
+    )
+    items = [
+        LoanListItem(
+            id=r["id"],
+            applicant_name=r["applicant_name"],
+            principal=r["principal"],
+            apr=r["apr"],
+            term_months=r["term_months"],
+            status=r["status"],
+            balance=(r["balance"] if r["balance"] is not None else 0.0),
+            past_due=(r["past_due"] if r["past_due"] is not None else 0.0),
+            opened_at=r["opened_at"].isoformat() if r["opened_at"] else None,
+        )
+        for r in rows
+    ]
+    return Page(items=items, total=len(items), limit=200, offset=0)
 
 
 @router.get("/{loan_id}", response_model=LoanDetail)
