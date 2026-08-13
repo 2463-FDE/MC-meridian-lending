@@ -230,6 +230,20 @@ rows sharing `(loan_id, amount_minor)` within a bounded time gap, and reports ea
 no window tolerance can hide it. On the sample it reports one pair: loan 5582, 41050 minor,
 2 seconds apart.
 
+The gap is a named constant, `DUPLICATE_SUSPECT_WINDOW_SECONDS`, sourced from configuration with
+no default — fail closed, the same posture as D4's alert threshold and `disclosure-service`
+`rules.py`'s fee schedule: the job aborts under (g) rather than run duplicate detection with a
+guessed bound.
+
+The bound is scoped in minutes, not days, because that is what separates an accidental
+double-submit from a legitimate repeat. Two ledger rows for the same loan and amount that are
+genuinely two different scheduled payments are at least one billing cycle apart —
+`disclosure-service/app/schedule.py`'s `_add_months` generates one due date per calendar month,
+so the shortest legitimate gap between two equal-amount rows on the same loan is on the order of
+weeks. A window measured in minutes catches the retry/replay case (seconds to low minutes apart,
+as in the sample) without coming near a normal monthly recurrence, so equal scheduled installment
+amounts are not a source of false `DUPLICATE_SUSPECT` pairs.
+
 `DUPLICATE_SUSPECT` is a *signal*, not a variance — it is not added to any variance figure,
 because the duplicate's money is already accounted for on whichever side it landed. Counting it
 twice would double-count the same money, which is the netting error stated in reverse.
@@ -316,10 +330,16 @@ and its "not a real control" comment is deleted because it is no longer true. Ke
 weaker comparison beside the real one reproduces the drift the fee-schedule loader was built to
 end, so `ledger_total()` and `settlement_total()` are removed rather than left in place.
 
-**The endpoint requires `X-Internal-Service`**, matching `kyc-service/app/routers/kyc.py`,
-`decision-service/app/routers/decisions.py` and `disclosure-service/app/routers/offers.py`; the
-gateway does not forward that header from a client. This is not a role model and needs no
-identity work — it is the pattern three services already use.
+**The endpoint requires the `X-Internal-Service` shared secret**, not merely the header's
+presence: the value is compared against `INTERNAL_SERVICE_TOKEN` with `hmac.compare_digest`, and
+the route refuses (fail closed, logging the misconfiguration) when `INTERNAL_SERVICE_TOKEN` is
+unset — the exact pattern in `kyc-service/app/routers/kyc.py`,
+`decision-service/app/routers/decisions.py` and `disclosure-service/app/routers/offers.py`. The
+gateway does not forward that header from a client, so it cannot be forged from outside. This is
+not a role model and needs no identity work — it is the pattern three services already use, spelled
+out here because this endpoint returns portfolio-wide reconciliation data (every loan in the
+window) rather than one caller's own record, so a header-presence-only gate would be a materially
+weaker control than the ones it claims to match.
 
 The reason is the client's own answer to the week-6 questions: the borrower portal sits behind
 the same gateway as the internal app, so a borrower login is on the public internet, and
