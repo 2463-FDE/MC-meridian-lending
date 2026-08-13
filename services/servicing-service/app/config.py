@@ -203,3 +203,24 @@ PROCESSOR_BASE_URL = os.getenv(
 INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 SETTLEMENT_FILE = os.getenv("SETTLEMENT_FILE", "data/settlement.csv")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+
+def duplicate_suspect_window_seconds():
+    """Gap bound for reconciliation's DUPLICATE_SUSPECT scan — no default, fail closed.
+
+    Read at call time rather than import time so a run picks up the deployed value
+    without a restart, and so the reconciliation job can abort (exit 2) on an unset
+    or unusable bound instead of scanning against a guessed one. Same posture as
+    `disclosure-service` `rules.py`'s fee schedule: a control that guesses its own
+    threshold reports a result it did not verify.
+
+    Returns None when unset, non-integer, or not positive; the caller aborts.
+    """
+    raw = os.getenv("DUPLICATE_SUSPECT_WINDOW_SECONDS", "")
+    if not raw.strip():
+        return None
+    try:
+        seconds = int(raw.strip())
+    except ValueError:
+        return None
+    return seconds if seconds > 0 else None

@@ -17,9 +17,9 @@ Read-only by construction (D2(h)): every statement it issues is a SELECT. It nev
 corrects a balance — that would be an unauthorized money movement with no maker-checker,
 on the same unlocked read-modify-write that is debt D3.
 
-Not here, deliberately: a same-day double charge still matches under the ±1 day
-tolerance and is reported clean (see `_match`). Detecting it needs a scan that does not
-consult the settlement side at all, which is the next change.
+The ±1 day tolerance means a same-day double charge matches two different settled
+captures, so matching alone reports it clean. `find_duplicate_suspects` therefore reads
+the ledger side ONLY, before matching, so no window tolerance can hide it (D2(d)/(e)).
 """
 
 import csv
@@ -31,7 +31,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from . import db
-from .config import SETTLEMENT_FILE
+from .config import SETTLEMENT_FILE, duplicate_suspect_window_seconds
 
 # D2(c). The ledger stamps `created_at` at capture and the processor stamps
 # `settlement_date` at settlement; no cut-off convention has been confirmed by the
@@ -42,6 +42,7 @@ MATCH_TOLERANCE_DAYS = 1
 MISSING_IN_LEDGER = "MISSING_IN_LEDGER"
 MISSING_IN_SETTLEMENT = "MISSING_IN_SETTLEMENT"
 REFUND_UNREPRESENTED = "REFUND_UNREPRESENTED"
+DUPLICATE_SUSPECT = "DUPLICATE_SUSPECT"
 
 # D2(g), mirroring `scripts/prove_test.sh`'s convention. "Could not check" is never
 # reported as 0, and never as 1 either: a zero-break result from a run that read
@@ -175,7 +176,12 @@ class LedgerRow:
 
 @dataclass(frozen=True)
 class Break:
-    """One finding. `amount_minor` is the value at stake, always integer cents."""
+    """One finding. `amount_minor` is the value at stake, always integer cents.
+
+    For `DUPLICATE_SUSPECT` it is the amount charged twice, which is a *signal* and is
+    not added to any variance figure — the duplicate's money is already accounted for
+    on whichever side it landed, so counting it again would double-count it.
+    """
 
     break_class: str
     loan_id: int
@@ -183,6 +189,7 @@ class Break:
     occurred_on: date
     processor_ref: Optional[str] = None
     payment_id: Optional[int] = None
+    gap_seconds: Optional[int] = None
     detail: str = ""
 
 
@@ -193,6 +200,7 @@ class ReconciliationResult:
     tolerance_days: int
     matched_count: int
     breaks: list = field(default_factory=list)
+    duplicates: list = field(default_factory=list)
     # D2(b): every figure is an int of minor units.
     net_variance_minor: int = 0
     per_loan_absolute_minor: int = 0
@@ -200,7 +208,13 @@ class ReconciliationResult:
 
     @property
     def exit_code(self) -> int:
-        if self.breaks:
+        """1 when there is anything to answer for, including a duplicate alone.
+
+        A `DUPLICATE_SUSPECT` is not a variance, but exiting 0 — "reconciled, no
+        breaks" — over a detected double charge would report clean on exactly the
+        defect this control exists to surface.
+        """
+        if self.breaks or self.duplicates:
             return EXIT_BREAKS
         return EXIT_CLEAN
 
@@ -231,6 +245,48 @@ def load_ledger(window_from: date, window_to: date) -> list:
             )
         )
     return ledger
+
+
+def find_duplicate_suspects(ledger: list, gap_seconds: int) -> list:
+    """D2(e). Scans the ledger side alone, before and independently of matching.
+
+    The ±1 day tolerance makes a same-day double charge match two different settled
+    captures, so matching reports it clean (D2(d)). This scan does not consult the
+    settlement side at all, which is why no window tolerance can hide it.
+
+    The bound is in minutes, not days, on purpose: `disclosure-service`'s
+    `schedule.py::_add_months` generates one due date per calendar month, so two
+    legitimate equal-amount rows on one loan are at least a billing cycle apart. A
+    minutes-scale bound catches the retry/replay case without touching a normal
+    monthly recurrence.
+    """
+    grouped: dict = {}
+    for row in ledger:
+        grouped.setdefault((row.loan_id, row.amount_minor), []).append(row)
+
+    duplicates = []
+    for (loan_id, amount_minor), rows in sorted(grouped.items()):
+        ordered = sorted(rows, key=lambda r: (r.created_at, r.payment_id))
+        for earlier, later in zip(ordered, ordered[1:]):
+            gap = int((later.created_at - earlier.created_at).total_seconds())
+            if gap <= gap_seconds:
+                duplicates.append(
+                    Break(
+                        break_class=DUPLICATE_SUSPECT,
+                        loan_id=loan_id,
+                        amount_minor=amount_minor,
+                        occurred_on=later.created_at.date(),
+                        payment_id=later.payment_id,
+                        gap_seconds=gap,
+                        detail=(
+                            f"payments {earlier.payment_id} and {later.payment_id} "
+                            f"{gap}s apart"
+                        ),
+                    )
+                )
+    return duplicates
+
+
 
 
 def _within(
@@ -295,6 +351,14 @@ def reconcile(
     """
     path = settlement_path or SETTLEMENT_FILE
 
+    # Fail closed before reading anything: the duplicate scan is not optional, so an
+    # unconfigured bound is an abort, not a run with the scan quietly skipped.
+    gap_seconds = duplicate_suspect_window_seconds()
+    if gap_seconds is None:
+        raise ReconciliationAbort(
+            "DUPLICATE_SUSPECT_WINDOW_SECONDS is not configured (positive integer "
+            "seconds); refusing to run duplicate detection against a guessed bound"
+        )
     if tolerance_days < 0:
         raise ReconciliationAbort(
             f"tolerance_days must not be negative: {tolerance_days}"
@@ -321,6 +385,8 @@ def reconcile(
         r for r in settlement if window_from <= r.settlement_date <= window_to
     ]
     ledger = load_ledger(window_from, window_to)
+
+    duplicates = find_duplicate_suspects(ledger, gap_seconds)
 
     captures = [r for r in settlement if r.row_type == CAPTURE]
     refunds = [r for r in settlement if r.row_type == REFUND]
@@ -391,6 +457,7 @@ def reconcile(
         tolerance_days=tolerance_days,
         matched_count=matched_count,
         breaks=breaks,
+        duplicates=duplicates,
         net_variance_minor=net_variance_minor,
         per_loan_absolute_minor=per_loan_absolute_minor,
         gross_break_minor=sum(b.amount_minor for b in breaks),

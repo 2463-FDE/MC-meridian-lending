@@ -200,6 +200,9 @@ def reconciliation_peek(
         "window_to": result.window_to.isoformat(),
         "tolerance_days": result.tolerance_days,
         "break_counts": counts,
+        # Separate from break_counts: a duplicate is a signal, not a variance. Without
+        # it a caller sees exit_code 1 with nothing in break_counts explaining why.
+        "duplicate_suspects": len(result.duplicates),
         "net_variance_minor": result.net_variance_minor,
         "per_loan_absolute_minor": result.per_loan_absolute_minor,
         "gross_break_minor": result.gross_break_minor,

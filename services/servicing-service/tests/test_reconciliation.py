@@ -305,6 +305,16 @@ def ledger(monkeypatch):
     return _install
 
 
+@pytest.fixture(autouse=True)
+def duplicate_window(monkeypatch):
+    """D2(e)'s gap bound is fail-closed config with no default.
+
+    Every test but the fail-closed one runs with it set, at the 5 minutes that
+    separates a retry/replay from a legitimate monthly recurrence.
+    """
+    monkeypatch.setenv("DUPLICATE_SUSPECT_WINDOW_SECONDS", "300")
+
+
 def klass(result, name):
     return [b for b in result.breaks if b.break_class == name]
 
@@ -646,6 +656,7 @@ def test_peek_returns_the_break_summary_to_an_internal_caller(ledger, monkeypatc
     assert resp.status_code == 200
     body = resp.json()
     assert body["break_counts"][reconciliation.MISSING_IN_LEDGER] == 4
+    assert body["duplicate_suspects"] == 1
     assert body["net_variance_minor"] == -88882
     assert body["exit_code"] == reconciliation.EXIT_BREAKS
     assert "ledger_total" not in body
@@ -660,3 +671,116 @@ def test_fail_open_total_helpers_are_gone():
     """
     assert not hasattr(reconciliation, "ledger_total")
     assert not hasattr(reconciliation, "settlement_total")
+
+
+# --- Duplicate detection (D2(d)/(e)) ---------------------------------------------
+
+
+def test_v_dup_absorbed_tolerance_hides_the_double_charge_from_matching(
+    ledger, tmp_path
+):
+    """V-DUP-ABSORBED — pins D2(d): under ±1d BOTH loan-5582 rows match.
+
+    This is the behaviour the matcher alone cannot see. It is asserted, not fixed:
+    tightening the window to ±0 to "expose" the duplicate is the wrong fix (D2(d)),
+    and this test exists so that regression is loud.
+    """
+    ledger([r for r in SEEDED_LEDGER if r["loan_id"] == 5582])
+    path = write_settlement(
+        tmp_path,
+        [
+            "2026-06-01,PR-100232,5582,410.50,capture",
+            "2026-06-02,PR-100258,5582,410.50,capture",
+        ],
+    )
+
+    result = reconciliation.reconcile(settlement_path=path)
+
+    assert klass(result, reconciliation.MISSING_IN_SETTLEMENT) == []
+
+
+def test_v_dup_detect_duplicate_is_reported_independently_of_matching(ledger, tmp_path):
+    """V-DUP-DETECT — D2(e). Same input as above; the duplicate is still reported."""
+    ledger([r for r in SEEDED_LEDGER if r["loan_id"] == 5582])
+    path = write_settlement(
+        tmp_path,
+        [
+            "2026-06-01,PR-100232,5582,410.50,capture",
+            "2026-06-02,PR-100258,5582,410.50,capture",
+        ],
+    )
+
+    result = reconciliation.reconcile(settlement_path=path)
+
+    assert len(result.duplicates) == 1
+    dup = result.duplicates[0]
+    assert dup.break_class == reconciliation.DUPLICATE_SUSPECT
+    assert dup.loan_id == 5582
+    assert dup.amount_minor == 41050
+    assert dup.gap_seconds == 2
+
+
+def test_v_dup_tol_invariant_window_never_silences_the_duplicate(ledger, tmp_path):
+    """V-DUP-TOL-INVARIANT / criterion 5a — the regression test for D2(d)+(e).
+
+    A tolerance change may move the gross break value and the class counts. It must
+    never move the net variance and must never silence the duplicate signal.
+    """
+    recorder_rows = SEEDED_LEDGER
+    ledger(recorder_rows)
+    wide = reconciliation.reconcile(
+        settlement_path=str(SAMPLE_SETTLEMENT), tolerance_days=1
+    )
+    ledger(recorder_rows)
+    tight = reconciliation.reconcile(
+        settlement_path=str(SAMPLE_SETTLEMENT), tolerance_days=0
+    )
+
+    assert wide.net_variance_minor == tight.net_variance_minor == -88882
+    assert len(wide.duplicates) == len(tight.duplicates) == 1
+    assert wide.duplicates[0].loan_id == tight.duplicates[0].loan_id == 5582
+    assert wide.duplicates[0].amount_minor == tight.duplicates[0].amount_minor == 41050
+    assert wide.gross_break_minor != tight.gross_break_minor
+
+
+def test_a_duplicate_alone_is_never_reported_as_clean(ledger, tmp_path):
+    """D2(e) + the fail-closed posture: a detected double charge is not exit 0.
+
+    Both ledger rows match under the tolerance (D2(d)), so `breaks` is empty — the
+    only finding is the duplicate. Exiting 0 there would report "reconciled, no
+    breaks" over exactly the defect this control exists to surface.
+    """
+    ledger([r for r in SEEDED_LEDGER if r["loan_id"] == 5582])
+    path = write_settlement(
+        tmp_path,
+        [
+            "2026-06-01,PR-100232,5582,410.50,capture",
+            "2026-06-02,PR-100258,5582,410.50,capture",
+        ],
+    )
+
+    result = reconciliation.reconcile(settlement_path=path)
+
+    assert result.breaks == []
+    assert len(result.duplicates) == 1
+    assert result.exit_code == reconciliation.EXIT_BREAKS
+
+
+def test_unset_duplicate_window_aborts_rather_than_guessing_a_bound(
+    ledger, tmp_path, monkeypatch
+):
+    """D2(e) — the gap bound is fail-closed config with no default.
+
+    Same posture as `disclosure-service`'s fee schedule: the job aborts rather than
+    run duplicate detection against a guessed bound.
+    """
+    monkeypatch.delenv("DUPLICATE_SUSPECT_WINDOW_SECONDS", raising=False)
+    ledger([])
+    path = write_settlement(tmp_path, ["2026-06-01,PR-1,4471,250.00,capture"])
+
+    with pytest.raises(reconciliation.ReconciliationAbort) as excinfo:
+        reconciliation.reconcile(settlement_path=path)
+
+    assert "DUPLICATE_SUSPECT_WINDOW_SECONDS" in str(excinfo.value)
+
+
