@@ -454,11 +454,15 @@ async def disclosure(
     return await _proxy(DISCLOSURE_URL, f"/{path}", request, user)
 
 
-@app.api_route("/payments/{path:path}", methods=["GET", "POST"])
-async def payments(
-    path: str, request: Request, authorization: str | None = Header(None)
-):
+@app.api_route("/payments", methods=["GET", "POST"])
+async def payments(request: Request, authorization: str | None = Header(None)):
     # Taking a payment is a money-moving action: authenticated, but (brownfield)
     # the gateway still does NOT enforce a specific role — same gap as /lss.
+    # payment-service exposes exactly one caller-facing route, POST /payments,
+    # which coincides with this proxy's own mount point -- unlike /lss or /kyc,
+    # a {path:path} catch-all forwarding f"/{path}" strips that segment, so a
+    # bare POST /payments (redirected by FastAPI's redirect_slashes to
+    # /payments/, path="") proxied to the service ROOT ("/"), which does not
+    # exist there, and 404d every real charge. Forward the fixed path instead.
     user = _require_user(authorization)
-    return await _proxy(PAYMENT_URL, f"/{path}", request, user)
+    return await _proxy(PAYMENT_URL, "/payments", request, user)
