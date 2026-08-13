@@ -7,6 +7,7 @@ including an anonymous caller with no X-User-Id -- is denied. A non-owner is den
 404, never 403-on-exists, so a caller cannot enumerate which application ids are real.
 """
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -876,3 +877,155 @@ def test_recheck_preserves_token_for_anonymous_recovery(monkeypatch):
     ok = client.post("/applications/1/decision", headers={"X-Application-Token": token})
     assert ok.status_code == 200
     assert ok.json()["decision"] == "approve"
+
+
+# --- Staff self-decision block (client ask, 2026-08-12 governance §5) ------------------
+#
+# ADR 0010 lets any officer act on any application, including one where that same account
+# is also the applicant, and nothing compares the two identities. Deciding your own
+# application is the segregation-of-duties finding the client asked us to close this
+# cycle: "block the decision route when the caller and the applicant are the same
+# account; leave every other officer action alone... Log the blocked attempts."
+#
+# The block is OFFICER-ONLY. A borrower deciding their own application is the normal
+# apply flow -- a bare "caller applicant_id == application applicant_id" test placed
+# after require_officer_or_owner would deny every borrower, since ownership is exactly
+# that equality.
+
+
+def _self_decision_db(user_row, app_applicant_id, app_exists=True):
+    """Stub authz.db.query for deny_self_decision: the users lookup returns user_row
+    ([] = no such user), the applications lookup returns the app's applicant_id."""
+
+    def _q(sql, params=None):
+        if "FROM users" in sql:
+            return [user_row] if user_row is not None else []
+        if "FROM applications" in sql:
+            return [{"applicant_id": app_applicant_id}] if app_exists else []
+        raise AssertionError(f"unexpected query: {sql}")
+
+    return _q
+
+
+def test_officer_deciding_their_own_application_is_denied(monkeypatch):
+    # Underwriter user 9 is applicant 4; application 1 belongs to applicant 4.
+    monkeypatch.setattr(
+        authz.db, "query", _self_decision_db({"applicant_id": 4}, app_applicant_id=4)
+    )
+    with pytest.raises(HTTPException) as exc:
+        authz.deny_self_decision(1, "underwriter", "9")
+    assert exc.value.status_code == 403
+
+
+def test_admin_deciding_their_own_application_is_denied(monkeypatch):
+    monkeypatch.setattr(
+        authz.db, "query", _self_decision_db({"applicant_id": 4}, app_applicant_id=4)
+    )
+    with pytest.raises(HTTPException) as exc:
+        authz.deny_self_decision(1, "Admin", "9")
+    assert exc.value.status_code == 403
+
+
+def test_officer_deciding_someone_elses_application_is_allowed(monkeypatch):
+    # Underwriter user 9 is applicant 4; application 1 belongs to applicant 7 -> the
+    # ordinary officer action, untouched.
+    monkeypatch.setattr(
+        authz.db, "query", _self_decision_db({"applicant_id": 4}, app_applicant_id=7)
+    )
+    authz.deny_self_decision(1, "underwriter", "9")  # no raise
+
+
+def test_officer_who_is_not_an_applicant_is_allowed(monkeypatch):
+    # A staff account with no applicant record (users.applicant_id NULL) can never be the
+    # applicant, so NULL == NULL must not read as a match.
+    monkeypatch.setattr(
+        authz.db, "query", _self_decision_db({"applicant_id": None}, app_applicant_id=7)
+    )
+    authz.deny_self_decision(1, "underwriter", "9")  # no raise
+
+
+def test_officer_on_an_ownerless_application_is_allowed(monkeypatch):
+    # An application with a NULL applicant_id must not match a staff account whose
+    # applicant_id is also NULL.
+    monkeypatch.setattr(
+        authz.db,
+        "query",
+        _self_decision_db({"applicant_id": None}, app_applicant_id=None),
+    )
+    authz.deny_self_decision(1, "underwriter", "9")  # no raise
+
+
+def test_borrower_deciding_their_own_application_is_untouched(monkeypatch):
+    # The regression this block must not cause: ownership IS identity equality, so the
+    # borrower apply flow would be denied by a role-blind check. Never query at all.
+    def _boom(*a, **k):
+        raise AssertionError("non-officer path must not query the database")
+
+    monkeypatch.setattr(authz.db, "query", _boom)
+    authz.deny_self_decision(1, "borrower", "5")  # no raise
+
+
+def test_anonymous_token_caller_is_untouched(monkeypatch):
+    # The anonymous applicant holding a continuation token is not an officer; the block
+    # does not apply (require_officer_or_owner already authorized them).
+    def _boom(*a, **k):
+        raise AssertionError("non-officer path must not query the database")
+
+    monkeypatch.setattr(authz.db, "query", _boom)
+    authz.deny_self_decision(1, None, None)  # no raise
+
+
+def test_officer_with_no_resolvable_user_id_is_allowed(monkeypatch):
+    # X-User-Id and X-User-Role come from the same gateway injection and are stripped
+    # from client requests, so an officer role without a user id is a service-to-service
+    # or test caller, not a bypass a portal user can construct. It cannot be the
+    # applicant either -- there is no account to compare.
+    def _boom(*a, **k):
+        raise AssertionError("an unresolvable caller must not query the database")
+
+    monkeypatch.setattr(authz.db, "query", _boom)
+    authz.deny_self_decision(1, "underwriter", None)  # no raise
+    authz.deny_self_decision(1, "underwriter", "not-an-int")  # no raise
+
+
+def test_unknown_officer_account_is_allowed(monkeypatch):
+    # A user id with no users row has no applicant_id to compare.
+    monkeypatch.setattr(authz.db, "query", _self_decision_db(None, app_applicant_id=7))
+    authz.deny_self_decision(1, "underwriter", "9")  # no raise
+
+
+class _CaptureHandler(logging.Handler):
+    """Collect records emitted on the authz logger. `logging_config.get_logger` sets
+    `propagate = False`, so `caplog` reports "nothing was logged" for a line that WAS
+    logged -- a false green on exactly the security-relevant warning under test (same
+    reason test_llm_client.py carries its own copy)."""
+
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+def test_blocked_self_decision_is_logged(monkeypatch):
+    # The client asked for the blocked attempts to be logged -- the control's only
+    # evidence that it fired.
+    monkeypatch.setattr(
+        authz.db, "query", _self_decision_db({"applicant_id": 4}, app_applicant_id=4)
+    )
+    handler = _CaptureHandler()
+    logger = logging.getLogger("authz")
+    logger.addHandler(handler)
+    try:
+        with pytest.raises(HTTPException):
+            authz.deny_self_decision(1, "underwriter", "9")
+    finally:
+        logger.removeHandler(handler)
+    warnings = [r.getMessage() for r in handler.records if r.levelno >= logging.WARNING]
+    assert warnings, "a blocked self-decision must be logged"
+    message = warnings[0]
+    # The three facts an auditor needs: who, which application, and that it was blocked.
+    assert "self-decision" in message
+    assert "user_id=9" in message
+    assert "app_id=1" in message

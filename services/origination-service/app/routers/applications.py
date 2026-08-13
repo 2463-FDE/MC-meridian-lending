@@ -651,6 +651,11 @@ def run_decision(
     # officer, the owning borrower, or the applicant holding this application's
     # continuation token may trigger it -- never an anonymous caller who guessed the id.
     authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
+    # Client ask (2026-08-12 governance §5): an officer may not decision an application
+    # where their own account is the applicant. Refuses an already-authorized caller, so
+    # it runs after the ADR 0010 gate and before the credit pull -- a blocked attempt
+    # appends no decision event. Borrowers are untouched (see deny_self_decision).
+    authz.deny_self_decision(app_id, x_user_role, x_user_id)
     # ADR 0011: a credit pull is a regulated action -- require a passing KYC first (fails
     # closed on a declined or never-run check), so a failed/absent identity check can never
     # reach decisioning or, transitively, funding.

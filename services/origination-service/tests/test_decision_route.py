@@ -256,3 +256,57 @@ def test_absent_score_is_none_not_a_fabricated_zero(monkeypatch):
     _stub_decision(monkeypatch, {"outcome": "approve"})
     out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
     assert out.score is None
+
+
+# --- Staff self-decision block (client ask, 2026-08-12 governance §5) ------------------
+#
+# The route-level wiring of authz.deny_self_decision (unit-tested in test_authz.py): the
+# block runs AFTER require_officer_or_owner authorizes and BEFORE the KYC gate and any
+# downstream credit pull, so a blocked attempt never appends a regulated decision event.
+
+
+def _self_decision_db(caller_applicant_id, app_applicant_id):
+    def _q(sql, params=None):
+        if "FROM users" in sql:
+            return [{"applicant_id": caller_applicant_id}]
+        if "FROM applications" in sql:
+            return [{"applicant_id": app_applicant_id}]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    return _q
+
+
+def test_officer_cannot_decision_their_own_application(monkeypatch, captured_payload):
+    monkeypatch.setattr(applications.authz.db, "query", _self_decision_db(4, 4))
+    with pytest.raises(HTTPException) as exc:
+        applications.run_decision(
+            42, idempotency_key=None, x_user_role="underwriter", x_user_id="9"
+        )
+    assert exc.value.status_code == 403
+    # No credit pull, no decision event: blocked before any downstream call.
+    assert captured_payload == {}
+
+
+def test_self_decision_is_blocked_before_the_kyc_gate(monkeypatch, captured_payload):
+    # The block is an authorization decision, not a data-quality one: a passing KYC must
+    # not be required to reach it, and a failing one must not mask it.
+    def _kyc_boom(app_id):
+        raise AssertionError("blocked self-decision must not reach the KYC gate")
+
+    monkeypatch.setattr(applications.kyc_gate, "require_kyc_passed", _kyc_boom)
+    monkeypatch.setattr(applications.authz.db, "query", _self_decision_db(4, 4))
+    with pytest.raises(HTTPException) as exc:
+        applications.run_decision(
+            42, idempotency_key=None, x_user_role="underwriter", x_user_id="9"
+        )
+    assert exc.value.status_code == 403
+
+
+def test_officer_decisioning_another_applicant_is_unaffected(
+    monkeypatch, captured_payload
+):
+    monkeypatch.setattr(applications.authz.db, "query", _self_decision_db(4, 7))
+    out = applications.run_decision(
+        42, idempotency_key=None, x_user_role="underwriter", x_user_id="9"
+    )
+    assert out.decision == "deny"
