@@ -100,6 +100,31 @@ is the control, not the drafting.
 **When.** After G1, or W10 as the plan's Path B reach if G1 slips. Worth putting to the client
 rather than assuming: the plan wants it ahead of her timeline, and she has not been asked.
 
+### G2 is split, and half of it is in this cycle after all
+
+The second dependency above — policy retrieval that answers — is the plan's own **driver**
+(`docs/plan-weeks7-10.md` §2 requires RAG working end to end on `main`), not just an input to
+drafted wording. Deferring it whole means the W10 handover cannot claim RAG works, which is the
+bar the weeks 7–10 arc is assessed against. So the retrieval half is split:
+
+- **G2a — the import seam. This cycle, 1–2 days.** `rag_eval/` is repo-root, origination imports
+  are `app.*` relative to the service directory, and there is no repo-wide venv, so
+  `import rag_eval` does not resolve in the container. Closing that is the expensive half of
+  retrieval and it stands alone as a commit. Do not fix it by copying modules into the service —
+  that reproduces the per-service redactor duplication `redactor-drift` exists to police.
+- **G2b — `search_policy` on the assistant loop, plus the drafted wording. Next cycle.** A third
+  entry in `_TOOLS` (`services/origination-service/app/assistant.py`), backed by `rag_eval.index`,
+  declared in `app/prompts/decision_assistant.py`; loop dispatch needs no change. **0.5–1 day once
+  G2a is done**, against 4–6 for the whole thing today. Needs ADR 0016 (0014 and 0015 are taken)
+  and two design constraints settled: retrieval abstains below the score threshold, and is
+  excluded from the `task="decision"` path entirely so generation never reaches the causal path.
+
+**Why split rather than defer or build whole.** Building all of it costs 4–6 days against a cycle
+that already owes week-7 reconciliation (6–8) and the lost-update fix; nothing fits. Deferring all
+of it leaves a week-long job that never finds a gap to fit into. The seam alone turns the rest into
+a day's work whenever one appears, and no client is waiting on either half — this is a decision
+about the plan's own bar, not about delivery to Lending Ops.
+
 ---
 
 ## Not carded, still open
