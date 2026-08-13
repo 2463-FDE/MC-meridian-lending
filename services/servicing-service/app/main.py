@@ -2,8 +2,14 @@
 
 Read API (loan list / detail / schedule / payment history) uses SQLAlchemy. The
 money-moving endpoints (payments, balance adjust, fee waiver) keep their original raw
-implementation and accept ANY authenticated caller — no role check, no maker-checker.
-(weak authz — kept on purpose)
+implementation.
+
+Authorization arrived with ADR 0014 Decision 1 (see app/authz.py), closing debt D8(b):
+adjust-balance and waive-fee require a servicing money role, apply-payment and late-fee
+require the internal-service secret, and loan-scoped reads admit staff or the owning
+borrower. What is still absent is a SECOND APPROVER on the two discretionary moves —
+deferred to the next cycle by the client, with the design fixed in that ADR — and any
+record of the movement, which is the ledger ADR 0014 Decision 3 specifies.
 """
 import logging
 import os
@@ -13,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 
-from . import balance, config, delinquency, payments, reconciliation
+from . import authz, balance, config, delinquency, payments, reconciliation
 from .logging_config import get_logger
 from .routers import loans
 
@@ -77,16 +83,32 @@ class ApplyPaymentIn(BaseModel):
 
 
 @app.post("/accounts/{loan_id}/apply-payment")
-def apply_payment(loan_id: int, body: ApplyPaymentIn):
+def apply_payment(
+    loan_id: int,
+    body: ApplyPaymentIn,
+    x_internal_service: Optional[str] = Header(default=None, alias="X-Internal-Service"),
+):
     # This is the apply path called by payment-service AFTER it captures the charge (the
-    # LSS half of the split payment flow). It still does the unlocked read-modify-write
-    # (D3) straight off principal with no waterfall (D14) — preserved exactly as-is.
+    # LSS half of the split payment flow). Internal-only: it reduces a balance and is
+    # reachable through the gateway on session auth alone, so without this gate a caller
+    # could credit any balance with no card and no payments row — money creation, which
+    # is a different problem from the authorization model (debt D8 split (a), ADR 0013).
+    # The unlocked read-modify-write (D3) and the missing waterfall (D14) are unchanged
+    # here: this commit gates the route, it does not fix the mutation.
+    authz.require_internal_caller(x_internal_service)
     new_balance = balance.apply_payment(loan_id, body.amount)
     return {"loan_id": loan_id, "applied_amount": body.amount, "new_balance": new_balance}
 
 
 @app.get("/accounts/{loan_id}/balance")
-def get_account_balance(loan_id: int):
+def get_account_balance(
+    loan_id: int,
+    x_user_role: Optional[str] = Header(None),
+    x_user_id: Optional[str] = Header(None),
+):
+    # Staff, or the borrower who owns the loan. Denied as 404 so a serial id cannot be
+    # probed for existence (ADR 0014 Decision 1).
+    authz.require_staff_or_owner(loan_id, x_user_role, x_user_id)
     return {
         "loan_id": loan_id,
         "balance": balance.get_balance(loan_id),
@@ -101,7 +123,11 @@ class AdjustIn(BaseModel):
 @app.post("/accounts/{loan_id}/adjust-balance")
 def adjust_balance(loan_id: int, body: AdjustIn,
                    x_user_role: Optional[str] = Header(None)):
-    # ANY authenticated user. No role check, no second approver, no ledger entry. (debt D8)
+    # CSR or admin only (ADR 0014 Decision 1) — the header is now READ, not just
+    # declared. Still no second approver and still no ledger entry: approval is deferred
+    # to the next cycle by the client and the ledger is Decision 3. (debt D8(b) closed,
+    # D2 open)
+    authz.require_money_role(x_user_role)
     return {"loan_id": loan_id, "balance": balance.adjust_balance(loan_id, body.new_balance)}
 
 
@@ -112,12 +138,23 @@ class WaiveIn(BaseModel):
 @app.post("/accounts/{loan_id}/waive-fee")
 def waive_fee(loan_id: int, body: WaiveIn,
               x_user_role: Optional[str] = Header(None)):
-    # ANY authenticated user can waive a fee. No maker-checker. (debt D8)
+    # CSR or admin only (ADR 0014 Decision 1). No amount limit is enforced: the
+    # ops-manual $150-per-account-per-month guideline is recorded and displayed, not
+    # gated, and enforcement is carded (docs/cards-week6-servicing.md C4). A manual
+    # late-fee reversal comes through here rather than a separate flow.
+    authz.require_money_role(x_user_role)
     return {"loan_id": loan_id, "past_due": balance.waive_fee(loan_id, body.amount)}
 
 
 @app.post("/accounts/{loan_id}/late-fee")
-def late_fee(loan_id: int):
+def late_fee(
+    loan_id: int,
+    x_internal_service: Optional[str] = Header(default=None, alias="X-Internal-Service"),
+):
+    # Rule-driven with no operator-chosen amount, so it is internal-only rather than
+    # role-gated (ADR 0014 Decision 1). A representative reversing a late fee by hand
+    # uses waive-fee, which records the reason.
+    authz.require_internal_caller(x_internal_service)
     return {"loan_id": loan_id, "past_due": delinquency.assess_late_fee(loan_id)}
 
 

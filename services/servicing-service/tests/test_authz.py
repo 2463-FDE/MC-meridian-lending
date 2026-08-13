@@ -1,0 +1,248 @@
+"""ADR 0014 Decision 1 authorization (closes debt D8(b)).
+
+Before this, `adjust_balance`/`waive_fee` declared X-User-Role and never read it, and
+every loan-scoped read was reachable by walking serial loan ids -- any authenticated
+caller, including a borrower login (confirmed on the public internet), could move
+money on any account. Money routes require a servicing money role (CSR/admin);
+internal-only routes require the shared X-Internal-Service secret; loan-scoped reads
+admit staff or the owning borrower, denied as 404 so a serial id cannot be probed for
+existence.
+"""
+
+import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+
+from app import authz, config
+from app.main import app
+
+
+# --- require_money_role --------------------------------------------------------
+
+
+@pytest.mark.parametrize("role", ["csr", "admin", "Csr", " ADMIN "])
+def test_money_role_allowed(role):
+    authz.require_money_role(role)  # no raise
+
+
+@pytest.mark.parametrize("role", ["underwriter", "borrower", None, ""])
+def test_money_role_denied(role):
+    with pytest.raises(HTTPException) as exc:
+        authz.require_money_role(role)
+    assert exc.value.status_code == 403
+
+
+# --- require_internal_caller ----------------------------------------------------
+
+
+def test_internal_caller_allowed_with_matching_token(monkeypatch):
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    authz.require_internal_caller("sekret")  # no raise
+
+
+def test_internal_caller_denied_with_wrong_token(monkeypatch):
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    with pytest.raises(HTTPException) as exc:
+        authz.require_internal_caller("wrong")
+    assert exc.value.status_code == 403
+
+
+def test_internal_caller_denied_with_no_token(monkeypatch):
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    with pytest.raises(HTTPException) as exc:
+        authz.require_internal_caller(None)
+    assert exc.value.status_code == 403
+
+
+def test_internal_caller_fails_closed_when_unconfigured(monkeypatch):
+    # Unconfigured secret must never fall open -- even a caller presenting the
+    # empty string must be refused, and refused as 503 (config problem), not 403.
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "")
+    with pytest.raises(HTTPException) as exc:
+        authz.require_internal_caller("anything")
+    assert exc.value.status_code == 503
+
+
+def test_internal_caller_denied_on_non_ascii_token_not_500(monkeypatch):
+    # hmac.compare_digest raises TypeError comparing a non-ASCII str against bytes
+    # unless both sides are encoded first -- must deny 403, never 500.
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    with pytest.raises(HTTPException) as exc:
+        authz.require_internal_caller("tökén-🔑")
+    assert exc.value.status_code == 403
+
+
+# --- require_staff_or_owner (loan-scoped reads) ---------------------------------
+
+
+@pytest.mark.parametrize("role", ["csr", "underwriter", "admin", "Csr", " ADMIN "])
+def test_staff_role_allowed_without_touching_db(monkeypatch, role):
+    def _boom(*a, **k):
+        raise AssertionError("staff path must not query the database")
+
+    monkeypatch.setattr(authz.db, "query", _boom)
+    authz.require_staff_or_owner(1, role, None)  # no raise
+
+
+def test_owner_allowed(monkeypatch):
+    # Loan 1's application belongs to applicant 7; borrower user 5 is applicant 7.
+    def _q(sql, params=None):
+        if "FROM loans l JOIN applications app" in sql:
+            return [{"applicant_id": 7}]
+        if "FROM users" in sql:
+            return [{"applicant_id": 7}]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(authz.db, "query", _q)
+    authz.require_staff_or_owner(1, "borrower", "5")  # no raise
+
+
+def test_non_owner_borrower_denied_404(monkeypatch):
+    def _q(sql, params=None):
+        if "FROM loans l JOIN applications app" in sql:
+            return [{"applicant_id": 7}]
+        if "FROM users" in sql:
+            return [{"applicant_id": 9}]  # different applicant
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(authz.db, "query", _q)
+    with pytest.raises(HTTPException) as exc:
+        authz.require_staff_or_owner(1, "borrower", "5")
+    assert exc.value.status_code == 404  # no existence oracle: not 403
+
+
+def test_anonymous_denied_without_db(monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("anonymous path must not query the database")
+
+    monkeypatch.setattr(authz.db, "query", _boom)
+    with pytest.raises(HTTPException) as exc:
+        authz.require_staff_or_owner(1, None, None)
+    assert exc.value.status_code == 404
+
+
+def test_non_numeric_user_id_denied_without_db(monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("bad user id must not reach the database")
+
+    monkeypatch.setattr(authz.db, "query", _boom)
+    with pytest.raises(HTTPException) as exc:
+        authz.require_staff_or_owner(1, "borrower", "not-a-number")
+    assert exc.value.status_code == 404
+
+
+def test_null_app_id_loan_denied_for_borrower(monkeypatch):
+    # A legacy loan with no app_id has no derivable owner -- staff-only.
+    def _q(sql, params=None):
+        if "FROM loans l JOIN applications app" in sql:
+            return []  # the JOIN finds nothing when app_id is NULL
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(authz.db, "query", _q)
+    with pytest.raises(HTTPException) as exc:
+        authz.require_staff_or_owner(1, "borrower", "5")
+    assert exc.value.status_code == 404
+
+
+def test_staff_user_with_null_applicant_still_allowed(monkeypatch):
+    # Staff logins carry users.applicant_id = NULL; the role check must win regardless.
+    def _boom(*a, **k):
+        raise AssertionError("staff path must not query the database")
+
+    monkeypatch.setattr(authz.db, "query", _boom)
+    authz.require_staff_or_owner(1, "admin", "1")  # no raise
+
+
+# --- require_staff (portfolio-wide routes) --------------------------------------
+
+
+@pytest.mark.parametrize("role", ["csr", "underwriter", "admin"])
+def test_require_staff_allows_staff(role):
+    authz.require_staff(role)  # no raise
+
+
+@pytest.mark.parametrize("role", ["borrower", None, ""])
+def test_require_staff_denies_non_staff(role):
+    with pytest.raises(HTTPException) as exc:
+        authz.require_staff(role)
+    assert exc.value.status_code == 403
+
+
+# --- full-stack wiring: each route enforces its gate ----------------------------
+
+
+def test_adjust_balance_denied_without_money_role():
+    resp = TestClient(app).post(
+        "/accounts/1/adjust-balance",
+        json={"new_balance": 100.0},
+        headers={"X-User-Role": "underwriter"},
+    )
+    assert resp.status_code == 403
+
+
+def test_adjust_balance_allowed_with_money_role(monkeypatch):
+    monkeypatch.setattr(
+        "app.balance.adjust_balance", lambda loan_id, new_value: new_value
+    )
+    resp = TestClient(app).post(
+        "/accounts/1/adjust-balance",
+        json={"new_balance": 100.0},
+        headers={"X-User-Role": "csr"},
+    )
+    assert resp.status_code == 200
+
+
+def test_waive_fee_denied_without_money_role():
+    resp = TestClient(app).post(
+        "/accounts/1/waive-fee",
+        json={"amount": 10.0},
+        headers={"X-User-Role": "borrower"},
+    )
+    assert resp.status_code == 403
+
+
+def test_apply_payment_denied_without_internal_token(monkeypatch):
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    resp = TestClient(app).post(
+        "/accounts/1/apply-payment", json={"amount": 50.0, "payment_id": 1}
+    )
+    assert resp.status_code == 403
+
+
+def test_apply_payment_allowed_with_internal_token(monkeypatch):
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    monkeypatch.setattr("app.balance.apply_payment", lambda loan_id, amount: 50.0)
+    resp = TestClient(app).post(
+        "/accounts/1/apply-payment",
+        json={"amount": 50.0, "payment_id": 1},
+        headers={"X-Internal-Service": "sekret"},
+    )
+    assert resp.status_code == 200
+
+
+def test_late_fee_denied_without_internal_token(monkeypatch):
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    resp = TestClient(app).post("/accounts/1/late-fee")
+    assert resp.status_code == 403
+
+
+def test_get_balance_denied_for_non_owner_borrower(monkeypatch):
+    def _q(sql, params=None):
+        if "FROM loans l JOIN applications app" in sql:
+            return [{"applicant_id": 7}]
+        if "FROM users" in sql:
+            return [{"applicant_id": 9}]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(authz.db, "query", _q)
+    resp = TestClient(app).get(
+        "/accounts/1/balance", headers={"X-User-Role": "borrower", "X-User-Id": "5"}
+    )
+    assert resp.status_code == 404
+
+
+def test_get_balance_allowed_for_staff(monkeypatch):
+    monkeypatch.setattr("app.balance.get_balance", lambda loan_id: 100.0)
+    monkeypatch.setattr("app.balance.get_past_due", lambda loan_id: 0.0)
+    resp = TestClient(app).get("/accounts/1/balance", headers={"X-User-Role": "csr"})
+    assert resp.status_code == 200
