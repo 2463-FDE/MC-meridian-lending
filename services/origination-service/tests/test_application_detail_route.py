@@ -86,6 +86,7 @@ def test_detail_carries_every_principal_reason_from_the_latest_event(monkeypatch
         "query",
         lambda sql, params=None: [
             {
+                "outcome": "deny",
                 "principal_reasons": _THREE_REASONS,
                 "drivers": {"model_score": 518},
             }
@@ -106,6 +107,48 @@ def test_detail_carries_every_principal_reason_from_the_latest_event(monkeypatch
     assert _dump(out.principal_reasons) == _THREE_REASONS
     # Legacy single-string field keeps its meaning for callers already reading it.
     assert out.adverse_action_reason == _THREE_REASONS[0]["reason"]
+
+
+# --- decision + reasons must come from the SAME event, not two independent reads ------
+#
+# `dec` (models.Decision, the `decisions` table) and the decision_events query below are
+# two separate reads on two separate connections with no shared snapshot. An officer can
+# redecide with no idempotency key at any time, so a stale `decisions.outcome` read before
+# a redecision commits must never be paired with the NEW event's reasons/score -- that is
+# a regulated, borrower-visible mismatch (Codex review, PR 34).
+
+
+def test_decision_and_reasons_are_sourced_from_the_same_event_not_a_stale_row(
+    monkeypatch,
+):
+    # `dec.outcome` ("deny") stands in for a decisions row read BEFORE a concurrent
+    # redecision committed; the decision_events row below ("approve", read after) is the
+    # actual latest state. The response must reflect the event's outcome throughout, not
+    # a stale "deny" paired with the new event's (empty, approve) reasons.
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        lambda sql, params=None: [
+            {
+                "outcome": "approve",
+                "principal_reasons": [],
+                "drivers": {"model_score": 690},
+            }
+        ],
+    )
+    session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
+
+    out = applications.get_application(
+        1,
+        session=session,
+        x_user_role="underwriter",
+        x_user_id=None,
+        x_application_token=None,
+    )
+
+    assert out.decision == "approve"
+    assert out.score == 690
+    assert out.principal_reasons == []
 
 
 def test_detail_has_no_reasons_when_no_decision_event_recorded(monkeypatch):
@@ -144,6 +187,7 @@ def test_reason_item_missing_reason_key_does_not_500(monkeypatch):
         "query",
         lambda sql, params=None: [
             {
+                "outcome": "deny",
                 "principal_reasons": [{"code": "R02"}],
                 "drivers": {"model_score": 518},
             }
@@ -175,6 +219,7 @@ def test_reasonless_first_item_does_not_suppress_a_later_reason(monkeypatch):
         "query",
         lambda sql, params=None: [
             {
+                "outcome": "deny",
                 "principal_reasons": [
                     {"code": "R02"},  # no reason text -- must not win the legacy slot
                     {
@@ -209,7 +254,9 @@ def test_reason_item_not_a_dict_does_not_500(monkeypatch):
     monkeypatch.setattr(
         applications.db,
         "query",
-        lambda sql, params=None: [{"principal_reasons": ["not-a-dict"], "drivers": {}}],
+        lambda sql, params=None: [
+            {"outcome": "deny", "principal_reasons": ["not-a-dict"], "drivers": {}}
+        ],
     )
     session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
 
@@ -237,7 +284,11 @@ def test_principal_reasons_as_object_falls_back_to_empty_list(monkeypatch):
         applications.db,
         "query",
         lambda sql, params=None: [
-            {"principal_reasons": {"not": "a list"}, "drivers": {"model_score": 518}}
+            {
+                "outcome": "deny",
+                "principal_reasons": {"not": "a list"},
+                "drivers": {"model_score": 518},
+            }
         ],
     )
     session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
@@ -259,7 +310,9 @@ def test_principal_reasons_as_bare_string_falls_back_to_empty_list(monkeypatch):
     monkeypatch.setattr(
         applications.db,
         "query",
-        lambda sql, params=None: [{"principal_reasons": "deny", "drivers": {}}],
+        lambda sql, params=None: [
+            {"outcome": "deny", "principal_reasons": "deny", "drivers": {}}
+        ],
     )
     session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
 
@@ -280,7 +333,11 @@ def test_drivers_as_non_dict_falls_back_to_no_score(monkeypatch):
         applications.db,
         "query",
         lambda sql, params=None: [
-            {"principal_reasons": _THREE_REASONS, "drivers": [518, "prime"]}
+            {
+                "outcome": "deny",
+                "principal_reasons": _THREE_REASONS,
+                "drivers": [518, "prime"],
+            }
         ],
     )
     session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
@@ -310,7 +367,11 @@ def test_model_score_as_numeric_string_falls_back_to_no_score(monkeypatch):
         applications.db,
         "query",
         lambda sql, params=None: [
-            {"principal_reasons": [], "drivers": {"model_score": "518"}}
+            {
+                "outcome": "deny",
+                "principal_reasons": [],
+                "drivers": {"model_score": "518"},
+            }
         ],
     )
     session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
@@ -331,7 +392,11 @@ def test_model_score_as_object_falls_back_to_no_score(monkeypatch):
         applications.db,
         "query",
         lambda sql, params=None: [
-            {"principal_reasons": [], "drivers": {"model_score": {"nested": True}}}
+            {
+                "outcome": "deny",
+                "principal_reasons": [],
+                "drivers": {"model_score": {"nested": True}},
+            }
         ],
     )
     session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
@@ -353,7 +418,11 @@ def test_model_score_as_float_still_rounds(monkeypatch):
         applications.db,
         "query",
         lambda sql, params=None: [
-            {"principal_reasons": [], "drivers": {"model_score": 517.6}}
+            {
+                "outcome": "deny",
+                "principal_reasons": [],
+                "drivers": {"model_score": 517.6},
+            }
         ],
     )
     session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
@@ -382,6 +451,7 @@ def test_extra_fields_on_a_reason_item_are_dropped(monkeypatch):
         "query",
         lambda sql, params=None: [
             {
+                "outcome": "deny",
                 "principal_reasons": [
                     {
                         "code": "R02",

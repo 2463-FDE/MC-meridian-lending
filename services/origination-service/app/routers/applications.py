@@ -329,12 +329,29 @@ def get_application(
     # a denied application, or an officer opening one without rerunning decisioning, showed
     # "denied" with no reasons (PR review). Latest event wins, mirroring
     # disclosure_coordinator.gather_disclosure_context's own read of this table.
+    #
+    # `outcome` is selected from decision_events here too, not read off `dec` above (Codex
+    # review): decision-service writes decision_events and decisions in ONE atomic statement
+    # (decision-service/app/decision.py::_persist_event), so the two tables are never
+    # inconsistent AT WRITE TIME -- but `dec` and this query are two separate reads on two
+    # separate connections with no shared snapshot, and an officer can redecide with no
+    # idempotency key at any time. A redecision landing between the two reads paired a stale
+    # `dec.outcome` with the NEW event's score/reasons -- a regulated, borrower-visible
+    # mismatch (e.g. showing "denied" reasons for an application that was just approved).
+    # Sourcing outcome from the same row as the reasons/score closes that window: this
+    # response is now internally consistent by construction, whichever event the query
+    # happens to land on. `dec.outcome` remains only as the fallback for a legacy row with
+    # `decisions.outcome` set but no matching decision_events (seed apps 6012/6013) -- a case
+    # with no reasons to mismatch against.
     events = db.query(
-        "SELECT principal_reasons, drivers FROM decision_events WHERE app_id = %s "
+        "SELECT outcome, principal_reasons, drivers FROM decision_events WHERE app_id = %s "
         "ORDER BY decided_at DESC, id DESC LIMIT 1",
         (app_id,),
     )
     latest_event = events[0] if events else None
+    decision_outcome = (
+        latest_event["outcome"] if latest_event else (dec.outcome if dec else None)
+    )
     # Normalize by TYPE, not just truthiness (teeth review round 2): `x or []` passes a
     # non-list/non-dict JSONB value straight through (an object where a list was expected,
     # or vice versa), and `principal_reasons[0]` / `drivers.get(...)` below would then
@@ -378,7 +395,7 @@ def get_application(
         )
         if kyc_row
         else None,
-        decision=dec.outcome if dec else None,
+        decision=decision_outcome,
         score=int(round(model_score)) if model_score is not None else None,
         adverse_action_reason=adverse_action_reason,
         principal_reasons=principal_reasons,
