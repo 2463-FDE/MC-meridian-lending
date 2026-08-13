@@ -169,6 +169,29 @@ def test_detail_has_no_reasons_when_no_decision_event_recorded(monkeypatch):
     assert out.adverse_action_reason is None
 
 
+def test_decision_falls_back_to_decisions_row_when_no_event_exists(monkeypatch):
+    # The seed apps 6012/6013 case (db/init/002_seed.sql): decisions.outcome is set but no
+    # decision_events row was ever recorded, so `dec` is truthy while `events` is empty --
+    # the dec-truthy half of `decision_outcome`'s fallback ternary (teeth review, PR 34).
+    # Every other test either has a non-empty events mock (dec unused) or dec=None
+    # (the prior test), so this exact branch was otherwise uncovered.
+    monkeypatch.setattr(applications.db, "query", lambda sql, params=None: [])
+    session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
+
+    out = applications.get_application(
+        1,
+        session=session,
+        x_user_role="underwriter",
+        x_user_id=None,
+        x_application_token=None,
+    )
+
+    assert out.decision == "deny"
+    assert out.score is None
+    assert out.principal_reasons == []
+    assert out.adverse_action_reason is None
+
+
 # --- malformed decision_events.principal_reasons must not 500 the whole detail view ----
 #
 # decision_events.principal_reasons is unconstrained JSONB. The live write path
