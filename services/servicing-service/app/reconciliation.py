@@ -223,6 +223,17 @@ class ReconciliationResult:
     net_variance_minor: int = 0
     per_loan_absolute_minor: int = 0
     gross_break_minor: int = 0
+    # Per-side counts and totals, so a reader of the report can see what was compared
+    # rather than take the variance on trust (D3(b)).
+    ledger_row_count: int = 0
+    ledger_total_minor: int = 0
+    settlement_row_count: int = 0
+    settlement_captures_minor: int = 0
+    settlement_refunds_minor: int = 0
+
+    @property
+    def settlement_net_minor(self) -> int:
+        return self.settlement_captures_minor - self.settlement_refunds_minor
 
     @property
     def exit_code(self) -> int:
@@ -731,4 +742,87 @@ def reconcile(
         net_variance_minor=net_variance_minor,
         per_loan_absolute_minor=per_loan_absolute_minor,
         gross_break_minor=sum(b.amount_minor for b in breaks),
+        ledger_row_count=len(ledger),
+        ledger_total_minor=sum(ledger_by_loan.values()),
+        settlement_row_count=len(settlement),
+        settlement_captures_minor=sum(r.amount_minor for r in captures),
+        settlement_refunds_minor=sum(r.amount_minor for r in refunds),
     )
+
+
+def _break_json(item: Break) -> dict:
+    """One break (or duplicate) as JSON. Optional keys appear only when they are known.
+
+    `pan` and `cvv` are never read, so they cannot reach this document; the report is
+    stdout and is not redactor-covered, which is why the column list is a review point
+    rather than an assumption (spec's redaction note).
+    """
+    document = {
+        "class": item.break_class,
+        "loan_id": item.loan_id,
+        "amount_minor": item.amount_minor,
+        "date": item.occurred_on.isoformat(),
+    }
+    for key, value in (
+        ("processor_ref", item.processor_ref),
+        ("payment_id", item.payment_id),
+        ("gap_seconds", item.gap_seconds),
+        ("detail", item.detail or None),
+    ):
+        if value is not None:
+            document[key] = value
+    return document
+
+
+def build_report(result: ReconciliationResult) -> dict:
+    """The D3(b) break report — ONE document shape, for the CLI and for `peek`.
+
+    Both callers render this, so there is no second, weaker comparison to drift away
+    from the real one. That drift is what the fee-schedule loader was built to end and
+    why `ledger_total()`/`settlement_total()` were deleted rather than left in place.
+
+    Each figure carries what it depends on (D3(c)). Reporting only the net variance is
+    the reporting failure behind "month-end is a little noisy" — on this sample -88882
+    against 175318, so the netting hides roughly half the error. Reporting the gross
+    break value without saying it moves with the tolerance would be the same mistake
+    again: a figure that looks like a measurement but is partly an artifact of a
+    constant we chose. The two coincide here at +/-1 day; that is a coincidence of this
+    data, not a property.
+    """
+    return {
+        "window": {
+            "from": result.window_from.isoformat(),
+            "to": result.window_to.isoformat(),
+            "tolerance_days": result.tolerance_days,
+        },
+        "ledger": {
+            "rows": result.ledger_row_count,
+            "total_minor": result.ledger_total_minor,
+        },
+        "settlement": {
+            "rows": result.settlement_row_count,
+            "captures_minor": result.settlement_captures_minor,
+            "refunds_minor": result.settlement_refunds_minor,
+            "net_minor": result.settlement_net_minor,
+        },
+        "matched": result.matched_count,
+        "figures": {
+            "net_variance_minor": {
+                "value": result.net_variance_minor,
+                "depends_on_matching_tolerance": False,
+            },
+            "per_loan_absolute_variance_minor": {
+                "value": result.per_loan_absolute_minor,
+                "depends_on_matching_tolerance": False,
+            },
+            "gross_break_value_minor": {
+                "value": result.gross_break_minor,
+                "depends_on_matching_tolerance": True,
+            },
+        },
+        "breaks": [_break_json(b) for b in result.breaks],
+        # Separate from `breaks` on purpose: a duplicate is a signal, not a variance,
+        # and adding it to one would double-count money already counted on one side.
+        "duplicate_suspects": [_break_json(d) for d in result.duplicates],
+        "exit_code": result.exit_code,
+    }
