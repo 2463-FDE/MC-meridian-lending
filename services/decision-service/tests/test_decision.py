@@ -111,6 +111,50 @@ def test_clear_deny(synthetic_mode, event_sink):
     )
 
 
+def test_run_decision_never_hands_ssn_fingerprint_to_score_application(
+    synthetic_mode, event_sink, monkeypatch
+):
+    # Model-card review (PR 35): the six-field synthetic-dict tests in
+    # test_model_vendor.py never exercise the production path, where
+    # _run_decision() adds ssn_fingerprint to the same `inputs` dict it persists.
+    # This captures the ACTUAL keys _run_decision() passes into
+    # model_vendor.score_application(), with a real pepper configured so a
+    # fingerprint would exist if the split were ever undone.
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", "a-real-test-pepper")
+
+    seen_keys = {}
+    real_score_application = decision_mod.model_vendor.score_application
+
+    def _recording_score_application(inputs):
+        seen_keys.update(inputs)
+        return real_score_application(inputs)
+
+    monkeypatch.setattr(
+        decision_mod.model_vendor, "score_application", _recording_score_application
+    )
+
+    decide(
+        {
+            "app_id": 3,
+            "ssn": "123456782",
+            "income": 100000,
+            "amount": 15000,
+            "term_months": 36,
+            "employment_years": 5,
+        }
+    )
+
+    assert "ssn_fingerprint" not in seen_keys
+    assert set(seen_keys) == {
+        "bureau_score",
+        "annual_income",
+        "requested_amount",
+        "term_months",
+        "monthly_debt",
+        "employment_years",
+    }
+
+
 def test_missing_key_fails_closed_no_decision(prod_like):
     # Production-like config with no bureau key must NOT return a decision.
     with pytest.raises(CreditPullError):

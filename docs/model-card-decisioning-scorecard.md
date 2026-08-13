@@ -15,14 +15,23 @@ inputs. None of them is a prohibited basis, and no identity field reaches it. Th
 demonstrated by test, not asserted:** `services/decision-service/tests/test_model_vendor.py` —
 `test_scorecard_reads_exactly_the_six_declared_inputs`,
 `test_scorecard_reads_no_prohibited_basis_even_when_handed_one`, and
-`test_prohibited_basis_cannot_change_the_score_or_the_reasons`.
+`test_prohibited_basis_cannot_change_the_score_or_the_reasons` — plus
+`services/decision-service/tests/test_decision.py` —
+`test_run_decision_never_hands_ssn_fingerprint_to_score_application`.
 
-Those tests do not restate the claim. The first two record every key the model actually reads
-while scoring, so a future change that starts reading a seventh key fails even when the score is
-unchanged. The third passes every Reg B prohibited basis (12 CFR 1002.2(z)) and every direct
-identifier an applicant record carries into the model deliberately, and requires the score and
-the attributions to come back identical — on the denial path too, where the attributions become
-the reasons an applicant is told.
+Those tests do not restate the claim. The first three record every key the model actually reads
+while scoring on a synthetic input dict, so a future change that starts reading a seventh key
+fails even when the score is unchanged; the third passes every Reg B prohibited basis (12 CFR
+1002.2(z)) and every direct identifier an applicant record carries into the model deliberately,
+and requires the score and the attributions to come back identical — on the denial path too,
+where the attributions become the reasons an applicant is told. **The fourth closes the gap the
+first three leave: it drives the real production path** (`decision._run_decision()`), where the
+`ssn_fingerprint` `decide()` adds for idempotency-conflict detection lives in the same dict that
+gets persisted — and asserts the keys actually handed to `score_application()` are the six
+declared inputs and nothing else. `_run_decision()` calls `score_application()` before
+`ssn_fingerprint` is ever merged into that dict, so a licensed model plugged in behind
+`score_application()` cannot receive an identity-derived field just because it shares a payload
+with the persisted/replay metadata.
 
 ---
 
@@ -121,9 +130,9 @@ them (carded as G2 in `docs/cards-week8-governance.md`).
 ## 6. Limitations and caveats
 
 - **A model that reads no protected characteristic can still produce disparate outcomes**, through
-  inputs correlated with one. That is why monitoring exists and why §3's claim, though
-  demonstrable, is not sufficient on its own. See
-  `docs/spec-fair-lending-monitoring-week8.md`.
+  inputs correlated with one. That is why monitoring is planned and why §3's claim, though
+  demonstrable, is not sufficient on its own — see §7 and
+  `docs/spec-fair-lending-monitoring-week8.md` (**Status: draft**, not yet built).
 - **No performance validation exists.** The scorecard is a stand-in with no training data, no
   holdout, and no measured discriminatory power. Its bands come from the client's policy document,
   not from observed default behaviour. It must not be described as validated, calibrated, or
@@ -142,14 +151,24 @@ them (carded as G2 in `docs/cards-week8-governance.md`).
 
 ## 7. Controls around the model
 
+**Active today:**
+
 - KYC must pass before decisioning (ADR 0011).
 - Every decision is recorded, identifier-free, with its inputs, drivers, band and reasons
   (`decision_events`).
 - Decisions are retained ~25 months per Reg B (`policies/underwriting_guidelines.md`).
-- Outcomes are monitored for fair-lending risk per
-  `docs/spec-fair-lending-monitoring-week8.md`. That monitoring runs in the reporting
-  environment; no protected characteristic or proxy is stored in this platform, which is what
-  keeps §3's claim demonstrable rather than a matter of discipline.
+
+**Planned, not active — draft design only:**
+
+- **Fair-lending outcome monitoring does not run today.** Nothing today measures whether
+  decision outcomes fall differently across protected groups. The design is specified in
+  `docs/spec-fair-lending-monitoring-week8.md` (**Status: draft**), which names the intended
+  posture — the reporting environment computes, this platform only emits, so no protected
+  characteristic or proxy is stored here — but leaves the reporting environment unnamed, the
+  review owner and escalation path unassigned, application volume ungiven, and the geocoding
+  source unconfirmed (spec §7, Open Items 1–4). None of the platform's export path exists yet.
+  Until those dependencies close and the export ships, this is a design, not a control, and must
+  not be cited as one in an examination.
 
 ## 8. Review
 
