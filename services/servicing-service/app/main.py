@@ -63,7 +63,15 @@ class PaymentIn(BaseModel):
 
 
 @app.post("/payments")
-def post_payment(body: PaymentIn):
+def post_payment(
+    body: PaymentIn,
+    x_user_role: Optional[str] = Header(None),
+    x_user_id: Optional[str] = Header(None),
+):
+    # Same class of authorization failure closed elsewhere in this file (ADR 0014
+    # Decision 1): staff, or the borrower who owns the loan being charged. Denied as
+    # 404 so a serial loan id cannot be probed for existence.
+    authz.require_staff_or_owner(body.loan_id, x_user_role, x_user_id)
     # Fail closed without a processor credential: charge() inserts the payment and
     # mutates the balance, recording a 'captured' payment no processor authorized.
     if not config.processor_configured():

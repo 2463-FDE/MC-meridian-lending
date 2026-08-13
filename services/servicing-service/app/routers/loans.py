@@ -1,10 +1,10 @@
 """Loan portfolio read API: list, detail, amortization schedule, payment history."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import models, schedule
+from .. import authz, models, schedule
 from ..database import get_session
 from ..schemas import (
     LoanDetail,
@@ -31,7 +31,10 @@ def list_loans(
     status: str | None = Query(default=None),
     limit: int = Query(default=25, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    x_user_role: str | None = Header(default=None),
 ):
+    # Portfolio-wide, no owner to fall back to -- staff only (ADR 0014 Decision 1).
+    authz.require_staff(x_user_role)
     stmt = select(models.Loan, models.Balance).join(
         models.Balance, models.Balance.loan_id == models.Loan.id, isouter=True
     )
@@ -59,7 +62,14 @@ def list_loans(
 
 
 @router.get("/{loan_id}", response_model=LoanDetail)
-def get_loan(loan_id: int, session: Session = Depends(get_session)):
+def get_loan(
+    loan_id: int,
+    session: Session = Depends(get_session),
+    x_user_role: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+):
+    # Staff or the owning borrower; denied as 404 (ADR 0014 Decision 1).
+    authz.require_staff_or_owner(loan_id, x_user_role, x_user_id)
     loan = session.get(models.Loan, loan_id)
     if not loan:
         raise HTTPException(status_code=404, detail="loan not found")
@@ -78,7 +88,13 @@ def get_loan(loan_id: int, session: Session = Depends(get_session)):
 
 
 @router.get("/{loan_id}/schedule", response_model=ScheduleOut)
-def loan_schedule(loan_id: int, session: Session = Depends(get_session)):
+def loan_schedule(
+    loan_id: int,
+    session: Session = Depends(get_session),
+    x_user_role: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+):
+    authz.require_staff_or_owner(loan_id, x_user_role, x_user_id)
     loan = session.get(models.Loan, loan_id)
     if not loan:
         raise HTTPException(status_code=404, detail="loan not found")
@@ -92,7 +108,13 @@ def loan_schedule(loan_id: int, session: Session = Depends(get_session)):
 
 
 @router.get("/{loan_id}/payments", response_model=PaymentsOut)
-def loan_payments(loan_id: int, session: Session = Depends(get_session)):
+def loan_payments(
+    loan_id: int,
+    session: Session = Depends(get_session),
+    x_user_role: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+):
+    authz.require_staff_or_owner(loan_id, x_user_role, x_user_id)
     rows = session.scalars(
         select(models.Payment)
         .where(models.Payment.loan_id == loan_id)

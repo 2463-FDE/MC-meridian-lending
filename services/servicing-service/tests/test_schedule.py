@@ -34,7 +34,7 @@ def test_loan_schedule_route_amortizes_at_note_rate_not_apr():
         def get(self, model, pk):
             return _Loan()
 
-    out = loans_router.loan_schedule(1, session=_Session())
+    out = loans_router.loan_schedule(1, session=_Session(), x_user_role="csr")
     first_interest = out.schedule[0].interest
     # First-period interest is balance * (rate/1200). It must equal the note-rate figure,
     # never the APR figure.
@@ -57,5 +57,5 @@ def test_loan_schedule_route_falls_back_to_apr_for_legacy_loan():
         def get(self, model, pk):
             return _Loan()
 
-    out = loans_router.loan_schedule(1, session=_Session())
+    out = loans_router.loan_schedule(1, session=_Session(), x_user_role="csr")
     assert out.schedule[0].interest == round(15000.0 * (8.5 / 100 / 12), 2)

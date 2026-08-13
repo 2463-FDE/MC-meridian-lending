@@ -246,3 +246,187 @@ def test_get_balance_allowed_for_staff(monkeypatch):
     monkeypatch.setattr("app.balance.get_past_due", lambda loan_id: 0.0)
     resp = TestClient(app).get("/accounts/1/balance", headers={"X-User-Role": "csr"})
     assert resp.status_code == 200
+
+
+# --- /loans router: staff-only list, staff-or-owner reads (ADR 0014 Decision 1) ---
+#
+# `Depends(get_session)` resolves before the route body runs, so even the denial
+# path would otherwise hit the real (unconfigured-in-tests) DATABASE_URL. Every
+# /loans test below takes `fake_db_session` to override it with a fake session --
+# authz still runs first in the handler body, so the denial tests never touch the
+# fake session's methods.
+
+
+class _FakeResult:
+    def all(self):
+        return []
+
+
+class _FakeSession:
+    def scalar(self, stmt):
+        return 0
+
+    def execute(self, stmt):
+        return _FakeResult()
+
+    def get(self, model, ident):
+        return None
+
+
+@pytest.fixture
+def fake_db_session():
+    from app.database import get_session
+
+    def _override():
+        yield _FakeSession()
+
+    app.dependency_overrides[get_session] = _override
+    yield
+    app.dependency_overrides.clear()
+
+
+def test_list_loans_denied_for_borrower(fake_db_session):
+    resp = TestClient(app).get("/loans", headers={"X-User-Role": "borrower"})
+    assert resp.status_code == 403
+
+
+def test_list_loans_denied_anonymous(fake_db_session):
+    resp = TestClient(app).get("/loans")
+    assert resp.status_code == 403
+
+
+def test_list_loans_allowed_for_staff(fake_db_session):
+    resp = TestClient(app).get("/loans", headers={"X-User-Role": "csr"})
+    assert resp.status_code == 200
+
+
+def test_get_loan_denied_for_non_owner_borrower(monkeypatch, fake_db_session):
+    def _q(sql, params=None):
+        if "FROM loans l JOIN applications app" in sql:
+            return [{"applicant_id": 7}]
+        if "FROM users" in sql:
+            return [{"applicant_id": 9}]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(authz.db, "query", _q)
+    resp = TestClient(app).get(
+        "/loans/1", headers={"X-User-Role": "borrower", "X-User-Id": "5"}
+    )
+    assert resp.status_code == 404
+
+
+def test_get_loan_denied_anonymous(monkeypatch, fake_db_session):
+    def _boom(*a, **k):
+        raise AssertionError("anonymous path must not query the database")
+
+    monkeypatch.setattr(authz.db, "query", _boom)
+    resp = TestClient(app).get("/loans/1")
+    assert resp.status_code == 404
+
+
+def test_loan_schedule_denied_for_non_owner_borrower(monkeypatch, fake_db_session):
+    def _q(sql, params=None):
+        if "FROM loans l JOIN applications app" in sql:
+            return [{"applicant_id": 7}]
+        if "FROM users" in sql:
+            return [{"applicant_id": 9}]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(authz.db, "query", _q)
+    resp = TestClient(app).get(
+        "/loans/1/schedule", headers={"X-User-Role": "borrower", "X-User-Id": "5"}
+    )
+    assert resp.status_code == 404
+
+
+def test_loan_schedule_denied_anonymous(monkeypatch, fake_db_session):
+    def _boom(*a, **k):
+        raise AssertionError("anonymous path must not query the database")
+
+    monkeypatch.setattr(authz.db, "query", _boom)
+    resp = TestClient(app).get("/loans/1/schedule")
+    assert resp.status_code == 404
+
+
+def test_loan_payments_denied_for_non_owner_borrower(monkeypatch, fake_db_session):
+    def _q(sql, params=None):
+        if "FROM loans l JOIN applications app" in sql:
+            return [{"applicant_id": 7}]
+        if "FROM users" in sql:
+            return [{"applicant_id": 9}]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(authz.db, "query", _q)
+    resp = TestClient(app).get(
+        "/loans/1/payments", headers={"X-User-Role": "borrower", "X-User-Id": "5"}
+    )
+    assert resp.status_code == 404
+
+
+def test_loan_payments_denied_anonymous(monkeypatch, fake_db_session):
+    def _boom(*a, **k):
+        raise AssertionError("anonymous path must not query the database")
+
+    monkeypatch.setattr(authz.db, "query", _boom)
+    resp = TestClient(app).get("/loans/1/payments")
+    assert resp.status_code == 404
+
+
+# --- POST /payments (direct charge route): staff-or-owner (ADR 0014 Decision 1) ---
+
+
+def test_post_payment_denied_for_non_owner_borrower(monkeypatch):
+    def _q(sql, params=None):
+        if "FROM loans l JOIN applications app" in sql:
+            return [{"applicant_id": 7}]
+        if "FROM users" in sql:
+            return [{"applicant_id": 9}]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(authz.db, "query", _q)
+
+    def _boom(*a, **k):
+        raise AssertionError("denied caller must never reach charge()")
+
+    monkeypatch.setattr("app.payments.charge", _boom)
+    resp = TestClient(app).post(
+        "/payments",
+        json={"loan_id": 1, "amount": 50.0},
+        headers={"X-User-Role": "borrower", "X-User-Id": "5"},
+    )
+    assert resp.status_code == 404
+
+
+def test_post_payment_denied_anonymous(monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("anonymous caller must never reach charge()")
+
+    monkeypatch.setattr("app.payments.charge", _boom)
+    resp = TestClient(app).post("/payments", json={"loan_id": 1, "amount": 50.0})
+    assert resp.status_code == 404
+
+
+def test_post_payment_allowed_for_owner(monkeypatch):
+    def _q(sql, params=None):
+        if "FROM loans l JOIN applications app" in sql:
+            return [{"applicant_id": 7}]
+        if "FROM users" in sql:
+            return [{"applicant_id": 7}]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(authz.db, "query", _q)
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
+    monkeypatch.setattr(
+        "app.payments.charge",
+        lambda loan_id, pan, cvv, amount, ssn, name, method: {
+            "loan_id": loan_id,
+            "amount": amount,
+            "balance": 0.0,
+        },
+    )
+    resp = TestClient(app).post(
+        "/payments",
+        json={"loan_id": 1, "amount": 50.0},
+        headers={"X-User-Role": "borrower", "X-User-Id": "5"},
+    )
+    assert resp.status_code == 200

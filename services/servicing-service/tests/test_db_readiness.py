@@ -334,7 +334,7 @@ def test_payments_503_without_processor_key(monkeypatch):
     from app.main import PaymentIn, post_payment
 
     with pytest.raises(HTTPException) as exc_info:
-        post_payment(PaymentIn(loan_id=1, amount=100.0))
+        post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
     assert exc_info.value.status_code == 503
 
 
@@ -349,5 +349,5 @@ def test_payments_allowed_with_processor_key(monkeypatch):
     )
     from app.main import PaymentIn, post_payment
 
-    out = post_payment(PaymentIn(loan_id=1, amount=100.0))
+    out = post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
     assert out["balance"] == 900.0
