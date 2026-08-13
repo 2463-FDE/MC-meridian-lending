@@ -3,13 +3,16 @@ _apply_via_servicing's return contract.
 
 servicing-service's /accounts/{loan_id}/apply-payment now requires
 X-Internal-Service (ADR 0014 Decision 1, services/servicing-service/app/authz.py
-require_internal_caller). Two Codex review rounds on PR 32 found this in stages:
-first, payment-service sent no such header at all (fixed by sending it); then,
-even with the header sent, a REJECTED apply (e.g. mismatched
-INTERNAL_SERVICE_TOKEN between the two services) was swallowed identically to
-servicing being merely unreachable, so charge() always reported status
-"captured" regardless of whether the balance actually moved. This file proves
-both the client sends the header AND that a rejection is reported honestly.
+require_internal_caller). Three Codex review rounds on PR 32 found this in stages:
+first, payment-service sent no such header at all; then, a REJECTED or REDIRECTED
+apply was swallowed identically to success; then, an UNREACHABLE servicing call
+was still reported as a successful apply on the reasoning it would be
+"reconciled later" -- which nothing in this codebase actually does
+(reconciliation.py's reconciliation_peek runs on no schedule and reports no
+breaks, D7). _apply_via_servicing now returns True only on an actual confirmed
+2xx; every other outcome (missing header, rejected, redirected, unreachable) is
+False, and charge() reports "captured_unapplied" rather than lying about the
+balance having moved.
 """
 
 from app import config, payments
@@ -82,10 +85,14 @@ def test_apply_via_servicing_redirect_reports_not_applied(monkeypatch):
     assert applied is False
 
 
-def test_apply_via_servicing_unreachable_still_reports_applied(monkeypatch):
-    # Network-level failure (unreachable/timeout/DNS) is NOT the same as a
-    # rejection: the card was already charged, so this stays "captured" and
-    # reconciled later (D7) -- the original documented design for this case.
+def test_apply_via_servicing_unreachable_reports_not_applied(monkeypatch):
+    # A network-level failure (unreachable/timeout/DNS) leaves the balance just
+    # as unupdated as a rejection does. An earlier version of this fix reported
+    # this case as still "captured" on the reasoning that it would be
+    # "reconciled later" -- but reconciliation.py's reconciliation_peek is
+    # explicitly not run on a schedule and does not report breaks (D7), so
+    # nothing in this codebase actually reconciles it. Treat it the same as a
+    # rejection (Codex review, PR 32, third round).
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
     monkeypatch.setattr(payments, "INTERNAL_SERVICE_TOKEN", "sekret")
 
@@ -94,9 +101,15 @@ def test_apply_via_servicing_unreachable_still_reports_applied(monkeypatch):
 
     monkeypatch.setattr(payments.httpx, "post", fake_post)
 
+    errors = []
+    monkeypatch.setattr(payments.log, "error", lambda *a, **k: errors.append((a, k)))
+
     applied = payments._apply_via_servicing(loan_id=1, amount=50.0, payment_id=7)
 
-    assert applied is True
+    assert applied is False
+    assert errors, (
+        "an unreachable apply-payment call must be logged, not silently ignored"
+    )
 
 
 def test_charge_reports_captured_unapplied_when_servicing_rejects(monkeypatch):

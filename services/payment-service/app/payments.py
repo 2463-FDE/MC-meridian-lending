@@ -5,10 +5,13 @@ Stores the FULL PAN and the CVV on the payments row. Logs the full charge reques
 payments row and applies the amount twice (double-charge). (D2, D5, #4, #7)
 
 The amount is applied to the balance by calling servicing-service over HTTP (the
-servicing /accounts/{loan_id}/apply-payment endpoint). If servicing is unreachable the
-charge is still reported captured so this service stands alone; if servicing REJECTS
-the call (e.g. a mismatched INTERNAL_SERVICE_TOKEN), that is not the same thing, and
-the response says "captured_unapplied" instead -- see _apply_via_servicing.
+servicing /accounts/{loan_id}/apply-payment endpoint). ANY failure to apply -- servicing
+unreachable (DNS/connection/timeout), a rejection (e.g. mismatched
+INTERNAL_SERVICE_TOKEN), or a redirect -- reports "captured_unapplied" instead of a
+plain "captured", because in every one of those cases the balance was NOT updated and
+this codebase has no real reconciliation to fall back on (reconciliation.py's
+reconciliation_peek is explicitly not run on a schedule and does not report breaks,
+D7) -- see _apply_via_servicing.
 """
 
 import json
@@ -90,11 +93,10 @@ def charge(
     )
     payment_id = rows[0]["id"] if rows else None
 
-    # Apply the captured amount to the balance via servicing-service. A REJECTED
-    # apply (e.g. a mismatched INTERNAL_SERVICE_TOKEN between the two services)
-    # is not the same as servicing being unreachable -- it means the balance
-    # definitely was not updated, and the response must say so rather than
-    # report a normal "captured" success (Codex review, PR 32).
+    # Apply the captured amount to the balance via servicing-service. ANY
+    # failure to apply -- rejected, redirected, or servicing unreachable --
+    # means the balance was definitely not updated, and the response must say
+    # so rather than report a normal "captured" success (Codex review, PR 32).
     applied = _apply_via_servicing(loan_id, amount, payment_id)
     return {
         "payment_id": payment_id,
@@ -107,20 +109,19 @@ def charge(
 def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
     """Tell servicing-service to apply this payment to the loan balance.
 
-    Returns True when the apply is handled -- either it actually succeeded, or
-    the call could not be made at all (network unreachable, timeout, DNS): the
-    card was already charged and the row written, so that case is still
-    reported captured and reconciled later (D7), matching this module's
-    original documented design.
+    Returns True only when servicing actually confirmed the apply (a 2xx
+    response). Returns False for every other outcome -- servicing unreachable
+    (connect/timeout/DNS, caught below), a rejection (e.g. mismatched
+    INTERNAL_SERVICE_TOKEN), or a redirect (httpx does not follow redirects by
+    default, so a 3xx means the apply-payment handler never ran).
 
-    Returns False only when servicing was REACHED and did not return a 2xx (a
-    deterministic rejection or a redirect, not a transient blip), and charge()
-    must not report it as applied. httpx does not follow redirects by default,
-    so a 3xx here means the apply-payment handler never ran, the same as a
-    403 -- checking only `>= 400` let a 3xx fall through to the success branch
-    (Codex review, PR 32, second round). The prior version also called
-    resp.raise_for_status() inside the same try/except as network errors, so a
-    403 was swallowed identically to "servicing unreachable" (first round).
+    An earlier version of this fix treated "unreachable" as still-applied,
+    reasoning the card was already charged and this would be "reconciled
+    later" -- but nothing in this codebase actually reconciles later:
+    reconciliation.py's reconciliation_peek is explicitly not run on a
+    schedule and does not report breaks (D7). An unresolved network failure
+    is exactly as permanently unresolved as a rejection, so charge() must
+    treat them the same way (Codex review, PR 32, third round).
     """
     url = f"{SERVICING_URL}/accounts/{loan_id}/apply-payment"
     try:
@@ -137,7 +138,7 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
             payment_id,
             exc,
         )
-        return True
+        return False
     if not (200 <= resp.status_code < 300):
         log.error(
             "apply-payment REJECTED by servicing status=%s loan_id=%s payment_id=%s",
