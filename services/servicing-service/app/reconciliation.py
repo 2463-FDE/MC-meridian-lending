@@ -42,6 +42,7 @@ MATCH_TOLERANCE_DAYS = 1
 MISSING_IN_LEDGER = "MISSING_IN_LEDGER"
 MISSING_IN_SETTLEMENT = "MISSING_IN_SETTLEMENT"
 REFUND_UNREPRESENTED = "REFUND_UNREPRESENTED"
+AMOUNT_MISMATCH = "AMOUNT_MISMATCH"
 DUPLICATE_SUSPECT = "DUPLICATE_SUSPECT"
 
 # D2(g), mirroring `scripts/prove_test.sh`'s convention. "Could not check" is never
@@ -178,7 +179,8 @@ class LedgerRow:
 class Break:
     """One finding. `amount_minor` is the value at stake, always integer cents.
 
-    For `DUPLICATE_SUSPECT` it is the amount charged twice, which is a *signal* and is
+    For `AMOUNT_MISMATCH` that is the absolute difference between the two sides; for
+    `DUPLICATE_SUSPECT` it is the amount charged twice, which is a *signal* and is
     not added to any variance figure — the duplicate's money is already accounted for
     on whichever side it landed, so counting it again would double-count it.
     """
@@ -332,10 +334,42 @@ def _match(ledger: list, captures: list, tolerance_days: int):
         else:
             unmatched_ledger.append(ledger_row)
 
+    # Second pass: a leftover pair on the same loan inside the window whose amounts
+    # differ is one break (AMOUNT_MISMATCH), not two orphans on opposite sides.
+    mismatches = []
+    still_unmatched_ledger = []
+    for ledger_row in unmatched_ledger:
+        for index, capture in enumerate(ordered_captures):
+            if claimed[index]:
+                continue
+            if capture.loan_id == ledger_row.loan_id and _within(
+                ledger_row, capture, tolerance
+            ):
+                claimed[index] = True
+                mismatches.append(
+                    Break(
+                        break_class=AMOUNT_MISMATCH,
+                        loan_id=ledger_row.loan_id,
+                        amount_minor=abs(
+                            capture.amount_minor - ledger_row.amount_minor
+                        ),
+                        occurred_on=capture.settlement_date,
+                        processor_ref=capture.processor_ref,
+                        payment_id=ledger_row.payment_id,
+                        detail=(
+                            f"ledger {ledger_row.amount_minor} vs settlement "
+                            f"{capture.amount_minor} minor"
+                        ),
+                    )
+                )
+                break
+        else:
+            still_unmatched_ledger.append(ledger_row)
+
     unmatched_captures = [
         c for index, c in enumerate(ordered_captures) if not claimed[index]
     ]
-    return matched_count, unmatched_ledger, unmatched_captures
+    return matched_count, still_unmatched_ledger, unmatched_captures, mismatches
 
 
 def reconcile(
@@ -390,10 +424,9 @@ def reconcile(
 
     captures = [r for r in settlement if r.row_type == CAPTURE]
     refunds = [r for r in settlement if r.row_type == REFUND]
-    matched_count, unmatched_ledger, unmatched_captures = _match(
+    matched_count, unmatched_ledger, unmatched_captures, breaks = _match(
         ledger, captures, tolerance_days
     )
-    breaks: list = []
 
     breaks.extend(
         Break(

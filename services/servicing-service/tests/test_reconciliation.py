@@ -513,6 +513,31 @@ def test_v_sample_tight_zero_day_window(ledger):
     assert result.net_variance_minor == -88882
 
 
+def test_amount_mismatch_pairs_same_loan_in_window_with_differing_amount(
+    ledger, tmp_path
+):
+    """D2(f) — the fifth class. Not present in the sample, so it gets its own case."""
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 6, 1, 9, 0, 0),
+            }
+        ]
+    )
+    path = write_settlement(tmp_path, ["2026-06-01,PR-100231,4471,255.00,capture"])
+
+    result = reconciliation.reconcile(settlement_path=path)
+
+    mismatches = klass(result, reconciliation.AMOUNT_MISMATCH)
+    assert len(mismatches) == 1
+    assert mismatches[0].amount_minor == 500
+    assert klass(result, reconciliation.MISSING_IN_LEDGER) == []
+    assert klass(result, reconciliation.MISSING_IN_SETTLEMENT) == []
+
+
 def test_surplus_on_one_side_is_reported_as_a_count_difference_not_a_guess(
     ledger, tmp_path
 ):
