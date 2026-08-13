@@ -56,12 +56,19 @@ def post_payment(
     if result["status"] == "captured_unapplied":
         # A 200 here would be indistinguishable from a real success to the
         # existing frontend, which discards the response body and shows a flat
-        # "submitted" message on any non-throwing call -- and with no
-        # idempotency key (D2), a caller who read this as "try again" would
-        # double-charge the card. Force it through the error path instead, with
-        # wording that explicitly rules out a retry (Codex review, PR 32).
+        # "submitted" message on any non-throwing call. 502/503/504 were ruled
+        # out even though the card WAS already captured: those codes carry a
+        # "transient upstream hiccup, safe to retry" convention that generic
+        # HTTP clients, gateways, and retry libraries act on regardless of the
+        # detail text -- and with no idempotency key (D2/D19, tracked as its
+        # own PR), an automated retry on this exact request would double-charge
+        # the card. 424 Failed Dependency says precisely what happened (this
+        # request's own work -- the capture -- succeeded; it failed because a
+        # dependency -- servicing's apply call -- did not) without implying a
+        # transient failure worth retrying (Codex review, PR 32, second pass
+        # on this same fix).
         raise HTTPException(
-            status_code=502,
+            status_code=424,
             detail=(
                 f"Payment captured (payment_id={result['payment_id']}) but "
                 "could not be applied to your balance. Do not retry -- contact "

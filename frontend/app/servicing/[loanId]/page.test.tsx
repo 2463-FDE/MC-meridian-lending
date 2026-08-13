@@ -226,9 +226,11 @@ describe("loan detail — per-loan state scoping", () => {
 
 describe("loan detail — captured but unapplied payment", () => {
   it("does not show a success message when the apply is rejected", async () => {
-    // The backend now returns a non-2xx (502) with a captured_unapplied detail
-    // instead of a plain 200 (Codex review, PR 32) -- apiPost throws on any
-    // non-2xx, so this must land in the catch branch, never the success one.
+    // The backend now returns a non-2xx (424 Failed Dependency, chosen over
+    // 502/503/504 so generic retry logic does not treat this as transient)
+    // with a captured_unapplied detail instead of a plain 200 (Codex review,
+    // PR 32) -- apiPost throws on any non-2xx, so this must land in the catch
+    // branch, never the success one.
     apiPost.mockRejectedValue({
       detail:
         "Payment captured (payment_id=42) but could not be applied to your " +

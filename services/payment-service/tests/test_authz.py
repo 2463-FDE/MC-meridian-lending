@@ -177,15 +177,20 @@ def test_post_payment_allowed_for_money_role_without_db(monkeypatch):
     assert resp.status_code == 200
 
 
-# --- captured_unapplied is not a plain 200 -----------------------------------------
+# --- captured_unapplied is not a plain 200, and not a retryable 5xx ----------------
 #
 # The frontend discards the /payments response body and shows a flat "submitted"
-# message on any call that does not throw; with no idempotency key (D2), a caller
-# who read status="captured_unapplied" as a normal 200 could retry and double-charge
-# the card. The route must make this state impossible to mistake for success.
+# message on any call that does not throw; with no idempotency key (D2/D19), a
+# caller who read status="captured_unapplied" as a normal 200 could retry and
+# double-charge the card. A 502/503/504 has the same problem from the other
+# direction: generic HTTP clients, gateways, and retry libraries treat those as
+# "transient, safe to retry" regardless of the detail text, and a retry on this
+# exact request would also double-charge. 424 Failed Dependency says the capture
+# itself succeeded and failed only because a dependency (servicing's apply call)
+# did, without the retry connotation.
 
 
-def test_post_payment_502_when_captured_unapplied(monkeypatch):
+def test_post_payment_424_when_captured_unapplied(monkeypatch):
     def _q(sql, params=None):
         if "FROM loans l JOIN applications app" in sql:
             return [{"applicant_id": 7}]
@@ -210,7 +215,10 @@ def test_post_payment_502_when_captured_unapplied(monkeypatch):
         json={"loan_id": 1, "amount": 50.0},
         headers={"X-User-Role": "borrower", "X-User-Id": "5"},
     )
-    assert resp.status_code == 502
+    assert resp.status_code == 424
+    assert resp.status_code not in (502, 503, 504), (
+        "must not use a status code generic retry logic treats as transient"
+    )
     body = resp.json()
     assert "42" in body["detail"]
     assert "not retry" in body["detail"].lower()
