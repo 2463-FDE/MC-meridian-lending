@@ -5,9 +5,15 @@ Stores the FULL PAN and the CVV on the payments row. Logs the full charge reques
 payments row and applies the amount twice (double-charge). (D2, D5, #4, #7)
 
 The amount is applied to the balance by calling servicing-service over HTTP (the
-servicing /accounts/{loan_id}/apply-payment endpoint). If servicing is unreachable the
-charge is still reported captured so this service stands alone.
+servicing /accounts/{loan_id}/apply-payment endpoint). ANY failure to apply -- servicing
+unreachable (DNS/connection/timeout), a rejection (e.g. mismatched
+INTERNAL_SERVICE_TOKEN), or a redirect -- reports "captured_unapplied" instead of a
+plain "captured", because in every one of those cases the balance was NOT updated and
+this codebase has no real reconciliation to fall back on (reconciliation.py's
+reconciliation_peek is explicitly not run on a schedule and does not report breaks,
+D7) -- see _apply_via_servicing.
 """
+
 import json
 import re
 
@@ -15,10 +21,10 @@ import httpx
 
 from .logging_config import get_logger
 from . import db
-from .config import SERVICING_URL
+from .config import INTERNAL_SERVICE_TOKEN, SERVICING_URL
 from .redactor import PiiRedactor
 
-log = get_logger("payment")   # writes to logs/payment-service.log
+log = get_logger("payment")  # writes to logs/payment-service.log
 
 
 def _mask_ssn(ssn):
@@ -59,8 +65,15 @@ def _redacted_charge_req(pan, cvv, ssn, amount, loan_id) -> dict:
     }
 
 
-def charge(loan_id: int, pan: str, cvv: str, amount: float, ssn: str = None,
-           name: str = None, method: str = "card") -> dict:
+def charge(
+    loan_id: int,
+    pan: str,
+    cvv: str,
+    amount: float,
+    ssn: str = None,
+    name: str = None,
+    method: str = "card",
+) -> dict:
     # PII (PAN/CVV/SSN) is masked at the value level before it reaches the log
     # string; see _redacted_charge_req for why the old formatter-only approach
     # was bypassable. `name` is client-controlled free text (a PAN can be
@@ -68,43 +81,76 @@ def charge(loan_id: int, pan: str, cvv: str, amount: float, ssn: str = None,
     # quotes in the remaining values.
     log.info(
         "POST /payments charge req=%s -> ok",
-        json.dumps(_redacted_charge_req(pan, cvv, ssn, amount, loan_id),
-                   ensure_ascii=False),
+        json.dumps(
+            _redacted_charge_req(pan, cvv, ssn, amount, loan_id), ensure_ascii=False
+        ),
     )
     # No idempotency check. No unique charge reference. Every POST inserts a row.
     rows = db.query(
         "INSERT INTO payments (loan_id, pan, cvv, amount, method) "
         "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-        (loan_id, pan, cvv, float(amount), method),   # full PAN + CVV persisted
+        (loan_id, pan, cvv, float(amount), method),  # full PAN + CVV persisted
     )
     payment_id = rows[0]["id"] if rows else None
 
-    # Apply the captured amount to the balance via servicing-service.
-    _apply_via_servicing(loan_id, amount, payment_id)
+    # Apply the captured amount to the balance via servicing-service. ANY
+    # failure to apply -- rejected, redirected, or servicing unreachable --
+    # means the balance was definitely not updated, and the response must say
+    # so rather than report a normal "captured" success (Codex review, PR 32).
+    applied = _apply_via_servicing(loan_id, amount, payment_id)
     return {
         "payment_id": payment_id,
         "loan_id": loan_id,
-        "status": "captured",
-        "applied_amount": float(amount),
+        "status": "captured" if applied else "captured_unapplied",
+        "applied_amount": float(amount) if applied else 0.0,
     }
 
 
-def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> None:
-    """Tell servicing-service to apply this payment to the loan balance."""
+def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
+    """Tell servicing-service to apply this payment to the loan balance.
+
+    Returns True only when servicing actually confirmed the apply (a 2xx
+    response). Returns False for every other outcome -- servicing unreachable
+    (connect/timeout/DNS, caught below), a rejection (e.g. mismatched
+    INTERNAL_SERVICE_TOKEN), or a redirect (httpx does not follow redirects by
+    default, so a 3xx means the apply-payment handler never ran).
+
+    An earlier version of this fix treated "unreachable" as still-applied,
+    reasoning the card was already charged and this would be "reconciled
+    later" -- but nothing in this codebase actually reconciles later:
+    reconciliation.py's reconciliation_peek is explicitly not run on a
+    schedule and does not report breaks (D7). An unresolved network failure
+    is exactly as permanently unresolved as a rejection, so charge() must
+    treat them the same way (Codex review, PR 32, third round).
+    """
     url = f"{SERVICING_URL}/accounts/{loan_id}/apply-payment"
     try:
         resp = httpx.post(
-            url, json={"amount": amount, "payment_id": payment_id}, timeout=5.0
-        )
-        resp.raise_for_status()
-        log.info(
-            "applied payment via servicing loan_id=%s payment_id=%s amount=%s -> ok",
-            loan_id, payment_id, amount,
+            url,
+            json={"amount": amount, "payment_id": payment_id},
+            headers={"X-Internal-Service": INTERNAL_SERVICE_TOKEN},
+            timeout=5.0,
         )
     except Exception as exc:
-        # Servicing unreachable / errored — the card was already charged and the row
-        # written, so we still report the charge captured. (apply reconciled later)
         log.error(
-            "apply-payment call to servicing failed loan_id=%s payment_id=%s: %s",
-            loan_id, payment_id, exc,
+            "apply-payment call to servicing unreachable loan_id=%s payment_id=%s: %s",
+            loan_id,
+            payment_id,
+            exc,
         )
+        return False
+    if not (200 <= resp.status_code < 300):
+        log.error(
+            "apply-payment REJECTED by servicing status=%s loan_id=%s payment_id=%s",
+            resp.status_code,
+            loan_id,
+            payment_id,
+        )
+        return False
+    log.info(
+        "applied payment via servicing loan_id=%s payment_id=%s amount=%s -> ok",
+        loan_id,
+        payment_id,
+        amount,
+    )
+    return True

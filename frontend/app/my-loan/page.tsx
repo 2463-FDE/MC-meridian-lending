@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import StatusChip from "../../components/StatusChip";
-import { apiGet, getUser, type SessionUser } from "../../lib/api";
+import { apiGet } from "../../lib/api";
 import { usd, pct, shortDate } from "../../lib/format";
 
 interface LoanRow {
@@ -34,12 +34,7 @@ function errMsg(err: unknown, fallback: string): string {
   return fallback;
 }
 
-function norm(s: string | null | undefined): string {
-  return (s || "").trim().toLowerCase();
-}
-
 export default function MyLoanPage() {
-  const [user, setUser] = useState<SessionUser | null>(null);
   const [items, setItems] = useState<LoanRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -48,10 +43,10 @@ export default function MyLoanPage() {
     setLoading(true);
     setError(null);
     try {
-      // The gateway returns the ENTIRE portfolio; there is no borrower-scoped
-      // endpoint. We scope to the logged-in borrower CLIENT-SIDE only (debt D8,
-      // fixed in W6) — the API still hands every caller all loans.
-      const res = (await apiGet(`/lss/loans?limit=200&offset=0`)) as LoansResponse;
+      // Server-scoped to the caller's own applicant_id (ADR 0014 Decision 1) --
+      // no client-side filtering needed, and no borrower can see another
+      // borrower's loans through this call.
+      const res = (await apiGet(`/lss/loans/mine`)) as LoansResponse;
       setItems(res.items ?? []);
     } catch (err) {
       setError(errMsg(err, "Could not load your loans."));
@@ -62,21 +57,8 @@ export default function MyLoanPage() {
   }, []);
 
   useEffect(() => {
-    setUser(getUser());
     load();
   }, [load]);
-
-  // Client-side name match against the session user (display name or username).
-  const names = [norm(user?.name), norm(user?.username)].filter(Boolean);
-  const matched = items.filter((l) => {
-    const candidate = norm(l.applicant_name || l.borrower);
-    return names.some((n) => n && (candidate === n || candidate.includes(n)));
-  });
-
-  // If we can't match the borrower to any loan, fall back to showing all so the
-  // demo is still usable. This fallback is purely a UI convenience.
-  const usingFallback = matched.length === 0 && items.length > 0;
-  const visible = matched.length > 0 ? matched : items;
 
   return (
     <main className="wrap">
@@ -100,10 +82,11 @@ export default function MyLoanPage() {
         </p>
       ) : items.length === 0 && !error ? (
         <div className="card" style={{ marginTop: 20 }}>
-          <h3 style={{ marginBottom: 6 }}>No loans yet</h3>
+          <h3 style={{ marginBottom: 6 }}>No loans found under your account</h3>
           <p className="muted" style={{ marginTop: 0 }}>
-            You don&apos;t have an active loan. Check your rate and apply in a
-            few minutes.
+            If you haven&apos;t applied yet, check your rate and apply in a few
+            minutes. Already have a loan but don&apos;t see it here? Contact
+            support to link it to your account.
           </p>
           <Link href="/apply" className="btn" style={{ marginTop: 8 }}>
             Apply for a loan
@@ -111,15 +94,8 @@ export default function MyLoanPage() {
         </div>
       ) : (
         <>
-          {usingFallback ? (
-            <div className="alert alert-info" style={{ marginTop: 16 }}>
-              Demo: couldn&apos;t match your account to a specific borrower, so
-              all loans are shown.
-            </div>
-          ) : null}
-
           <div className="grid grid-2" style={{ marginTop: 20 }}>
-            {visible.map((l) => (
+            {items.map((l) => (
               <div className="card" key={String(l.id)}>
                 <div className="spread" style={{ marginBottom: 12 }}>
                   <div>

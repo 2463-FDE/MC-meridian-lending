@@ -170,6 +170,12 @@ def missing_required_secrets() -> list:
         missing.append("DATABASE_URL")
     if not processor_configured():
         missing.append("PROCESSOR_API_KEY")
+    # INTERNAL_SERVICE_TOKEN gates apply-payment and late-fee (ADR 0014 Decision 1).
+    # Unset makes both routes fail closed with 503, so the LOS->LSS apply path stops
+    # working — that must read as unhealthy here rather than surface as a per-request
+    # 503 nobody attributes to config. Mirrors kyc/decision/disclosure.
+    if not INTERNAL_SERVICE_TOKEN:
+        missing.append("INTERNAL_SERVICE_TOKEN")
     return missing
 
 
@@ -189,5 +195,11 @@ def processor_configured() -> bool:
 PROCESSOR_BASE_URL = os.getenv(
     "PROCESSOR_BASE_URL", "https://api.cardprocessor.example.com"
 )
+
+# Shared secret identifying an internal service-to-service call. Required by
+# apply-payment (called by payment-service after it captures a charge) and late-fee
+# (rule-driven, no operator). Env only, no committed default; unset makes both routes
+# fail closed. Same variable the five sibling services already read from .env.
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 SETTLEMENT_FILE = os.getenv("SETTLEMENT_FILE", "data/settlement.csv")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

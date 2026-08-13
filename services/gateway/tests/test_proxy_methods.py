@@ -531,3 +531,74 @@ def test_session_role_overrides_client_supplied_role(monkeypatch):
     assert resp.status_code == 200
     assert captured["headers"]["x-user-role"] == "underwriter"
     assert captured["headers"]["x-user-id"] == "7"
+
+
+# --- /payments proxy targets the real route, not the service root -------------------
+#
+# payment-service exposes exactly one caller-facing route, POST /payments, which
+# coincides with this proxy's own mount point. The old catch-all
+# ("/payments/{path:path}" forwarding f"/{path}") stripped that segment: FastAPI's
+# redirect_slashes turned a bare POST /payments into /payments/ (path=""), which
+# proxied to PAYMENT_URL + "/" -- the service root, 404 every real charge.
+
+
+def test_payments_proxy_forwards_to_payments_path(monkeypatch):
+    from app import auth, config
+
+    monkeypatch.setattr(
+        auth, "get_session", lambda token: {"id": 5, "role": "borrower"}
+    )
+    captured = _capture_forwarded_headers(monkeypatch)
+    resp = client.post(
+        "/payments",
+        json={"loan_id": 1, "amount": 25.0},
+        headers={"Authorization": "Bearer sesh"},
+    )
+    assert resp.status_code == 200
+    method, url = captured["calls"][0]
+    assert url == f"{config.PAYMENT_URL}/payments"
+
+
+def test_payments_route_rejects_patch():
+    resp = client.patch("/payments", json={"loan_id": 1, "amount": 25.0})
+    assert resp.status_code == 405
+
+
+def test_payments_health_subpath_forwards(monkeypatch):
+    # Codex review, PR 32: the first fix replaced /payments/{path:path} with
+    # an exact /payments route and dropped subpath forwarding entirely, which
+    # broke /payments/health -- documented in docs/runbook.md as the
+    # payment-service gateway surface and used by
+    # scripts/repro_double_charge.py's health probe. The wildcard route
+    # (registered alongside the exact one) must still cover it.
+    from app import auth, config
+
+    monkeypatch.setattr(
+        auth, "get_session", lambda token: {"id": 5, "role": "borrower"}
+    )
+    captured = _capture_forwarded_headers(monkeypatch)
+    resp = client.get("/payments/health", headers={"Authorization": "Bearer sesh"})
+    assert resp.status_code == 200
+    method, url = captured["calls"][0]
+    assert url == f"{config.PAYMENT_URL}/health"
+
+
+def test_payments_double_segment_subpath_still_forwards(monkeypatch):
+    # scripts/repro_double_charge.py posts to /payments/payments as a
+    # pre-existing workaround for the bare-call bug the exact route now
+    # fixes directly -- the wildcard must still carry that call too, so the
+    # script keeps working unmodified.
+    from app import auth, config
+
+    monkeypatch.setattr(
+        auth, "get_session", lambda token: {"id": 5, "role": "borrower"}
+    )
+    captured = _capture_forwarded_headers(monkeypatch)
+    resp = client.post(
+        "/payments/payments",
+        json={"loan_id": 1, "amount": 25.0},
+        headers={"Authorization": "Bearer sesh"},
+    )
+    assert resp.status_code == 200
+    method, url = captured["calls"][0]
+    assert url == f"{config.PAYMENT_URL}/payments"

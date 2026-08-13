@@ -5,6 +5,7 @@ misconfigured so /health can report unhealthy instead of connecting
 unauthenticated or failing auth at first query. Covers the passwordless DSN
 (meridian:@postgres) the secret purge left behind and the shipped placeholder.
 """
+
 import threading
 import time
 
@@ -56,7 +57,9 @@ def test_stale_password_rejected_against_postgres_password(monkeypatch):
     # without a DB round trip.
     monkeypatch.setenv("POSTGRES_PASSWORD", "the_real_pw")
     monkeypatch.setattr(
-        config, "DATABASE_URL", "postgresql://meridian:stale_old_pw@postgres:5432/meridian"
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:stale_old_pw@postgres:5432/meridian",
     )
     assert config.database_url_configured() is False
     assert "DATABASE_URL" in config.missing_required_secrets()
@@ -65,7 +68,9 @@ def test_stale_password_rejected_against_postgres_password(monkeypatch):
 def test_password_matching_postgres_password_is_ok(monkeypatch):
     monkeypatch.setenv("POSTGRES_PASSWORD", "the_real_pw")
     monkeypatch.setattr(
-        config, "DATABASE_URL", "postgresql://meridian:the_real_pw@postgres:5432/meridian"
+        config,
+        "DATABASE_URL",
+        "postgresql://meridian:the_real_pw@postgres:5432/meridian",
     )
     assert config.database_url_configured() is True
     assert "DATABASE_URL" not in config.missing_required_secrets()
@@ -257,23 +262,74 @@ def test_payments_503_without_processor_key(monkeypatch):
     from app.schemas import PaymentIn
 
     with pytest.raises(HTTPException) as exc_info:
-        post_payment(PaymentIn(loan_id=1, amount=100.0))
+        post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
     assert exc_info.value.status_code == 503
 
 
 def test_payments_allowed_with_processor_key(monkeypatch):
     monkeypatch.setattr(config, "PROCESSOR_API_KEY", "proc_test")
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
     from app import payments
 
     monkeypatch.setattr(
         payments,
         "charge",
         lambda *a, **k: {
-            "payment_id": 1, "loan_id": 1, "status": "captured", "applied_amount": 100.0
+            "payment_id": 1,
+            "loan_id": 1,
+            "status": "captured",
+            "applied_amount": 100.0,
         },
     )
     from app.routers.payments import post_payment
     from app.schemas import PaymentIn
 
-    out = post_payment(PaymentIn(loan_id=1, amount=100.0))
+    out = post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
     assert out["status"] == "captured"
+
+
+def test_missing_internal_service_token_flags_readiness(monkeypatch):
+    # servicing-service's apply-payment now requires X-Internal-Service (ADR 0014
+    # Decision 1); an unset token here means every captured charge silently fails
+    # to reduce the loan balance -- that must read as unhealthy.
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "")
+    assert "INTERNAL_SERVICE_TOKEN" in config.missing_required_secrets()
+
+
+def test_present_internal_service_token_not_flagged(monkeypatch):
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    assert "INTERNAL_SERVICE_TOKEN" not in config.missing_required_secrets()
+
+
+def test_non_ascii_internal_service_token_flags_readiness(monkeypatch):
+    # httpx encodes header values as ASCII by default -- a non-ASCII token would
+    # raise UnicodeEncodeError inside _apply_via_servicing's httpx.post call,
+    # swallowed by the same broad except that handles servicing being unreachable.
+    # Fail closed at readiness instead of hitting that mid-charge.
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret-üñîçødé")
+    assert config.internal_service_token_configured() is False
+    assert "INTERNAL_SERVICE_TOKEN" in config.missing_required_secrets()
+
+
+def test_payments_503_without_internal_service_token(monkeypatch):
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "proc_test")
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "")
+    from fastapi import HTTPException
+    from app.routers.payments import post_payment
+    from app.schemas import PaymentIn
+
+    with pytest.raises(HTTPException) as exc_info:
+        post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
+    assert exc_info.value.status_code == 503
+
+
+def test_payments_503_with_non_ascii_internal_service_token(monkeypatch):
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "proc_test")
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret-üñîçødé")
+    from fastapi import HTTPException
+    from app.routers.payments import post_payment
+    from app.schemas import PaymentIn
+
+    with pytest.raises(HTTPException) as exc_info:
+        post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
+    assert exc_info.value.status_code == 503
