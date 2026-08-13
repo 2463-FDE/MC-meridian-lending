@@ -1,8 +1,10 @@
 """Payment capture API. POST /payments charges a card/ACH and applies it to the balance."""
 
-from fastapi import APIRouter, HTTPException
+from typing import Optional
 
-from .. import config, payments
+from fastapi import APIRouter, Header, HTTPException
+
+from .. import authz, config, payments
 from ..schemas import PaymentIn, PaymentOut
 
 router = APIRouter(tags=["payments"])
@@ -17,7 +19,18 @@ def _mask_pan(pan: str | None) -> str | None:
 
 
 @router.post("/payments", response_model=PaymentOut)
-def post_payment(body: PaymentIn):
+def post_payment(
+    body: PaymentIn,
+    x_user_role: Optional[str] = Header(None),
+    x_user_id: Optional[str] = Header(None),
+):
+    # This is the front-door capture route the gateway/frontend actually call --
+    # servicing-service's own /payments already gates on money-role-or-owner
+    # (ADR 0014 Decision 1); without the same gate here, any authenticated
+    # caller could capture a charge against any loan id and ride the internal
+    # token past servicing's gate as a confused deputy. Denied as 404, matching
+    # servicing-service's own /payments (no existence oracle on loan id).
+    authz.require_money_role_or_owner(body.loan_id, x_user_role, x_user_id)
     # Fail closed without a processor credential: charge() would record a
     # 'captured' payment no processor ever authorized. (readiness also flags this)
     if not config.processor_configured():
