@@ -8,6 +8,7 @@ The amount is applied to the balance by calling servicing-service over HTTP (the
 servicing /accounts/{loan_id}/apply-payment endpoint). If servicing is unreachable the
 charge is still reported captured so this service stands alone.
 """
+
 import json
 import re
 
@@ -15,10 +16,10 @@ import httpx
 
 from .logging_config import get_logger
 from . import db
-from .config import SERVICING_URL
+from .config import INTERNAL_SERVICE_TOKEN, SERVICING_URL
 from .redactor import PiiRedactor
 
-log = get_logger("payment")   # writes to logs/payment-service.log
+log = get_logger("payment")  # writes to logs/payment-service.log
 
 
 def _mask_ssn(ssn):
@@ -59,8 +60,15 @@ def _redacted_charge_req(pan, cvv, ssn, amount, loan_id) -> dict:
     }
 
 
-def charge(loan_id: int, pan: str, cvv: str, amount: float, ssn: str = None,
-           name: str = None, method: str = "card") -> dict:
+def charge(
+    loan_id: int,
+    pan: str,
+    cvv: str,
+    amount: float,
+    ssn: str = None,
+    name: str = None,
+    method: str = "card",
+) -> dict:
     # PII (PAN/CVV/SSN) is masked at the value level before it reaches the log
     # string; see _redacted_charge_req for why the old formatter-only approach
     # was bypassable. `name` is client-controlled free text (a PAN can be
@@ -68,14 +76,15 @@ def charge(loan_id: int, pan: str, cvv: str, amount: float, ssn: str = None,
     # quotes in the remaining values.
     log.info(
         "POST /payments charge req=%s -> ok",
-        json.dumps(_redacted_charge_req(pan, cvv, ssn, amount, loan_id),
-                   ensure_ascii=False),
+        json.dumps(
+            _redacted_charge_req(pan, cvv, ssn, amount, loan_id), ensure_ascii=False
+        ),
     )
     # No idempotency check. No unique charge reference. Every POST inserts a row.
     rows = db.query(
         "INSERT INTO payments (loan_id, pan, cvv, amount, method) "
         "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-        (loan_id, pan, cvv, float(amount), method),   # full PAN + CVV persisted
+        (loan_id, pan, cvv, float(amount), method),  # full PAN + CVV persisted
     )
     payment_id = rows[0]["id"] if rows else None
 
@@ -94,17 +103,24 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> None:
     url = f"{SERVICING_URL}/accounts/{loan_id}/apply-payment"
     try:
         resp = httpx.post(
-            url, json={"amount": amount, "payment_id": payment_id}, timeout=5.0
+            url,
+            json={"amount": amount, "payment_id": payment_id},
+            headers={"X-Internal-Service": INTERNAL_SERVICE_TOKEN},
+            timeout=5.0,
         )
         resp.raise_for_status()
         log.info(
             "applied payment via servicing loan_id=%s payment_id=%s amount=%s -> ok",
-            loan_id, payment_id, amount,
+            loan_id,
+            payment_id,
+            amount,
         )
     except Exception as exc:
         # Servicing unreachable / errored — the card was already charged and the row
         # written, so we still report the charge captured. (apply reconciled later)
         log.error(
             "apply-payment call to servicing failed loan_id=%s payment_id=%s: %s",
-            loan_id, payment_id, exc,
+            loan_id,
+            payment_id,
+            exc,
         )

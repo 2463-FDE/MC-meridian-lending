@@ -49,7 +49,10 @@ def database_url_configured() -> bool:
     # stale/rotated DSN is caught by the POSTGRES_PASSWORD consistency check below.
     if password.lower() in {
         "replace_with_postgres_password",
-        "changeme", "change_me", "password", "postgres",
+        "changeme",
+        "change_me",
+        "password",
+        "postgres",
     }:
         return False
     # When POSTGRES_PASSWORD is the source of truth (compose ${VAR:?}), the DSN
@@ -150,6 +153,12 @@ def missing_required_secrets() -> list:
         missing.append("DATABASE_URL")
     if not processor_configured():
         missing.append("PROCESSOR_API_KEY")
+    # servicing-service's apply-payment now requires X-Internal-Service (ADR 0014
+    # Decision 1). Unset here means every captured charge silently fails to reduce
+    # the loan balance (_apply_via_servicing swallows the 403) -- that must read as
+    # unhealthy rather than surface only as a money/state divergence nobody sees.
+    if not INTERNAL_SERVICE_TOKEN:
+        missing.append("INTERNAL_SERVICE_TOKEN")
     return missing
 
 
@@ -164,7 +173,16 @@ def processor_configured() -> bool:
     service cannot legitimately capture — fail closed (readiness AND the /payments
     endpoint) rather than record a 'captured' payment no processor ever saw."""
     return bool(PROCESSOR_API_KEY)
-PROCESSOR_BASE_URL = os.getenv("PROCESSOR_BASE_URL", "https://api.cardprocessor.example.com")
+
+
+PROCESSOR_BASE_URL = os.getenv(
+    "PROCESSOR_BASE_URL", "https://api.cardprocessor.example.com"
+)
 # servicing-service base URL — we call it to apply a captured payment to the balance
 SERVICING_URL = os.getenv("SERVICING_URL", "http://servicing-service:8002")
+
+# Shared secret identifying this service to servicing-service's apply-payment route
+# (ADR 0014 Decision 1). Env only, no committed default; unset makes apply-payment
+# fail closed on servicing's side. Same variable name servicing-service reads.
+INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
