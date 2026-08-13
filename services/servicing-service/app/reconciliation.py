@@ -1,34 +1,51 @@
-"""Reconciliation — reading the processor settlement file (debt D7, in progress).
+"""Row-level settlement reconciliation — closes debt D7.
 
-Spec: `docs/spec-observability-week7.md` §D2(b) and §D2(g). ADR 0015 holds the decisions.
+Spec: `docs/spec-observability-week7.md` §D2. ADR 0015 records the decisions.
 
-This is the read half. `settlement_total()` used to return `0.0` when the file was
-absent — no exception, no signal, a number reported over a file it never read — and it
-summed binary floats to answer a question about whether two figures tie out. Both are
-now gone: the file is parsed into typed rows carrying **integer minor units**, and any
-condition that stops the read from happening raises `ReconciliationAbort` instead of
-producing a total.
+Both total-only helpers are gone. `ledger_total()` summed the whole `payments` table —
+including the bulk-seeded 2026-05 rows — against a settlement file covering three loans
+over seven days, so the subtraction was meaningless before any defect was considered.
+`settlement_total()` netted the file into one figure, which cannot say WHICH row is
+missing. Keeping either beside the real comparison would reproduce the drift the
+fee-schedule loader was built to end.
 
-Still true after this change, and addressed next: the two totals are not comparable.
-`ledger_total()` spans the entire `payments` table while the settlement file covers
-three loans over seven days, so the subtraction remains meaningless until the row-level
-comparison replaces it. That work deletes both helpers.
+What replaces them: a windowed, row-level comparison in integer minor units, with an
+explicit matching rule, five break classes, and an abort that is distinct from
+"reconciled, no breaks".
+
+Read-only by construction (D2(h)): every statement it issues is a SELECT. It never
+corrects a balance — that would be an unauthorized money movement with no maker-checker,
+on the same unlocked read-modify-write that is debt D3.
+
+Not here, deliberately: a same-day double charge still matches under the ±1 day
+tolerance and is reported clean (see `_match`). Detecting it needs a scan that does not
+consult the settlement side at all, which is the next change.
 """
 
 import csv
 import os
 import re
-from dataclasses import dataclass
-from datetime import date, datetime
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from typing import Optional
 
 from . import db
 from .config import SETTLEMENT_FILE
 
+# D2(c). The ledger stamps `created_at` at capture and the processor stamps
+# `settlement_date` at settlement; no cut-off convention has been confirmed by the
+# client (spec Client Questions Q5). Named, not buried in a comparison.
+MATCH_TOLERANCE_DAYS = 1
+
+# D2(f). Every unmatched row lands in exactly one of these.
+MISSING_IN_LEDGER = "MISSING_IN_LEDGER"
+MISSING_IN_SETTLEMENT = "MISSING_IN_SETTLEMENT"
+REFUND_UNREPRESENTED = "REFUND_UNREPRESENTED"
+
 # D2(g), mirroring `scripts/prove_test.sh`'s convention. "Could not check" is never
 # reported as 0, and never as 1 either: a zero-break result from a run that read
-# nothing is the failure this control exists to prevent. The comparison that returns
-# 0 and 1 lands with the matcher; the codes are fixed here because the abort is.
+# nothing is the failure this control exists to prevent.
 EXIT_CLEAN = 0
 EXIT_BREAKS = 1
 EXIT_ABORT = 2
@@ -148,28 +165,233 @@ def load_settlement(path: str) -> list:
     return rows
 
 
-def ledger_total() -> float:
-    rows = db.query("SELECT COALESCE(SUM(amount), 0) AS total FROM payments")
-    return float(rows[0]["total"]) if rows else 0.0
+@dataclass(frozen=True)
+class LedgerRow:
+    payment_id: int
+    loan_id: int
+    amount_minor: int
+    created_at: datetime
 
 
-def settlement_total() -> float:
-    """Net settlement across the whole file, captures less refunds.
+@dataclass(frozen=True)
+class Break:
+    """One finding. `amount_minor` is the value at stake, always integer cents."""
 
-    Same meaning as before; only the failure mode changed. It reads through
-    `load_settlement`, so an unreadable file now aborts rather than reporting `0.0`.
+    break_class: str
+    loan_id: int
+    amount_minor: int
+    occurred_on: date
+    processor_ref: Optional[str] = None
+    payment_id: Optional[int] = None
+    detail: str = ""
 
-    The netting is done in minor units and converted once at the boundary, because
-    this helper's callers still expect a float. That conversion is why it is a step and
-    not a destination: the comparison it feeds is replaced by the row-level matcher,
-    which stays in minor units end to end and deletes this.
-    """
-    rows = load_settlement(SETTLEMENT_FILE)
-    net_minor = sum(
-        row.amount_minor if row.row_type == CAPTURE else -row.amount_minor
-        for row in rows
+
+@dataclass(frozen=True)
+class ReconciliationResult:
+    window_from: date
+    window_to: date
+    tolerance_days: int
+    matched_count: int
+    breaks: list = field(default_factory=list)
+    # D2(b): every figure is an int of minor units.
+    net_variance_minor: int = 0
+    per_loan_absolute_minor: int = 0
+    gross_break_minor: int = 0
+
+    @property
+    def exit_code(self) -> int:
+        if self.breaks:
+            return EXIT_BREAKS
+        return EXIT_CLEAN
+
+
+def load_ledger(window_from: date, window_to: date) -> list:
+    """The capture side, inside the window. SELECT only; `pan`/`cvv` are never read."""
+    rows = db.query(
+        "SELECT id, loan_id, amount, created_at "
+        "FROM payments "
+        "WHERE created_at >= %s AND created_at < %s "
+        "ORDER BY loan_id, amount, created_at, id",
+        (window_from, window_to + timedelta(days=1)),
     )
-    return net_minor / 100
+    ledger = []
+    for row in rows:
+        created_at = row["created_at"]
+        # The window is a property of the job, not of the SQL string.
+        if not window_from <= created_at.date() <= window_to:
+            continue
+        ledger.append(
+            LedgerRow(
+                payment_id=int(row["id"]),
+                loan_id=int(row["loan_id"]),
+                amount_minor=_minor_units(
+                    row["amount"], source=f"payments row {row['id']}"
+                ),
+                created_at=created_at,
+            )
+        )
+    return ledger
 
 
-# NOTE: nothing calls these on a schedule. No break-report. No alert. (D7)
+def _within(
+    ledger_row: LedgerRow, settlement_row: SettlementRow, tolerance: timedelta
+) -> bool:
+    return (
+        abs(settlement_row.settlement_date - ledger_row.created_at.date()) <= tolerance
+    )
+
+
+def _match(ledger: list, captures: list, tolerance_days: int):
+    """D2(c). One-to-one and greedy in `(loan_id, amount_minor, date)` order.
+
+    A settlement row already matched cannot match a second ledger row. Where counts
+    differ on an otherwise identical tuple, the surplus rows on whichever side has
+    more are reported unmatched on that side — the job never guesses which of two
+    identical rows is the orphan.
+    """
+    tolerance = timedelta(days=tolerance_days)
+    ordered_ledger = sorted(
+        ledger, key=lambda r: (r.loan_id, r.amount_minor, r.created_at, r.payment_id)
+    )
+    ordered_captures = sorted(
+        captures,
+        key=lambda r: (r.loan_id, r.amount_minor, r.settlement_date, r.processor_ref),
+    )
+    claimed = [False] * len(ordered_captures)
+
+    matched_count = 0
+    unmatched_ledger = []
+    for ledger_row in ordered_ledger:
+        for index, capture in enumerate(ordered_captures):
+            if claimed[index]:
+                continue
+            if (
+                capture.loan_id == ledger_row.loan_id
+                and capture.amount_minor == ledger_row.amount_minor
+                and _within(ledger_row, capture, tolerance)
+            ):
+                claimed[index] = True
+                matched_count += 1
+                break
+        else:
+            unmatched_ledger.append(ledger_row)
+
+    unmatched_captures = [
+        c for index, c in enumerate(ordered_captures) if not claimed[index]
+    ]
+    return matched_count, unmatched_ledger, unmatched_captures
+
+
+def reconcile(
+    from_date: Optional[date] = None,
+    to_date: Optional[date] = None,
+    tolerance_days: int = MATCH_TOLERANCE_DAYS,
+    settlement_path: Optional[str] = None,
+) -> ReconciliationResult:
+    """Reconcile the capture side against the settlement file over a date window.
+
+    Raises `ReconciliationAbort` (exit 2) rather than returning a result it could not
+    verify. Returns a result whose `exit_code` is 0 (clean) or 1 (findings).
+    """
+    path = settlement_path or SETTLEMENT_FILE
+
+    if tolerance_days < 0:
+        raise ReconciliationAbort(
+            f"tolerance_days must not be negative: {tolerance_days}"
+        )
+
+    settlement = load_settlement(path)
+
+    # D2(a). Default window is the settlement file's own range, and it applies to both
+    # sides identically. Known boundary property, stated rather than worked around: a
+    # capture on the day before `from_date` that settles on `from_date` is out of scope,
+    # so its settlement row reports MISSING_IN_LEDGER. The tolerance operates inside the
+    # window, not across its edge. Widening the ledger fetch by the tolerance instead
+    # would make the two sides span different periods — the P1 defect at the edge. The
+    # caller controls this by choosing the window (a calendar month, not the file's exact
+    # min/max).
+    window_from = from_date or min(r.settlement_date for r in settlement)
+    window_to = to_date or max(r.settlement_date for r in settlement)
+    if window_from > window_to:
+        raise ReconciliationAbort(
+            f"window start {window_from} is after window end {window_to}"
+        )
+
+    settlement = [
+        r for r in settlement if window_from <= r.settlement_date <= window_to
+    ]
+    ledger = load_ledger(window_from, window_to)
+
+    captures = [r for r in settlement if r.row_type == CAPTURE]
+    refunds = [r for r in settlement if r.row_type == REFUND]
+    matched_count, unmatched_ledger, unmatched_captures = _match(
+        ledger, captures, tolerance_days
+    )
+    breaks: list = []
+
+    breaks.extend(
+        Break(
+            break_class=MISSING_IN_SETTLEMENT,
+            loan_id=row.loan_id,
+            amount_minor=row.amount_minor,
+            occurred_on=row.created_at.date(),
+            payment_id=row.payment_id,
+            detail="credited, never captured",
+        )
+        for row in unmatched_ledger
+    )
+    breaks.extend(
+        Break(
+            break_class=MISSING_IN_LEDGER,
+            loan_id=row.loan_id,
+            amount_minor=row.amount_minor,
+            occurred_on=row.settlement_date,
+            processor_ref=row.processor_ref,
+            detail="captured, never credited",
+        )
+        for row in unmatched_captures
+    )
+    # A refund is a schema limitation, not a lost payment: `payments` has no direction
+    # column, so it cannot hold a counterpart. Its own class, deliberately, so a
+    # known-benign row does not sit next to customer money that went missing.
+    breaks.extend(
+        Break(
+            break_class=REFUND_UNREPRESENTED,
+            loan_id=row.loan_id,
+            amount_minor=row.amount_minor,
+            occurred_on=row.settlement_date,
+            processor_ref=row.processor_ref,
+            detail="settlement refund the payments table cannot represent",
+        )
+        for row in refunds
+    )
+    breaks.sort(key=lambda b: (b.break_class, b.loan_id, b.occurred_on, b.amount_minor))
+
+    ledger_by_loan: dict = {}
+    for row in ledger:
+        ledger_by_loan[row.loan_id] = (
+            ledger_by_loan.get(row.loan_id, 0) + row.amount_minor
+        )
+    settlement_by_loan: dict = {}
+    for row in settlement:
+        signed = row.amount_minor if row.row_type == CAPTURE else -row.amount_minor
+        settlement_by_loan[row.loan_id] = (
+            settlement_by_loan.get(row.loan_id, 0) + signed
+        )
+
+    net_variance_minor = sum(ledger_by_loan.values()) - sum(settlement_by_loan.values())
+    per_loan_absolute_minor = sum(
+        abs(ledger_by_loan.get(loan_id, 0) - settlement_by_loan.get(loan_id, 0))
+        for loan_id in set(ledger_by_loan) | set(settlement_by_loan)
+    )
+
+    return ReconciliationResult(
+        window_from=window_from,
+        window_to=window_to,
+        tolerance_days=tolerance_days,
+        matched_count=matched_count,
+        breaks=breaks,
+        net_variance_minor=net_variance_minor,
+        per_loan_absolute_minor=per_loan_absolute_minor,
+        gross_break_minor=sum(b.amount_minor for b in breaks),
+    )

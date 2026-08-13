@@ -175,24 +175,33 @@ def reconciliation_peek(
         default=None, alias="X-Internal-Service"
     ),
 ):
-    # Not a real control — just exposes the two totals. They don't tie out. (debt D7)
-    #
-    # Internal-only, same pattern as apply-payment and late-fee (ADR 0014 Decision 1):
-    # the value is compared with hmac.compare_digest, not merely required to be present,
-    # and the gateway strips any client-supplied X-Internal-Service so it cannot be
-    # forged from outside. This route reports across EVERY loan in the file, while a
-    # borrower — on the same gateway, on the public internet — reads their own account
-    # only. Whatever this returns, it is not one caller's own record.
+    """Break summary for the settlement file's own window (D2).
+
+    Internal-only, same pattern as apply-payment and late-fee (ADR 0014 Decision 1):
+    the value is compared with hmac.compare_digest, not merely required to be present,
+    and the gateway strips any client-supplied X-Internal-Service so it cannot be
+    forged from outside. This route reports across EVERY loan in the window, while a
+    borrower — on the same gateway, on the public internet — reads their own account
+    only.
+
+    An abort is a 503, never a 200 carrying zeroes.
+    """
     authz.require_internal_caller(x_internal_service)
     try:
-        settlement = reconciliation.settlement_total()
+        result = reconciliation.reconcile()
     except reconciliation.ReconciliationAbort as exc:
-        # The settlement file could not be read, so there is no total to report. A 200
-        # carrying 0.0 here was the fail-open: a successful-looking answer for a file
-        # nobody opened.
         log.error("reconciliation aborted: %s", exc)
         raise HTTPException(status_code=503, detail=f"reconciliation aborted: {exc}")
+    counts: dict = {}
+    for item in result.breaks:
+        counts[item.break_class] = counts.get(item.break_class, 0) + 1
     return {
-        "ledger_total": reconciliation.ledger_total(),
-        "settlement_total": settlement,
+        "window_from": result.window_from.isoformat(),
+        "window_to": result.window_to.isoformat(),
+        "tolerance_days": result.tolerance_days,
+        "break_counts": counts,
+        "net_variance_minor": result.net_variance_minor,
+        "per_loan_absolute_minor": result.per_loan_absolute_minor,
+        "gross_break_minor": result.gross_break_minor,
+        "exit_code": result.exit_code,
     }
