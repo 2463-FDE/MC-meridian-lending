@@ -305,10 +305,14 @@ def get_application(
         (app_id,),
     )
     latest_event = events[0] if events else None
-    principal_reasons = (
-        (latest_event["principal_reasons"] or []) if latest_event else []
-    )
-    drivers = (latest_event["drivers"] or {}) if latest_event else {}
+    # Normalize by TYPE, not just truthiness (teeth review round 2): `x or []` passes a
+    # non-list/non-dict JSONB value straight through (an object where a list was expected,
+    # or vice versa), and `principal_reasons[0]` / `drivers.get(...)` below would then
+    # raise on the container itself, before the guard on individual reason items even runs.
+    raw_reasons = latest_event["principal_reasons"] if latest_event else None
+    principal_reasons = raw_reasons if isinstance(raw_reasons, list) else []
+    raw_drivers = latest_event["drivers"] if latest_event else None
+    drivers = raw_drivers if isinstance(raw_drivers, dict) else {}
     model_score = drivers.get("model_score")
     # decision_events is written only by decision-service's own reasons.py, which always
     # emits {code, reason, feature} -- but the column itself is unconstrained JSONB (teeth

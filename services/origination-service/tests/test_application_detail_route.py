@@ -172,3 +172,76 @@ def test_reason_item_not_a_dict_does_not_500(monkeypatch):
     )
 
     assert out.adverse_action_reason is None
+
+
+# --- malformed decision_events CONTAINERS (not just items) must not 500 either ---------
+#
+# The item-level guard above only protects `principal_reasons[0]` after already trusting
+# `principal_reasons` and `drivers` themselves as a list/dict. Both are unconstrained
+# JSONB, so either can come back as the wrong JSON type entirely (Codex review round 2).
+
+
+def test_principal_reasons_as_object_falls_back_to_empty_list(monkeypatch):
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        lambda sql, params=None: [
+            {"principal_reasons": {"not": "a list"}, "drivers": {"model_score": 518}}
+        ],
+    )
+    session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
+
+    out = applications.get_application(
+        1,
+        session=session,
+        x_user_role="underwriter",
+        x_user_id=None,
+        x_application_token=None,
+    )
+
+    assert out.principal_reasons == []
+    assert out.adverse_action_reason is None
+    assert out.score == 518  # drivers was still well-formed
+
+
+def test_principal_reasons_as_bare_string_falls_back_to_empty_list(monkeypatch):
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        lambda sql, params=None: [{"principal_reasons": "deny", "drivers": {}}],
+    )
+    session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
+
+    out = applications.get_application(
+        1,
+        session=session,
+        x_user_role="underwriter",
+        x_user_id=None,
+        x_application_token=None,
+    )
+
+    assert out.principal_reasons == []
+    assert out.adverse_action_reason is None
+
+
+def test_drivers_as_non_dict_falls_back_to_no_score(monkeypatch):
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        lambda sql, params=None: [
+            {"principal_reasons": _THREE_REASONS, "drivers": [518, "prime"]}
+        ],
+    )
+    session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
+
+    out = applications.get_application(
+        1,
+        session=session,
+        x_user_role="underwriter",
+        x_user_id=None,
+        x_application_token=None,
+    )
+
+    assert out.score is None
+    # principal_reasons itself was well-formed and independent of the malformed drivers.
+    assert out.principal_reasons == _THREE_REASONS
