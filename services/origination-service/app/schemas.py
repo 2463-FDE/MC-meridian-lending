@@ -214,6 +214,17 @@ class ApplicationListItem(BaseModel):
     created_at: Optional[str] = None
 
 
+class PrincipalReason(BaseModel):
+    # Allowlisted shape for a decision_events.principal_reasons item (Codex review):
+    # that column is unconstrained JSONB, and origination-service is the first place a
+    # legacy/backfilled/hand-edited row's reasons reach a borrower-readable response. A
+    # bare `list` field forwards whatever extra keys the row happens to carry; this
+    # schema drops anything not in {code, reason, feature}.
+    code: Optional[str] = None
+    reason: Optional[str] = None
+    feature: Optional[str] = None
+
+
 class DecisionOut(BaseModel):
     app_id: int
     decision: str
@@ -224,8 +235,9 @@ class DecisionOut(BaseModel):
     # Every specific Reg B principal reason, ranked worst-first: [{code, reason, feature}].
     # 12 CFR 1002.9 requires the reason(s) actually used, and decision-service ranks up to
     # four; forwarding only the legacy field above told an applicant denied for three
-    # reasons about one of them while decision_events recorded all three.
-    principal_reasons: list = []
+    # reasons about one of them while decision_events recorded all three. Typed (not a
+    # bare list) so a caller forwarding raw JSONB without normalizing it fails at parse.
+    principal_reasons: list[PrincipalReason] = []
 
 
 class ScheduleRow(BaseModel):
@@ -249,17 +261,6 @@ class Disclosure(BaseModel):
 class OfferOut(BaseModel):
     app_id: int
     disclosure: Disclosure
-
-
-class PrincipalReason(BaseModel):
-    # Allowlisted shape for a decision_events.principal_reasons item (Codex review):
-    # that column is unconstrained JSONB, and this route is the first place a legacy/
-    # backfilled/hand-edited row's reasons reach a borrower-readable response. A bare
-    # `list` field forwards whatever extra keys the row happens to carry; this schema
-    # drops anything not in {code, reason, feature}.
-    code: Optional[str] = None
-    reason: Optional[str] = None
-    feature: Optional[str] = None
 
 
 class ApplicationDetail(BaseModel):

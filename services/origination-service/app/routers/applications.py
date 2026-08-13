@@ -263,6 +263,29 @@ def list_applications(
     return Page(items=items, total=total, limit=limit, offset=offset)
 
 
+def _normalize_principal_reasons(raw: object) -> list[PrincipalReason]:
+    """Allowlist a decision_events.principal_reasons JSONB value to {code, reason, feature}.
+
+    That column is unconstrained JSONB, written only by decision-service's reasons.py
+    but readable by any legacy/backfill/hand-edit, and reaches borrower-readable
+    responses both on GET detail and on the POST decision path (idempotency replay
+    rebuilds it from the same persisted row) -- both must sanitize identically
+    (Codex review).
+    """
+    items = raw if isinstance(raw, list) else []
+    return [
+        PrincipalReason(
+            **{
+                k: v
+                for k, v in item.items()
+                if k in ("code", "reason", "feature") and isinstance(v, str)
+            }
+        )
+        for item in items
+        if isinstance(item, dict)
+    ]
+
+
 @router.get("/{app_id}", response_model=ApplicationDetail)
 def get_application(
     app_id: int,
@@ -311,25 +334,9 @@ def get_application(
     # or vice versa), and `principal_reasons[0]` / `drivers.get(...)` below would then
     # raise on the container itself, before the guard on individual reason items even runs.
     raw_reasons = latest_event["principal_reasons"] if latest_event else None
-    raw_reasons = raw_reasons if isinstance(raw_reasons, list) else []
     raw_drivers = latest_event["drivers"] if latest_event else None
     drivers = raw_drivers if isinstance(raw_drivers, dict) else {}
-    # This route is the first place decision_events -- unconstrained JSONB written only
-    # by decision-service's reasons.py, but readable by any legacy/backfill/hand-edit --
-    # reaches a borrower-readable response (Codex review). Allowlist each item to
-    # {code, reason, feature} with string values only, dropping unknown keys and any
-    # non-dict item entirely, rather than forwarding the row verbatim.
-    principal_reasons = [
-        PrincipalReason(
-            **{
-                k: v
-                for k, v in item.items()
-                if k in ("code", "reason", "feature") and isinstance(v, str)
-            }
-        )
-        for item in raw_reasons
-        if isinstance(item, dict)
-    ]
+    principal_reasons = _normalize_principal_reasons(raw_reasons)
     adverse_action_reason = principal_reasons[0].reason if principal_reasons else None
     # model_score is likewise unvalidated JSONB (Codex review): a string, dict, or bool
     # must degrade to no score, not raise out of round().
@@ -662,8 +669,11 @@ def run_decision(
         adverse_action_reason=resp.get("reason"),
         # `reason` is decision-service's FIRST principal reason only; the full ranked set
         # is `principal_reasons`. Forward both — the screens read the list, and callers
-        # already reading the single field keep working.
-        principal_reasons=resp.get("principal_reasons") or [],
+        # already reading the single field keep working. decision-service can rebuild
+        # this list from the persisted decision_events row on idempotency replay, so it
+        # carries the same unconstrained-JSONB risk as the GET detail route's read of
+        # that table -- normalize through the same allowlist (Codex review, PR 34).
+        principal_reasons=_normalize_principal_reasons(resp.get("principal_reasons")),
     )
 
 

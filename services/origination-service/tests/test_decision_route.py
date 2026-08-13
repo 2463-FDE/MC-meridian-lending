@@ -151,7 +151,7 @@ def test_every_principal_reason_reaches_the_response(monkeypatch):
         },
     )
     out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
-    assert out.principal_reasons == _THREE_REASONS
+    assert [r.model_dump() for r in out.principal_reasons] == _THREE_REASONS
     # The legacy single-string field keeps its meaning for callers already reading it.
     assert out.adverse_action_reason == _THREE_REASONS[0]["reason"]
 
@@ -163,3 +163,53 @@ def test_absent_principal_reasons_is_an_empty_list_not_none(monkeypatch):
     out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
     assert out.principal_reasons == []
     assert out.adverse_action_reason is None
+
+
+# --- Malformed downstream principal_reasons must not reach the response verbatim -----
+#
+# decision-service can rebuild principal_reasons from the persisted decision_events row
+# on idempotency replay (unconstrained JSONB, decision.py:198), and GET application
+# detail already allowlists that same column to {code, reason, feature}. This route must
+# sanitize identically instead of forwarding resp["principal_reasons"] verbatim, or a
+# malformed/backfilled/hand-edited event leaks extra internal keys or non-dict items to
+# a borrower or officer calling decisioning (PR 34 review).
+
+
+def test_malformed_principal_reasons_are_sanitized_not_forwarded(monkeypatch):
+    _stub_decision(
+        monkeypatch,
+        {
+            "outcome": "deny",
+            "score": 518,
+            "reason": "Excessive obligations in relation to income",
+            "principal_reasons": [
+                {
+                    "code": "R02",
+                    "reason": "Excessive obligations in relation to income",
+                    "feature": "payment_burden",
+                    "internal_model_weight": 0.83,  # unknown key must be dropped
+                },
+                "not-a-reason-object",  # non-dict item must be dropped entirely
+                {
+                    "code": 7,
+                    "reason": None,
+                    "feature": "income_sufficiency",
+                },  # non-string values dropped
+            ],
+        },
+    )
+    out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
+    assert len(out.principal_reasons) == 2
+    first = out.principal_reasons[0]
+    assert first.model_dump() == {
+        "code": "R02",
+        "reason": "Excessive obligations in relation to income",
+        "feature": "payment_burden",
+    }
+    assert not hasattr(first, "internal_model_weight")
+    second = out.principal_reasons[1]
+    assert second.model_dump() == {
+        "code": None,
+        "reason": None,
+        "feature": "income_sufficiency",
+    }
