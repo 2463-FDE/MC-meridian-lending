@@ -118,3 +118,57 @@ def test_detail_has_no_reasons_when_no_decision_event_recorded(monkeypatch):
     assert out.score is None
     assert out.principal_reasons == []
     assert out.adverse_action_reason is None
+
+
+# --- malformed decision_events.principal_reasons must not 500 the whole detail view ----
+#
+# decision_events.principal_reasons is unconstrained JSONB. The live write path
+# (decision-service reasons.py) always emits {code, reason, feature}, but a legacy row,
+# a hand-edit, or a future backfill is not guaranteed to (teeth review). The route must
+# degrade to no legacy reason string, not crash and take the whole application detail
+# view down with it.
+
+
+def test_reason_item_missing_reason_key_does_not_500(monkeypatch):
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        lambda sql, params=None: [
+            {
+                "principal_reasons": [{"code": "R02"}],
+                "drivers": {"model_score": 518},
+            }
+        ],
+    )
+    session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
+
+    out = applications.get_application(
+        1,
+        session=session,
+        x_user_role="underwriter",
+        x_user_id=None,
+        x_application_token=None,
+    )
+
+    assert out.decision == "deny"
+    assert out.principal_reasons == [{"code": "R02"}]
+    assert out.adverse_action_reason is None
+
+
+def test_reason_item_not_a_dict_does_not_500(monkeypatch):
+    monkeypatch.setattr(
+        applications.db,
+        "query",
+        lambda sql, params=None: [{"principal_reasons": ["not-a-dict"], "drivers": {}}],
+    )
+    session = _FakeSession(_app_row(), types.SimpleNamespace(outcome="deny"))
+
+    out = applications.get_application(
+        1,
+        session=session,
+        x_user_role="underwriter",
+        x_user_id=None,
+        x_application_token=None,
+    )
+
+    assert out.adverse_action_reason is None

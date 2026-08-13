@@ -310,6 +310,14 @@ def get_application(
     )
     drivers = (latest_event["drivers"] or {}) if latest_event else {}
     model_score = drivers.get("model_score")
+    # decision_events is written only by decision-service's own reasons.py, which always
+    # emits {code, reason, feature} -- but the column itself is unconstrained JSONB (teeth
+    # review), so a legacy/backfilled/hand-edited row missing "reason" must not 500 the
+    # whole detail view. .get() over [0]["reason"]; isinstance guards a non-dict element.
+    first_reason = principal_reasons[0] if principal_reasons else None
+    adverse_action_reason = (
+        first_reason.get("reason") if isinstance(first_reason, dict) else None
+    )
     return ApplicationDetail(
         id=a.id,
         applicant=ApplicantOut(
@@ -338,9 +346,7 @@ def get_application(
         else None,
         decision=dec.outcome if dec else None,
         score=int(round(model_score)) if model_score is not None else None,
-        adverse_action_reason=principal_reasons[0]["reason"]
-        if principal_reasons
-        else None,
+        adverse_action_reason=adverse_action_reason,
         principal_reasons=principal_reasons,
         offer=Disclosure(
             apr=offer.apr or 0,
