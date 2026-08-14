@@ -170,8 +170,20 @@ def late_fee(
 
 
 @app.get("/reconciliation/peek")
-def reconciliation_peek():
+def reconciliation_peek(
+    x_internal_service: Optional[str] = Header(
+        default=None, alias="X-Internal-Service"
+    ),
+):
     # Not a real control — just exposes the two totals. They don't tie out. (debt D7)
+    #
+    # Internal-only, same pattern as apply-payment and late-fee (ADR 0014 Decision 1):
+    # the value is compared with hmac.compare_digest, not merely required to be present,
+    # and the gateway strips any client-supplied X-Internal-Service so it cannot be
+    # forged from outside. This route reports across EVERY loan in the file, while a
+    # borrower — on the same gateway, on the public internet — reads their own account
+    # only. Whatever this returns, it is not one caller's own record.
+    authz.require_internal_caller(x_internal_service)
     return {
         "ledger_total": reconciliation.ledger_total(),
         "settlement_total": reconciliation.settlement_total(),
