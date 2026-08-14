@@ -34,7 +34,11 @@ from typing import Optional
 import psycopg2
 
 from . import db
-from .config import DUPLICATE_SUSPECT_WINDOW_SECONDS, SETTLEMENT_FILE
+from .config import (
+    DUPLICATE_SUSPECT_WINDOW_SECONDS,
+    MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS,
+    SETTLEMENT_FILE,
+)
 
 # D2(c). The ledger stamps `created_at` at capture and the processor stamps
 # `settlement_date` at settlement; no cut-off convention has been confirmed by the
@@ -356,15 +360,16 @@ def _match(ledger: list, captures: list, tolerance_days: int):
     return matched_count, remaining_ledger, remaining_captures, mismatches
 
 
-# D2(e) says the bound is "scoped in minutes, not days". 30 days is far beyond that
-# intent but still a sane ceiling: it rejects a misconfigured operator value (a stray
-# extra digit, a units mix-up) before `timedelta(seconds=...)` in
-# `_find_duplicate_suspects` can raise `OverflowError` on a pathological one.
-_MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS = 30 * 24 * 60 * 60
-
-
 def _duplicate_suspect_window_seconds() -> int:
-    """D2(e). No default: a guessed bound is worse than no detection at all."""
+    """D2(e). No default: a guessed bound is worse than no detection at all.
+
+    The 30-day ceiling (config.MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS, imported rather
+    than redeclared here) rejects a misconfigured operator value — a stray extra
+    digit, a units mix-up — before `timedelta(seconds=...)` in
+    `_find_duplicate_suspects` can raise `OverflowError` on a pathological one. The
+    same ceiling gates config.duplicate_suspect_window_configured(), so a value this
+    function would abort on already fails /health instead of only /reconciliation/peek.
+    """
     raw = (DUPLICATE_SUSPECT_WINDOW_SECONDS or "").strip()
     if not raw:
         raise ReconciliationAbort(
@@ -377,10 +382,10 @@ def _duplicate_suspect_window_seconds() -> int:
         raise ReconciliationAbort(
             f"DUPLICATE_SUSPECT_WINDOW_SECONDS={raw!r} is not an integer"
         )
-    if seconds > _MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS:
+    if seconds > MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS:
         raise ReconciliationAbort(
             f"DUPLICATE_SUSPECT_WINDOW_SECONDS={seconds} exceeds the sane ceiling of "
-            f"{_MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS} (30 days)"
+            f"{MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS} (30 days)"
         )
     if seconds <= 0:
         raise ReconciliationAbort(
