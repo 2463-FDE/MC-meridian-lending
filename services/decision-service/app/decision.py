@@ -329,10 +329,13 @@ def _run_decision(application: dict, request_id: str | None) -> dict:
     idempotency lock held (keyed path) or directly (explicit re-decision, no key)."""
     bureau_score = _pull_credit(application.get("ssn", ""))
 
-    # Identifier-free model inputs (ADR 0007 rule 1) — this dict is persisted verbatim.
-    # ssn_fingerprint is a non-reversible keyed digest (never the raw SSN), stored so a
-    # reused request_id with a changed SSN is caught on replay (PR review).
-    inputs = {
+    # Identifier-free model inputs (ADR 0007 rule 1) — the SIX declared fields only.
+    # A SEPARATE dict from the persisted/replay metadata below (PR review): a
+    # licensed model plugged in behind score_application() may retain the object it
+    # is handed (for audit/logging, deferred serialization, returned metadata), so
+    # reusing the same dict and mutating it afterward would still leak
+    # ssn_fingerprint into whatever the model retained, even called post-scoring.
+    scoring_inputs = {
         "bureau_score": bureau_score,
         "annual_income": application.get("income", 0),
         "requested_amount": application.get("amount", 0),
@@ -340,10 +343,16 @@ def _run_decision(application: dict, request_id: str | None) -> dict:
         "monthly_debt": application.get("monthly_debt", 0),
         "employment_years": application.get("employment_years", 0),
     }
+    model_out = model_vendor.score_application(scoring_inputs)
+
+    # `inputs` is the persisted/replay record — a COPY of scoring_inputs, never the
+    # same object, plus ssn_fingerprint. A non-reversible keyed digest (never the raw
+    # SSN), stored so a reused request_id with a changed SSN is caught on replay
+    # (PR review).
+    inputs = dict(scoring_inputs)
     ssn_fingerprint = _ssn_fingerprint(application.get("ssn", ""))
     if ssn_fingerprint is not None:
         inputs["ssn_fingerprint"] = ssn_fingerprint
-    model_out = model_vendor.score_application(inputs)
     band = model_vendor.policy_band(model_out["score"])
     outcome = band  # system decisions follow the band; overrides are human-only
     # The mapper validates the model's WHOLE vocabulary (fail closed on any unmapped
