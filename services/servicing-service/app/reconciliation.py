@@ -30,6 +30,8 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
+import psycopg2
+
 from . import db
 from .config import SETTLEMENT_FILE
 
@@ -206,14 +208,24 @@ class ReconciliationResult:
 
 
 def load_ledger(window_from: date, window_to: date) -> list:
-    """The capture side, inside the window. SELECT only; `pan`/`cvv` are never read."""
-    rows = db.query(
-        "SELECT id, loan_id, amount, created_at "
-        "FROM payments "
-        "WHERE created_at >= %s AND created_at < %s "
-        "ORDER BY loan_id, amount, created_at, id",
-        (window_from, window_to + timedelta(days=1)),
-    )
+    """The capture side, inside the window. SELECT only; `pan`/`cvv` are never read.
+
+    A query failure (Postgres unreachable, statement error) is a verifier that could
+    not verify, not an unclassified server error — it aborts the same as an unreadable
+    settlement file, rather than reaching the route's generic 500 handler.
+    """
+    try:
+        rows = db.query(
+            "SELECT id, loan_id, amount, created_at "
+            "FROM payments "
+            "WHERE created_at >= %s AND created_at < %s "
+            "ORDER BY loan_id, amount, created_at, id",
+            (window_from, window_to + timedelta(days=1)),
+        )
+    except psycopg2.Error as exc:
+        raise ReconciliationAbort(
+            f"ledger query failed for window {window_from}..{window_to}: {exc}"
+        )
     ledger = []
     for row in rows:
         created_at = row["created_at"]

@@ -15,6 +15,7 @@ Money figures are pinned literals; never regenerate them from the code under tes
 import datetime as dt
 from pathlib import Path
 
+import psycopg2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -263,13 +264,48 @@ SAMPLE_SETTLEMENT = REPO_ROOT / "db" / "settlement.csv"
 # `payments.amount` is DOUBLE PRECISION, so psycopg2 hands back Python floats; the
 # values are carried here in that type deliberately.
 SEEDED_LEDGER = [
-    {"id": 1, "loan_id": 4471, "amount": 250.00, "created_at": dt.datetime(2026, 6, 1, 9, 14, 11)},
-    {"id": 2, "loan_id": 5582, "amount": 410.50, "created_at": dt.datetime(2026, 6, 1, 9, 31, 4)},
-    {"id": 3, "loan_id": 5582, "amount": 410.50, "created_at": dt.datetime(2026, 6, 1, 9, 31, 6)},
-    {"id": 4, "loan_id": 4471, "amount": 99.99, "created_at": dt.datetime(2026, 6, 1, 11, 18, 45)},
-    {"id": 5, "loan_id": 6011, "amount": 432.18, "created_at": dt.datetime(2026, 6, 2, 8, 0, 0)},
-    {"id": 6, "loan_id": 4471, "amount": 250.00, "created_at": dt.datetime(2026, 6, 3, 9, 0, 0)},
-    {"id": 7, "loan_id": 6011, "amount": 432.18, "created_at": dt.datetime(2026, 6, 3, 8, 0, 0)},
+    {
+        "id": 1,
+        "loan_id": 4471,
+        "amount": 250.00,
+        "created_at": dt.datetime(2026, 6, 1, 9, 14, 11),
+    },
+    {
+        "id": 2,
+        "loan_id": 5582,
+        "amount": 410.50,
+        "created_at": dt.datetime(2026, 6, 1, 9, 31, 4),
+    },
+    {
+        "id": 3,
+        "loan_id": 5582,
+        "amount": 410.50,
+        "created_at": dt.datetime(2026, 6, 1, 9, 31, 6),
+    },
+    {
+        "id": 4,
+        "loan_id": 4471,
+        "amount": 99.99,
+        "created_at": dt.datetime(2026, 6, 1, 11, 18, 45),
+    },
+    {
+        "id": 5,
+        "loan_id": 6011,
+        "amount": 432.18,
+        "created_at": dt.datetime(2026, 6, 2, 8, 0, 0),
+    },
+    {
+        "id": 6,
+        "loan_id": 4471,
+        "amount": 250.00,
+        "created_at": dt.datetime(2026, 6, 3, 9, 0, 0),
+    },
+    {
+        "id": 7,
+        "loan_id": 6011,
+        "amount": 432.18,
+        "created_at": dt.datetime(2026, 6, 3, 8, 0, 0),
+    },
 ]
 
 
@@ -660,3 +696,38 @@ def test_fail_open_total_helpers_are_gone():
     """
     assert not hasattr(reconciliation, "ledger_total")
     assert not hasattr(reconciliation, "settlement_total")
+
+
+# --- Ledger query failure aborts, never reaches the route's generic 500 ----------
+
+
+def test_ledger_query_failure_aborts_instead_of_a_bare_500(monkeypatch, tmp_path):
+    """A DB error is a verifier that could not verify — ReconciliationAbort, not a
+    raw psycopg2 exception reaching FastAPI's unhandled-exception 500."""
+
+    def _boom(sql, params=None):
+        raise psycopg2.OperationalError("could not connect to server")
+
+    monkeypatch.setattr(reconciliation.db, "query", _boom)
+    path = write_settlement(tmp_path, ["2026-06-01,PR-1,4471,250.00,capture"])
+
+    with pytest.raises(reconciliation.ReconciliationAbort) as excinfo:
+        reconciliation.reconcile(settlement_path=path)
+
+    assert "ledger query failed" in str(excinfo.value)
+
+
+def test_peek_reports_ledger_query_failure_as_503_not_500(monkeypatch, tmp_path):
+    def _boom(sql, params=None):
+        raise psycopg2.OperationalError("could not connect to server")
+
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    path = write_settlement(tmp_path, ["2026-06-01,PR-1,4471,250.00,capture"])
+    monkeypatch.setattr(reconciliation, "SETTLEMENT_FILE", path)
+    monkeypatch.setattr(reconciliation.db, "query", _boom)
+
+    resp = TestClient(app).get(
+        "/reconciliation/peek", headers={"X-Internal-Service": "sekret"}
+    )
+
+    assert resp.status_code == 503
