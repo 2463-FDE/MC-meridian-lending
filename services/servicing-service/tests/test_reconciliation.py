@@ -427,6 +427,69 @@ def test_v_window_out_two_days_apart_is_a_break_on_each_side(ledger, tmp_path):
     assert result.exit_code == reconciliation.EXIT_BREAKS
 
 
+def test_v_amount_mismatch_same_loan_and_date_differing_amount(ledger, tmp_path):
+    """V-AMOUNT-MISMATCH — ledger 250.00 vs settlement 249.99, same loan/date.
+
+    Exact match requires equal amount_minor, so this pair never matches. Before
+    AMOUNT_MISMATCH existed it fell out as one MISSING_IN_SETTLEMENT (25000) plus one
+    unrelated MISSING_IN_LEDGER (24999), inflating gross_break_minor to 49999 for a
+    1-minor-unit discrepancy. It must report as a single AMOUNT_MISMATCH of the delta
+    instead, and never also as MISSING_IN_SETTLEMENT/MISSING_IN_LEDGER.
+    """
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 6, 1, 9, 14, 11),
+            }
+        ]
+    )
+    path = write_settlement(tmp_path, ["2026-06-01,PR-100231,4471,249.99,capture"])
+
+    result = reconciliation.reconcile(settlement_path=path)
+
+    mismatches = klass(result, reconciliation.AMOUNT_MISMATCH)
+    assert len(mismatches) == 1
+    assert mismatches[0].amount_minor == 1
+    assert mismatches[0].loan_id == 4471
+    assert klass(result, reconciliation.MISSING_IN_SETTLEMENT) == []
+    assert klass(result, reconciliation.MISSING_IN_LEDGER) == []
+    assert result.gross_break_minor == 1
+    assert result.exit_code == reconciliation.EXIT_BREAKS
+
+
+def test_an_exact_match_is_never_reclassified_as_a_mismatch(ledger, tmp_path):
+    """A perfect match always wins the first pass; a second, later-arriving capture
+    on the same loan/date at a different amount is a true MISSING_IN_LEDGER, not a
+    mismatch stolen from the row that already matched exactly."""
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 6, 1, 9, 14, 11),
+            }
+        ]
+    )
+    path = write_settlement(
+        tmp_path,
+        [
+            "2026-06-01,PR-1,4471,250.00,capture",
+            "2026-06-01,PR-2,4471,99.99,capture",
+        ],
+    )
+
+    result = reconciliation.reconcile(settlement_path=path)
+
+    assert klass(result, reconciliation.AMOUNT_MISMATCH) == []
+    missing = klass(result, reconciliation.MISSING_IN_LEDGER)
+    assert len(missing) == 1
+    assert missing[0].amount_minor == 9999
+
+
 def test_a_ledger_row_before_the_window_is_out_of_scope_not_matched(ledger, tmp_path):
     """Pins a known boundary property of D2(a) so it is a decision, not an accident.
 

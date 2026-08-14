@@ -45,6 +45,7 @@ MATCH_TOLERANCE_DAYS = 1
 MISSING_IN_LEDGER = "MISSING_IN_LEDGER"
 MISSING_IN_SETTLEMENT = "MISSING_IN_SETTLEMENT"
 REFUND_UNREPRESENTED = "REFUND_UNREPRESENTED"
+AMOUNT_MISMATCH = "AMOUNT_MISMATCH"
 
 # D2(e). A signal, not a break class: it never enters `breaks` or any variance figure
 # (the duplicate's money is already accounted for on whichever side it landed).
@@ -283,12 +284,20 @@ def _within(
 
 
 def _match(ledger: list, captures: list, tolerance_days: int):
-    """D2(c). One-to-one and greedy in `(loan_id, amount_minor, date)` order.
+    """D2(c)/(f). One-to-one and greedy in `(loan_id, amount_minor, date)` order.
 
     A settlement row already matched cannot match a second ledger row. Where counts
     differ on an otherwise identical tuple, the surplus rows on whichever side has
     more are reported unmatched on that side — the job never guesses which of two
     identical rows is the orphan.
+
+    Exact match always runs first: a row that matches perfectly on loan, amount and
+    date can never be reclassified as a mismatch of something else. A second pass
+    over what exact match left behind then pairs same-loan rows inside the tolerance
+    window whose amounts DIFFER — AMOUNT_MISMATCH — so a rounding/typo discrepancy on
+    an otherwise-present payment reports as one mismatch, not a MISSING_IN_SETTLEMENT
+    plus an unrelated MISSING_IN_LEDGER that inflates gross_break_minor by both full
+    sides instead of the actual delta.
     """
     tolerance = timedelta(days=tolerance_days)
     ordered_ledger = sorted(
@@ -320,7 +329,31 @@ def _match(ledger: list, captures: list, tolerance_days: int):
     unmatched_captures = [
         c for index, c in enumerate(ordered_captures) if not claimed[index]
     ]
-    return matched_count, unmatched_ledger, unmatched_captures
+
+    unmatched_ledger.sort(key=lambda r: (r.loan_id, r.created_at, r.payment_id))
+    unmatched_captures.sort(
+        key=lambda r: (r.loan_id, r.settlement_date, r.processor_ref)
+    )
+    mismatch_claimed = [False] * len(unmatched_captures)
+    mismatches = []
+    remaining_ledger = []
+    for ledger_row in unmatched_ledger:
+        for index, capture in enumerate(unmatched_captures):
+            if mismatch_claimed[index]:
+                continue
+            if capture.loan_id == ledger_row.loan_id and _within(
+                ledger_row, capture, tolerance
+            ):
+                mismatch_claimed[index] = True
+                mismatches.append((ledger_row, capture))
+                break
+        else:
+            remaining_ledger.append(ledger_row)
+
+    remaining_captures = [
+        c for index, c in enumerate(unmatched_captures) if not mismatch_claimed[index]
+    ]
+    return matched_count, remaining_ledger, remaining_captures, mismatches
 
 
 # D2(e) says the bound is "scoped in minutes, not days". 30 days is far beyond that
@@ -442,7 +475,7 @@ def reconcile(
 
     captures = [r for r in settlement if r.row_type == CAPTURE]
     refunds = [r for r in settlement if r.row_type == REFUND]
-    matched_count, unmatched_ledger, unmatched_captures = _match(
+    matched_count, unmatched_ledger, unmatched_captures, mismatches = _match(
         ledger, captures, tolerance_days
     )
     breaks: list = []
@@ -482,6 +515,25 @@ def reconcile(
             detail="settlement refund the payments table cannot represent",
         )
         for row in refunds
+    )
+    # D2(f). The true discrepancy is the delta, not either side's full amount — a
+    # ledger row for 10000 against a settled capture for 9999 is a 1-minor-unit
+    # mismatch, not 10000 missing plus 9999 unaccounted for.
+    breaks.extend(
+        Break(
+            break_class=AMOUNT_MISMATCH,
+            loan_id=ledger_row.loan_id,
+            amount_minor=abs(ledger_row.amount_minor - capture.amount_minor),
+            occurred_on=ledger_row.created_at.date(),
+            processor_ref=capture.processor_ref,
+            payment_id=ledger_row.payment_id,
+            detail=(
+                f"ledger {ledger_row.amount_minor} minor units vs settlement "
+                f"{capture.amount_minor} minor units ({capture.processor_ref}, "
+                f"{capture.settlement_date.isoformat()})"
+            ),
+        )
+        for ledger_row, capture in mismatches
     )
     breaks.sort(key=lambda b: (b.break_class, b.loan_id, b.occurred_on, b.amount_minor))
 
