@@ -54,6 +54,22 @@ def test_an_empty_file_aborts(tmp_path):
         reconciliation.load_settlement(path)
 
 
+def test_undecodable_bytes_abort_instead_of_crashing(tmp_path):
+    """`open()` succeeds on bad bytes; only iterating the reader raises.
+
+    `UnicodeDecodeError` is a `ValueError`, not an `OSError` — the read loop must
+    catch it explicitly or it reaches the route as an uncontrolled 500 instead of
+    the intended `ReconciliationAbort` -> 503.
+    """
+    path = tmp_path / "settlement.csv"
+    path.write_bytes(
+        SETTLEMENT_HEADER.encode() + b"2026-06-01,PR-1,4471,\xff\xfe,capture\n"
+    )
+
+    with pytest.raises(reconciliation.ReconciliationAbort):
+        reconciliation.load_settlement(str(path))
+
+
 def test_a_missing_required_column_aborts_and_names_it(tmp_path):
     path = write_settlement(
         tmp_path,
@@ -227,6 +243,24 @@ def test_peek_reports_an_abort_as_503_never_a_200_carrying_zeroes(
     """
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
     monkeypatch.setattr(reconciliation, "SETTLEMENT_FILE", str(tmp_path / "absent.csv"))
+
+    resp = TestClient(app).get(
+        "/reconciliation/peek", headers={"X-Internal-Service": "sekret"}
+    )
+
+    assert resp.status_code == 503
+
+
+def test_peek_reports_undecodable_settlement_bytes_as_503_not_500(
+    tmp_path, monkeypatch
+):
+    """Same fail-open at the HTTP boundary, for the decode-error path specifically."""
+    path = tmp_path / "settlement.csv"
+    path.write_bytes(
+        SETTLEMENT_HEADER.encode() + b"2026-06-01,PR-1,4471,\xff\xfe,capture\n"
+    )
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    monkeypatch.setattr(reconciliation, "SETTLEMENT_FILE", str(path))
 
     resp = TestClient(app).get(
         "/reconciliation/peek", headers={"X-Internal-Service": "sekret"}

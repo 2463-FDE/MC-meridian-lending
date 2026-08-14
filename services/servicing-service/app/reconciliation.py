@@ -127,7 +127,7 @@ def load_settlement(path: str) -> list:
     if not os.path.exists(path):
         raise ReconciliationAbort(f"settlement file not found: {path}")
     try:
-        with open(path, newline="") as handle:
+        with open(path, newline="", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
             columns = reader.fieldnames or []
             missing = [c for c in REQUIRED_COLUMNS if c not in columns]
@@ -140,7 +140,7 @@ def load_settlement(path: str) -> list:
                 _parse_settlement_row(raw, f"{path} line {lineno}")
                 for lineno, raw in enumerate(reader, start=2)
             ]
-    except OSError as exc:
+    except (OSError, UnicodeError, csv.Error) as exc:
         raise ReconciliationAbort(f"settlement file {path} could not be read: {exc}")
 
     if not rows:
