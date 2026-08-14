@@ -331,11 +331,18 @@ class Recorder:
 
 @pytest.fixture
 def ledger(monkeypatch):
-    """Stub the ledger side; defaults to the seeded June rows."""
+    """Stub the ledger side; defaults to the seeded June rows.
 
-    def _install(rows=SEEDED_LEDGER):
+    Also sets a valid DUPLICATE_SUSPECT_WINDOW_SECONDS (D2(e)) so tests that reach
+    duplicate detection succeed by default; pass window_seconds to override.
+    """
+
+    def _install(rows=SEEDED_LEDGER, window_seconds="120"):
         recorder = Recorder(rows)
         monkeypatch.setattr(reconciliation.db, "query", recorder)
+        monkeypatch.setattr(
+            reconciliation, "DUPLICATE_SUSPECT_WINDOW_SECONDS", window_seconds
+        )
         return recorder
 
     return _install
@@ -505,6 +512,10 @@ def test_v_sample_full_run_matches_the_pinned_figures(ledger):
     assert minor(klass(result, reconciliation.MISSING_IN_LEDGER)) == 132100
     assert len(klass(result, reconciliation.REFUND_UNREPRESENTED)) == 1
     assert minor(klass(result, reconciliation.REFUND_UNREPRESENTED)) == 43218
+    assert len(result.duplicates) == 1
+    assert result.duplicates[0].loan_id == 5582
+    assert result.duplicates[0].amount_minor == 41050
+    assert result.duplicates[0].gap_seconds == 2
     assert klass(result, reconciliation.MISSING_IN_SETTLEMENT) == []
     assert result.exit_code == reconciliation.EXIT_BREAKS
     assert recorder.writes == []
@@ -522,7 +533,11 @@ def test_v_sample_reports_all_three_labelled_figures(ledger):
 
 
 def test_v_sample_tight_zero_day_window(ledger):
-    """V-SAMPLE-TIGHT — ±0d: 7 breaks, gross 257418, net unchanged at −88882."""
+    """V-SAMPLE-TIGHT — ±0d: 7 breaks, gross 257418, net unchanged at −88882.
+
+    Also V-DUP-TOL-INVARIANT: DUPLICATE_SUSPECT is identical to the ±1d run — it does
+    not depend on `tolerance_days` at all, since it never consults the settlement side.
+    """
     ledger()
 
     result = reconciliation.reconcile(
@@ -536,6 +551,10 @@ def test_v_sample_tight_zero_day_window(ledger):
     assert minor(klass(result, reconciliation.MISSING_IN_SETTLEMENT)) == 41050
     assert len(klass(result, reconciliation.REFUND_UNREPRESENTED)) == 1
     assert result.gross_break_minor == 257418
+    assert len(result.duplicates) == 1
+    assert result.duplicates[0].loan_id == 5582
+    assert result.duplicates[0].amount_minor == 41050
+    assert result.duplicates[0].gap_seconds == 2
     assert result.net_variance_minor == -88882
 
 
@@ -686,6 +705,14 @@ def test_peek_returns_the_break_summary_to_an_internal_caller(ledger, monkeypatc
     assert body["exit_code"] == reconciliation.EXIT_BREAKS
     assert "ledger_total" not in body
     assert "settlement_total" not in body
+    assert body["duplicate_suspects"] == [
+        {
+            "loan_id": 5582,
+            "amount_minor": 41050,
+            "occurred_on": "2026-06-01",
+            "gap_seconds": 2,
+        }
+    ]
 
 
 def test_fail_open_total_helpers_are_gone():
@@ -696,6 +723,132 @@ def test_fail_open_total_helpers_are_gone():
     """
     assert not hasattr(reconciliation, "ledger_total")
     assert not hasattr(reconciliation, "settlement_total")
+
+
+# --- Duplicate detection, independent of matching (D2(d)/(e)) --------------------
+
+
+def test_v_dup_detect_reports_one_pair_regardless_of_settlement(ledger, tmp_path):
+    """V-DUP-DETECT — two ledger rows, same loan/amount, 2s apart.
+
+    The scan never consults the settlement side, so it fires even when the settlement
+    file has nothing to do with the duplicated loan.
+    """
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 5582,
+                "amount": 410.50,
+                "created_at": dt.datetime(2026, 6, 1, 9, 31, 4),
+            },
+            {
+                "id": 2,
+                "loan_id": 5582,
+                "amount": 410.50,
+                "created_at": dt.datetime(2026, 6, 1, 9, 31, 6),
+            },
+        ]
+    )
+    path = write_settlement(tmp_path, ["2026-06-01,PR-1,9999,1.00,capture"])
+
+    result = reconciliation.reconcile(
+        from_date=dt.date(2026, 6, 1), to_date=dt.date(2026, 6, 1), settlement_path=path
+    )
+
+    assert len(result.duplicates) == 1
+    dup = result.duplicates[0]
+    assert dup.loan_id == 5582
+    assert dup.amount_minor == 41050
+    assert dup.gap_seconds == 2
+    assert dup.first_payment_id == 1
+    assert dup.second_payment_id == 2
+
+
+def test_v_dup_absorbed_matcher_still_matches_both_duplicate_rows(ledger, tmp_path):
+    """V-DUP-ABSORBED — under ±1d the duplicate is invisible to `_match`; MISSING_IN_
+    SETTLEMENT comes back empty. This is D2(d), the reason (e) is a separate check.
+    """
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 5582,
+                "amount": 410.50,
+                "created_at": dt.datetime(2026, 6, 1, 9, 31, 4),
+            },
+            {
+                "id": 2,
+                "loan_id": 5582,
+                "amount": 410.50,
+                "created_at": dt.datetime(2026, 6, 1, 9, 31, 6),
+            },
+        ]
+    )
+    path = write_settlement(
+        tmp_path,
+        [
+            "2026-06-01,PR-1,5582,410.50,capture",
+            "2026-06-02,PR-2,5582,410.50,capture",
+        ],
+    )
+
+    result = reconciliation.reconcile(
+        from_date=dt.date(2026, 6, 1), to_date=dt.date(2026, 6, 2), settlement_path=path
+    )
+
+    assert klass(result, reconciliation.MISSING_IN_SETTLEMENT) == []
+    assert klass(result, reconciliation.MISSING_IN_LEDGER) == []
+    assert len(result.duplicates) == 1
+
+
+def test_a_third_same_amount_row_pairs_once_not_twice(ledger, tmp_path):
+    """Adjacent pairing: three rows 2s apart each report one pair and one clean row,
+    not two overlapping pairs double-counting the middle row."""
+    ledger(
+        [
+            {
+                "id": i,
+                "loan_id": 5582,
+                "amount": 410.50,
+                "created_at": dt.datetime(2026, 6, 1, 9, 31, 4 + 2 * (i - 1)),
+            }
+            for i in (1, 2, 3)
+        ]
+    )
+    path = write_settlement(tmp_path, ["2026-06-01,PR-1,9999,1.00,capture"])
+
+    result = reconciliation.reconcile(
+        from_date=dt.date(2026, 6, 1), to_date=dt.date(2026, 6, 1), settlement_path=path
+    )
+
+    assert len(result.duplicates) == 1
+    assert result.duplicates[0].first_payment_id == 1
+    assert result.duplicates[0].second_payment_id == 2
+
+
+# --- Duplicate-window config, fail closed (D2(e)) ---------------------------------
+
+
+def test_missing_duplicate_window_env_aborts(monkeypatch, tmp_path):
+    monkeypatch.setattr(reconciliation.db, "query", Recorder([]))
+    monkeypatch.setattr(reconciliation, "DUPLICATE_SUSPECT_WINDOW_SECONDS", "")
+    path = write_settlement(tmp_path, ["2026-06-01,PR-1,4471,250.00,capture"])
+
+    with pytest.raises(reconciliation.ReconciliationAbort) as excinfo:
+        reconciliation.reconcile(settlement_path=path)
+
+    assert "DUPLICATE_SUSPECT_WINDOW_SECONDS" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("bad_value", ["abc", "0", "-5"])
+def test_invalid_duplicate_window_env_aborts(monkeypatch, tmp_path, bad_value):
+    monkeypatch.setattr(reconciliation.db, "query", Recorder([]))
+    monkeypatch.setattr(reconciliation, "DUPLICATE_SUSPECT_WINDOW_SECONDS", bad_value)
+    path = write_settlement(tmp_path, ["2026-06-01,PR-1,4471,250.00,capture"])
+
+    with pytest.raises(reconciliation.ReconciliationAbort):
+        reconciliation.reconcile(settlement_path=path)
 
 
 # --- Ledger query failure aborts, never reaches the route's generic 500 ----------

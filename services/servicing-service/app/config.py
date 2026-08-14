@@ -203,3 +203,8 @@ PROCESSOR_BASE_URL = os.getenv(
 INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 SETTLEMENT_FILE = os.getenv("SETTLEMENT_FILE", "data/settlement.csv")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Bound for reconciliation's duplicate-charge scan (spec D2(e)). No default: a guessed
+# bound is worse than no detection, since a wrong one would report a false clean. Env
+# only; reconciliation.py aborts (EXIT_ABORT) rather than run with it unset or invalid.
+DUPLICATE_SUSPECT_WINDOW_SECONDS = os.getenv("DUPLICATE_SUSPECT_WINDOW_SECONDS", "")

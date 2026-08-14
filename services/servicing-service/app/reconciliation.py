@@ -17,9 +17,10 @@ Read-only by construction (D2(h)): every statement it issues is a SELECT. It nev
 corrects a balance — that would be an unauthorized money movement with no maker-checker,
 on the same unlocked read-modify-write that is debt D3.
 
-Not here, deliberately: a same-day double charge still matches under the ±1 day
-tolerance and is reported clean (see `_match`). Detecting it needs a scan that does not
-consult the settlement side at all, which is the next change.
+D2(d)/(e): the ±1 day tolerance defeats duplicate detection on its own — a same-day
+double charge matches under it and disappears from `_match`'s output. `_find_duplicate_suspects`
+runs a second, matching-independent pass over the ledger side alone, so a duplicate can
+never hide behind the tolerance that exists for a different reason (settlement lag).
 """
 
 import csv
@@ -33,7 +34,7 @@ from typing import Optional
 import psycopg2
 
 from . import db
-from .config import SETTLEMENT_FILE
+from .config import DUPLICATE_SUSPECT_WINDOW_SECONDS, SETTLEMENT_FILE
 
 # D2(c). The ledger stamps `created_at` at capture and the processor stamps
 # `settlement_date` at settlement; no cut-off convention has been confirmed by the
@@ -44,6 +45,10 @@ MATCH_TOLERANCE_DAYS = 1
 MISSING_IN_LEDGER = "MISSING_IN_LEDGER"
 MISSING_IN_SETTLEMENT = "MISSING_IN_SETTLEMENT"
 REFUND_UNREPRESENTED = "REFUND_UNREPRESENTED"
+
+# D2(e). A signal, not a break class: it never enters `breaks` or any variance figure
+# (the duplicate's money is already accounted for on whichever side it landed).
+DUPLICATE_SUSPECT = "DUPLICATE_SUSPECT"
 
 # D2(g), mirroring `scripts/prove_test.sh`'s convention. "Could not check" is never
 # reported as 0, and never as 1 either: a zero-break result from a run that read
@@ -189,12 +194,26 @@ class Break:
 
 
 @dataclass(frozen=True)
+class DuplicateSuspect:
+    """One pair from `_find_duplicate_suspects`. Signal only — see `DUPLICATE_SUSPECT`."""
+
+    loan_id: int
+    amount_minor: int
+    occurred_on: date
+    gap_seconds: int
+    first_payment_id: int
+    second_payment_id: int
+
+
+@dataclass(frozen=True)
 class ReconciliationResult:
     window_from: date
     window_to: date
     tolerance_days: int
     matched_count: int
     breaks: list = field(default_factory=list)
+    # D2(e). Reported separately from `breaks` — see `DuplicateSuspect`.
+    duplicates: list = field(default_factory=list)
     # D2(b): every figure is an int of minor units.
     net_variance_minor: int = 0
     per_loan_absolute_minor: int = 0
@@ -294,6 +313,66 @@ def _match(ledger: list, captures: list, tolerance_days: int):
     return matched_count, unmatched_ledger, unmatched_captures
 
 
+def _duplicate_suspect_window_seconds() -> int:
+    """D2(e). No default: a guessed bound is worse than no detection at all."""
+    raw = (DUPLICATE_SUSPECT_WINDOW_SECONDS or "").strip()
+    if not raw:
+        raise ReconciliationAbort(
+            "DUPLICATE_SUSPECT_WINDOW_SECONDS is not set; duplicate detection cannot "
+            "run without a bound"
+        )
+    try:
+        seconds = int(raw)
+    except ValueError:
+        raise ReconciliationAbort(
+            f"DUPLICATE_SUSPECT_WINDOW_SECONDS={raw!r} is not an integer"
+        )
+    if seconds <= 0:
+        raise ReconciliationAbort(
+            f"DUPLICATE_SUSPECT_WINDOW_SECONDS={seconds} must be positive"
+        )
+    return seconds
+
+
+def _find_duplicate_suspects(ledger: list, window_seconds: int) -> list:
+    """D2(e). Ledger side only — never consults settlement, so no tolerance can hide it.
+
+    Rows sharing `(loan_id, amount_minor)` are ordered by `created_at` and paired
+    adjacently: once a row is claimed by a pair it cannot pair again, so three
+    same-amount rows in a row report one pair and one clean row, not two overlapping
+    pairs double-counting the middle row.
+    """
+    groups: dict = {}
+    for row in ledger:
+        groups.setdefault((row.loan_id, row.amount_minor), []).append(row)
+
+    gap = timedelta(seconds=window_seconds)
+    suspects = []
+    for (loan_id, amount_minor), rows in groups.items():
+        ordered = sorted(rows, key=lambda r: (r.created_at, r.payment_id))
+        index = 0
+        while index < len(ordered) - 1:
+            current, following = ordered[index], ordered[index + 1]
+            delta = following.created_at - current.created_at
+            if delta <= gap:
+                suspects.append(
+                    DuplicateSuspect(
+                        loan_id=loan_id,
+                        amount_minor=amount_minor,
+                        occurred_on=current.created_at.date(),
+                        gap_seconds=int(delta.total_seconds()),
+                        first_payment_id=current.payment_id,
+                        second_payment_id=following.payment_id,
+                    )
+                )
+                index += 2
+            else:
+                index += 1
+
+    suspects.sort(key=lambda s: (s.loan_id, s.amount_minor, s.occurred_on))
+    return suspects
+
+
 def reconcile(
     from_date: Optional[date] = None,
     to_date: Optional[date] = None,
@@ -333,6 +412,11 @@ def reconcile(
         r for r in settlement if window_from <= r.settlement_date <= window_to
     ]
     ledger = load_ledger(window_from, window_to)
+
+    # D2(e). Independent of matching and of `tolerance_days`: computed from the ledger
+    # alone, before `_match` runs, so a same-day double charge cannot hide behind the
+    # settlement-lag tolerance the way it does in `_match`'s output (D2(d)).
+    duplicates = _find_duplicate_suspects(ledger, _duplicate_suspect_window_seconds())
 
     captures = [r for r in settlement if r.row_type == CAPTURE]
     refunds = [r for r in settlement if r.row_type == REFUND]
@@ -403,6 +487,7 @@ def reconcile(
         tolerance_days=tolerance_days,
         matched_count=matched_count,
         breaks=breaks,
+        duplicates=duplicates,
         net_variance_minor=net_variance_minor,
         per_loan_absolute_minor=per_loan_absolute_minor,
         gross_break_minor=sum(b.amount_minor for b in breaks),

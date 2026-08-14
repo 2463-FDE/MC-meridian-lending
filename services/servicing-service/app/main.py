@@ -11,6 +11,7 @@ borrower. What is still absent is a SECOND APPROVER on the two discretionary mov
 deferred to the next cycle by the client, with the design fixed in that ADR — and any
 record of the movement, which is the ledger ADR 0014 Decision 3 specifies.
 """
+
 import logging
 import os
 
@@ -41,13 +42,21 @@ def health():
     if missing:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "service": "servicing", "missing_secrets": missing},
+            content={
+                "status": "unhealthy",
+                "service": "servicing",
+                "missing_secrets": missing,
+            },
         )
     ok, db_error = config.database_reachable()
     if not ok:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "service": "servicing", "database_error": db_error},
+            content={
+                "status": "unhealthy",
+                "service": "servicing",
+                "database_error": db_error,
+            },
         )
     return {"status": "ok", "service": "servicing"}
 
@@ -97,7 +106,9 @@ class ApplyPaymentIn(BaseModel):
 def apply_payment(
     loan_id: int,
     body: ApplyPaymentIn,
-    x_internal_service: Optional[str] = Header(default=None, alias="X-Internal-Service"),
+    x_internal_service: Optional[str] = Header(
+        default=None, alias="X-Internal-Service"
+    ),
 ):
     # This is the apply path called by payment-service AFTER it captures the charge (the
     # LSS half of the split payment flow). Internal-only: it reduces a balance and is
@@ -108,7 +119,11 @@ def apply_payment(
     # here: this commit gates the route, it does not fix the mutation.
     authz.require_internal_caller(x_internal_service)
     new_balance = balance.apply_payment(loan_id, body.amount)
-    return {"loan_id": loan_id, "applied_amount": body.amount, "new_balance": new_balance}
+    return {
+        "loan_id": loan_id,
+        "applied_amount": body.amount,
+        "new_balance": new_balance,
+    }
 
 
 @app.get("/accounts/{loan_id}/balance")
@@ -132,14 +147,18 @@ class AdjustIn(BaseModel):
 
 
 @app.post("/accounts/{loan_id}/adjust-balance")
-def adjust_balance(loan_id: int, body: AdjustIn,
-                   x_user_role: Optional[str] = Header(None)):
+def adjust_balance(
+    loan_id: int, body: AdjustIn, x_user_role: Optional[str] = Header(None)
+):
     # CSR or admin only (ADR 0014 Decision 1) — the header is now READ, not just
     # declared. Still no second approver and still no ledger entry: approval is deferred
     # to the next cycle by the client and the ledger is Decision 3. (debt D8(b) closed,
     # D2 open)
     authz.require_money_role(x_user_role)
-    return {"loan_id": loan_id, "balance": balance.adjust_balance(loan_id, body.new_balance)}
+    return {
+        "loan_id": loan_id,
+        "balance": balance.adjust_balance(loan_id, body.new_balance),
+    }
 
 
 class WaiveIn(BaseModel):
@@ -147,8 +166,7 @@ class WaiveIn(BaseModel):
 
 
 @app.post("/accounts/{loan_id}/waive-fee")
-def waive_fee(loan_id: int, body: WaiveIn,
-              x_user_role: Optional[str] = Header(None)):
+def waive_fee(loan_id: int, body: WaiveIn, x_user_role: Optional[str] = Header(None)):
     # CSR or admin only (ADR 0014 Decision 1). No amount limit is enforced: the
     # ops-manual $150-per-account-per-month guideline is recorded and displayed, not
     # gated, and enforcement is carded (docs/cards-week6-servicing.md C4). A manual
@@ -160,7 +178,9 @@ def waive_fee(loan_id: int, body: WaiveIn,
 @app.post("/accounts/{loan_id}/late-fee")
 def late_fee(
     loan_id: int,
-    x_internal_service: Optional[str] = Header(default=None, alias="X-Internal-Service"),
+    x_internal_service: Optional[str] = Header(
+        default=None, alias="X-Internal-Service"
+    ),
 ):
     # Rule-driven with no operator-chosen amount, so it is internal-only rather than
     # role-gated (ADR 0014 Decision 1). A representative reversing a late fee by hand
@@ -203,5 +223,14 @@ def reconciliation_peek(
         "net_variance_minor": result.net_variance_minor,
         "per_loan_absolute_minor": result.per_loan_absolute_minor,
         "gross_break_minor": result.gross_break_minor,
+        "duplicate_suspects": [
+            {
+                "loan_id": d.loan_id,
+                "amount_minor": d.amount_minor,
+                "occurred_on": d.occurred_on.isoformat(),
+                "gap_seconds": d.gap_seconds,
+            }
+            for d in result.duplicates
+        ],
         "exit_code": result.exit_code,
     }
