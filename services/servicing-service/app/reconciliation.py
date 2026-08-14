@@ -247,6 +247,16 @@ def load_ledger(window_from: date, window_to: date) -> list:
         )
     ledger = []
     for row in rows:
+        # `payments.created_at`/`loan_id` carry no NOT NULL constraint (db/init/
+        # 001_schema.sql), so a malformed row is reachable without a query failure.
+        # Same fail-closed contract as the query itself: abort rather than let
+        # `None.date()`/`int(None)` reach the route as an uncontrolled 500.
+        if row["created_at"] is None:
+            raise ReconciliationAbort(
+                f"payments row {row['id']}: created_at is missing"
+            )
+        if row["loan_id"] is None:
+            raise ReconciliationAbort(f"payments row {row['id']}: loan_id is missing")
         created_at = row["created_at"]
         # The window is a property of the job, not of the SQL string.
         if not window_from <= created_at.date() <= window_to:
@@ -313,6 +323,13 @@ def _match(ledger: list, captures: list, tolerance_days: int):
     return matched_count, unmatched_ledger, unmatched_captures
 
 
+# D2(e) says the bound is "scoped in minutes, not days". 30 days is far beyond that
+# intent but still a sane ceiling: it rejects a misconfigured operator value (a stray
+# extra digit, a units mix-up) before `timedelta(seconds=...)` in
+# `_find_duplicate_suspects` can raise `OverflowError` on a pathological one.
+_MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS = 30 * 24 * 60 * 60
+
+
 def _duplicate_suspect_window_seconds() -> int:
     """D2(e). No default: a guessed bound is worse than no detection at all."""
     raw = (DUPLICATE_SUSPECT_WINDOW_SECONDS or "").strip()
@@ -326,6 +343,11 @@ def _duplicate_suspect_window_seconds() -> int:
     except ValueError:
         raise ReconciliationAbort(
             f"DUPLICATE_SUSPECT_WINDOW_SECONDS={raw!r} is not an integer"
+        )
+    if seconds > _MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS:
+        raise ReconciliationAbort(
+            f"DUPLICATE_SUSPECT_WINDOW_SECONDS={seconds} exceeds the sane ceiling of "
+            f"{_MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS} (30 days)"
         )
     if seconds <= 0:
         raise ReconciliationAbort(

@@ -841,14 +841,62 @@ def test_missing_duplicate_window_env_aborts(monkeypatch, tmp_path):
     assert "DUPLICATE_SUSPECT_WINDOW_SECONDS" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("bad_value", ["abc", "0", "-5"])
+@pytest.mark.parametrize("bad_value", ["abc", "0", "-5", "99999999999999999999"])
 def test_invalid_duplicate_window_env_aborts(monkeypatch, tmp_path, bad_value):
+    """Includes an absurdly large value (teeth check): unguarded, it reaches
+    `timedelta(seconds=...)` in `_find_duplicate_suspects` and raises OverflowError
+    instead of ReconciliationAbort — a fail-closed contract violation on a
+    misconfigured operator value."""
     monkeypatch.setattr(reconciliation.db, "query", Recorder([]))
     monkeypatch.setattr(reconciliation, "DUPLICATE_SUSPECT_WINDOW_SECONDS", bad_value)
     path = write_settlement(tmp_path, ["2026-06-01,PR-1,4471,250.00,capture"])
 
     with pytest.raises(reconciliation.ReconciliationAbort):
         reconciliation.reconcile(settlement_path=path)
+
+
+def test_malformed_ledger_row_aborts_instead_of_crashing(monkeypatch, tmp_path):
+    """Teeth check: `payments.created_at`/`loan_id` carry no NOT NULL constraint
+    (db/init/001_schema.sql), so a NULL row is reachable without any query failure.
+    Unguarded, `None.date()` raises a bare AttributeError past the route's abort
+    handling into the generic 500 — the same fail-closed violation as an unreachable
+    database, just triggered by row content instead of a connection failure."""
+    monkeypatch.setattr(
+        reconciliation.db,
+        "query",
+        Recorder([{"id": 1, "loan_id": 4471, "amount": 250.00, "created_at": None}]),
+    )
+    monkeypatch.setattr(reconciliation, "DUPLICATE_SUSPECT_WINDOW_SECONDS", "120")
+    path = write_settlement(tmp_path, ["2026-06-01,PR-1,4471,250.00,capture"])
+
+    with pytest.raises(reconciliation.ReconciliationAbort) as excinfo:
+        reconciliation.reconcile(settlement_path=path)
+
+    assert "created_at is missing" in str(excinfo.value)
+
+
+def test_ledger_row_with_null_loan_id_aborts_instead_of_crashing(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        reconciliation.db,
+        "query",
+        Recorder(
+            [
+                {
+                    "id": 1,
+                    "loan_id": None,
+                    "amount": 250.00,
+                    "created_at": dt.datetime(2026, 6, 1, 9, 0, 0),
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(reconciliation, "DUPLICATE_SUSPECT_WINDOW_SECONDS", "120")
+    path = write_settlement(tmp_path, ["2026-06-01,PR-1,4471,250.00,capture"])
+
+    with pytest.raises(reconciliation.ReconciliationAbort) as excinfo:
+        reconciliation.reconcile(settlement_path=path)
+
+    assert "loan_id is missing" in str(excinfo.value)
 
 
 # --- Ledger query failure aborts, never reaches the route's generic 500 ----------
