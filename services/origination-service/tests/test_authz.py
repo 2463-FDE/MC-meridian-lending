@@ -1007,6 +1007,29 @@ def test_anonymously_submitted_application_is_allowed(monkeypatch):
     authz.deny_self_decision(1, "underwriter", "9")  # no raise
 
 
+def test_legacy_null_submitter_self_decision_is_not_blocked_by_code(monkeypatch):
+    # D24 residual (docs/debt-log.md; PR #38 review, round 3): a row created before
+    # migration 0017 has submitted_by_user_id NULL -- there was nothing to backfill it
+    # from, since no prior code ever captured a submitter. That NULL is identical, at the
+    # SQL level, to a genuine anonymous applicant's permanent NULL, so no code-level check
+    # can tell "an officer self-submitted this before the fix landed" apart from "someone
+    # genuinely anonymous applied" -- pinning this documents the residual as a known,
+    # tested limit rather than an untested gap. Mitigated operationally (docs/runbook.md
+    # "Known operational pain" carries the manual back-book audit query), not in code: a
+    # fail-closed gate on submitted_by_user_id IS NULL would permanently block every future
+    # anonymous application too, not just this legacy window.
+    monkeypatch.setattr(
+        authz.db,
+        "query",
+        _self_decision_db(
+            {"applicant_id": None}, app_applicant_id=42, submitted_by_user_id=None
+        ),
+    )
+    authz.deny_self_decision(
+        1, "underwriter", "9"
+    )  # no raise -- the documented residual
+
+
 def test_officer_on_an_ownerless_application_is_allowed(monkeypatch):
     # An application with a NULL applicant_id must not match a staff account whose
     # applicant_id is also NULL.

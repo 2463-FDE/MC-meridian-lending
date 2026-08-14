@@ -656,3 +656,38 @@ def test_assistant_cannot_decision_own_self_submitted_unlinked_application(monke
         assert blocked.status_code == 403
     finally:
         app.dependency_overrides.clear()
+
+
+def test_assistant_legacy_null_submitter_self_decision_is_not_blocked(monkeypatch):
+    # D24 residual (docs/debt-log.md; PR #38 review, round 3): a pre-migration-0017 row
+    # (or any genuinely anonymous submit) has submitted_by_user_id NULL, identical at the
+    # SQL level to a real anonymous applicant -- no code-level check can tell them apart.
+    # Route-level pin through the assistant path, matching the run_decision route pin in
+    # test_decision_route.py. Mitigated operationally (docs/runbook.md), not in code.
+    from fastapi.testclient import TestClient
+
+    from app import authz, main
+    from app.main import app
+
+    def _q(sql, params=None):
+        if "FROM users" in sql:
+            return [{"applicant_id": None}]
+        if "FROM applications" in sql:
+            return [{"applicant_id": 42, "submitted_by_user_id": None}]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(authz.db, "query", _q)
+    monkeypatch.setattr(
+        main, "_run_assistant", lambda *a, **k: {"decision": "not-blocked-marker"}
+    )
+    app.dependency_overrides[main.get_llm_client] = lambda: _client(FINAL_DENY)[0]
+    try:
+        tc = TestClient(app, raise_server_exceptions=False)
+        resp = tc.post(
+            "/assistant/decisions/42",
+            headers={"X-User-Role": "underwriter", "X-User-Id": "9"},
+        )
+        assert resp.status_code == 200  # not blocked -- the documented residual
+        assert resp.json() == {"decision": "not-blocked-marker"}
+    finally:
+        app.dependency_overrides.clear()

@@ -277,12 +277,18 @@ def deny_self_decision(
        see this -- PR #38 review, reproduced by
        test_known_gap_self_submitted_application_not_linked_is_allowed before this fix).
 
-    Residual: an officer who submits WITHOUT being logged in (a separate anonymous session or
-    tab) leaves submitted_by_user_id NULL, so check 2 has nothing to compare -- indistinguishable
-    from a genuine anonymous applicant at the intake boundary. Closing that would mean matching
-    on identity fields (SSN/DOB) instead of accounts, a different and much larger control than
-    either check here; unlike the original gap, it now requires deliberately avoiding
-    authentication at submit, not simply using the ordinary logged-in apply flow.
+    Residual (PR #38 review, round 3): submitted_by_user_id is NULL for an officer who submits
+    WITHOUT being logged in (a separate anonymous session/tab) -- AND for every application
+    that predates migration 0017 (the column has no backfill; there was nothing to backfill
+    FROM, since no prior code ever captured a submitter). Both leave check 2 with nothing to
+    compare, indistinguishable from a genuine anonymous applicant. This is NOT a closing
+    migration-window gap: NULL stays the correct, common value for every future anonymous
+    application too, so a fail-closed gate on submitted_by_user_id IS NULL would permanently
+    block the platform's primary intake channel, not just a legacy backlog -- rejected for that
+    reason. Closing the identity gap for real would mean matching on identity fields (SSN/DOB)
+    instead of accounts, a different and much larger control than either check here. Mitigated
+    operationally, not in code: see docs/runbook.md "Known operational pain" for the manual
+    back-book audit query, and docs/debt-log.md D24.
     """
     if not _is_officer(x_user_role):
         return

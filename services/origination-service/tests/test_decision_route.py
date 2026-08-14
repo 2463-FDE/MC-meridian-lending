@@ -340,3 +340,23 @@ def test_officer_cannot_decision_their_own_self_submitted_application(
         )
     assert exc.value.status_code == 403
     assert captured_payload == {}
+
+
+def test_legacy_null_submitter_self_decision_route_is_not_blocked(
+    monkeypatch, captured_payload
+):
+    # D24 residual (docs/debt-log.md; PR #38 review, round 3): a pre-migration-0017 row
+    # (or any genuinely anonymous submit) has submitted_by_user_id NULL, identical at the
+    # SQL level to a real anonymous applicant -- no code-level check can tell them apart.
+    # Route-level pin matching test_legacy_null_submitter_self_decision_is_not_blocked_by_code
+    # in test_authz.py: documents the residual is still open through this route rather than
+    # leaving it untested. Mitigated operationally (docs/runbook.md), not in code.
+    monkeypatch.setattr(
+        applications.authz.db,
+        "query",
+        _self_decision_db(None, 42, submitted_by_user_id=None),
+    )
+    out = applications.run_decision(
+        42, idempotency_key=None, x_user_role="underwriter", x_user_id="9"
+    )
+    assert out.decision == "deny"  # not blocked -- the documented residual
