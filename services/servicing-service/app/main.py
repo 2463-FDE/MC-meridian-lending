@@ -103,10 +103,18 @@ class ApplyPaymentIn(BaseModel):
     payment_id: int
 
 
-# Same charset rule payment-service applies when it mints the id (its
-# new_request_id): no whitespace, so a header value cannot forge a second log
-# record, and capped so it cannot push the operational fields off the line.
+# Same two rules payment-service applies to the header (its new_request_id):
+# a charset with no whitespace, so a header value cannot forge a second log
+# record and cannot push the operational fields off the line; and a 9-digit
+# ceiling, since an SSN is 9 digits and a card 13-19, and the redactor masks a
+# bare SSN only inside a labeled field and a bare PAN only when Luhn-valid --
+# neither covers request_id=412559981. Counting digits rather than matching a
+# shape is what makes separator- and letter-padded variants fail too. This route
+# is reachable directly (internal token only), so the rule cannot be left to the
+# upstream service. (Codex review)
 _REQUEST_ID_OK = re.compile(r"[A-Za-z0-9._-]{1,64}")
+_MAX_REQUEST_ID_DIGITS = 9
+_ASCII_DIGIT = re.compile(r"[0-9]")
 
 
 def _span_request_id(supplied: Optional[str]) -> str:
@@ -116,10 +124,15 @@ def _span_request_id(supplied: Optional[str]) -> str:
     payment-service opens. A direct call with no header is therefore logged as
     request_id=- -- present and visibly uncorrelated, rather than an omitted
     field that reads as a parse gap (test vector V-TRACE-DIRECT). A supplied
-    value that fails the charset rule is treated the same way, since the
-    alternative is writing client-controlled text into the log verbatim.
+    value that fails the charset rule or carries SSN/card-length digits is
+    treated the same way, since the alternative is writing client-controlled
+    text into the log verbatim.
     """
-    if supplied and _REQUEST_ID_OK.fullmatch(supplied):
+    if (
+        supplied
+        and _REQUEST_ID_OK.fullmatch(supplied)
+        and len(_ASCII_DIGIT.findall(supplied)) < _MAX_REQUEST_ID_DIGITS
+    ):
         return supplied
     return "-"
 

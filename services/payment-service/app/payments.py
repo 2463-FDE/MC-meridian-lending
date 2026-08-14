@@ -35,9 +35,20 @@ log = get_logger("payment")  # writes to logs/payment-service.log
 _SPAN_FIELDS = "request_id=%s loan_id=%s payment_id=%s outcome=%s"
 
 # An id the log can hold on one line: no whitespace (a newline forges a whole
-# record), no digits-only run long enough to look like a card to the redactor's
-# backstop, capped so it cannot push the operational fields off the line.
+# record), capped so it cannot push the operational fields off the line.
 _REQUEST_ID_OK = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+# How many digits a value may carry before it is refused as a possible SSN or
+# card number. An SSN is 9 digits and a card is 13-19, so a 9-digit CEILING
+# refuses both, and it refuses them by DIGIT COUNT rather than by shape: the
+# separators and single letters this charset allows (412-55-9981, 4.1.2.5.5.9.9.8.1,
+# 4111a1111a1111a1111) each defeat a positional pattern, and no arrangement of
+# fewer than 9 digits can spell either value. The redactor does not cover this:
+# it masks a bare SSN only inside a LABELED field (rule 3b) and a bare PAN only
+# when Luhn-VALID (_redact_if_pan), so request_id=412559981 and an invalid-Luhn
+# request_id=4111111111111112 both reach the log in cleartext. (Codex review)
+_MAX_REQUEST_ID_DIGITS = 9
+_ASCII_DIGIT = re.compile(r"[0-9]")
 
 
 def new_request_id(supplied: str = None) -> str:
@@ -45,13 +56,29 @@ def new_request_id(supplied: str = None) -> str:
 
     D1(a) says a supplied X-Request-Id is used VERBATIM, and it is -- for any real
     id. The header is client-controlled free text on its way into a log line
-    though, so a value outside the accepted charset is replaced rather than
-    written through: a newline in it would forge a second log record, and a long
-    digit run would ride past the value-level masking in _redacted_charge_req.
+    though, so a value outside the accepted charset, or one carrying enough
+    digits to be an SSN or a card number, is replaced rather than written
+    through: a newline in it would forge a second log record, and either PII
+    shape would ride past the value-level masking in _redacted_charge_req.
     Replacing (not blanking) keeps the span correlated under a usable id.
+
+    The digit ceiling costs a caller whose ids are digit-heavy (an epoch-millis
+    id is 13 digits) its verbatim id; that call keeps a generated one and stays
+    correlated end to end, which is the trade this path takes over logging a
+    value that may be a borrower's SSN.
+
+    The charset check runs FIRST, so the digit count only ever reads ASCII --
+    a unicode digit cannot reach it.
     """
-    if supplied and _REQUEST_ID_OK.fullmatch(supplied):
+    if (
+        supplied
+        and _REQUEST_ID_OK.fullmatch(supplied)
+        and len(_ASCII_DIGIT.findall(supplied)) < _MAX_REQUEST_ID_DIGITS
+    ):
         return supplied
+    # Not subject to the ceiling above: this value carries no caller input, so a
+    # random digit run in it is not a borrower's SSN. The charset matches what a
+    # caller may supply, so both branches produce the same shape of field.
     return uuid.uuid4().hex
 
 

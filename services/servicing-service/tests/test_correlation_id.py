@@ -82,3 +82,37 @@ def test_hostile_request_id_is_not_logged_verbatim(monkeypatch):
 
     assert parsed[0]["request_id"] == "-", lines
     assert "abc def" not in "\n".join(lines), lines
+
+
+# Mirrors payment-service's PII_SHAPED_REQUEST_IDS. This route is reachable
+# directly with only the internal token, so the digit ceiling has to hold here
+# too -- servicing cannot assume the id was validated upstream. The redactor
+# masks a bare SSN only inside a labeled field and a bare PAN only when
+# Luhn-valid, so neither shape is caught inside request_id=... (Codex review)
+PII_SHAPED_REQUEST_IDS = [
+    ("bare_ssn", "412559981"),
+    ("dashed_ssn", "412-55-9981"),
+    ("separator_padded_ssn", "4.1.2.5.5.9.9.8.1"),
+    ("invalid_luhn_pan", "4111111111111112"),
+    ("letter_padded_invalid_luhn_pan", "4111a1111a1111a1112"),
+]
+
+
+def test_pii_shaped_request_id_is_logged_as_uncorrelated(monkeypatch):
+    """A header carrying SSN- or card-length digits is refused like any other
+    unusable value: the line says request_id=- and holds none of the digits."""
+    for label, hostile in PII_SHAPED_REQUEST_IDS:
+        parsed, lines = _apply(monkeypatch, {"X-Request-Id": hostile})
+
+        assert parsed[0]["request_id"] == "-", f"{label}: {lines}"
+        assert hostile not in "\n".join(lines), (
+            f"{label}: PII-shaped id logged raw: {lines}"
+        )
+
+
+def test_a_real_id_with_a_few_digits_is_still_logged_verbatim(monkeypatch):
+    """The ceiling is on SSN/card-length digit runs, not on digits: an id with
+    fewer than nine still correlates the two halves of the span."""
+    parsed, lines = _apply(monkeypatch, {"X-Request-Id": "pay-2026-08-a1b2"})
+
+    assert parsed[0]["request_id"] == "pay-2026-08-a1b2", lines

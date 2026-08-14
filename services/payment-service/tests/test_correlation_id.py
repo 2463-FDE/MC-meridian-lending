@@ -256,3 +256,58 @@ def test_hostile_request_id_is_not_logged_verbatim(monkeypatch):
     assert re.fullmatch(r"[0-9a-f]{32}", ids.pop()), (
         f"a rejected id must fall back to a generated one, not to empty: {lines}"
     )
+
+
+# The accepted charset alone lets a bare SSN and a card-length digit run through,
+# and the redactor does not catch either inside request_id=...: it masks a bare
+# SSN only inside a LABELED field and a bare PAN only when Luhn-VALID. Each value
+# below therefore has to be refused at validation, and refused on BOTH exits --
+# this service's own log line AND the X-Request-Id header propagated to servicing,
+# which logs whatever it is handed. (Codex review)
+PII_SHAPED_REQUEST_IDS = [
+    ("bare_ssn", "412559981"),
+    ("dashed_ssn", "412-55-9981"),
+    ("separator_padded_ssn", "4.1.2.5.5.9.9.8.1"),
+    ("invalid_luhn_pan", "4111111111111112"),
+    ("letter_padded_invalid_luhn_pan", "4111a1111a1111a1112"),
+    ("epoch_millis", "1755180000000"),
+]
+
+
+def test_pii_shaped_request_id_reaches_neither_the_log_nor_servicing(monkeypatch):
+    """A supplied id carrying SSN- or card-length digits is replaced, so the raw
+    digits appear in no log line and in no propagated header."""
+    for label, hostile in PII_SHAPED_REQUEST_IDS:
+        captured = _stub_charge_path(monkeypatch)
+        lines = _capture_log(monkeypatch)
+
+        payments.charge(
+            loan_id=1,
+            pan="4111111111111111",
+            cvv="123",
+            amount=50.0,
+            request_id=hostile,
+        )
+
+        joined = "\n".join(lines)
+        assert hostile not in joined, f"{label}: PII-shaped id logged raw: {lines}"
+        assert captured["headers"]["X-Request-Id"] != hostile, (
+            f"{label}: PII-shaped id propagated to servicing, which logs it"
+        )
+        ids = {p["request_id"] for p in _fields(lines)}
+        assert len(ids) == 1, f"{label}: the span must still share one id, got {ids}"
+        generated = ids.pop()
+        assert re.fullmatch(r"[0-9a-f]{32}", generated), (
+            f"{label}: a refused id must fall back to a generated one: {lines}"
+        )
+        assert captured["headers"]["X-Request-Id"] == generated, (
+            f"{label}: both halves of the span must still carry the same id"
+        )
+
+
+def test_a_real_id_with_a_few_digits_is_still_used_verbatim():
+    """The ceiling is on SSN/card-length digit runs, not on digits: an ordinary
+    id with fewer than nine digits keeps D1(a)'s verbatim guarantee."""
+    # 8 digits, one under the ceiling -- the boundary the rule is written on.
+    for ok in ("abc123", "pay-2026-08-a1b2", "req.7", "a" * 64):
+        assert payments.new_request_id(ok) == ok, ok
