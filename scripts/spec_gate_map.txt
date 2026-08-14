@@ -110,6 +110,13 @@ services/decision-service/app => docs/spec-fair-lending-monitoring-week8.md
 services/origination-service/app/clients.py => adr/0004-decompose-origination-into-services.md
 services/gateway/app/main.py => adr/0010-application-ownership-authorization.md
 
+# --- PR #38 follow-on: self-decision anonymous-submission gap ---------------
+# authz.py already exists on main (ADR 0010) and is exactly the module ADR
+# 0017's decision extends (deny_self_decision), same footing as week 7/8
+# above: the code area is live today, so deleting it must fail this gate even
+# though ADR 0017's own maker-checker decision is Proposed, not built.
+services/origination-service/app/authz.py => adr/0017-self-decision-anonymous-submission-gap.md
+
 # --- Exemptions: docs with no code path whose deletion would violate them ---
 # EXEMPT: adr/0001-record-architecture-decisions.md — establishes the ADR process itself; obligates no source file.
 # EXEMPT: adr/0002-single-database-shared-schema.md — records the existing one-database constraint; no artifact whose deletion violates it (DDL numbering is covered by migration-numbering-gate).
