@@ -155,6 +155,42 @@ def test_run_decision_never_hands_ssn_fingerprint_to_score_application(
     }
 
 
+def test_run_decision_scoring_dict_is_never_mutated_after_being_handed_off(
+    synthetic_mode, event_sink, monkeypatch
+):
+    # Model-card review (PR 35 follow-up): the previous test only copies keys
+    # inside the fake scorer, which misses aliasing — a licensed model behind
+    # score_application() may RETAIN the dict object it is handed (audit/logging,
+    # deferred serialization, returned metadata) rather than reading it inline.
+    # This fake retains the reference and asserts it is never later mutated with
+    # ssn_fingerprint, which only a same-object aliasing bug could produce.
+    monkeypatch.setattr(config, "DECISION_FINGERPRINT_PEPPER", "a-real-test-pepper")
+
+    retained = {}
+    real_score_application = decision_mod.model_vendor.score_application
+
+    def _retaining_score_application(inputs):
+        retained["ref"] = inputs
+        return real_score_application(inputs)
+
+    monkeypatch.setattr(
+        decision_mod.model_vendor, "score_application", _retaining_score_application
+    )
+
+    decide(
+        {
+            "app_id": 4,
+            "ssn": "123456782",
+            "income": 100000,
+            "amount": 15000,
+            "term_months": 36,
+            "employment_years": 5,
+        }
+    )
+
+    assert "ssn_fingerprint" not in retained["ref"]
+
+
 def test_missing_key_fails_closed_no_decision(prod_like):
     # Production-like config with no bureau key must NOT return a decision.
     with pytest.raises(CreditPullError):
