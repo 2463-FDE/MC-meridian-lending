@@ -24,6 +24,9 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 
 from . import config, db
+from .logging_config import get_logger
+
+log = get_logger("authz")
 
 _OFFICER_ROLES = {"underwriter", "admin"}
 
@@ -227,3 +230,103 @@ def require_officer_or_owner(
     # Non-owner, wrong/absent token, or unknown application: deny without revealing
     # existence.
     raise HTTPException(status_code=404, detail="application not found")
+
+
+def deny_self_decision(
+    app_id: int, x_user_role: str | None, x_user_id: str | None
+) -> None:
+    """Refuse a decision run by the account that is also the applicant.
+
+    Client ask, 2026-08-12 governance §5: "block the decision route when the caller and
+    the applicant are the same account; leave every other officer action alone... Log the
+    blocked attempts." ADR 0010 lets any officer act on any application and never compares
+    the caller's identity to the applicant's, so an underwriter or admin could run and read
+    the decision on their own application -- the segregation-of-duties finding this closes.
+
+    OFFICER-ONLY, and that is the whole point of the role check rather than a bare
+    identity comparison: under ADR 0010 a borrower's authorization to act on an
+    application IS `users.applicant_id == applications.applicant_id`, so a role-blind
+    "caller is the applicant" test would deny every borrower on the ordinary apply flow.
+    Only a staff member deciding their own application is turned away.
+
+    Runs AFTER require_officer_or_owner (this refuses an already-authorized caller; it
+    does not authorize anyone) and BEFORE the KYC gate and any downstream call, so a
+    blocked attempt never pulls credit or appends a decision event.
+
+    A caller with no resolvable user id is not blocked: X-User-Id and X-User-Role are
+    injected together by the gateway from the session and stripped from client requests
+    (gateway main.py:170), so an officer role without a user id is a service-to-service or
+    test caller, not a bypass a portal user can construct -- and an unidentifiable caller
+    has no account to be the applicant of. A staff account with no applicant record
+    (users.applicant_id NULL) is likewise never a match on the account-linkage check: NULL
+    is compared as "no applicant", not as a value, so it can never equal an ownerless
+    application's NULL applicant_id.
+
+    TWO independent checks, closing D24 (docs/debt-log.md; PR #38 review):
+
+    1. Account linkage: users.applicant_id == applications.applicant_id. Catches a staff
+       member whose login is linked to the applicant record by provisioning outside this
+       platform ("it may already be covered by... account provisioning that keeps staff off
+       their own paperwork" -- the client's own governance-ask caveat).
+    2. Submitter identity: applications.submitted_by_user_id == the caller's user id.
+       intake.create_application persists the caller's X-User-Id when POST /applications was
+       authenticated (the gateway forwards it for any session-bearing request, this
+       anonymous-by-default route included), so an officer who submits their own application
+       through the ordinary apply flow while logged in is caught here even though intake
+       never links the fresh applicants row to users.applicant_id (check 1 alone could not
+       see this -- PR #38 review, reproduced by
+       test_known_gap_self_submitted_application_not_linked_is_allowed before this fix).
+
+    Residual (PR #38 review, round 3): submitted_by_user_id is NULL for an officer who submits
+    WITHOUT being logged in (a separate anonymous session/tab) -- AND for every application
+    that predates migration 0017 (the column has no backfill; there was nothing to backfill
+    FROM, since no prior code ever captured a submitter). Both leave check 2 with nothing to
+    compare, indistinguishable from a genuine anonymous applicant. This is NOT a closing
+    migration-window gap: NULL stays the correct, common value for every future anonymous
+    application too, so a fail-closed gate on submitted_by_user_id IS NULL would permanently
+    block the platform's primary intake channel, not just a legacy backlog -- rejected for that
+    reason. Closing the identity gap for real would mean matching on identity fields (SSN/DOB)
+    instead of accounts, a different and much larger control than either check here. Mitigated
+    operationally, not in code: see docs/runbook.md "Known operational pain" for the manual
+    back-book audit query, and docs/debt-log.md D24.
+    """
+    if not _is_officer(x_user_role):
+        return
+    user_id = _as_int(x_user_id)
+    if user_id is None:
+        return
+    user_rows = db.query("SELECT applicant_id FROM users WHERE id = %s", (user_id,))
+    caller_applicant_id = user_rows[0]["applicant_id"] if user_rows else None
+    app_rows = db.query(
+        "SELECT applicant_id, submitted_by_user_id FROM applications WHERE id = %s",
+        (app_id,),
+    )
+    app_row = app_rows[0] if app_rows else None
+    if app_row is None:
+        return
+    account_match = (
+        caller_applicant_id is not None
+        and app_row["applicant_id"] == caller_applicant_id
+    )
+    submitter_match = app_row["submitted_by_user_id"] == user_id
+    if not account_match and not submitter_match:
+        return
+    # The blocked attempt is the control's only evidence that it fired. Ids only -- no
+    # name, no SSN -- so the audit line carries no PII of its own.
+    log.warning(
+        "blocked self-decision: user_id=%s applicant_id=%s app_id=%s role=%s "
+        "account_match=%s submitter_match=%s",
+        user_id,
+        caller_applicant_id,
+        app_id,
+        (x_user_role or "").strip().lower(),
+        account_match,
+        submitter_match,
+    )
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "a decision cannot be run by the applicant's own account; "
+            "another officer must decision this application"
+        ),
+    )

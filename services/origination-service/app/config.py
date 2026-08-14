@@ -218,6 +218,19 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
                 return False, (
                     "schema_not_ready:applications.continuation_token_expires_at"
                 )
+            # D24 (PR #38 review): deny_self_decision SELECTs submitted_by_user_id on every
+            # decision call (both routes), and intake's INSERT writes it on every submit. A
+            # volume predating migration 0017 has neither, so both would 500 while /health
+            # looked fine -- same class as the rungs above. Type asserted, not just name:
+            # ADD COLUMN IF NOT EXISTS swallows a same-named column of any type.
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'applications' "
+                "AND column_name = 'submitted_by_user_id' "
+                "AND data_type = 'integer'"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:applications.submitted_by_user_id"
             # PR review: applicants.dob is a DATE that reaches year 294276, while Python's
             # date stops at 9999 -- so an out-of-range value stores fine and then raises
             # "year N is out of range" during row hydration. models.Application.applicant is

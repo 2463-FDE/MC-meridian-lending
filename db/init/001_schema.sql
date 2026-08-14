@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS applications (
     -- Expiry of the continuation token (PR #7 review): authz rejects it past this instant,
     -- so the bearer capability is time-boxed. NULL for officer/legacy rows (no token path).
     continuation_token_expires_at TIMESTAMPTZ,
+    -- D24 (PR #38 review): users.id of the caller who submitted this application, when they
+    -- were authenticated (X-User-Id) at submit time. NULL for a genuinely anonymous apply --
+    -- that is the common case and is not itself a signal. Lets deny_self_decision refuse an
+    -- officer who submitted their OWN application through the ordinary apply flow, which
+    -- users.applicant_id == applications.applicant_id cannot see (intake never links the two).
+    submitted_by_user_id INTEGER,
     created_at        TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);

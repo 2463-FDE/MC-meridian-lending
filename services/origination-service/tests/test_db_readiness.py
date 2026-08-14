@@ -351,6 +351,71 @@ def test_probe_fails_when_continuation_token_expires_at_column_missing(monkeypat
     assert err == "schema_not_ready:applications.continuation_token_expires_at"
 
 
+class _SubmittedByMissingCursor:
+    """Every earlier applications rung present, but D24's submitted_by_user_id absent -- a
+    volume predating migration 0017, on which intake's INSERT and deny_self_decision's
+    SELECT would 500 while /health looked fine (PR #38 review)."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "'submitted_by_user_id'" in self._last:
+            return None
+        return (1,)
+
+
+class _SubmittedByMissingConn:
+    def cursor(self):
+        return _SubmittedByMissingCursor()
+
+    def close(self):
+        pass
+
+
+class _SubmittedByWrongTypeCursor(_SubmittedByMissingCursor):
+    """The column exists under the right name and the wrong type. ADD COLUMN IF NOT
+    EXISTS swallows a same-named column of any type, so a name-only rung reports ready
+    over a stand-in type."""
+
+    def fetchone(self):
+        if "'submitted_by_user_id'" in self._last and "integer" in self._last:
+            return None
+        return (1,)
+
+
+class _SubmittedByWrongTypeConn:
+    def cursor(self):
+        return _SubmittedByWrongTypeCursor()
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize(
+    "conn_cls", [_SubmittedByMissingConn, _SubmittedByWrongTypeConn]
+)
+def test_probe_fails_when_submitted_by_user_id_column_is_not_ready(
+    monkeypatch, conn_cls
+):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: conn_cls())
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:applications.submitted_by_user_id"
+
+
 class _DobConstraintMissingCursor:
     """Every earlier rung satisfied, but migration 0011's ck_applicants_dob_readable absent --
     a volume on which an out-of-range applicants.dob can still be stored, and on which any
