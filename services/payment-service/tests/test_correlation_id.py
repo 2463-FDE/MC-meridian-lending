@@ -1,0 +1,258 @@
+"""Regression coverage for D1: one correlation id across the payment span.
+
+Test vectors V-TRACE, V-TRACE-SUPPLIED and V-TRACE-FAIL from
+docs/spec-observability-week7.md, plus acceptance criteria 3 (no log line
+asserts success before the work it describes) and 9b (every payment-path line
+carries request_id, loan_id, payment_id and outcome as NAMED fields, in a fixed
+order, so a span is recoverable by field extraction rather than by reading
+prose).
+
+The id is called request_id, matching decision-service's existing convention --
+not trace_id and not correlation_id (spec D1(a)).
+
+These are structured FIELDS inside the ordinary text log line. The formatter
+stays RedactingFormatter("%(levelname)s %(asctime)s %(message)s") and the PII
+redactor keeps scanning the same formatted byte sequence; re-encoding as JSON
+would change what two blocking gates (redaction-tests, redactor-drift) scan and
+is explicitly out of scope for this week.
+"""
+
+import re
+
+from fastapi.testclient import TestClient
+
+from app import authz, config, payments
+from app.main import app
+
+# request_id, loan_id, payment_id, outcome -- the documented order (spec D1(c)).
+FIELDS = re.compile(
+    r"request_id=(?P<request_id>\S+) "
+    r"loan_id=(?P<loan_id>\S+) "
+    r"payment_id=(?P<payment_id>\S+) "
+    r"outcome=(?P<outcome>\S+)"
+)
+
+
+def _capture_log(monkeypatch):
+    """Collect fully-interpolated log lines, the way the formatter sees them."""
+    lines = []
+
+    def record(msg, *args, **kwargs):
+        lines.append(msg % args if args else msg)
+
+    monkeypatch.setattr(payments.log, "info", record)
+    monkeypatch.setattr(payments.log, "error", record)
+    return lines
+
+
+def _fields(lines):
+    """The parsed field-sets of every line that carries the field block."""
+    return [m.groupdict() for m in (FIELDS.search(line) for line in lines) if m]
+
+
+def _stub_charge_path(monkeypatch, *, status_code=200, insert_id=7):
+    """db INSERT returns insert_id; servicing returns status_code. Captures headers."""
+    captured = {}
+    monkeypatch.setattr(payments, "INTERNAL_SERVICE_TOKEN", "sekret")
+    monkeypatch.setattr(payments.db, "query", lambda *a, **k: [{"id": insert_id}])
+
+    class _FakeResponse:
+        def __init__(self, code):
+            self.status_code = code
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["headers"] = headers
+        captured["json"] = json
+        return _FakeResponse(status_code)
+
+    monkeypatch.setattr(payments.httpx, "post", fake_post)
+    return captured
+
+
+def test_supplied_request_id_used_verbatim_on_every_line(monkeypatch):
+    """V-TRACE-SUPPLIED: a caller-supplied id is used verbatim on the charge
+    line, the outcome line, and on the header servicing logs its own line from."""
+    captured = _stub_charge_path(monkeypatch)
+    lines = _capture_log(monkeypatch)
+
+    payments.charge(
+        loan_id=1,
+        pan="4111111111111111",
+        cvv="123",
+        amount=50.0,
+        request_id="abc123",
+    )
+
+    parsed = _fields(lines)
+    assert parsed, f"no line carried the named field block: {lines}"
+    assert {p["request_id"] for p in parsed} == {"abc123"}, (
+        f"supplied id must be used verbatim on every line: {lines}"
+    )
+    assert captured["headers"]["X-Request-Id"] == "abc123"
+
+
+def test_generated_request_id_is_one_id_shared_by_the_whole_span(monkeypatch):
+    """V-TRACE: with no supplied id, ONE generated id appears on every line and
+    on the propagated header -- not a fresh id per line."""
+    captured = _stub_charge_path(monkeypatch)
+    lines = _capture_log(monkeypatch)
+
+    payments.charge(loan_id=1, pan="4111111111111111", cvv="123", amount=50.0)
+
+    ids = {p["request_id"] for p in _fields(lines)}
+    assert len(ids) == 1, f"the span must share one id, got {ids}: {lines}"
+    generated = ids.pop()
+    assert re.fullmatch(r"[0-9a-f]{32}", generated), (
+        f"expected a uuid4 hex, got {generated!r}"
+    )
+    assert captured["headers"]["X-Request-Id"] == generated
+
+
+def test_unreachable_failure_line_carries_the_same_id(monkeypatch):
+    """V-TRACE-FAIL: servicing unreachable -- the failure line and the charge
+    line share one id, so a captured-unapplied payment is findable by field."""
+    monkeypatch.setattr(payments, "INTERNAL_SERVICE_TOKEN", "sekret")
+    monkeypatch.setattr(payments.db, "query", lambda *a, **k: [{"id": 7}])
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(payments.httpx, "post", fake_post)
+    lines = _capture_log(monkeypatch)
+
+    out = payments.charge(
+        loan_id=1,
+        pan="4111111111111111",
+        cvv="123",
+        amount=50.0,
+        request_id="abc123",
+    )
+
+    assert out["status"] == "captured_unapplied"
+    parsed = _fields(lines)
+    assert {p["request_id"] for p in parsed} == {"abc123"}, lines
+    outcomes = [p["outcome"] for p in parsed]
+    assert "captured_unapplied" in outcomes, (
+        f"a failed apply must be distinguishable in the logs (criterion 2): {lines}"
+    )
+    assert "captured" not in outcomes, (
+        f"a failed apply must not also log a success outcome: {lines}"
+    )
+
+
+def test_no_line_claims_success_before_the_insert(monkeypatch):
+    """Criterion 3 / D1(d): the entry line is logged BEFORE the INSERT, so it
+    must not assert an outcome the row does not yet have. The pre-D1 code logged
+    'POST /payments charge req=... -> ok' at that point."""
+    monkeypatch.setattr(payments, "INTERNAL_SERVICE_TOKEN", "sekret")
+
+    def exploding_insert(*a, **k):
+        raise RuntimeError("INSERT failed")
+
+    monkeypatch.setattr(payments.db, "query", exploding_insert)
+    lines = _capture_log(monkeypatch)
+
+    try:
+        payments.charge(
+            loan_id=1,
+            pan="4111111111111111",
+            cvv="123",
+            amount=50.0,
+            request_id="abc123",
+        )
+    except RuntimeError:
+        pass
+
+    assert lines, "the span must still open with an entry line"
+    assert not any("-> ok" in line for line in lines), (
+        f"no line may assert success for work that never happened: {lines}"
+    )
+    outcomes = [p["outcome"] for p in _fields(lines)]
+    assert outcomes == ["started"], (
+        f"the entry line reports 'started', not an outcome it cannot know: {lines}"
+    )
+
+
+def test_every_payment_path_line_carries_the_four_named_fields(monkeypatch):
+    """Criterion 9b: every line on the charge path carries all four fields in
+    the documented order -- the span is recoverable by extraction alone."""
+    _stub_charge_path(monkeypatch)
+    lines = _capture_log(monkeypatch)
+
+    payments.charge(
+        loan_id=1,
+        pan="4111111111111111",
+        cvv="123",
+        amount=50.0,
+        request_id="abc123",
+    )
+
+    assert len(_fields(lines)) == len(lines), (
+        f"every line must carry the four fields in order: {lines}"
+    )
+    outcomes = [p["outcome"] for p in _fields(lines)]
+    assert outcomes[0] == "started"
+    assert "captured" in outcomes
+    # The entry line precedes the INSERT, so it has no payment id yet: it says so
+    # rather than omitting the field, same reason servicing logs request_id=-.
+    assert _fields(lines)[0]["payment_id"] == "-"
+    assert all(p["loan_id"] == "1" for p in _fields(lines)), lines
+
+
+def test_route_forwards_the_x_request_id_header_to_charge(monkeypatch):
+    """D1(a): POST /payments accepts X-Request-Id and hands it to charge(). The
+    route is where the header enters the span."""
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    monkeypatch.setattr(authz, "require_money_role_or_owner", lambda *a, **k: None)
+
+    seen = {}
+
+    def fake_charge(loan_id, pan, cvv, amount, ssn, name, method, request_id=None):
+        seen["request_id"] = request_id
+        return {
+            "payment_id": 1,
+            "loan_id": loan_id,
+            "status": "captured",
+            "applied_amount": amount,
+        }
+
+    monkeypatch.setattr("app.payments.charge", fake_charge)
+
+    resp = TestClient(app).post(
+        "/payments",
+        json={"loan_id": 1, "amount": 50.0},
+        headers={
+            "X-User-Role": "csr",
+            "X-Request-Id": "abc123",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert seen["request_id"] == "abc123"
+
+
+def test_hostile_request_id_is_not_logged_verbatim(monkeypatch):
+    """The header is client-controlled free text on its way into a log line. A
+    newline forges a whole log record; a digit run smuggles a card number past
+    the value-level masking in _redacted_charge_req. 'Used verbatim' (D1(a))
+    covers a real id, so an id outside the accepted charset is replaced by a
+    generated one rather than written through."""
+    _stub_charge_path(monkeypatch)
+    lines = _capture_log(monkeypatch)
+
+    payments.charge(
+        loan_id=1,
+        pan="4111111111111111",
+        cvv="123",
+        amount=50.0,
+        request_id="abc\nINFO 2026-08-13 forged line 4111111111111111",
+    )
+
+    joined = "\n".join(lines)
+    assert "forged line" not in joined, f"log injection via X-Request-Id: {lines}"
+    ids = {p["request_id"] for p in _fields(lines)}
+    assert len(ids) == 1
+    assert re.fullmatch(r"[0-9a-f]{32}", ids.pop()), (
+        f"a rejected id must fall back to a generated one, not to empty: {lines}"
+    )

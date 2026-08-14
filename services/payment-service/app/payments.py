@@ -16,6 +16,7 @@ D7) -- see _apply_via_servicing.
 
 import json
 import re
+import uuid
 
 import httpx
 
@@ -25,6 +26,33 @@ from .config import INTERNAL_SERVICE_TOKEN, SERVICING_URL
 from .redactor import PiiRedactor
 
 log = get_logger("payment")  # writes to logs/payment-service.log
+
+# The four fields every line on this path carries, in this order (spec D1(c)):
+# request_id, loan_id, payment_id, outcome. A payment span is then recoverable by
+# field extraction instead of by reading prose. These are named fields inside the
+# ordinary text line, NOT JSON: the redactor scans the formatted message and two
+# blocking gates (redaction-tests, redactor-drift) pin that byte sequence.
+_SPAN_FIELDS = "request_id=%s loan_id=%s payment_id=%s outcome=%s"
+
+# An id the log can hold on one line: no whitespace (a newline forges a whole
+# record), no digits-only run long enough to look like a card to the redactor's
+# backstop, capped so it cannot push the operational fields off the line.
+_REQUEST_ID_OK = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def new_request_id(supplied: str = None) -> str:
+    """The span's id: the caller's when it is one the log can carry, else a fresh one.
+
+    D1(a) says a supplied X-Request-Id is used VERBATIM, and it is -- for any real
+    id. The header is client-controlled free text on its way into a log line
+    though, so a value outside the accepted charset is replaced rather than
+    written through: a newline in it would forge a second log record, and a long
+    digit run would ride past the value-level masking in _redacted_charge_req.
+    Replacing (not blanking) keeps the span correlated under a usable id.
+    """
+    if supplied and _REQUEST_ID_OK.fullmatch(supplied):
+        return supplied
+    return uuid.uuid4().hex
 
 
 def _mask_ssn(ssn):
@@ -73,14 +101,27 @@ def charge(
     ssn: str = None,
     name: str = None,
     method: str = "card",
+    request_id: str = None,
 ) -> dict:
+    request_id = new_request_id(request_id)
+    # The ENTRY line: it opens the span before any work is done, so it reports
+    # outcome=started and carries no payment id yet -- the row does not exist
+    # until the INSERT below. This line used to end "-> ok" while sitting in
+    # exactly this position, asserting a success for an INSERT that had not run
+    # and could still fail (spec D1(d), criterion 3). The real outcome is logged
+    # once, at the end, when it is known.
+    #
     # PII (PAN/CVV/SSN) is masked at the value level before it reaches the log
     # string; see _redacted_charge_req for why the old formatter-only approach
     # was bypassable. `name` is client-controlled free text (a PAN can be
     # smuggled into it) and is deliberately not logged. json.dumps escapes any
     # quotes in the remaining values.
     log.info(
-        "POST /payments charge req=%s -> ok",
+        "POST /payments charge " + _SPAN_FIELDS + " req=%s",
+        request_id,
+        loan_id,
+        "-",
+        "started",
         json.dumps(
             _redacted_charge_req(pan, cvv, ssn, amount, loan_id), ensure_ascii=False
         ),
@@ -97,16 +138,29 @@ def charge(
     # failure to apply -- rejected, redirected, or servicing unreachable --
     # means the balance was definitely not updated, and the response must say
     # so rather than report a normal "captured" success (Codex review, PR 32).
-    applied = _apply_via_servicing(loan_id, amount, payment_id)
+    applied = _apply_via_servicing(loan_id, amount, payment_id, request_id)
+    status = "captured" if applied else "captured_unapplied"
+    # The OUTCOME line: after the INSERT and after the apply attempt, carrying
+    # what actually happened. Same id as the entry line and as servicing's own
+    # line, so both halves of the span come back from one field query.
+    log.info(
+        "POST /payments charge complete " + _SPAN_FIELDS,
+        request_id,
+        loan_id,
+        payment_id if payment_id is not None else "-",
+        status,
+    )
     return {
         "payment_id": payment_id,
         "loan_id": loan_id,
-        "status": "captured" if applied else "captured_unapplied",
+        "status": status,
         "applied_amount": float(amount) if applied else 0.0,
     }
 
 
-def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
+def _apply_via_servicing(
+    loan_id: int, amount: float, payment_id: int, request_id: str = "-"
+) -> bool:
     """Tell servicing-service to apply this payment to the loan balance.
 
     Returns True only when servicing actually confirmed the apply (a 2xx
@@ -127,30 +181,43 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
     try:
         resp = httpx.post(
             url,
+            # The id travels as a HEADER. The body is NOT changed -- it stays
+            # {"amount", "payment_id"}, which week-5 D3(d) owns (it removes
+            # `amount` from it), and a second writer on the same body collides
+            # with that work. Spec D1(b).
             json={"amount": amount, "payment_id": payment_id},
-            headers={"X-Internal-Service": INTERNAL_SERVICE_TOKEN},
+            headers={
+                "X-Internal-Service": INTERNAL_SERVICE_TOKEN,
+                "X-Request-Id": request_id,
+            },
             timeout=5.0,
         )
     except Exception as exc:
         log.error(
-            "apply-payment call to servicing unreachable loan_id=%s payment_id=%s: %s",
+            "apply-payment call to servicing unreachable " + _SPAN_FIELDS + ": %s",
+            request_id,
             loan_id,
             payment_id,
+            "apply_unreachable",
             exc,
         )
         return False
     if not (200 <= resp.status_code < 300):
         log.error(
-            "apply-payment REJECTED by servicing status=%s loan_id=%s payment_id=%s",
-            resp.status_code,
+            "apply-payment REJECTED by servicing " + _SPAN_FIELDS + " status=%s",
+            request_id,
             loan_id,
             payment_id,
+            "apply_rejected",
+            resp.status_code,
         )
         return False
     log.info(
-        "applied payment via servicing loan_id=%s payment_id=%s amount=%s -> ok",
+        "applied payment via servicing " + _SPAN_FIELDS + " amount=%s",
+        request_id,
         loan_id,
         payment_id,
+        "applied",
         amount,
     )
     return True

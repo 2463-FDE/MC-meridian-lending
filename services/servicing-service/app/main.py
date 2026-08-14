@@ -11,8 +11,10 @@ borrower. What is still absent is a SECOND APPROVER on the two discretionary mov
 deferred to the next cycle by the client, with the design fixed in that ADR — and any
 record of the movement, which is the ledger ADR 0014 Decision 3 specifies.
 """
+
 import logging
 import os
+import re
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -41,13 +43,21 @@ def health():
     if missing:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "service": "servicing", "missing_secrets": missing},
+            content={
+                "status": "unhealthy",
+                "service": "servicing",
+                "missing_secrets": missing,
+            },
         )
     ok, db_error = config.database_reachable()
     if not ok:
         return JSONResponse(
             status_code=503,
-            content={"status": "unhealthy", "service": "servicing", "database_error": db_error},
+            content={
+                "status": "unhealthy",
+                "service": "servicing",
+                "database_error": db_error,
+            },
         )
     return {"status": "ok", "service": "servicing"}
 
@@ -93,11 +103,35 @@ class ApplyPaymentIn(BaseModel):
     payment_id: int
 
 
+# Same charset rule payment-service applies when it mints the id (its
+# new_request_id): no whitespace, so a header value cannot forge a second log
+# record, and capped so it cannot push the operational fields off the line.
+_REQUEST_ID_OK = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def _span_request_id(supplied: Optional[str]) -> str:
+    """The correlation id for this log line, or "-" when there is none.
+
+    Servicing has no id of its own to mint: it is the downstream half of a span
+    payment-service opens. A direct call with no header is therefore logged as
+    request_id=- -- present and visibly uncorrelated, rather than an omitted
+    field that reads as a parse gap (test vector V-TRACE-DIRECT). A supplied
+    value that fails the charset rule is treated the same way, since the
+    alternative is writing client-controlled text into the log verbatim.
+    """
+    if supplied and _REQUEST_ID_OK.fullmatch(supplied):
+        return supplied
+    return "-"
+
+
 @app.post("/accounts/{loan_id}/apply-payment")
 def apply_payment(
     loan_id: int,
     body: ApplyPaymentIn,
-    x_internal_service: Optional[str] = Header(default=None, alias="X-Internal-Service"),
+    x_internal_service: Optional[str] = Header(
+        default=None, alias="X-Internal-Service"
+    ),
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
 ):
     # This is the apply path called by payment-service AFTER it captures the charge (the
     # LSS half of the split payment flow). Internal-only: it reduces a balance and is
@@ -108,7 +142,24 @@ def apply_payment(
     # here: this commit gates the route, it does not fix the mutation.
     authz.require_internal_caller(x_internal_service)
     new_balance = balance.apply_payment(loan_id, body.amount)
-    return {"loan_id": loan_id, "applied_amount": body.amount, "new_balance": new_balance}
+    # The LSS half of the payment span. This handler logged NOTHING before, so a
+    # payment crossing the seam left one line in payment-service and no
+    # counterpart here at all. Logged AFTER the balance actually moves, never
+    # before (criterion 3), carrying the same four named fields in the same order
+    # payment-service uses, so one field query returns both halves.
+    log.info(
+        "apply-payment request_id=%s loan_id=%s payment_id=%s outcome=%s new_balance=%s",
+        _span_request_id(x_request_id),
+        loan_id,
+        body.payment_id,
+        "applied",
+        new_balance,
+    )
+    return {
+        "loan_id": loan_id,
+        "applied_amount": body.amount,
+        "new_balance": new_balance,
+    }
 
 
 @app.get("/accounts/{loan_id}/balance")
@@ -132,14 +183,18 @@ class AdjustIn(BaseModel):
 
 
 @app.post("/accounts/{loan_id}/adjust-balance")
-def adjust_balance(loan_id: int, body: AdjustIn,
-                   x_user_role: Optional[str] = Header(None)):
+def adjust_balance(
+    loan_id: int, body: AdjustIn, x_user_role: Optional[str] = Header(None)
+):
     # CSR or admin only (ADR 0014 Decision 1) — the header is now READ, not just
     # declared. Still no second approver and still no ledger entry: approval is deferred
     # to the next cycle by the client and the ledger is Decision 3. (debt D8(b) closed,
     # D2 open)
     authz.require_money_role(x_user_role)
-    return {"loan_id": loan_id, "balance": balance.adjust_balance(loan_id, body.new_balance)}
+    return {
+        "loan_id": loan_id,
+        "balance": balance.adjust_balance(loan_id, body.new_balance),
+    }
 
 
 class WaiveIn(BaseModel):
@@ -147,8 +202,7 @@ class WaiveIn(BaseModel):
 
 
 @app.post("/accounts/{loan_id}/waive-fee")
-def waive_fee(loan_id: int, body: WaiveIn,
-              x_user_role: Optional[str] = Header(None)):
+def waive_fee(loan_id: int, body: WaiveIn, x_user_role: Optional[str] = Header(None)):
     # CSR or admin only (ADR 0014 Decision 1). No amount limit is enforced: the
     # ops-manual $150-per-account-per-month guideline is recorded and displayed, not
     # gated, and enforcement is carded (docs/cards-week6-servicing.md C4). A manual
@@ -160,7 +214,9 @@ def waive_fee(loan_id: int, body: WaiveIn,
 @app.post("/accounts/{loan_id}/late-fee")
 def late_fee(
     loan_id: int,
-    x_internal_service: Optional[str] = Header(default=None, alias="X-Internal-Service"),
+    x_internal_service: Optional[str] = Header(
+        default=None, alias="X-Internal-Service"
+    ),
 ):
     # Rule-driven with no operator-chosen amount, so it is internal-only rather than
     # role-gated (ADR 0014 Decision 1). A representative reversing a late fee by hand
