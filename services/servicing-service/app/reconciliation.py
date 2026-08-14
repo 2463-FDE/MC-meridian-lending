@@ -287,13 +287,43 @@ def _within(
     )
 
 
-def _match(ledger: list, captures: list, tolerance_days: int):
-    """D2(c)/(f). One-to-one and greedy in `(loan_id, amount_minor, date)` order.
+def _rank_candidate(ledger_row, capture, true_window_captures: frozenset):
+    """Lower sorts better. Review finding: the matcher used to accept the first
+    same-loan/same-amount candidate in date-sort order, so a widened out-of-window
+    edge candidate (settlement_date earlier than an in-window exact match) could be
+    claimed first, leaving the true in-window row falsely unmatched. Rank instead:
+    smallest date gap first (an exact-date match always beats a tolerance match),
+    then a true-window candidate over an edge one, then a deterministic tie-break.
+    """
+    gap_days = abs((capture.settlement_date - ledger_row.created_at.date()).days)
+    return (
+        gap_days,
+        capture not in true_window_captures,
+        capture.settlement_date,
+        capture.processor_ref,
+    )
+
+
+def _match(
+    ledger: list,
+    captures: list,
+    tolerance_days: int,
+    *,
+    true_window_ledger: frozenset = frozenset(),
+    true_window_captures: frozenset = frozenset(),
+):
+    """D2(c)/(f). One-to-one; the BEST candidate wins, not the first one scanned.
 
     A settlement row already matched cannot match a second ledger row. Where counts
     differ on an otherwise identical tuple, the surplus rows on whichever side has
     more are reported unmatched on that side — the job never guesses which of two
     identical rows is the orphan.
+
+    True-window ledger rows are processed before edge ones (an edge row's job is to
+    absorb a boundary lag, not to out-compete a true-window row for the best
+    candidate), and each row's candidate is chosen by `_rank_candidate` rather than
+    "first in sorted order" — the latter made claim order an accident of how
+    `ordered_captures` happened to sort, not a decision.
 
     Exact match always runs first: a row that matches perfectly on loan, amount and
     date can never be reclassified as a mismatch of something else. A second pass
@@ -305,7 +335,14 @@ def _match(ledger: list, captures: list, tolerance_days: int):
     """
     tolerance = timedelta(days=tolerance_days)
     ordered_ledger = sorted(
-        ledger, key=lambda r: (r.loan_id, r.amount_minor, r.created_at, r.payment_id)
+        ledger,
+        key=lambda r: (
+            r.loan_id,
+            r.amount_minor,
+            r not in true_window_ledger,
+            r.created_at,
+            r.payment_id,
+        ),
     )
     ordered_captures = sorted(
         captures,
@@ -316,25 +353,38 @@ def _match(ledger: list, captures: list, tolerance_days: int):
     matched_count = 0
     unmatched_ledger = []
     for ledger_row in ordered_ledger:
-        for index, capture in enumerate(ordered_captures):
-            if claimed[index]:
-                continue
-            if (
-                capture.loan_id == ledger_row.loan_id
-                and capture.amount_minor == ledger_row.amount_minor
-                and _within(ledger_row, capture, tolerance)
-            ):
-                claimed[index] = True
-                matched_count += 1
-                break
-        else:
+        candidates = [
+            index
+            for index, capture in enumerate(ordered_captures)
+            if not claimed[index]
+            and capture.loan_id == ledger_row.loan_id
+            and capture.amount_minor == ledger_row.amount_minor
+            and _within(ledger_row, capture, tolerance)
+        ]
+        if not candidates:
             unmatched_ledger.append(ledger_row)
+            continue
+        best_index = min(
+            candidates,
+            key=lambda index: _rank_candidate(
+                ledger_row, ordered_captures[index], true_window_captures
+            ),
+        )
+        claimed[best_index] = True
+        matched_count += 1
 
     unmatched_captures = [
         c for index, c in enumerate(ordered_captures) if not claimed[index]
     ]
 
-    unmatched_ledger.sort(key=lambda r: (r.loan_id, r.created_at, r.payment_id))
+    unmatched_ledger.sort(
+        key=lambda r: (
+            r.loan_id,
+            r not in true_window_ledger,
+            r.created_at,
+            r.payment_id,
+        )
+    )
     unmatched_captures.sort(
         key=lambda r: (r.loan_id, r.settlement_date, r.processor_ref)
     )
@@ -342,17 +392,24 @@ def _match(ledger: list, captures: list, tolerance_days: int):
     mismatches = []
     remaining_ledger = []
     for ledger_row in unmatched_ledger:
-        for index, capture in enumerate(unmatched_captures):
-            if mismatch_claimed[index]:
-                continue
-            if capture.loan_id == ledger_row.loan_id and _within(
-                ledger_row, capture, tolerance
-            ):
-                mismatch_claimed[index] = True
-                mismatches.append((ledger_row, capture))
-                break
-        else:
+        candidates = [
+            index
+            for index, capture in enumerate(unmatched_captures)
+            if not mismatch_claimed[index]
+            and capture.loan_id == ledger_row.loan_id
+            and _within(ledger_row, capture, tolerance)
+        ]
+        if not candidates:
             remaining_ledger.append(ledger_row)
+            continue
+        best_index = min(
+            candidates,
+            key=lambda index: _rank_candidate(
+                ledger_row, unmatched_captures[index], true_window_captures
+            ),
+        )
+        mismatch_claimed[best_index] = True
+        mismatches.append((ledger_row, unmatched_captures[best_index]))
 
     remaining_captures = [
         c for index, c in enumerate(unmatched_captures) if not mismatch_claimed[index]
@@ -520,8 +577,18 @@ def reconcile(
 
     capture_candidates = [r for r in settlement_candidates if r.row_type == CAPTURE]
     refunds = [r for r in settlement if r.row_type == REFUND]
+    # Review finding: a widened edge candidate must never out-compete a true-window
+    # row for the best match. `_match` uses these sets to rank exact/true-window
+    # candidates ahead of tolerance/edge ones instead of accepting whichever
+    # candidate happened to sort first.
+    true_window_ledger = frozenset(ledger)
+    true_window_captures = frozenset(r for r in settlement if r.row_type == CAPTURE)
     matched_count, unmatched_ledger, unmatched_captures, mismatches = _match(
-        ledger_candidates, capture_candidates, tolerance_days
+        ledger_candidates,
+        capture_candidates,
+        tolerance_days,
+        true_window_ledger=true_window_ledger,
+        true_window_captures=true_window_captures,
     )
     breaks: list = []
 

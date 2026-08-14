@@ -614,6 +614,81 @@ def test_zero_tolerance_does_not_widen_the_candidate_pool(ledger, tmp_path):
     assert klass(result, reconciliation.MISSING_IN_SETTLEMENT) == []
 
 
+def test_a_true_window_settlement_row_beats_an_out_of_window_edge_candidate(
+    ledger, tmp_path
+):
+    """Review finding: two same-loan/same-amount settlement rows straddle
+    window_from (06-01, out of window; 06-02, the window start) and one exact
+    ledger row lands on 06-02. The matcher used to accept the first candidate in
+    date-sort order — the earlier, out-of-window 06-01 row — leaving the true
+    06-02 row falsely unmatched and reported MISSING_IN_LEDGER. An exact-date,
+    true-window match must always win over a tolerance/edge one.
+    """
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 6, 2, 9, 0, 0),
+            }
+        ]
+    )
+    path = write_settlement(
+        tmp_path,
+        [
+            "2026-06-01,PR-OLD,4471,250.00,capture",
+            "2026-06-02,PR-NEW,4471,250.00,capture",
+        ],
+    )
+
+    result = reconciliation.reconcile(
+        from_date=dt.date(2026, 6, 2),
+        to_date=dt.date(2026, 6, 2),
+        settlement_path=path,
+    )
+
+    assert result.breaks == []
+    assert result.exit_code == reconciliation.EXIT_CLEAN
+
+
+def test_a_true_window_ledger_row_beats_an_out_of_window_edge_candidate(
+    ledger, tmp_path
+):
+    """Mirror of the case above, on the ledger side. Two same-loan/same-amount
+    ledger rows straddle window_from (05-31, out of window; 06-01, the window
+    start) and there is only one settlement row, exactly on 06-01. Processing
+    edge ledger rows before true-window ones would let the out-of-window 05-31
+    row claim the only capture, leaving the true 06-01 row falsely unmatched.
+    """
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 5, 31, 9, 0, 0),
+            },
+            {
+                "id": 2,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 6, 1, 9, 0, 0),
+            },
+        ]
+    )
+    path = write_settlement(tmp_path, ["2026-06-01,PR-1,4471,250.00,capture"])
+
+    result = reconciliation.reconcile(
+        from_date=dt.date(2026, 6, 1),
+        to_date=dt.date(2026, 6, 1),
+        settlement_path=path,
+    )
+
+    assert klass(result, reconciliation.MISSING_IN_SETTLEMENT) == []
+    assert klass(result, reconciliation.MISSING_IN_LEDGER) == []
+
+
 def test_v_missing_ledger_settled_captures_with_no_ledger_row(ledger, tmp_path):
     """V-MISSING-LEDGER — PR-100290 and PR-100311, 25000 each, no ledger counterpart."""
     ledger([])
