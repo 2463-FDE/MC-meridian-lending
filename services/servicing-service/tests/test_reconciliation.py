@@ -1203,6 +1203,60 @@ def test_a_boundary_match_is_the_only_way_variance_survives_a_clean_exit(
     assert result.exit_code == reconciliation.EXIT_CLEAN
 
 
+def test_an_outside_pair_does_not_consume_the_row_a_window_retry_pairs_with(
+    ledger, tmp_path
+):
+    """D2(e) boundary, review finding. Three retries of the same charge, the first two
+    just before window_from and the third just inside it, every gap inside
+    DUPLICATE_SUSPECT_WINDOW_SECONDS.
+
+    Adjacent pairing used to claim the two outside rows first and advance past them,
+    so the inside row was never compared to its immediate predecessor; the relevance
+    filter then dropped the outside-only pair and this window reported no duplicate at
+    all. The third charge went unreported by every window: the previous window's run
+    reports the first pair and treats the third row as clean, and this one saw
+    nothing. Pair selection must prefer a pair that touches the true window over one
+    that does not.
+    """
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 5, 31, 23, 59, 0),
+            },
+            {
+                "id": 2,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 5, 31, 23, 59, 30),
+            },
+            {
+                "id": 3,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 6, 1, 0, 0, 10),
+            },
+        ],
+        window_seconds="120",
+    )
+    path = write_settlement(tmp_path, ["2026-06-01,PR-1,9999,1.00,capture"])
+
+    result = reconciliation.reconcile(
+        from_date=dt.date(2026, 6, 1),
+        to_date=dt.date(2026, 6, 30),
+        settlement_path=path,
+    )
+
+    assert len(result.duplicates) == 1
+    dup = result.duplicates[0]
+    # The pair that reaches into the window, not the one wholly outside it.
+    assert (dup.first_payment_id, dup.second_payment_id) == (2, 3)
+    assert dup.gap_seconds == 40
+    assert result.exit_code == reconciliation.EXIT_BREAKS
+
+
 # --- Duplicate-window config, fail closed (D2(e)) ---------------------------------
 
 

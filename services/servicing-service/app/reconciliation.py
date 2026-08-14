@@ -466,13 +466,25 @@ def _duplicate_suspect_window_seconds() -> int:
     return seconds
 
 
-def _find_duplicate_suspects(ledger: list, window_seconds: int) -> list:
+def _find_duplicate_suspects(
+    ledger: list, window_seconds: int, true_window_payment_ids: frozenset
+) -> list:
     """D2(e). Ledger side only — never consults settlement, so no tolerance can hide it.
 
-    Rows sharing `(loan_id, amount_minor)` are ordered by `created_at` and paired
-    adjacently: once a row is claimed by a pair it cannot pair again, so three
-    same-amount rows in a row report one pair and one clean row, not two overlapping
-    pairs double-counting the middle row.
+    Rows sharing `(loan_id, amount_minor)` are ordered by `created_at`, and every
+    adjacent pair inside `window_seconds` becomes a candidate. Candidates are then
+    claimed at most once per row, so three same-amount rows in a row report one pair
+    and one clean row rather than two overlapping pairs double-counting the middle
+    one.
+
+    Candidates that touch the true window are claimed FIRST (review finding). Claiming
+    left-to-right instead let a pair sitting wholly before `window_from` consume the
+    row that the window's own retry needed to pair with: the outside pair was then
+    dropped by the caller's relevance filter and the in-window retry was reported by
+    no window at all — the previous window's run reports the outside pair and treats
+    the third row as clean. Ordering by relevance before claiming costs nothing when
+    every row is in the window, where the created_at tie-break leaves the original
+    left-to-right result unchanged.
     """
     groups: dict = {}
     for row in ledger:
@@ -482,24 +494,38 @@ def _find_duplicate_suspects(ledger: list, window_seconds: int) -> list:
     suspects = []
     for (loan_id, amount_minor), rows in groups.items():
         ordered = sorted(rows, key=lambda r: (r.created_at, r.payment_id))
-        index = 0
-        while index < len(ordered) - 1:
+        candidates = []
+        for index in range(len(ordered) - 1):
             current, following = ordered[index], ordered[index + 1]
             delta = following.created_at - current.created_at
             if delta <= gap:
-                suspects.append(
-                    DuplicateSuspect(
-                        loan_id=loan_id,
-                        amount_minor=amount_minor,
-                        occurred_on=current.created_at.date(),
-                        gap_seconds=int(delta.total_seconds()),
-                        first_payment_id=current.payment_id,
-                        second_payment_id=following.payment_id,
-                    )
+                candidates.append((current, following, delta))
+        candidates.sort(
+            key=lambda pair: (
+                not (
+                    pair[0].payment_id in true_window_payment_ids
+                    or pair[1].payment_id in true_window_payment_ids
+                ),
+                pair[0].created_at,
+                pair[0].payment_id,
+            )
+        )
+        claimed: set = set()
+        for current, following, delta in candidates:
+            if current.payment_id in claimed or following.payment_id in claimed:
+                continue
+            claimed.add(current.payment_id)
+            claimed.add(following.payment_id)
+            suspects.append(
+                DuplicateSuspect(
+                    loan_id=loan_id,
+                    amount_minor=amount_minor,
+                    occurred_on=current.created_at.date(),
+                    gap_seconds=int(delta.total_seconds()),
+                    first_payment_id=current.payment_id,
+                    second_payment_id=following.payment_id,
                 )
-                index += 2
-            else:
-                index += 1
+            )
 
     suspects.sort(key=lambda s: (s.loan_id, s.amount_minor, s.occurred_on))
     return suspects
@@ -580,11 +606,11 @@ def reconcile(
     )
     # A pair entirely outside the true window is not this window's signal to
     # report -- it belongs to whichever window actually contains it.
-    true_window_payment_ids = {row.payment_id for row in ledger}
+    true_window_payment_ids = frozenset(row.payment_id for row in ledger)
     duplicates = [
         suspect
         for suspect in _find_duplicate_suspects(
-            duplicate_candidates, duplicate_window_seconds
+            duplicate_candidates, duplicate_window_seconds, true_window_payment_ids
         )
         if suspect.first_payment_id in true_window_payment_ids
         or suspect.second_payment_id in true_window_payment_ids
