@@ -278,6 +278,26 @@ logged here as pre-existing debt; not fixed, out of scope for "parts we touched"
 | **Medium** | D22: Redactor missed unlabeled dot/slash/tab/multi-space SSN | **Fixed** | Teeth 2026-07-19. **The one finding in code our features introduced** (Week-1 redactor). Generalized `3a-bis` + widened `3b`; resynced 7 copies; regression tests added. Fixed on `fix/redactor-ssn-separator-blindspots`. |
 | **High** | D3: Unlocked read-modify-write on `balances` loses concurrent applies | Open — **fix specified, not built** | Week 5. Cited in code four times since the baseline, never logged and never measured. **Measured 2026-08-02:** 8 concurrent applies captured $800.00 and credited $600.00 — $200 taken, never applied. Fix is an atomic `UPDATE balances SET balance = balance - :amount` in one transaction with an append-only `payment_applications` row (ADR 0013, spec D3d). **Not fixed by the idempotency key** — distinct defect. |
 | **Medium** | D23: The charge handler exists twice, writing the same `payments` table | Open (ours by omission) | Week 5. ADR 0004 copied the handler into `payment-service` and left the original routed in `servicing-service`; both INSERT into `payments`, both carry the same "no idempotency check" comment. Fix-propagation risk, same shape as D15. It is the reason ADR 0013 enforces idempotency with a DB constraint rather than in service code. Retire the servicing charge path; own PR. |
+| **High** | D24: Self-decision block misses an officer's own account-linked-elsewhere submission | Open (out of scope for governance-§5 PR) | Week 8. PR #38 review. `deny_self_decision` compares `users.applicant_id` to `applications.applicant_id`; intake never links the two, so an officer who self-submits via the ordinary apply flow is not caught. Root cause is pre-existing ADR 0010 intake design. Fix: `applications.submitted_by_user_id` captured at intake + a second comparison in the guard. Own PR. |
+
+---
+
+## Week 8 governance scoping — new entry
+
+### D24: Self-decision block only catches an officer whose account IS linked to the applicant
+
+| Field | Value |
+|---|---|
+| **ID** | D24 |
+| **Finding** | `authz.deny_self_decision` (client ask, 2026-08-12 governance §5) compares `users.applicant_id` to `applications.applicant_id` to refuse an officer deciding their own application. `intake.create_application` always INSERTs a fresh `applicants` row and never links it back to `users.applicant_id` (no such write exists outside `db/init/002_seed.sql`), and staff seed rows carry `users.applicant_id = NULL`. So an underwriter/admin who submits an application through the ordinary (anonymous-by-design, ADR 0010) intake route, then decisions it under their own officer role, is not blocked — the guard has no caller-applicant-id to compare. |
+| **Location** | `services/origination-service/app/authz.py:264-274` (docstring already names this as a "Known coverage limit"); root cause is `services/origination-service/app/intake.py:58` (`create_application` never writes `users.applicant_id`); `db/init/001_schema.sql:41-65` (`applications` has no submitter/owner column). |
+| **Trigger** | An officer account applies through the borrower-facing apply flow using their own information, then opens the same application in the officer queue and runs a decision on it. |
+| **Risk** | **High** (per PR #38 review). Same segregation-of-duties gap the control was built to close, reachable via the one path (self-service submission) the account-comparison design cannot see. |
+| **Attribution** | The control (`deny_self_decision`) is ours (`cd8c3e8`, this branch); the root cause (anonymous, unlinked intake) is **pre-existing ADR 0010 architecture**, not touched by this PR. The client's own governance-ask caveat ("it may already be covered by something outside the platform... account provisioning that keeps staff off their own paperwork") named this exact dependency at scoping time. |
+| **Mitigation Path** | Capture the submitting caller's `X-User-Id` (when present — the intake route is still anonymous by default) into a new `applications` column (e.g. `submitted_by_user_id`) at INSERT time, and have `deny_self_decision` also refuse when `submitted_by_user_id` equals the caller's user id — catches the self-submit case without matching on identity fields (SSN/DOB), which the docstring correctly rules out as a much larger control. Needs a migration (`db/migrations/`, mirrored in `db/init/001_schema.sql`), an `X-User-Id` header on `POST /applications`, and a readiness-rung update. Own PR. |
+| **Status** | Open; documented in code (`authz.py`) and pinned by `test_officer_who_is_not_an_applicant_is_allowed` / `test_known_gap_self_submitted_application_not_linked_is_allowed` (`tests/test_authz.py`); out of scope for the governance-§5 PR, which was scoped by the client to the account-comparison control. |
+
+---
 
 **Week 5 status changes (2026-08-02, spec-only — designs recorded, nothing built):**
 **D19** measured and design recorded (client-minted key + partial unique index + insert-first

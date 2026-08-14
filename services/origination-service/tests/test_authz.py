@@ -944,6 +944,22 @@ def test_officer_who_is_not_an_applicant_is_allowed(monkeypatch):
     authz.deny_self_decision(1, "underwriter", "9")  # no raise
 
 
+def test_known_gap_self_submitted_application_not_linked_is_allowed(monkeypatch):
+    # D24 (docs/debt-log.md), PR #38 review: intake.create_application never links the
+    # applicants row it creates back to users.applicant_id, so an officer who submits an
+    # application through the ordinary apply flow under their own account -- a different
+    # applicant_id than their (usually NULL) users.applicant_id -- is not caught here. This
+    # pins the documented, out-of-scope-for-this-PR limit rather than letting it silently
+    # start passing (which would mean someone quietly fixed it without updating D24/authz.py)
+    # or silently start failing (a real regression this test exists to catch either way).
+    monkeypatch.setattr(
+        authz.db,
+        "query",
+        _self_decision_db({"applicant_id": None}, app_applicant_id=42),
+    )
+    authz.deny_self_decision(1, "underwriter", "9")  # no raise -- the known gap
+
+
 def test_officer_on_an_ownerless_application_is_allowed(monkeypatch):
     # An application with a NULL applicant_id must not match a staff account whose
     # applicant_id is also NULL.

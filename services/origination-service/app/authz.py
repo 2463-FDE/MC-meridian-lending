@@ -272,6 +272,10 @@ def deny_self_decision(
     (SSN/DOB) rather than on the account: a different and much larger control than the one
     asked for. The dependency is real and belongs in the client reply -- this block is only
     as strong as the provisioning that links a staff login to its applicant record.
+
+    Tracked as D24 (docs/debt-log.md): mitigation is a submitted_by_user_id column captured
+    at intake so this guard can also compare on the submitting account, not identity fields.
+    Own PR -- out of scope for the account-comparison control this governance ask scoped.
     """
     if not _is_officer(x_user_role):
         return
