@@ -593,7 +593,7 @@ def test_assistant_cannot_decision_the_callers_own_application(monkeypatch):
         if "FROM users" in sql:
             return [{"applicant_id": 4}]
         if "FROM applications" in sql:
-            return [{"applicant_id": 4}]
+            return [{"applicant_id": 4, "submitted_by_user_id": None}]
         raise AssertionError(f"unexpected query: {sql}")
 
     monkeypatch.setattr(authz.db, "query", _q)
@@ -618,5 +618,41 @@ def test_assistant_cannot_decision_the_callers_own_application(monkeypatch):
             ).status_code
             != 403
         )
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_assistant_cannot_decision_own_self_submitted_unlinked_application(monkeypatch):
+    # D24 (docs/debt-log.md), PR #38 review: account linkage alone cannot catch an officer
+    # who submitted their own application through the ordinary apply flow -- intake never
+    # links the fresh applicants row to users.applicant_id. Same shape as the test above,
+    # through the assistant path, but with no account linkage (caller_applicant_id=None,
+    # the usual staff shape per PR #38) and submitted_by_user_id matching the caller instead.
+    from fastapi.testclient import TestClient
+
+    from app import authz, main
+    from app.main import app
+
+    def _q(sql, params=None):
+        if "FROM users" in sql:
+            return [{"applicant_id": None}]
+        if "FROM applications" in sql:
+            return [{"applicant_id": 42, "submitted_by_user_id": 9}]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    monkeypatch.setattr(authz.db, "query", _q)
+
+    def _never(*a, **k):
+        raise AssertionError("a blocked self-decision must not run the assistant")
+
+    monkeypatch.setattr(main, "_run_assistant", _never)
+    app.dependency_overrides[main.get_llm_client] = lambda: _client(FINAL_DENY)[0]
+    try:
+        tc = TestClient(app, raise_server_exceptions=False)
+        blocked = tc.post(
+            "/assistant/decisions/42",
+            headers={"X-User-Role": "underwriter", "X-User-Id": "9"},
+        )
+        assert blocked.status_code == 403
     finally:
         app.dependency_overrides.clear()

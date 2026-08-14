@@ -134,7 +134,10 @@ def _run_kyc(
 
 
 @router.post("", response_model=ApplicationCreated)
-def submit_application(body: ApplicationIn):
+def submit_application(
+    body: ApplicationIn,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+):
     payload = body.model_dump()
     # ADR 0010 Phase B: create_application persists the applicant+application AND its
     # continuation token in one INSERT and returns both (PR review). The token is the
@@ -142,7 +145,18 @@ def submit_application(body: ApplicationIn):
     # atomic with the application row -- if the write fails, submit fails, never a durable
     # application with a NULL token and no recovery path. Returned once below; the frontend
     # carries it as X-Application-Token.
-    app_id, continuation_token = intake.create_application(payload)
+    #
+    # D24 (PR #38 review): the gateway forwards X-User-Id for any session-bearing request,
+    # including this anonymous-by-default route, so a LOGGED-IN caller (e.g. an officer
+    # applying under their own information) is recorded as the submitter. An unauthenticated
+    # apply carries no header and stays None -- the ordinary anonymous case, not a gap.
+    try:
+        submitted_by_user_id = int(x_user_id) if x_user_id is not None else None
+    except ValueError:
+        submitted_by_user_id = None
+    app_id, continuation_token = intake.create_application(
+        payload, submitted_by_user_id
+    )
     # Resolve applicant_id the same way the old in-process path did.
     applicant_id = None
     try:

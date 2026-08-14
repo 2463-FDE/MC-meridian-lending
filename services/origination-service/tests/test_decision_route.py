@@ -265,12 +265,17 @@ def test_absent_score_is_none_not_a_fabricated_zero(monkeypatch):
 # downstream credit pull, so a blocked attempt never appends a regulated decision event.
 
 
-def _self_decision_db(caller_applicant_id, app_applicant_id):
+def _self_decision_db(caller_applicant_id, app_applicant_id, submitted_by_user_id=None):
     def _q(sql, params=None):
         if "FROM users" in sql:
             return [{"applicant_id": caller_applicant_id}]
         if "FROM applications" in sql:
-            return [{"applicant_id": app_applicant_id}]
+            return [
+                {
+                    "applicant_id": app_applicant_id,
+                    "submitted_by_user_id": submitted_by_user_id,
+                }
+            ]
         raise AssertionError(f"unexpected query: {sql}")
 
     return _q
@@ -310,3 +315,28 @@ def test_officer_decisioning_another_applicant_is_unaffected(
         42, idempotency_key=None, x_user_role="underwriter", x_user_id="9"
     )
     assert out.decision == "deny"
+
+
+# --- D24 (docs/debt-log.md), PR #38 review: self-submitted-but-unlinked application ----
+#
+# The account-linkage check alone (users.applicant_id == applications.applicant_id) cannot
+# see an officer who submitted their own application through the ordinary apply flow,
+# because intake never links the fresh applicants row back to users.applicant_id. Route
+# proof, through run_decision, that the submitted_by_user_id check closes it even with no
+# account linkage (caller_applicant_id=None, exactly the "usual staff shape" from PR #38).
+
+
+def test_officer_cannot_decision_their_own_self_submitted_application(
+    monkeypatch, captured_payload
+):
+    monkeypatch.setattr(
+        applications.authz.db,
+        "query",
+        _self_decision_db(None, 42, submitted_by_user_id=9),
+    )
+    with pytest.raises(HTTPException) as exc:
+        applications.run_decision(
+            42, idempotency_key=None, x_user_role="underwriter", x_user_id="9"
+        )
+    assert exc.value.status_code == 403
+    assert captured_payload == {}

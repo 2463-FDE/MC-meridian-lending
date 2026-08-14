@@ -258,24 +258,31 @@ def deny_self_decision(
     (gateway main.py:170), so an officer role without a user id is a service-to-service or
     test caller, not a bypass a portal user can construct -- and an unidentifiable caller
     has no account to be the applicant of. A staff account with no applicant record
-    (users.applicant_id NULL) is likewise never a match: NULL is compared as "no applicant",
-    not as a value, so it can never equal an ownerless application's NULL applicant_id.
+    (users.applicant_id NULL) is likewise never a match on the account-linkage check: NULL
+    is compared as "no applicant", not as a value, so it can never equal an ownerless
+    application's NULL applicant_id.
 
-    Known coverage limit, and it is the client's own caveat made concrete ("it may already
-    be covered by something outside the platform... account provisioning that keeps staff
-    off their own paperwork"): this compares ACCOUNTS, so it catches a staff member whose
-    users.applicant_id is linked to the applicant record. It does NOT catch one who applies
-    through the borrower portal, because intake.submit_application always INSERTs a fresh
-    applicants row and never links it to users.applicant_id (intake.py:58), and nothing
-    outside db/init/002_seed.sql ever writes that column -- so the two ids differ even though
-    the same person is on both sides. Closing that would mean matching on identity fields
-    (SSN/DOB) rather than on the account: a different and much larger control than the one
-    asked for. The dependency is real and belongs in the client reply -- this block is only
-    as strong as the provisioning that links a staff login to its applicant record.
+    TWO independent checks, closing D24 (docs/debt-log.md; PR #38 review):
 
-    Tracked as D24 (docs/debt-log.md): mitigation is a submitted_by_user_id column captured
-    at intake so this guard can also compare on the submitting account, not identity fields.
-    Own PR -- out of scope for the account-comparison control this governance ask scoped.
+    1. Account linkage: users.applicant_id == applications.applicant_id. Catches a staff
+       member whose login is linked to the applicant record by provisioning outside this
+       platform ("it may already be covered by... account provisioning that keeps staff off
+       their own paperwork" -- the client's own governance-ask caveat).
+    2. Submitter identity: applications.submitted_by_user_id == the caller's user id.
+       intake.create_application persists the caller's X-User-Id when POST /applications was
+       authenticated (the gateway forwards it for any session-bearing request, this
+       anonymous-by-default route included), so an officer who submits their own application
+       through the ordinary apply flow while logged in is caught here even though intake
+       never links the fresh applicants row to users.applicant_id (check 1 alone could not
+       see this -- PR #38 review, reproduced by
+       test_known_gap_self_submitted_application_not_linked_is_allowed before this fix).
+
+    Residual: an officer who submits WITHOUT being logged in (a separate anonymous session or
+    tab) leaves submitted_by_user_id NULL, so check 2 has nothing to compare -- indistinguishable
+    from a genuine anonymous applicant at the intake boundary. Closing that would mean matching
+    on identity fields (SSN/DOB) instead of accounts, a different and much larger control than
+    either check here; unlike the original gap, it now requires deliberately avoiding
+    authentication at submit, not simply using the ordinary logged-in apply flow.
     """
     if not _is_officer(x_user_role):
         return
@@ -284,22 +291,31 @@ def deny_self_decision(
         return
     user_rows = db.query("SELECT applicant_id FROM users WHERE id = %s", (user_id,))
     caller_applicant_id = user_rows[0]["applicant_id"] if user_rows else None
-    if caller_applicant_id is None:
-        return
     app_rows = db.query(
-        "SELECT applicant_id FROM applications WHERE id = %s", (app_id,)
+        "SELECT applicant_id, submitted_by_user_id FROM applications WHERE id = %s",
+        (app_id,),
     )
-    app_applicant_id = app_rows[0]["applicant_id"] if app_rows else None
-    if app_applicant_id != caller_applicant_id:
+    app_row = app_rows[0] if app_rows else None
+    if app_row is None:
+        return
+    account_match = (
+        caller_applicant_id is not None
+        and app_row["applicant_id"] == caller_applicant_id
+    )
+    submitter_match = app_row["submitted_by_user_id"] == user_id
+    if not account_match and not submitter_match:
         return
     # The blocked attempt is the control's only evidence that it fired. Ids only -- no
     # name, no SSN -- so the audit line carries no PII of its own.
     log.warning(
-        "blocked self-decision: user_id=%s applicant_id=%s app_id=%s role=%s",
+        "blocked self-decision: user_id=%s applicant_id=%s app_id=%s role=%s "
+        "account_match=%s submitter_match=%s",
         user_id,
         caller_applicant_id,
         app_id,
         (x_user_role or "").strip().lower(),
+        account_match,
+        submitter_match,
     )
     raise HTTPException(
         status_code=403,

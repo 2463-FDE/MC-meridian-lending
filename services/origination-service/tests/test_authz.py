@@ -831,7 +831,9 @@ def test_public_apply_flow_completes_with_continuation_token(monkeypatch):
     # without a login, and only with the scoped capability.
     state = {"token": None}
     monkeypatch.setattr(
-        applications.intake, "create_application", lambda payload: (1, _E2E_TOKEN)
+        applications.intake,
+        "create_application",
+        lambda payload, submitted_by_user_id=None: (1, _E2E_TOKEN),
     )
     monkeypatch.setattr(applications.db, "query", _apply_flow_db(state))
     monkeypatch.setattr(applications.clients, "post", _apply_flow_clients_post)
@@ -893,15 +895,27 @@ def test_recheck_preserves_token_for_anonymous_recovery(monkeypatch):
 # that equality.
 
 
-def _self_decision_db(user_row, app_applicant_id, app_exists=True):
+def _self_decision_db(
+    user_row, app_applicant_id, app_exists=True, submitted_by_user_id=None
+):
     """Stub authz.db.query for deny_self_decision: the users lookup returns user_row
-    ([] = no such user), the applications lookup returns the app's applicant_id."""
+    ([] = no such user), the applications lookup returns the app's applicant_id and
+    submitted_by_user_id (D24)."""
 
     def _q(sql, params=None):
         if "FROM users" in sql:
             return [user_row] if user_row is not None else []
         if "FROM applications" in sql:
-            return [{"applicant_id": app_applicant_id}] if app_exists else []
+            return (
+                [
+                    {
+                        "applicant_id": app_applicant_id,
+                        "submitted_by_user_id": submitted_by_user_id,
+                    }
+                ]
+                if app_exists
+                else []
+            )
         raise AssertionError(f"unexpected query: {sql}")
 
     return _q
@@ -944,20 +958,53 @@ def test_officer_who_is_not_an_applicant_is_allowed(monkeypatch):
     authz.deny_self_decision(1, "underwriter", "9")  # no raise
 
 
-def test_known_gap_self_submitted_application_not_linked_is_allowed(monkeypatch):
+def test_self_submitted_application_not_linked_is_now_blocked(monkeypatch):
     # D24 (docs/debt-log.md), PR #38 review: intake.create_application never links the
-    # applicants row it creates back to users.applicant_id, so an officer who submits an
-    # application through the ordinary apply flow under their own account -- a different
-    # applicant_id than their (usually NULL) users.applicant_id -- is not caught here. This
-    # pins the documented, out-of-scope-for-this-PR limit rather than letting it silently
-    # start passing (which would mean someone quietly fixed it without updating D24/authz.py)
-    # or silently start failing (a real regression this test exists to catch either way).
+    # applicants row it creates back to users.applicant_id, so account linkage alone
+    # (check 1) cannot catch an officer who submits their own application through the
+    # ordinary apply flow -- their users.applicant_id (often NULL) differs from the
+    # application's fresh applicant_id even though it is the same person on both sides.
+    # submitted_by_user_id (check 2) closes this: intake now persists the caller's
+    # X-User-Id at submit, and deny_self_decision compares it here. Same shape as the
+    # test this replaces (test_known_gap_self_submitted_application_not_linked_is_allowed
+    # asserted the bypass; this asserts the block).
     monkeypatch.setattr(
         authz.db,
         "query",
-        _self_decision_db({"applicant_id": None}, app_applicant_id=42),
+        _self_decision_db(
+            {"applicant_id": None}, app_applicant_id=42, submitted_by_user_id=9
+        ),
     )
-    authz.deny_self_decision(1, "underwriter", "9")  # no raise -- the known gap
+    with pytest.raises(HTTPException) as exc:
+        authz.deny_self_decision(1, "underwriter", "9")
+    assert exc.value.status_code == 403
+
+
+def test_self_submitted_by_someone_else_is_allowed(monkeypatch):
+    # Contrast: submitted_by_user_id set but to a DIFFERENT user -- an ordinary officer
+    # action on an application someone else submitted while logged in. Must not block.
+    monkeypatch.setattr(
+        authz.db,
+        "query",
+        _self_decision_db(
+            {"applicant_id": None}, app_applicant_id=42, submitted_by_user_id=3
+        ),
+    )
+    authz.deny_self_decision(1, "underwriter", "9")  # no raise
+
+
+def test_anonymously_submitted_application_is_allowed(monkeypatch):
+    # submitted_by_user_id NULL (the genuinely anonymous apply flow, still the common
+    # case) must not read as a match against any caller -- None == 9 is False, not a
+    # NULL-as-wildcard bug.
+    monkeypatch.setattr(
+        authz.db,
+        "query",
+        _self_decision_db(
+            {"applicant_id": None}, app_applicant_id=42, submitted_by_user_id=None
+        ),
+    )
+    authz.deny_self_decision(1, "underwriter", "9")  # no raise
 
 
 def test_officer_on_an_ownerless_application_is_allowed(monkeypatch):
