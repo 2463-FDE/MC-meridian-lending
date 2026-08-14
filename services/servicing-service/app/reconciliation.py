@@ -446,40 +446,59 @@ def reconcile(
             f"tolerance_days must not be negative: {tolerance_days}"
         )
 
-    settlement = load_settlement(path)
+    all_settlement = load_settlement(path)
 
     # D2(a). Default window is the settlement file's own range, and it applies to both
-    # sides identically. Known boundary property, stated rather than worked around: a
-    # capture on the day before `from_date` that settles on `from_date` is out of scope,
-    # so its settlement row reports MISSING_IN_LEDGER. The tolerance operates inside the
-    # window, not across its edge. Widening the ledger fetch by the tolerance instead
-    # would make the two sides span different periods — the P1 defect at the edge. The
-    # caller controls this by choosing the window (a calendar month, not the file's exact
-    # min/max).
-    window_from = from_date or min(r.settlement_date for r in settlement)
-    window_to = to_date or max(r.settlement_date for r in settlement)
+    # sides identically for TOTALS: `ledger`/`settlement` below, and everything derived
+    # from them (refunds, net/per-loan/gross variance), are cut to exactly
+    # window_from..window_to. Without this the comparison is the P1 defect with more
+    # steps (ledger_total() summed the whole payments table against a settlement file
+    # covering days).
+    window_from = from_date or min(r.settlement_date for r in all_settlement)
+    window_to = to_date or max(r.settlement_date for r in all_settlement)
     if window_from > window_to:
         raise ReconciliationAbort(
             f"window start {window_from} is after window end {window_to}"
         )
 
-    settlement = [
-        r for r in settlement if window_from <= r.settlement_date <= window_to
-    ]
-    ledger = load_ledger(window_from, window_to)
+    # D2(c) boundary fix. A capture the day before window_from that settles on
+    # window_from (or a ledger row on window_to settling the day after) is exactly the
+    # settlement lag the ±1 day tolerance exists to absorb — but a candidate pool
+    # pre-cut to the exact reporting window never gives it the chance: `_match` cannot
+    # pair a row it was never handed. The MATCHING candidate pool is widened by
+    # tolerance_days on each edge; TOTALS above stay on the narrow, true window, so
+    # this cannot reintroduce the P1 defect (a wider match, not a wider total).
+    candidate_from = window_from - timedelta(days=tolerance_days)
+    candidate_to = window_to + timedelta(days=tolerance_days)
 
-    # D2(e). Independent of matching and of `tolerance_days`: computed from the ledger
-    # alone, before `_match` runs, so a same-day double charge cannot hide behind the
-    # settlement-lag tolerance the way it does in `_match`'s output (D2(d)).
+    settlement = [
+        r for r in all_settlement if window_from <= r.settlement_date <= window_to
+    ]
+    settlement_candidates = [
+        r for r in all_settlement if candidate_from <= r.settlement_date <= candidate_to
+    ]
+
+    ledger_candidates = load_ledger(candidate_from, candidate_to)
+    ledger = [
+        r for r in ledger_candidates if window_from <= r.created_at.date() <= window_to
+    ]
+
+    # D2(e). Independent of matching and of `tolerance_days`: computed from the
+    # true-window ledger alone, before `_match` runs, so a same-day double charge
+    # cannot hide behind the settlement-lag tolerance the way it does in `_match`'s
+    # output (D2(d)).
     duplicates = _find_duplicate_suspects(ledger, _duplicate_suspect_window_seconds())
 
-    captures = [r for r in settlement if r.row_type == CAPTURE]
+    capture_candidates = [r for r in settlement_candidates if r.row_type == CAPTURE]
     refunds = [r for r in settlement if r.row_type == REFUND]
     matched_count, unmatched_ledger, unmatched_captures, mismatches = _match(
-        ledger, captures, tolerance_days
+        ledger_candidates, capture_candidates, tolerance_days
     )
     breaks: list = []
 
+    # A row the widened candidate pool pulled in from outside the true window that
+    # still failed to match is not this window's break to report — it is either out
+    # of scope entirely or belongs to whichever window actually contains it.
     breaks.extend(
         Break(
             break_class=MISSING_IN_SETTLEMENT,
@@ -490,6 +509,7 @@ def reconcile(
             detail="credited, never captured",
         )
         for row in unmatched_ledger
+        if window_from <= row.created_at.date() <= window_to
     )
     breaks.extend(
         Break(
@@ -501,6 +521,7 @@ def reconcile(
             detail="captured, never credited",
         )
         for row in unmatched_captures
+        if window_from <= row.settlement_date <= window_to
     )
     # A refund is a schema limitation, not a lost payment: `payments` has no direction
     # column, so it cannot hold a counterpart. Its own class, deliberately, so a
@@ -534,6 +555,10 @@ def reconcile(
             ),
         )
         for ledger_row, capture in mismatches
+        if (
+            window_from <= ledger_row.created_at.date() <= window_to
+            or window_from <= capture.settlement_date <= window_to
+        )
     )
     breaks.sort(key=lambda b: (b.break_class, b.loan_id, b.occurred_on, b.amount_minor))
 

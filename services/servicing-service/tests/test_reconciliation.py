@@ -490,22 +490,19 @@ def test_an_exact_match_is_never_reclassified_as_a_mismatch(ledger, tmp_path):
     assert missing[0].amount_minor == 9999
 
 
-def test_a_ledger_row_before_the_window_is_out_of_scope_not_matched(ledger, tmp_path):
-    """Pins a known boundary property of D2(a) so it is a decision, not an accident.
+def test_a_ledger_row_before_the_window_still_matches_within_tolerance(
+    ledger, tmp_path
+):
+    """D2(c) boundary fix (review finding, was pinned as a residual before this).
 
-    The window applies to both sides identically (D2(a)), so a capture on the day
-    before `--from` that settles on `--from` is out of scope and its settlement row
-    reports as MISSING_IN_LEDGER. The ±1 day tolerance operates *inside* the window,
-    not across its edge.
-
-    The alternative — widening the ledger fetch by the tolerance — makes the two
-    sides span different periods, which is the P1 defect (`ledger_total()` over the
-    whole table against seven days of settlement) reintroduced at the edge. The
-    caller controls this by choosing the window: a month-end run over a calendar
-    month, not over the file's exact min/max.
-
-    This is a residual for D3's report and D6's runbook to state, not a defect to
-    fix silently here.
+    A capture the day before `--from` that settles on `--from` is exactly the
+    settlement lag the ±1 day tolerance exists to absorb. The matching candidate
+    pool is widened by tolerance_days on each edge specifically so this pairs
+    instead of falsely reporting MISSING_IN_LEDGER — turning normal cutoff timing
+    into a customer-money break was the defect. TOTALS (net/per-loan/gross variance)
+    still use the narrow, true window, so this cannot reintroduce the P1 defect
+    (`ledger_total()` over the whole table against seven days of settlement) —
+    see test_a_boundary_match_does_not_widen_the_totals_window below.
     """
     ledger(
         [
@@ -522,6 +519,94 @@ def test_a_ledger_row_before_the_window_is_out_of_scope_not_matched(ledger, tmp_
     result = reconciliation.reconcile(
         from_date=dt.date(2026, 6, 1),
         to_date=dt.date(2026, 6, 30),
+        settlement_path=path,
+    )
+
+    assert klass(result, reconciliation.MISSING_IN_LEDGER) == []
+    assert klass(result, reconciliation.MISSING_IN_SETTLEMENT) == []
+    assert result.exit_code == reconciliation.EXIT_CLEAN
+
+
+def test_a_settlement_row_after_the_window_still_matches_within_tolerance(
+    ledger, tmp_path
+):
+    """The mirror case on the settlement side: a ledger row on `--to` that settles
+    the day after `--to` is the same cutoff lag, just at the other edge."""
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 6, 30, 9, 0, 0),
+            }
+        ]
+    )
+    path = write_settlement(tmp_path, ["2026-07-01,PR-100231,4471,250.00,capture"])
+
+    result = reconciliation.reconcile(
+        from_date=dt.date(2026, 6, 1),
+        to_date=dt.date(2026, 6, 30),
+        settlement_path=path,
+    )
+
+    assert klass(result, reconciliation.MISSING_IN_LEDGER) == []
+    assert klass(result, reconciliation.MISSING_IN_SETTLEMENT) == []
+    assert result.exit_code == reconciliation.EXIT_CLEAN
+
+
+def test_a_boundary_match_does_not_widen_the_totals_window(ledger, tmp_path):
+    """The widened candidate pool is for matching only — net/per-loan/gross variance
+    must still reflect the narrow, true window, or the boundary fix reintroduces the
+    P1 defect (a total over a period wider than the settlement side) in reverse.
+
+    The 5/31 ledger row here matches the 6/1 settlement row (no break), but since it
+    falls outside the true window it must not be counted in the window's ledger
+    total — net_variance_minor stays driven by the true-window sides only.
+    """
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 5, 31, 23, 50, 0),
+            }
+        ]
+    )
+    path = write_settlement(tmp_path, ["2026-06-01,PR-100231,4471,250.00,capture"])
+
+    result = reconciliation.reconcile(
+        from_date=dt.date(2026, 6, 1),
+        to_date=dt.date(2026, 6, 30),
+        settlement_path=path,
+    )
+
+    # Settlement side (true window) carries 250.00; ledger side (true window)
+    # carries nothing, since the only ledger row is outside window_from..window_to.
+    assert result.net_variance_minor == -25000
+    assert result.per_loan_absolute_minor == 25000
+
+
+def test_zero_tolerance_does_not_widen_the_candidate_pool(ledger, tmp_path):
+    """candidate_from/candidate_to collapse to window_from/window_to at ±0d — the
+    boundary widening is proportional to tolerance_days, not a fixed extra day."""
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 5, 31, 23, 50, 0),
+            }
+        ]
+    )
+    path = write_settlement(tmp_path, ["2026-06-01,PR-100231,4471,250.00,capture"])
+
+    result = reconciliation.reconcile(
+        from_date=dt.date(2026, 6, 1),
+        to_date=dt.date(2026, 6, 30),
+        tolerance_days=0,
         settlement_path=path,
     )
 
