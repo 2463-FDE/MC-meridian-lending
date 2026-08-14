@@ -968,6 +968,80 @@ def test_a_third_same_amount_row_pairs_once_not_twice(ledger, tmp_path):
     assert result.duplicates[0].second_payment_id == 2
 
 
+def test_a_duplicate_pair_split_across_the_window_edge_is_still_detected(
+    ledger, tmp_path
+):
+    """Review finding: a retry pair split across window_from midnight (23:59:59 the
+    day before, 00:00:01 on window_from) is within DUPLICATE_SUSPECT_WINDOW_SECONDS
+    of each other, but the narrow true-window ledger only ever holds the second row.
+    A scan restricted to that narrow ledger would never see the pair -- exactly the
+    seconds-to-minutes duplicate class this control exists to catch, missed at every
+    scheduled daily window boundary.
+    """
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 5, 31, 23, 59, 59),
+            },
+            {
+                "id": 2,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 6, 1, 0, 0, 1),
+            },
+        ],
+        window_seconds="120",
+    )
+    path = write_settlement(tmp_path, ["2026-06-01,PR-1,4471,250.00,capture"])
+
+    result = reconciliation.reconcile(
+        from_date=dt.date(2026, 6, 1),
+        to_date=dt.date(2026, 6, 30),
+        settlement_path=path,
+    )
+
+    assert len(result.duplicates) == 1
+    dup = result.duplicates[0]
+    assert dup.first_payment_id == 1
+    assert dup.second_payment_id == 2
+    assert dup.gap_seconds == 2
+
+
+def test_a_duplicate_pair_entirely_outside_the_window_is_not_reported(ledger, tmp_path):
+    """The mirror case: both rows of a pair sit outside window_from..window_to. It
+    is not this window's signal to report -- it belongs to whichever window
+    actually contains it, not a window it merely lands near."""
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 5, 31, 23, 59, 58),
+            },
+            {
+                "id": 2,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 5, 31, 23, 59, 59),
+            },
+        ],
+        window_seconds="120",
+    )
+    path = write_settlement(tmp_path, ["2026-06-01,PR-1,9999,1.00,capture"])
+
+    result = reconciliation.reconcile(
+        from_date=dt.date(2026, 6, 1),
+        to_date=dt.date(2026, 6, 30),
+        settlement_path=path,
+    )
+
+    assert result.duplicates == []
+
+
 # --- Duplicate-window config, fail closed (D2(e)) ---------------------------------
 
 

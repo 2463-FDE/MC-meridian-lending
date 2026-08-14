@@ -488,11 +488,35 @@ def reconcile(
         r for r in ledger_candidates if window_from <= r.created_at.date() <= window_to
     ]
 
-    # D2(e). Independent of matching and of `tolerance_days`: computed from the
-    # true-window ledger alone, before `_match` runs, so a same-day double charge
-    # cannot hide behind the settlement-lag tolerance the way it does in `_match`'s
-    # output (D2(d)).
-    duplicates = _find_duplicate_suspects(ledger, _duplicate_suspect_window_seconds())
+    # D2(e) boundary fix (review finding). A retry pair split across the window edge
+    # -- e.g. 23:59:59 the day before window_from and 00:00:01 on window_from -- is
+    # within DUPLICATE_SUSPECT_WINDOW_SECONDS of each other, but the narrow
+    # true-window `ledger` above only ever holds one side of it, so a scan over
+    # `ledger` alone never sees the pair. The candidate pool for THIS scan is
+    # widened separately, by the duplicate window itself, not by tolerance_days --
+    # they are unrelated configuration values. `date` arithmetic ignores the
+    # sub-day part of a `timedelta` (`date - timedelta(seconds=90)` is a no-op), so
+    # the margin is computed in whole days, generous by construction: the exact
+    # datetime gap comparison still happens inside `_find_duplicate_suspects`, so
+    # over-fetching by up to a day cannot manufacture a false pair, only avoid
+    # missing a true one that a day-granularity fetch would otherwise cut off.
+    duplicate_window_seconds = _duplicate_suspect_window_seconds()
+    duplicate_margin_days = duplicate_window_seconds // 86400 + 1
+    duplicate_candidates = load_ledger(
+        window_from - timedelta(days=duplicate_margin_days),
+        window_to + timedelta(days=duplicate_margin_days),
+    )
+    # A pair entirely outside the true window is not this window's signal to
+    # report -- it belongs to whichever window actually contains it.
+    true_window_payment_ids = {row.payment_id for row in ledger}
+    duplicates = [
+        suspect
+        for suspect in _find_duplicate_suspects(
+            duplicate_candidates, duplicate_window_seconds
+        )
+        if suspect.first_payment_id in true_window_payment_ids
+        or suspect.second_payment_id in true_window_payment_ids
+    ]
 
     capture_candidates = [r for r in settlement_candidates if r.row_type == CAPTURE]
     refunds = [r for r in settlement if r.row_type == REFUND]
