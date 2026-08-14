@@ -223,14 +223,8 @@ def reconciliation_peek(
         "net_variance_minor": result.net_variance_minor,
         "per_loan_absolute_minor": result.per_loan_absolute_minor,
         "gross_break_minor": result.gross_break_minor,
-        "duplicate_suspects": [
-            {
-                "loan_id": d.loan_id,
-                "amount_minor": d.amount_minor,
-                "occurred_on": d.occurred_on.isoformat(),
-                "gap_seconds": d.gap_seconds,
-            }
-            for d in result.duplicates
-        ],
+        # Count only, matching break_counts' aggregate shape — the itemized pairs
+        # (loan_id, amount, gap) are for D3's report, not this summary route.
+        "duplicate_suspect_count": len(result.duplicates),
         "exit_code": result.exit_code,
     }

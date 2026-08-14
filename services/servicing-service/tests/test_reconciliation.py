@@ -705,14 +705,7 @@ def test_peek_returns_the_break_summary_to_an_internal_caller(ledger, monkeypatc
     assert body["exit_code"] == reconciliation.EXIT_BREAKS
     assert "ledger_total" not in body
     assert "settlement_total" not in body
-    assert body["duplicate_suspects"] == [
-        {
-            "loan_id": 5582,
-            "amount_minor": 41050,
-            "occurred_on": "2026-06-01",
-            "gap_seconds": 2,
-        }
-    ]
+    assert body["duplicate_suspect_count"] == 1
 
 
 def test_fail_open_total_helpers_are_gone():
