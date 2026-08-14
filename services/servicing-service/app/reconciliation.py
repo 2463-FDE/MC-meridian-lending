@@ -226,7 +226,22 @@ class ReconciliationResult:
 
     @property
     def exit_code(self) -> int:
-        if self.breaks:
+        """D2(g). Driven by `duplicates` as well as `breaks` (review finding).
+
+        A duplicate charge absorbed by matching leaves `breaks` empty while
+        `duplicates` holds the whole finding, so an exit code derived from `breaks`
+        alone reported the run clean and the cron or operator keying off it missed
+        precisely the double-charge signal D2(e) exists to raise. A duplicate is
+        still not a break and still enters no variance figure — it changes the
+        status, not the arithmetic.
+
+        Deliberately NOT driven by the variance figures: nonzero variance with an
+        empty `breaks` list has one cause, a match pairing across the window edge,
+        which is the settlement lag the tolerance absorbs by design (D2(c), and
+        `test_a_boundary_match_is_the_only_way_variance_survives_a_clean_exit`).
+        That money reconciles into the adjacent window rather than going missing.
+        """
+        if self.breaks or self.duplicates:
             return EXIT_BREAKS
         return EXIT_CLEAN
 

@@ -1117,6 +1117,92 @@ def test_a_duplicate_pair_entirely_outside_the_window_is_not_reported(ledger, tm
     assert result.duplicates == []
 
 
+def test_a_duplicate_only_run_does_not_exit_clean(ledger, tmp_path):
+    """D2(g), review finding. Matching absorbs the duplicate under the tolerance, so
+    `breaks` is empty and both sides tie out to zero variance -- the run's ONLY
+    finding is the duplicate pair. An exit code derived from `breaks` alone reported
+    that as reconciled-clean, so the cron or operator keying off the exit code missed
+    exactly the double-charge signal (e) exists to raise.
+    """
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 5582,
+                "amount": 410.50,
+                "created_at": dt.datetime(2026, 6, 1, 9, 31, 4),
+            },
+            {
+                "id": 2,
+                "loan_id": 5582,
+                "amount": 410.50,
+                "created_at": dt.datetime(2026, 6, 1, 9, 31, 6),
+            },
+        ]
+    )
+    path = write_settlement(
+        tmp_path,
+        [
+            "2026-06-01,PR-1,5582,410.50,capture",
+            "2026-06-02,PR-2,5582,410.50,capture",
+        ],
+    )
+
+    result = reconciliation.reconcile(
+        from_date=dt.date(2026, 6, 1), to_date=dt.date(2026, 6, 2), settlement_path=path
+    )
+
+    # The duplicate is the only finding: nothing else in the run is out of place.
+    assert result.breaks == []
+    assert result.net_variance_minor == 0
+    assert result.per_loan_absolute_minor == 0
+    assert len(result.duplicates) == 1
+    assert result.exit_code == reconciliation.EXIT_BREAKS
+
+
+def test_a_boundary_match_is_the_only_way_variance_survives_a_clean_exit(
+    ledger, tmp_path
+):
+    """D2(g) pin, against a review finding that asked for any nonzero variance to
+    force a non-clean exit.
+
+    Nonzero variance with an empty `breaks` list has exactly one cause: a match that
+    pairs across the window edge, which is the settlement lag the tolerance exists to
+    absorb (see test_a_ledger_row_before_the_window_still_matches_within_tolerance).
+    Every other suppressed row sits outside the narrow window on BOTH sides, so it
+    contributes nothing to the totals either. The money is not unaccounted for -- it
+    reconciles into the adjacent window -- so forcing exit 1 here would report
+    ordinary cutoff timing as a break, which is the defect the boundary fix removed.
+
+    This pins the pairing (variance nonzero AND clean AND explained) so a later change
+    cannot quietly make a clean exit hide variance from some OTHER cause.
+    """
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 5, 31, 23, 50, 0),
+            }
+        ]
+    )
+    path = write_settlement(tmp_path, ["2026-06-01,PR-100231,4471,250.00,capture"])
+
+    result = reconciliation.reconcile(
+        from_date=dt.date(2026, 6, 1),
+        to_date=dt.date(2026, 6, 30),
+        settlement_path=path,
+    )
+
+    assert result.breaks == []
+    assert result.duplicates == []
+    assert result.matched_count == 1
+    # Nonzero purely because the ledger side of the matched pair sits in May.
+    assert result.net_variance_minor == -25000
+    assert result.exit_code == reconciliation.EXIT_CLEAN
+
+
 # --- Duplicate-window config, fail closed (D2(e)) ---------------------------------
 
 
