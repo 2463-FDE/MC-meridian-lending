@@ -827,6 +827,43 @@ def test_v_sample_reports_all_three_labelled_figures(ledger):
     assert result.gross_break_minor == 175318
 
 
+def test_a_duplicate_settlement_row_is_not_collapsed_by_a_set(ledger, tmp_path):
+    """Review finding — two settlement rows identical on every `SettlementRow` field
+    (date, processor_ref, loan_id, amount, type) are two real money movements, not
+    one. `settlement_captures_minor` was summed from a `frozenset` of `SettlementRow`,
+    so the two rows collapsed to one element and the reported capture total silently
+    dropped a duplicate. `settlement_by_loan` (net_variance) always summed the list, so
+    a real duplicate produced a report whose per-side totals did not reconcile to the
+    reported variance.
+    """
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 6, 1, 9, 14, 11),
+            }
+        ]
+    )
+    path = write_settlement(
+        tmp_path,
+        [
+            "2026-06-01,PR-100231,4471,250.00,capture",
+            "2026-06-01,PR-100231,4471,250.00,capture",
+        ],
+    )
+
+    result = reconciliation.reconcile(settlement_path=path)
+
+    assert result.settlement_row_count == 2
+    assert result.settlement_captures_minor == 50000
+    assert result.settlement_net_minor == 50000
+    assert result.net_variance_minor == -25000
+    assert len(klass(result, reconciliation.MISSING_IN_LEDGER)) == 1
+    assert minor(klass(result, reconciliation.MISSING_IN_LEDGER)) == 25000
+
+
 def test_v_sample_tight_zero_day_window(ledger):
     """V-SAMPLE-TIGHT — ±0d: 7 breaks, gross 257418, net unchanged at −88882.
 
