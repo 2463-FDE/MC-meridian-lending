@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 import time
 from urllib.parse import unquote, urlparse
@@ -181,6 +182,11 @@ def missing_required_secrets() -> list:
     # the hidden-control-failure class this whole change exists to remove.
     if not duplicate_suspect_window_configured():
         missing.append("DUPLICATE_SUSPECT_WINDOW_SECONDS")
+    # D4's alert threshold, same posture: unguarded, a deploy would pass /health and the
+    # month-end run would abort — the operator learns the control was never configured at
+    # the moment they need its answer.
+    if not reconciliation_alert_threshold_configured():
+        missing.append("RECONCILIATION_ALERT_THRESHOLD_MINOR")
     return missing
 
 
@@ -218,6 +224,43 @@ DUPLICATE_SUSPECT_WINDOW_SECONDS = os.getenv("DUPLICATE_SUSPECT_WINDOW_SECONDS",
 # source of truth: reconciliation.py imports this rather than redeclaring it, so the
 # /health check below and the abort it mirrors can never drift apart.
 MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS = 30 * 24 * 60 * 60
+
+
+# Alert threshold for reconciliation (spec D4), in MINOR units — the client's answer of
+# 2026-08-14 set it at $5.00 aggregate, so 500. No default, same reason as the bound
+# above: a guessed threshold either alerts on everything or on nothing, and both read as
+# a working control. Env only; reconciliation.py aborts (EXIT_ABORT) rather than run with
+# it unset or invalid.
+RECONCILIATION_ALERT_THRESHOLD_MINOR = os.getenv(
+    "RECONCILIATION_ALERT_THRESHOLD_MINOR", ""
+)
+
+# D4's threshold, same posture as the money parsers it guards: `int()` alone accepts
+# "1_000" and "+500", neither of which reads like a figure a person typed into a
+# deploy. Single source of truth: reconciliation.py imports this rather than
+# redeclaring it, so the /health check below and the abort it mirrors can never
+# drift apart the way they did before (readiness took bare int(), runtime took this
+# regex, and the two disagreed on "1_000" and "+500").
+_PLAIN_INTEGER = re.compile(r"^\d+$")
+
+
+def reconciliation_alert_threshold_configured() -> bool:
+    """True only when RECONCILIATION_ALERT_THRESHOLD_MINOR is a plain positive integer.
+
+    Zero is rejected rather than read as "alert on any variance": the one way variance
+    is nonzero with an empty break list is a match pairing across the window edge, which
+    is the settlement lag the tolerance absorbs by design, so a zero threshold would
+    alert on ordinary cut-off timing every close. An operator who wants that should say
+    so with a 1, not with a value that also reads as "unset".
+
+    Same validity reconciliation.py's _alert_threshold_minor() enforces (same regex,
+    imported from here), checked here so a misconfigured deploy fails /health rather
+    than only failing on the first run.
+    """
+    raw = (RECONCILIATION_ALERT_THRESHOLD_MINOR or "").strip()
+    if not raw or not _PLAIN_INTEGER.match(raw):
+        return False
+    return int(raw) > 0
 
 
 def duplicate_suspect_window_configured() -> bool:

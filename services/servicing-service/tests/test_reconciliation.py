@@ -309,6 +309,13 @@ SEEDED_LEDGER = [
 ]
 
 
+# D4's threshold, deliberately far above every figure in this file: the tests here
+# predate the alert and assert exit codes that must keep meaning what they meant. D4's
+# own file (test_reconciliation_alert.py) sets the client's real 500 and owns the
+# question of when it fires.
+_ALERT_THRESHOLD_ABOVE_EVERY_FIGURE_HERE = "100000000"
+
+
 class Recorder:
     """Stub for `app.db.query` that records every statement it was handed."""
 
@@ -334,14 +341,25 @@ def ledger(monkeypatch):
     """Stub the ledger side; defaults to the seeded June rows.
 
     Also sets a valid DUPLICATE_SUSPECT_WINDOW_SECONDS (D2(e)) so tests that reach
-    duplicate detection succeed by default; pass window_seconds to override.
+    duplicate detection succeed by default; pass window_seconds to override. Same for
+    D4's RECONCILIATION_ALERT_THRESHOLD_MINOR — both fail closed, so an unset one aborts
+    every run in this file rather than only the tests that care about it.
     """
 
-    def _install(rows=SEEDED_LEDGER, window_seconds="120"):
+    def _install(
+        rows=SEEDED_LEDGER,
+        window_seconds="120",
+        alert_threshold_minor=_ALERT_THRESHOLD_ABOVE_EVERY_FIGURE_HERE,
+    ):
         recorder = Recorder(rows)
         monkeypatch.setattr(reconciliation.db, "query", recorder)
         monkeypatch.setattr(
             reconciliation, "DUPLICATE_SUSPECT_WINDOW_SECONDS", window_seconds
+        )
+        monkeypatch.setattr(
+            reconciliation,
+            "RECONCILIATION_ALERT_THRESHOLD_MINOR",
+            alert_threshold_minor,
         )
         return recorder
 
@@ -807,6 +825,43 @@ def test_v_sample_reports_all_three_labelled_figures(ledger):
     assert result.net_variance_minor == -88882
     assert result.per_loan_absolute_minor == 175318
     assert result.gross_break_minor == 175318
+
+
+def test_a_duplicate_settlement_row_is_not_collapsed_by_a_set(ledger, tmp_path):
+    """Review finding — two settlement rows identical on every `SettlementRow` field
+    (date, processor_ref, loan_id, amount, type) are two real money movements, not
+    one. `settlement_captures_minor` was summed from a `frozenset` of `SettlementRow`,
+    so the two rows collapsed to one element and the reported capture total silently
+    dropped a duplicate. `settlement_by_loan` (net_variance) always summed the list, so
+    a real duplicate produced a report whose per-side totals did not reconcile to the
+    reported variance.
+    """
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 6, 1, 9, 14, 11),
+            }
+        ]
+    )
+    path = write_settlement(
+        tmp_path,
+        [
+            "2026-06-01,PR-100231,4471,250.00,capture",
+            "2026-06-01,PR-100231,4471,250.00,capture",
+        ],
+    )
+
+    result = reconciliation.reconcile(settlement_path=path)
+
+    assert result.settlement_row_count == 2
+    assert result.settlement_captures_minor == 50000
+    assert result.settlement_net_minor == 50000
+    assert result.net_variance_minor == -25000
+    assert len(klass(result, reconciliation.MISSING_IN_LEDGER)) == 1
+    assert minor(klass(result, reconciliation.MISSING_IN_LEDGER)) == 25000
 
 
 def test_v_sample_tight_zero_day_window(ledger):
@@ -1328,7 +1383,15 @@ def test_an_outside_pair_does_not_consume_the_row_a_window_retry_pairs_with(
 
 
 def test_missing_duplicate_window_env_aborts(monkeypatch, tmp_path):
+    """The alert threshold is set here so the abort under test is the only one armed —
+    both settings fail closed, and an assertion on the message must not depend on which
+    of the two `reconcile()` happens to resolve first."""
     monkeypatch.setattr(reconciliation.db, "query", Recorder([]))
+    monkeypatch.setattr(
+        reconciliation,
+        "RECONCILIATION_ALERT_THRESHOLD_MINOR",
+        _ALERT_THRESHOLD_ABOVE_EVERY_FIGURE_HERE,
+    )
     monkeypatch.setattr(reconciliation, "DUPLICATE_SUSPECT_WINDOW_SECONDS", "")
     path = write_settlement(tmp_path, ["2026-06-01,PR-1,4471,250.00,capture"])
 
@@ -1345,6 +1408,11 @@ def test_invalid_duplicate_window_env_aborts(monkeypatch, tmp_path, bad_value):
     instead of ReconciliationAbort — a fail-closed contract violation on a
     misconfigured operator value."""
     monkeypatch.setattr(reconciliation.db, "query", Recorder([]))
+    monkeypatch.setattr(
+        reconciliation,
+        "RECONCILIATION_ALERT_THRESHOLD_MINOR",
+        _ALERT_THRESHOLD_ABOVE_EVERY_FIGURE_HERE,
+    )
     monkeypatch.setattr(reconciliation, "DUPLICATE_SUSPECT_WINDOW_SECONDS", bad_value)
     path = write_settlement(tmp_path, ["2026-06-01,PR-1,4471,250.00,capture"])
 
