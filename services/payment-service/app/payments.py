@@ -50,6 +50,17 @@ _REQUEST_ID_OK = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _MAX_REQUEST_ID_DIGITS = 9
 _ASCII_DIGIT = re.compile(r"[0-9]")
 
+# servicing-service re-applies this SAME ceiling to whatever X-Request-Id it
+# receives (services/servicing-service/app/main.py, _span_request_id) -- that
+# route is reachable directly, so it re-validates rather than trusting the
+# header. A raw uuid4 hex fails that check near-certainly (32 hex chars average
+# ~20 digits), so a generated id was logged in full here but replaced with "-"
+# on servicing's line -- the two halves of the span stopped sharing an id for
+# every no-header or refused-header request (Codex review). Mapping each hex
+# digit to a letter keeps uuid4's entropy and the accepted charset while
+# guaranteeing zero digits, so the ceiling can never trigger on a generated id.
+_HEX_DIGIT_TO_LETTER = str.maketrans("0123456789", "ghijklmnop")
+
 
 def new_request_id(supplied: str = None) -> str:
     """The span's id: the caller's when it is one the log can carry, else a fresh one.
@@ -76,10 +87,11 @@ def new_request_id(supplied: str = None) -> str:
         and len(_ASCII_DIGIT.findall(supplied)) < _MAX_REQUEST_ID_DIGITS
     ):
         return supplied
-    # Not subject to the ceiling above: this value carries no caller input, so a
-    # random digit run in it is not a borrower's SSN. The charset matches what a
-    # caller may supply, so both branches produce the same shape of field.
-    return uuid.uuid4().hex
+    # Not subject to the ceiling check above: this value carries no caller
+    # input, so a random digit run in it is not a borrower's SSN. It still has
+    # to survive servicing-service's own re-application of that ceiling on the
+    # header it receives -- see _HEX_DIGIT_TO_LETTER above.
+    return uuid.uuid4().hex.translate(_HEX_DIGIT_TO_LETTER)
 
 
 def _mask_ssn(ssn):

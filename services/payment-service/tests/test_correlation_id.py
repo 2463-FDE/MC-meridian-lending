@@ -102,8 +102,8 @@ def test_generated_request_id_is_one_id_shared_by_the_whole_span(monkeypatch):
     ids = {p["request_id"] for p in _fields(lines)}
     assert len(ids) == 1, f"the span must share one id, got {ids}: {lines}"
     generated = ids.pop()
-    assert re.fullmatch(r"[0-9a-f]{32}", generated), (
-        f"expected a uuid4 hex, got {generated!r}"
+    assert re.fullmatch(r"[a-p]{32}", generated), (
+        f"expected a digit-mapped uuid4 hex (letters only), got {generated!r}"
     )
     assert captured["headers"]["X-Request-Id"] == generated
 
@@ -253,7 +253,7 @@ def test_hostile_request_id_is_not_logged_verbatim(monkeypatch):
     assert "forged line" not in joined, f"log injection via X-Request-Id: {lines}"
     ids = {p["request_id"] for p in _fields(lines)}
     assert len(ids) == 1
-    assert re.fullmatch(r"[0-9a-f]{32}", ids.pop()), (
+    assert re.fullmatch(r"[a-p]{32}", ids.pop()), (
         f"a rejected id must fall back to a generated one, not to empty: {lines}"
     )
 
@@ -297,7 +297,7 @@ def test_pii_shaped_request_id_reaches_neither_the_log_nor_servicing(monkeypatch
         ids = {p["request_id"] for p in _fields(lines)}
         assert len(ids) == 1, f"{label}: the span must still share one id, got {ids}"
         generated = ids.pop()
-        assert re.fullmatch(r"[0-9a-f]{32}", generated), (
+        assert re.fullmatch(r"[a-p]{32}", generated), (
             f"{label}: a refused id must fall back to a generated one: {lines}"
         )
         assert captured["headers"]["X-Request-Id"] == generated, (
@@ -331,4 +331,33 @@ def test_replaced_request_id_is_returned_to_the_caller(monkeypatch):
 
     assert "request_id" in result, "caller has no way to recover the effective id"
     assert result["request_id"] != hostile
-    assert re.fullmatch(r"[0-9a-f]{32}", result["request_id"])
+    assert re.fullmatch(r"[a-p]{32}", result["request_id"])
+
+
+# Mirrors servicing-service's _span_request_id validation
+# (services/servicing-service/app/main.py) exactly: the same charset and the
+# same 9-digit ceiling, since that route is reachable directly and
+# re-validates every X-Request-Id rather than trusting the header. A raw
+# uuid4 hex clears the charset but fails the digit ceiling near-certainly (32
+# hex chars average ~20 digits), so before the fix a generated id was logged
+# in full here but replaced with "-" on servicing's line for every no-header
+# or refused-header request -- the two halves of the span stopped sharing an
+# id (Codex review, PR 41).
+_SERVICING_REQUEST_ID_OK = re.compile(r"[A-Za-z0-9._-]{1,64}")
+_SERVICING_MAX_DIGITS = 9
+
+
+def test_generated_request_id_survives_servicings_independent_revalidation():
+    """The id minted with no caller header, or a refused one, must clear
+    servicing's own re-application of the digit ceiling -- not just this
+    service's. Run many times: the fallback is random (uuid4-derived), and a
+    single generation passing by chance would not prove the invariant."""
+    for _ in range(50):
+        generated = payments.new_request_id()
+        assert _SERVICING_REQUEST_ID_OK.fullmatch(generated), generated
+        digits = len(re.findall(r"[0-9]", generated))
+        assert digits < _SERVICING_MAX_DIGITS, (
+            f"generated id {generated!r} carries {digits} digits -- "
+            "servicing-service will replace it with '-', breaking span "
+            "correlation for this request"
+        )
