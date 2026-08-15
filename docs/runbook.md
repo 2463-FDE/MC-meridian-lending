@@ -127,12 +127,36 @@ goes to **stdout** (pipe it), the human summary to **stderr** (read it).
 default and the job exits `2` without it, rather than scan for double charges against a
 guessed bound.
 
+**Requires `RECONCILIATION_ALERT_THRESHOLD_MINOR`** (minor units; `500` in `.env.example`,
+which is the $5.00 the client set on 2026-08-14). Also no default, also exit `2` without it.
+
+**The alert.** One alert, and it fires when the window's **per-loan absolute variance exceeds
+the threshold**. Not the net — the net cancels opposite-signed breaks, and on the sample file
+that is −88882 against 175318 absolute, so netting hides roughly half the error. Not the gross
+break value — that moves with the matching tolerance (175318 at ±1 day, 257418 at ±0), so a
+threshold measured against it would shift whenever someone tuned a constant. `DUPLICATE_SUSPECT`
+does not feed it: a duplicate carries no variance, and counting it would count the same money
+twice. The report states the threshold beside the result, so a reader never has to look up the
+deploy's environment to interpret it.
+
+**Individual breaks are listed whatever their size.** The threshold gates the alert only. A
+sub-threshold break still appears in the exception output — the client asked for that
+explicitly.
+
+**Expect it to fire on the current data.** Per-loan absolute variance on the seeded sample is
+175318 minor against a 500 threshold — roughly 350×, and loan 4471 alone is 50000, or 100×.
+That is the open exception for PR-100290 / PR-100311 showing up in the alert exactly as
+intended, not a mis-set threshold.
+
+A daily close is this same job run with `--from` and `--to` set to the same date. Nothing in
+this stack schedules it; the crontab line below is the operator's.
+
 **Exit codes — a cron must not treat these as pass/fail.**
 
 | Code | Meaning | Operator action |
 |---|---|---|
-| `0` | Reconciled, nothing found | None |
-| `1` | Reconciled, breaks found | Work the break list below |
+| `0` | Reconciled, nothing found, variance within the threshold | None |
+| `1` | Reconciled, breaks found **or the alert fired** | Work the break list below |
 | `2` | **ABORT** — could not run the comparison | Fix the cause and re-run. **Not** a clean result |
 
 `2` means the settlement file was absent, unreadable, empty, missing a column, or held a row

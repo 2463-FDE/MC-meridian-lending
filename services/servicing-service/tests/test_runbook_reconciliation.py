@@ -30,6 +30,24 @@ BREAK_CLASSES = (
 )
 
 
+def _env_value(name: str) -> str:
+    """The single declaration of `name` in `.env.example`, or fail loudly.
+
+    Two declarations mean the file disagrees with itself and neither the runbook nor a
+    deploy can be graded against it.
+    """
+    assert ENV_EXAMPLE.exists(), f".env.example not found at {ENV_EXAMPLE}"
+    declared = [
+        line.split("=", 1)[1].strip()
+        for line in ENV_EXAMPLE.read_text().splitlines()
+        if line.startswith(f"{name}=")
+    ]
+    assert len(declared) == 1, (
+        f"expected exactly one {name} in .env.example, found {len(declared)}"
+    )
+    return declared[0]
+
+
 @pytest.fixture(scope="module")
 def runbook():
     assert RUNBOOK.exists(), f"runbook not found at {RUNBOOK}"
@@ -65,6 +83,24 @@ def test_every_exit_code_is_documented_with_its_meaning(runbook):
 def test_the_fail_closed_setting_is_named(runbook):
     """The job exits 2 without it, so an operator must be told it exists."""
     assert "DUPLICATE_SUSPECT_WINDOW_SECONDS" in runbook
+
+
+def test_the_alert_setting_and_its_value_are_documented(runbook):
+    """D4. The alert is delivered through the exit code an operator's cron reads, so the
+    setting that arms it, the figure it measures and the value it is measured against all
+    have to be on the page they read at month-end. Value checked against `.env.example`
+    for the same reason as the bound above."""
+    assert "RECONCILIATION_ALERT_THRESHOLD_MINOR" in runbook
+    assert "per-loan absolute variance" in runbook
+    assert _env_value("RECONCILIATION_ALERT_THRESHOLD_MINOR") == "500"
+    assert "`500`" in runbook
+
+
+def test_the_runbook_does_not_promise_the_threshold_filters_the_report(runbook):
+    """The client asked that individual unmatched transactions appear regardless of
+    amount. A runbook implying the threshold suppresses small breaks would have an
+    operator stop looking for them."""
+    assert "gates the alert only" in runbook
 
 
 def test_the_documented_window_value_matches_env_example(runbook):

@@ -37,6 +37,7 @@ from . import db
 from .config import (
     DUPLICATE_SUSPECT_WINDOW_SECONDS,
     MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS,
+    RECONCILIATION_ALERT_THRESHOLD_MINOR,
     SETTLEMENT_FILE,
 )
 
@@ -72,6 +73,8 @@ REQUIRED_COLUMNS = ("settlement_date", "processor_ref", "loan_id", "amount", "ty
 # figure while reading nothing like one. Same posture as the disclosure figure check.
 _PLAIN_DECIMAL = re.compile(r"^\d+(\.\d+)?$")
 _MINOR_UNITS_PER_MAJOR = Decimal(100)
+# D4's threshold, same posture: `int()` alone accepts "1_000" and "+500".
+_PLAIN_INTEGER = re.compile(r"^\d+$")
 
 
 class ReconciliationAbort(Exception):
@@ -230,10 +233,38 @@ class ReconciliationResult:
     settlement_row_count: int = 0
     settlement_captures_minor: int = 0
     settlement_refunds_minor: int = 0
+    # D4. The threshold this run was measured against, carried on the result so the
+    # report states the number rather than leaving a reader to look it up in a deploy's
+    # environment.
+    alert_threshold_minor: int = 0
 
     @property
     def settlement_net_minor(self) -> int:
         return self.settlement_captures_minor - self.settlement_refunds_minor
+
+    @property
+    def alert_triggered(self) -> bool:
+        """D4. One alert: per-loan absolute variance EXCEEDS the threshold.
+
+        Three properties, each against a rejected alternative (spec D4):
+
+        - Absolute, not net. Netting is the failure mode — it is what let three defects
+          present as one small number.
+        - Per-loan absolute, not gross break value. Gross moves with the matching
+          tolerance (175318 at +/-1 day, 257418 at +/-0); a threshold that shifts when
+          someone tunes a constant is not a threshold.
+        - Value, not count. Breaks exist in the sample today, so a count-based alert
+          fires every day until unrelated work lands, which is how an alert becomes
+          noise.
+
+        Strictly greater, matching "exceeds": a variance exactly at the threshold is the
+        largest variance the client called acceptable, not the smallest one they wanted
+        to hear about.
+
+        DUPLICATE_SUSPECT does not feed this — it carries no variance (D2(e)), and
+        adding it would count money already counted on one side.
+        """
+        return self.per_loan_absolute_minor > self.alert_threshold_minor
 
     @property
     def exit_code(self) -> int:
@@ -246,13 +277,19 @@ class ReconciliationResult:
         still not a break and still enters no variance figure — it changes the
         status, not the arithmetic.
 
-        Deliberately NOT driven by the variance figures: nonzero variance with an
-        empty `breaks` list has one cause, a match pairing across the window edge,
-        which is the settlement lag the tolerance absorbs by design (D2(c), and
-        `test_a_boundary_match_is_the_only_way_variance_survives_a_clean_exit`).
-        That money reconciles into the adjacent window rather than going missing.
+        Driven by the variance figures ONLY through D4's threshold, never by their
+        being nonzero. Nonzero variance with an empty `breaks` list has one cause, a
+        match pairing across the window edge, which is the settlement lag the tolerance
+        absorbs by design (D2(c), and
+        `test_a_boundary_match_is_the_only_way_variance_survives_a_clean_exit`) — that
+        money reconciles into the adjacent window rather than going missing, so it must
+        not force a non-clean exit on its own. Above the threshold the client set, it is
+        no longer "on its own": they asked to hear about an aggregate difference over
+        that value whatever produced it, and the exit code is the channel D4 delivers
+        through (no new alerting infrastructure). So the boundary case stays clean while
+        it is small and stops being clean once it is material.
         """
-        if self.breaks or self.duplicates:
+        if self.breaks or self.duplicates or self.alert_triggered:
             return EXIT_BREAKS
         return EXIT_CLEAN
 
@@ -481,6 +518,37 @@ def _duplicate_suspect_window_seconds() -> int:
     return seconds
 
 
+def _alert_threshold_minor() -> int:
+    """D4. No default: a guessed threshold alerts on everything or on nothing.
+
+    Both read as a working control from the outside, which is the hidden-control-failure
+    class this whole change exists to remove. The client set the value on 2026-08-14
+    ($5.00 aggregate, so 500 minor units); it lives in configuration so that answer can
+    change without a code change. Zero is refused for the reason given in
+    config.reconciliation_alert_threshold_configured().
+    """
+    raw = (RECONCILIATION_ALERT_THRESHOLD_MINOR or "").strip()
+    if not raw:
+        raise ReconciliationAbort(
+            "RECONCILIATION_ALERT_THRESHOLD_MINOR is not set; the alert cannot run "
+            "without a threshold"
+        )
+    # A plain digit run, nothing else. `int()` accepts "1_000" and "+500", both of
+    # which read nothing like a figure a person typed into a deploy — the same reason
+    # _PLAIN_DECIMAL guards the money parser above. A threshold is money too.
+    if not _PLAIN_INTEGER.match(raw):
+        raise ReconciliationAbort(
+            f"RECONCILIATION_ALERT_THRESHOLD_MINOR={raw!r} is not a plain integer "
+            "number of minor units"
+        )
+    threshold = int(raw)
+    if threshold <= 0:
+        raise ReconciliationAbort(
+            f"RECONCILIATION_ALERT_THRESHOLD_MINOR={threshold} must be positive"
+        )
+    return threshold
+
+
 def _find_duplicate_suspects(
     ledger: list, window_seconds: int, true_window_payment_ids: frozenset
 ) -> list:
@@ -613,6 +681,9 @@ def reconcile(
     # datetime gap comparison still happens inside `_find_duplicate_suspects`, so
     # over-fetching by up to a day cannot manufacture a false pair, only avoid
     # missing a true one that a day-granularity fetch would otherwise cut off.
+    # Both fail-closed settings resolve before any comparison runs: an abort must
+    # mean 'this run produced nothing', not 'this run produced most of a report'.
+    alert_threshold_minor = _alert_threshold_minor()
     duplicate_window_seconds = _duplicate_suspect_window_seconds()
     duplicate_margin_days = duplicate_window_seconds // 86400 + 1
     duplicate_candidates = load_ledger(
@@ -747,6 +818,7 @@ def reconcile(
         settlement_row_count=len(settlement),
         settlement_captures_minor=sum(r.amount_minor for r in true_window_captures),
         settlement_refunds_minor=sum(r.amount_minor for r in refunds),
+        alert_threshold_minor=alert_threshold_minor,
     )
 
 
@@ -845,6 +917,14 @@ def build_report(result: ReconciliationResult) -> dict:
                 "value": result.gross_break_minor,
                 "depends_on_matching_tolerance": True,
             },
+        },
+        # D4. One alert, stated with the threshold it was measured against so a reader
+        # never has to look up a deploy's environment to interpret the boolean.
+        "alert": {
+            "triggered": result.alert_triggered,
+            "threshold_minor": result.alert_threshold_minor,
+            "measured": "per_loan_absolute_variance_minor",
+            "value": result.per_loan_absolute_minor,
         },
         "breaks": [_break_json(b) for b in result.breaks],
         # Separate from `breaks` on purpose: a duplicate is a signal, not a variance,
