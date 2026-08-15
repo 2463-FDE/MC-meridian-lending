@@ -652,6 +652,60 @@ def test_a_true_window_settlement_row_beats_an_out_of_window_edge_candidate(
     assert result.exit_code == reconciliation.EXIT_CLEAN
 
 
+def test_an_edge_exact_match_beats_a_true_window_amount_mismatch(ledger, tmp_path):
+    """Review finding, REJECTED on the numbers — pinned so it is not re-litigated.
+
+    A ledger row on 06-02 for 10000, an out-of-window capture on 06-01 for 10000, and
+    a true-window capture on 06-02 for 10100. Review asked that the true-window row be
+    ranked first, pairing 10000 against 10100 as a 100-minor-unit AMOUNT_MISMATCH
+    instead of matching the edge row exactly.
+
+    That reads the data the less safe way. Amount equality does not drift; settlement
+    DATE does, which is the only reason a tolerance exists at all — so an exact-amount
+    capture one day out is the settlement lag D2(c) widened the pool to absorb, and the
+    10100 capture then has no ledger row behind it: money captured, never credited, the
+    full 10100. Ranking the mismatch first reports a 100-minor-unit delta, and the
+    10000 edge capture it displaces falls outside the true window, so the relevance
+    filter drops it and nothing in this window's report points at the 10100 at all —
+    a 100x understatement of the exposure on the same rows.
+
+    Understating a break is the failure this control exists to prevent; overstating one
+    costs an investigation that closes. The same precedence on the same-date variant is
+    pinned by `test_an_exact_match_is_never_reclassified_as_a_mismatch`.
+    """
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 100.00,
+                "created_at": dt.datetime(2026, 6, 2, 9, 0, 0),
+            }
+        ]
+    )
+    path = write_settlement(
+        tmp_path,
+        [
+            "2026-06-01,PR-EDGE,4471,100.00,capture",
+            "2026-06-02,PR-TRUE,4471,101.00,capture",
+        ],
+    )
+
+    result = reconciliation.reconcile(
+        from_date=dt.date(2026, 6, 2),
+        to_date=dt.date(2026, 6, 2),
+        settlement_path=path,
+    )
+
+    assert result.matched_count == 1
+    assert klass(result, reconciliation.AMOUNT_MISMATCH) == []
+    missing = klass(result, reconciliation.MISSING_IN_LEDGER)
+    assert len(missing) == 1
+    assert missing[0].amount_minor == 10100
+    assert missing[0].processor_ref == "PR-TRUE"
+    assert result.exit_code == reconciliation.EXIT_BREAKS
+
+
 def test_a_true_window_ledger_row_beats_an_out_of_window_edge_candidate(
     ledger, tmp_path
 ):
