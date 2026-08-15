@@ -29,7 +29,13 @@ services:
       retries: 10
 
   origination-service:
-    build: ./services/origination-service
+    # Repo-root context, unlike its six siblings: this service is the only consumer of the
+    # repo-root rag_eval/ package, and a service-directory context put that package outside
+    # the build context entirely (card G2a). The root .dockerignore keeps .env and the
+    # embedding cache out of it.
+    build:
+      context: .
+      dockerfile: services/origination-service/Dockerfile
     env_file: .env
     environment:
       # LLM credential is injected from the HOST shell at `compose up` time and
