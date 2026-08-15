@@ -745,13 +745,17 @@ def reconcile(
         ledger_row_count=len(ledger),
         ledger_total_minor=sum(ledger_by_loan.values()),
         settlement_row_count=len(settlement),
-        settlement_captures_minor=sum(r.amount_minor for r in captures),
+        settlement_captures_minor=sum(r.amount_minor for r in true_window_captures),
         settlement_refunds_minor=sum(r.amount_minor for r in refunds),
     )
 
 
 def _break_json(item: Break) -> dict:
-    """One break (or duplicate) as JSON. Optional keys appear only when they are known.
+    """One break as JSON. Optional keys appear only when they are known.
+
+    Breaks only — a duplicate suspect goes through `_duplicate_json`; the two carry
+    different fields and neither dataclass holds the other's. `gap_seconds` was read
+    here while the two shared a type, and `Break` has never had it.
 
     `pan` and `cvv` are never read, so they cannot reach this document; the report is
     stdout and is not redactor-covered, which is why the column list is a review point
@@ -766,12 +770,34 @@ def _break_json(item: Break) -> dict:
     for key, value in (
         ("processor_ref", item.processor_ref),
         ("payment_id", item.payment_id),
-        ("gap_seconds", item.gap_seconds),
         ("detail", item.detail or None),
     ):
         if value is not None:
             document[key] = value
     return document
+
+
+def _duplicate_json(item: DuplicateSuspect) -> dict:
+    """One duplicate suspect as JSON. A `DuplicateSuspect` is NOT a `Break`.
+
+    It has no `break_class` and no single `payment_id` — it names a PAIR, and the two
+    ids are the whole remediation instruction: they are what an operator refunds or
+    voids. Rendering it through `_break_json` raised
+    `AttributeError: 'DuplicateSuspect' object has no attribute 'break_class'` on any
+    run that found one, which the seeded sample always does (loan 5582), so both the
+    CLI and `peek` traceback rather than report. `class` is stamped here because the
+    dataclass does not carry one — the document's reader keys off it exactly as it does
+    for a break.
+    """
+    return {
+        "class": DUPLICATE_SUSPECT,
+        "loan_id": item.loan_id,
+        "amount_minor": item.amount_minor,
+        "date": item.occurred_on.isoformat(),
+        "gap_seconds": item.gap_seconds,
+        "first_payment_id": item.first_payment_id,
+        "second_payment_id": item.second_payment_id,
+    }
 
 
 def build_report(result: ReconciliationResult) -> dict:
@@ -823,6 +849,6 @@ def build_report(result: ReconciliationResult) -> dict:
         "breaks": [_break_json(b) for b in result.breaks],
         # Separate from `breaks` on purpose: a duplicate is a signal, not a variance,
         # and adding it to one would double-count money already counted on one side.
-        "duplicate_suspects": [_break_json(d) for d in result.duplicates],
+        "duplicate_suspects": [_duplicate_json(d) for d in result.duplicates],
         "exit_code": result.exit_code,
     }

@@ -89,6 +89,7 @@ def format_summary(result: reconciliation.ReconciliationResult) -> str:
     for item in result.duplicates:
         lines.append(
             f"  loan {item.loan_id}  {item.amount_minor} minor  {item.gap_seconds}s apart"
+            f"  payments {item.first_payment_id},{item.second_payment_id}"
         )
 
     lines += [

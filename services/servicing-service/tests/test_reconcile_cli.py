@@ -19,7 +19,14 @@ from tests.test_reconciliation import SAMPLE_SETTLEMENT, SEEDED_LEDGER, Recorder
 
 @pytest.fixture(autouse=True)
 def duplicate_window(monkeypatch):
-    monkeypatch.setenv("DUPLICATE_SUSPECT_WINDOW_SECONDS", "300")
+    """Patch the module constant, not the environment.
+
+    `reconciliation` reads `DUPLICATE_SUSPECT_WINDOW_SECONDS` from config at import
+    time, so `setenv` after import changes nothing and every run here aborted with
+    exit 2 over an unset bound. Same shape as `test_reconciliation.py`'s `ledger`
+    fixture.
+    """
+    monkeypatch.setattr(reconciliation, "DUPLICATE_SUSPECT_WINDOW_SECONDS", "300")
 
 
 @pytest.fixture
@@ -146,6 +153,31 @@ def test_duplicate_suspects_are_reported_separately_from_the_breaks(sample, caps
         document["figures"]["net_variance_minor"]["value"],
         document["figures"]["gross_break_value_minor"]["value"],
     )
+
+
+def test_a_duplicate_suspect_names_both_payment_ids_it_pairs(sample, capsys):
+    """Review finding — a count without row evidence cannot drive remediation.
+
+    The two ids ARE the remediation instruction: they are the rows an operator voids
+    or refunds. `DuplicateSuspect` is not a `Break` — it has no `break_class` and no
+    single `payment_id` — so rendering it through `_break_json` raised
+    `AttributeError: 'DuplicateSuspect' object has no attribute 'break_class'` on any
+    run that found one, and the seeded sample always finds loan 5582's pair. Both the
+    CLI and `peek` produced a traceback instead of a document.
+
+    The stderr summary carries the ids too: an operator reading the terminal must not
+    have to re-run piped through `jq` to learn which two rows to act on.
+    """
+    sample()
+
+    _, document, stderr = run(capsys)
+
+    duplicate = document["duplicate_suspects"][0]
+    assert duplicate["class"] == reconciliation.DUPLICATE_SUSPECT
+    assert duplicate["first_payment_id"] == 2
+    assert duplicate["second_payment_id"] == 3
+    assert duplicate["date"] == "2026-06-01"
+    assert "payments 2,3" in stderr
 
 
 # --- D3(c) the three figures -----------------------------------------------------
