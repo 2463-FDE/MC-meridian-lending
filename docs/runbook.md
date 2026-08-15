@@ -152,7 +152,7 @@ or that only alerts on `1`, turns "could not check" into silence.
 | `MISSING_IN_SETTLEMENT` | `payments` row with no settled capture — credited, never captured | Check whether the capture failed after the row was written; the balance may be understated |
 | `REFUND_UNREPRESENTED` | Settlement refund the `payments` table cannot hold (no direction column) | Expected today; a schema limitation, not a lost payment. Note it and move on |
 | `AMOUNT_MISMATCH` | Same loan and window, different amount | Compare the two figures in the report's `detail`; usually a partial capture |
-| `DUPLICATE_SUSPECT` | Two `payments` rows, same loan and amount, inside the gap bound | Suspected double charge. **Reported separately from the breaks and never added to a variance figure** — the money is already counted on whichever side it landed |
+| `DUPLICATE_SUSPECT` | Two `payments` rows, same loan and amount, inside the gap bound | Suspected double charge. The entry names both rows — `first_payment_id` and `second_payment_id` — and those are the ids to act on; the summary prints them as `payments <first>,<second>`. **Reported separately from the breaks and never added to a variance figure** — the money is already counted on whichever side it landed |
 
 **The three figures are not interchangeable.** The report labels each with whether it moves
 with the matching tolerance:
