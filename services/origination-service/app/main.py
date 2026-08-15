@@ -109,6 +109,7 @@ def assistant_decide(
     app_id: int,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     client: ClaudeClient = Depends(get_llm_client),
 ):
     """Decision an application through the officer assistant (ADR 0009 §5).
@@ -122,6 +123,12 @@ def assistant_decide(
     and appending a second regulated event. Absent = explicit re-decision.
     """
     authz.require_officer(x_user_role)
+    # Client ask (2026-08-12 governance §5). The client scoped the block to "the one route
+    # that runs a decision", having seen only POST /applications/{id}/decision -- but the
+    # score tool below performs the same regulated decision and appends the same
+    # decision_events record, so gating only that route would leave the finding open
+    # through this panel. The read-only GET (explain) never scores and stays open.
+    authz.deny_self_decision(app_id, x_user_role, x_user_id)
     if idempotency_key is not None and len(idempotency_key) > 64:
         raise HTTPException(
             status_code=400, detail="Idempotency-Key must be at most 64 characters"

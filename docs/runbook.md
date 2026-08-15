@@ -108,6 +108,25 @@ term, monthly_debt, employment_years, or SSN) returns **409** rather than a stal
 
 ## Known operational pain (unresolved)
 
+- **Self-decision guard can't see a pre-migration or anonymous self-submit (D24).**
+  `deny_self_decision` blocks an officer from deciding their own application when either
+  `users.applicant_id` links their account to it, or `applications.submitted_by_user_id`
+  (captured at submit from `X-User-Id`, migration 0017) matches their user id. Neither
+  check can see an application submitted anonymously — including every row from before
+  this migration, which has no submitter recorded at all and is indistinguishable from a
+  genuine anonymous applicant. No automated gate can close this without blocking the
+  ordinary anonymous-apply flow permanently. Manual back-book check: for any application
+  an officer decisioned with no linked account, cross-reference the applicant's recorded
+  name against staff `display_name` by hand. This lists the candidates:
+
+  ```sql
+  SELECT a.id, ap.name, ap.created_at
+  FROM applications a JOIN applicants ap ON ap.id = a.applicant_id
+  WHERE a.submitted_by_user_id IS NULL
+  ORDER BY a.created_at;
+  ```
+
+  See `docs/debt-log.md` D24.
 - **Payment retries.** The processor occasionally times out; clients retry. `payment-service`
   has no idempotency key, so retried payments insert a second row and apply twice (the second
   `apply-payment` call posts again). We field "double charge" support tickets a few times a

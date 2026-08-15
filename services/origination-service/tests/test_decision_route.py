@@ -256,3 +256,107 @@ def test_absent_score_is_none_not_a_fabricated_zero(monkeypatch):
     _stub_decision(monkeypatch, {"outcome": "approve"})
     out = applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
     assert out.score is None
+
+
+# --- Staff self-decision block (client ask, 2026-08-12 governance §5) ------------------
+#
+# The route-level wiring of authz.deny_self_decision (unit-tested in test_authz.py): the
+# block runs AFTER require_officer_or_owner authorizes and BEFORE the KYC gate and any
+# downstream credit pull, so a blocked attempt never appends a regulated decision event.
+
+
+def _self_decision_db(caller_applicant_id, app_applicant_id, submitted_by_user_id=None):
+    def _q(sql, params=None):
+        if "FROM users" in sql:
+            return [{"applicant_id": caller_applicant_id}]
+        if "FROM applications" in sql:
+            return [
+                {
+                    "applicant_id": app_applicant_id,
+                    "submitted_by_user_id": submitted_by_user_id,
+                }
+            ]
+        raise AssertionError(f"unexpected query: {sql}")
+
+    return _q
+
+
+def test_officer_cannot_decision_their_own_application(monkeypatch, captured_payload):
+    monkeypatch.setattr(applications.authz.db, "query", _self_decision_db(4, 4))
+    with pytest.raises(HTTPException) as exc:
+        applications.run_decision(
+            42, idempotency_key=None, x_user_role="underwriter", x_user_id="9"
+        )
+    assert exc.value.status_code == 403
+    # No credit pull, no decision event: blocked before any downstream call.
+    assert captured_payload == {}
+
+
+def test_self_decision_is_blocked_before_the_kyc_gate(monkeypatch, captured_payload):
+    # The block is an authorization decision, not a data-quality one: a passing KYC must
+    # not be required to reach it, and a failing one must not mask it.
+    def _kyc_boom(app_id):
+        raise AssertionError("blocked self-decision must not reach the KYC gate")
+
+    monkeypatch.setattr(applications.kyc_gate, "require_kyc_passed", _kyc_boom)
+    monkeypatch.setattr(applications.authz.db, "query", _self_decision_db(4, 4))
+    with pytest.raises(HTTPException) as exc:
+        applications.run_decision(
+            42, idempotency_key=None, x_user_role="underwriter", x_user_id="9"
+        )
+    assert exc.value.status_code == 403
+
+
+def test_officer_decisioning_another_applicant_is_unaffected(
+    monkeypatch, captured_payload
+):
+    monkeypatch.setattr(applications.authz.db, "query", _self_decision_db(4, 7))
+    out = applications.run_decision(
+        42, idempotency_key=None, x_user_role="underwriter", x_user_id="9"
+    )
+    assert out.decision == "deny"
+
+
+# --- D24 (docs/debt-log.md), PR #38 review: self-submitted-but-unlinked application ----
+#
+# The account-linkage check alone (users.applicant_id == applications.applicant_id) cannot
+# see an officer who submitted their own application through the ordinary apply flow,
+# because intake never links the fresh applicants row back to users.applicant_id. Route
+# proof, through run_decision, that the submitted_by_user_id check closes it even with no
+# account linkage (caller_applicant_id=None, exactly the "usual staff shape" from PR #38).
+
+
+def test_officer_cannot_decision_their_own_self_submitted_application(
+    monkeypatch, captured_payload
+):
+    monkeypatch.setattr(
+        applications.authz.db,
+        "query",
+        _self_decision_db(None, 42, submitted_by_user_id=9),
+    )
+    with pytest.raises(HTTPException) as exc:
+        applications.run_decision(
+            42, idempotency_key=None, x_user_role="underwriter", x_user_id="9"
+        )
+    assert exc.value.status_code == 403
+    assert captured_payload == {}
+
+
+def test_legacy_null_submitter_self_decision_route_is_not_blocked(
+    monkeypatch, captured_payload
+):
+    # D24 residual (docs/debt-log.md; PR #38 review, round 3): a pre-migration-0017 row
+    # (or any genuinely anonymous submit) has submitted_by_user_id NULL, identical at the
+    # SQL level to a real anonymous applicant -- no code-level check can tell them apart.
+    # Route-level pin matching test_legacy_null_submitter_self_decision_is_not_blocked_by_code
+    # in test_authz.py: documents the residual is still open through this route rather than
+    # leaving it untested. Mitigated operationally (docs/runbook.md), not in code.
+    monkeypatch.setattr(
+        applications.authz.db,
+        "query",
+        _self_decision_db(None, 42, submitted_by_user_id=None),
+    )
+    out = applications.run_decision(
+        42, idempotency_key=None, x_user_role="underwriter", x_user_id="9"
+    )
+    assert out.decision == "deny"  # not blocked -- the documented residual

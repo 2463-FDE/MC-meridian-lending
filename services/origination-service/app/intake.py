@@ -14,8 +14,17 @@ from . import authz, config, db
 log = get_logger("intake")
 
 
-def create_application(payload: dict) -> tuple[int, str]:
+def create_application(
+    payload: dict, submitted_by_user_id: int | None = None
+) -> tuple[int, str]:
     """Insert applicant + application; return (app_id, RAW continuation_token).
+
+    submitted_by_user_id is the caller's users.id when the submit was authenticated (the
+    gateway forwards X-User-Id for any session-bearing request), else None for a genuinely
+    anonymous apply. Persisted so deny_self_decision (D24, docs/debt-log.md) can refuse an
+    officer who submitted their own application through this flow -- a case
+    users.applicant_id == applications.applicant_id cannot see, because this INSERT never
+    links the two.
 
     The RAW token is returned to the applicant exactly once (here); only its keyed hash is
     persisted, and it is stamped with an expiry (PR #7 review) so authz can time-box the
@@ -71,8 +80,9 @@ def create_application(payload: dict) -> tuple[int, str]:
         cur.execute(
             "INSERT INTO applications "
             "(applicant_id, amount, term_months, purpose, income, monthly_debt, "
-            "employment_years, continuation_token, continuation_token_expires_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            "employment_years, continuation_token, continuation_token_expires_at, "
+            "submitted_by_user_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (
                 applicant_id,
                 payload.get("amount"),
@@ -83,6 +93,7 @@ def create_application(payload: dict) -> tuple[int, str]:
                 payload.get("employment_years"),
                 token_hash,  # store the keyed hash, never the raw
                 expires_at,
+                submitted_by_user_id,
             ),
         )
         app_id = cur.fetchone()["id"]

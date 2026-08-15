@@ -176,7 +176,9 @@ def test_kyc_transport_failure_is_observable_not_silent(monkeypatch):
     # resilience is kept (still 200/submitted), but the failure is made observable:
     # kyc_checked=False in the response AND an audit_logs row.
     monkeypatch.setattr(
-        applications.intake, "create_application", lambda payload: (1, "tok-test")
+        applications.intake,
+        "create_application",
+        lambda payload, submitted_by_user_id=None: (1, "tok-test"),
     )
     audit = []
     monkeypatch.setattr(applications.db, "query", _kyc_test_db(audit))
@@ -205,7 +207,9 @@ def test_kyc_success_sets_kyc_checked_true(monkeypatch):
     # Contrast: when KYC actually runs, kyc_checked is True and a genuine decline is a
     # 200 with cip_passed False (no audit row) — distinct from the failure path above.
     monkeypatch.setattr(
-        applications.intake, "create_application", lambda payload: (1, "tok-test")
+        applications.intake,
+        "create_application",
+        lambda payload, submitted_by_user_id=None: (1, "tok-test"),
     )
     audit = []
     monkeypatch.setattr(applications.db, "query", _kyc_test_db(audit))

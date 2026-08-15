@@ -1,0 +1,12 @@
+-- D24 (PR #38 review): the self-decision block (migration-free, cd8c3e8) compares
+-- users.applicant_id to applications.applicant_id, but intake.create_application never
+-- links the applicant row it creates back to a submitting user -- so an officer who
+-- submits their own application through the ordinary apply flow, then decisions it under
+-- the same logged-in account, is not caught.
+--
+-- Records the submitting caller's users.id at submit time, when the caller was
+-- authenticated (X-User-Id forwarded by the gateway for any session-bearing request, not
+-- only application-scoped ones). NULL for a genuinely anonymous apply -- the common case,
+-- not itself a signal -- and for every pre-migration row. deny_self_decision additionally
+-- refuses when submitted_by_user_id equals the caller's user id.
+ALTER TABLE applications ADD COLUMN IF NOT EXISTS submitted_by_user_id INTEGER;

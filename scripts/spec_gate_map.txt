@@ -103,12 +103,26 @@ services/servicing-service/app => adr/0015-settlement-reconciliation-as-a-contro
 # footing as week 7 above — the code area is live today, so deleting it must
 # fail this gate.
 services/decision-service/app => docs/spec-fair-lending-monitoring-week8.md
+# ADR 0016 records the decision behind that spec — the platform emits, the
+# reporting environment computes, and no protected characteristic or proxy
+# probability is stored here. It binds to the same code area because what it
+# constrains is what decision-service may hold: the model card's six-input
+# claim rests on that data being absent, and the claim is demonstrated by this
+# service's own test.
+services/decision-service/app => adr/0016-fair-lending-monitoring-computes-outside-the-platform.md
 
 # --- Brownfield structure + trust boundary ----------------------------------
 # ADR 0004's decomposition is load-bearing through origination's sync HTTP
 # client seam; ADR 0010 Phase A+B enforce officer-OR-owner at the gateway.
 services/origination-service/app/clients.py => adr/0004-decompose-origination-into-services.md
 services/gateway/app/main.py => adr/0010-application-ownership-authorization.md
+
+# --- PR #38 follow-on: self-decision anonymous-submission gap ---------------
+# authz.py already exists on main (ADR 0010) and is exactly the module ADR
+# 0017's decision extends (deny_self_decision), same footing as week 7/8
+# above: the code area is live today, so deleting it must fail this gate even
+# though ADR 0017's own maker-checker decision is Proposed, not built.
+services/origination-service/app/authz.py => adr/0017-self-decision-anonymous-submission-gap.md
 
 # --- Exemptions: docs with no code path whose deletion would violate them ---
 # EXEMPT: adr/0001-record-architecture-decisions.md — establishes the ADR process itself; obligates no source file.
