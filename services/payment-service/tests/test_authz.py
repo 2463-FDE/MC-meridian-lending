@@ -138,7 +138,7 @@ def test_post_payment_allowed_for_owner(monkeypatch):
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
     monkeypatch.setattr(
         "app.payments.charge",
-        lambda loan_id, pan, cvv, amount, ssn, name, method: {
+        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None: {
             "payment_id": 1,
             "loan_id": loan_id,
             "status": "captured",
@@ -162,7 +162,7 @@ def test_post_payment_allowed_for_money_role_without_db(monkeypatch):
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
     monkeypatch.setattr(
         "app.payments.charge",
-        lambda loan_id, pan, cvv, amount, ssn, name, method: {
+        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None: {
             "payment_id": 1,
             "loan_id": loan_id,
             "status": "captured",
@@ -203,7 +203,7 @@ def test_post_payment_424_when_captured_unapplied(monkeypatch):
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
     monkeypatch.setattr(
         "app.payments.charge",
-        lambda loan_id, pan, cvv, amount, ssn, name, method: {
+        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None: {
             "payment_id": 42,
             "loan_id": loan_id,
             "status": "captured_unapplied",

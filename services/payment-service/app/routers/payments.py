@@ -23,6 +23,7 @@ def post_payment(
     body: PaymentIn,
     x_user_role: Optional[str] = Header(None),
     x_user_id: Optional[str] = Header(None),
+    x_request_id: Optional[str] = Header(None),
 ):
     # This is the front-door capture route the gateway/frontend actually call --
     # servicing-service's own /payments already gates on money-role-or-owner
@@ -51,8 +52,18 @@ def post_payment(
             "unset or non-ASCII)",
         )
     # No idempotency key accepted or checked. Retried POST = second charge. (debt D2)
+    # X-Request-Id enters the span here: charge() uses a caller-supplied id
+    # verbatim and mints one otherwise, so the charge line, the apply call and
+    # servicing's own line all come back under a single id (spec D1(a)).
     result = payments.charge(
-        body.loan_id, body.pan, body.cvv, body.amount, body.ssn, body.name, body.method
+        body.loan_id,
+        body.pan,
+        body.cvv,
+        body.amount,
+        body.ssn,
+        body.name,
+        body.method,
+        request_id=x_request_id,
     )
     if result["status"] == "captured_unapplied":
         # A 200 here would be indistinguishable from a real success to the
@@ -71,9 +82,10 @@ def post_payment(
         raise HTTPException(
             status_code=424,
             detail=(
-                f"Payment captured (payment_id={result['payment_id']}) but "
-                "could not be applied to your balance. Do not retry -- contact "
-                "support to reconcile this payment."
+                f"Payment captured (payment_id={result['payment_id']}, "
+                f"request_id={result.get('request_id')}) but could not be "
+                "applied to your balance. Do not retry -- contact support to "
+                "reconcile this payment."
             ),
         )
     return result

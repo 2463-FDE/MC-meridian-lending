@@ -1,4 +1,5 @@
 """Pydantic models for the Payment Service API."""
+
 from typing import Optional
 
 from pydantic import BaseModel
@@ -19,6 +20,11 @@ class PaymentOut(BaseModel):
     loan_id: int
     status: str
     applied_amount: float
+    # The effective span id (caller's own, or the generated replacement when the
+    # caller's was refused -- see payments.new_request_id). Without this the
+    # caller has no way to learn the replacement id and cannot correlate its own
+    # logs with payment/servicing's (Codex review).
+    request_id: Optional[str] = None
 
 
 class PaymentItem(BaseModel):

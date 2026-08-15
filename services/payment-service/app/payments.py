@@ -16,6 +16,7 @@ D7) -- see _apply_via_servicing.
 
 import json
 import re
+import uuid
 
 import httpx
 
@@ -25,6 +26,72 @@ from .config import INTERNAL_SERVICE_TOKEN, SERVICING_URL
 from .redactor import PiiRedactor
 
 log = get_logger("payment")  # writes to logs/payment-service.log
+
+# The four fields every line on this path carries, in this order (spec D1(c)):
+# request_id, loan_id, payment_id, outcome. A payment span is then recoverable by
+# field extraction instead of by reading prose. These are named fields inside the
+# ordinary text line, NOT JSON: the redactor scans the formatted message and two
+# blocking gates (redaction-tests, redactor-drift) pin that byte sequence.
+_SPAN_FIELDS = "request_id=%s loan_id=%s payment_id=%s outcome=%s"
+
+# An id the log can hold on one line: no whitespace (a newline forges a whole
+# record), capped so it cannot push the operational fields off the line.
+_REQUEST_ID_OK = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+# How many digits a value may carry before it is refused as a possible SSN or
+# card number. An SSN is 9 digits and a card is 13-19, so a 9-digit CEILING
+# refuses both, and it refuses them by DIGIT COUNT rather than by shape: the
+# separators and single letters this charset allows (412-55-9981, 4.1.2.5.5.9.9.8.1,
+# 4111a1111a1111a1111) each defeat a positional pattern, and no arrangement of
+# fewer than 9 digits can spell either value. The redactor does not cover this:
+# it masks a bare SSN only inside a LABELED field (rule 3b) and a bare PAN only
+# when Luhn-VALID (_redact_if_pan), so request_id=412559981 and an invalid-Luhn
+# request_id=4111111111111112 both reach the log in cleartext. (Codex review)
+_MAX_REQUEST_ID_DIGITS = 9
+_ASCII_DIGIT = re.compile(r"[0-9]")
+
+# servicing-service re-applies this SAME ceiling to whatever X-Request-Id it
+# receives (services/servicing-service/app/main.py, _span_request_id) -- that
+# route is reachable directly, so it re-validates rather than trusting the
+# header. A raw uuid4 hex fails that check near-certainly (32 hex chars average
+# ~20 digits), so a generated id was logged in full here but replaced with "-"
+# on servicing's line -- the two halves of the span stopped sharing an id for
+# every no-header or refused-header request (Codex review). Mapping each hex
+# digit to a letter keeps uuid4's entropy and the accepted charset while
+# guaranteeing zero digits, so the ceiling can never trigger on a generated id.
+_HEX_DIGIT_TO_LETTER = str.maketrans("0123456789", "ghijklmnop")
+
+
+def new_request_id(supplied: str = None) -> str:
+    """The span's id: the caller's when it is one the log can carry, else a fresh one.
+
+    D1(a) says a supplied X-Request-Id is used VERBATIM, and it is -- for any real
+    id. The header is client-controlled free text on its way into a log line
+    though, so a value outside the accepted charset, or one carrying enough
+    digits to be an SSN or a card number, is replaced rather than written
+    through: a newline in it would forge a second log record, and either PII
+    shape would ride past the value-level masking in _redacted_charge_req.
+    Replacing (not blanking) keeps the span correlated under a usable id.
+
+    The digit ceiling costs a caller whose ids are digit-heavy (an epoch-millis
+    id is 13 digits) its verbatim id; that call keeps a generated one and stays
+    correlated end to end, which is the trade this path takes over logging a
+    value that may be a borrower's SSN.
+
+    The charset check runs FIRST, so the digit count only ever reads ASCII --
+    a unicode digit cannot reach it.
+    """
+    if (
+        supplied
+        and _REQUEST_ID_OK.fullmatch(supplied)
+        and len(_ASCII_DIGIT.findall(supplied)) < _MAX_REQUEST_ID_DIGITS
+    ):
+        return supplied
+    # Not subject to the ceiling check above: this value carries no caller
+    # input, so a random digit run in it is not a borrower's SSN. It still has
+    # to survive servicing-service's own re-application of that ceiling on the
+    # header it receives -- see _HEX_DIGIT_TO_LETTER above.
+    return uuid.uuid4().hex.translate(_HEX_DIGIT_TO_LETTER)
 
 
 def _mask_ssn(ssn):
@@ -73,14 +140,27 @@ def charge(
     ssn: str = None,
     name: str = None,
     method: str = "card",
+    request_id: str = None,
 ) -> dict:
+    request_id = new_request_id(request_id)
+    # The ENTRY line: it opens the span before any work is done, so it reports
+    # outcome=started and carries no payment id yet -- the row does not exist
+    # until the INSERT below. This line used to end "-> ok" while sitting in
+    # exactly this position, asserting a success for an INSERT that had not run
+    # and could still fail (spec D1(d), criterion 3). The real outcome is logged
+    # once, at the end, when it is known.
+    #
     # PII (PAN/CVV/SSN) is masked at the value level before it reaches the log
     # string; see _redacted_charge_req for why the old formatter-only approach
     # was bypassable. `name` is client-controlled free text (a PAN can be
     # smuggled into it) and is deliberately not logged. json.dumps escapes any
     # quotes in the remaining values.
     log.info(
-        "POST /payments charge req=%s -> ok",
+        "POST /payments charge " + _SPAN_FIELDS + " req=%s",
+        request_id,
+        loan_id,
+        "-",
+        "started",
         json.dumps(
             _redacted_charge_req(pan, cvv, ssn, amount, loan_id), ensure_ascii=False
         ),
@@ -97,16 +177,33 @@ def charge(
     # failure to apply -- rejected, redirected, or servicing unreachable --
     # means the balance was definitely not updated, and the response must say
     # so rather than report a normal "captured" success (Codex review, PR 32).
-    applied = _apply_via_servicing(loan_id, amount, payment_id)
+    applied = _apply_via_servicing(loan_id, amount, payment_id, request_id)
+    status = "captured" if applied else "captured_unapplied"
+    # The OUTCOME line: after the INSERT and after the apply attempt, carrying
+    # what actually happened. Same id as the entry line and as servicing's own
+    # line, so both halves of the span come back from one field query.
+    log.info(
+        "POST /payments charge complete " + _SPAN_FIELDS,
+        request_id,
+        loan_id,
+        payment_id if payment_id is not None else "-",
+        status,
+    )
     return {
         "payment_id": payment_id,
         "loan_id": loan_id,
-        "status": "captured" if applied else "captured_unapplied",
+        "status": status,
         "applied_amount": float(amount) if applied else 0.0,
+        # The effective id: the caller's own when it was usable, else the
+        # generated replacement -- returned so a caller whose id was refused
+        # can still learn what the log lines are keyed on (Codex review).
+        "request_id": request_id,
     }
 
 
-def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
+def _apply_via_servicing(
+    loan_id: int, amount: float, payment_id: int, request_id: str = "-"
+) -> bool:
     """Tell servicing-service to apply this payment to the loan balance.
 
     Returns True only when servicing actually confirmed the apply (a 2xx
@@ -127,30 +224,43 @@ def _apply_via_servicing(loan_id: int, amount: float, payment_id: int) -> bool:
     try:
         resp = httpx.post(
             url,
+            # The id travels as a HEADER. The body is NOT changed -- it stays
+            # {"amount", "payment_id"}, which week-5 D3(d) owns (it removes
+            # `amount` from it), and a second writer on the same body collides
+            # with that work. Spec D1(b).
             json={"amount": amount, "payment_id": payment_id},
-            headers={"X-Internal-Service": INTERNAL_SERVICE_TOKEN},
+            headers={
+                "X-Internal-Service": INTERNAL_SERVICE_TOKEN,
+                "X-Request-Id": request_id,
+            },
             timeout=5.0,
         )
     except Exception as exc:
         log.error(
-            "apply-payment call to servicing unreachable loan_id=%s payment_id=%s: %s",
+            "apply-payment call to servicing unreachable " + _SPAN_FIELDS + ": %s",
+            request_id,
             loan_id,
             payment_id,
+            "apply_unreachable",
             exc,
         )
         return False
     if not (200 <= resp.status_code < 300):
         log.error(
-            "apply-payment REJECTED by servicing status=%s loan_id=%s payment_id=%s",
-            resp.status_code,
+            "apply-payment REJECTED by servicing " + _SPAN_FIELDS + " status=%s",
+            request_id,
             loan_id,
             payment_id,
+            "apply_rejected",
+            resp.status_code,
         )
         return False
     log.info(
-        "applied payment via servicing loan_id=%s payment_id=%s amount=%s -> ok",
+        "applied payment via servicing " + _SPAN_FIELDS + " amount=%s",
+        request_id,
         loan_id,
         payment_id,
+        "applied",
         amount,
     )
     return True

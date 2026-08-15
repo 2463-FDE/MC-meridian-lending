@@ -95,11 +95,26 @@ jobs:
           cd services/payment-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_logging_redaction.py -q
+      - name: payment-service correlation-id validation (client header into the log)
+        # X-Request-Id is client-controlled and the gateway forwards it, so the
+        # value is interpolated into every payment log line. The redactor cannot
+        # backstop it — it masks a bare SSN only inside a labeled field and a bare
+        # PAN only when Luhn-valid — which makes this validation the control, and a
+        # control belongs in a blocking job rather than the tolerated matrix.
+        run: |
+          cd services/payment-service
+          python -m pytest tests/test_correlation_id.py -q
       - name: servicing-service logging-redaction integration tests
         run: |
           cd services/servicing-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_logging_redaction.py -q
+      - name: servicing-service correlation-id validation (client header into the log)
+        # Same header, same log-leak class, reachable on apply-payment with only the
+        # internal token — so the rule is enforced here too and gated here too.
+        run: |
+          cd services/servicing-service
+          python -m pytest tests/test_correlation_id.py -q
       - name: kyc-service logging-redaction integration tests
         run: |
           cd services/kyc-service

@@ -37,10 +37,17 @@ def test_apply_via_servicing_sends_internal_service_header(monkeypatch):
 
     monkeypatch.setattr(payments.httpx, "post", fake_post)
 
-    applied = payments._apply_via_servicing(loan_id=1, amount=50.0, payment_id=7)
+    applied = payments._apply_via_servicing(
+        loan_id=1, amount=50.0, payment_id=7, request_id="abc123"
+    )
 
     assert applied is True
-    assert captured["headers"] == {"X-Internal-Service": "sekret"}
+    # X-Request-Id rides alongside, carrying the span's correlation id (D1(b)).
+    # The BODY stays exactly as it was: week-5 D3(d) owns it.
+    assert captured["headers"] == {
+        "X-Internal-Service": "sekret",
+        "X-Request-Id": "abc123",
+    }
     assert captured["json"] == {"amount": 50.0, "payment_id": 7}
 
 
@@ -53,7 +60,7 @@ def test_apply_via_servicing_rejected_reports_not_applied(monkeypatch):
     monkeypatch.setattr(payments, "INTERNAL_SERVICE_TOKEN", "")
 
     def fake_post(url, json=None, headers=None, timeout=None):
-        assert headers == {"X-Internal-Service": ""}
+        assert headers["X-Internal-Service"] == ""
         return _FakeResponse(403)  # what servicing's real gate returns
 
     monkeypatch.setattr(payments.httpx, "post", fake_post)

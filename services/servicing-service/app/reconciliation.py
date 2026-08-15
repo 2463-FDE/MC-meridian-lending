@@ -27,7 +27,7 @@ import csv
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
@@ -43,8 +43,11 @@ from .config import (
 )
 
 # D2(c). The ledger stamps `created_at` at capture and the processor stamps
-# `settlement_date` at settlement; no cut-off convention has been confirmed by the
-# client (spec Client Questions Q5). Named, not buried in a comparison.
+# `settlement_date` at settlement. The client confirmed the convention on 2026-08-14
+# (spec Client Questions Q5, now answered): the cut-off is the PROCESSOR-SETTLED date,
+# read in UTC, with a tolerance of one calendar day. The window already keys on the
+# settled date; UTC is enforced at the connection (db.py) and at the row boundary
+# (load_ledger). Named, not buried in a comparison.
 MATCH_TOLERANCE_DAYS = 1
 
 # D2(f). Every unmatched row lands in exactly one of these.
@@ -328,6 +331,17 @@ def load_ledger(window_from: date, window_to: date) -> list:
         if row["loan_id"] is None:
             raise ReconciliationAbort(f"payments row {row['id']}: loan_id is missing")
         created_at = row["created_at"]
+        # D2(c), client answer 2026-08-14: the cut-off is the processor-settled date in
+        # UTC. `payments.created_at` is TIMESTAMPTZ, so psycopg2 hands back an aware
+        # datetime in the SESSION's timezone — `.date()` on it is a UTC date only if the
+        # session happens to be UTC. `db.py` pins the session, and this converts as well:
+        # the two are not redundant, because a caller passing rows from anywhere else
+        # (another pool, a fixture, a future reader) reaches the same nine `.date()` call
+        # sites downstream. Normalising once here, where rows enter, is what makes every
+        # one of them a UTC date. A naive datetime is left alone — it carries no offset to
+        # convert from, and inventing one would be a guess.
+        if created_at.tzinfo is not None:
+            created_at = created_at.astimezone(timezone.utc)
         # The window is a property of the job, not of the SQL string.
         if not window_from <= created_at.date() <= window_to:
             continue
