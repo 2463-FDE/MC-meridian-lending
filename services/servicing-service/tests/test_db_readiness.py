@@ -351,3 +351,38 @@ def test_payments_allowed_with_processor_key(monkeypatch):
 
     out = post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
     assert out["balance"] == 900.0
+
+
+# DUPLICATE_SUSPECT_WINDOW_SECONDS (D2(e)) — without it, reconciliation.reconcile()
+# aborts on the very first call. Unguarded here, a deploy would pass /health and only
+# fail when /reconciliation/peek is invoked: the hidden-control-failure class this
+# whole readiness surface exists to remove.
+
+
+@pytest.mark.parametrize("bad_value", ["", "abc", "0", "-5", "99999999999999999999"])
+def test_missing_or_invalid_duplicate_window_flags_readiness(monkeypatch, bad_value):
+    monkeypatch.setattr(config, "DUPLICATE_SUSPECT_WINDOW_SECONDS", bad_value)
+    assert "DUPLICATE_SUSPECT_WINDOW_SECONDS" in config.missing_required_secrets()
+
+
+def test_valid_duplicate_window_not_flagged(monkeypatch):
+    monkeypatch.setattr(config, "DUPLICATE_SUSPECT_WINDOW_SECONDS", "120")
+    assert "DUPLICATE_SUSPECT_WINDOW_SECONDS" not in config.missing_required_secrets()
+
+
+def test_duplicate_window_ceiling_matches_reconciliations_own_abort(monkeypatch):
+    """config.duplicate_suspect_window_configured() and reconciliation.py's
+    _duplicate_suspect_window_seconds() share config.MAX_DUPLICATE_SUSPECT_WINDOW_
+    SECONDS rather than each declaring their own copy — this pins that a value one
+    past the ceiling is flagged by both, so they cannot silently drift apart."""
+    from app import reconciliation
+
+    over_ceiling = str(config.MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS + 1)
+    monkeypatch.setattr(config, "DUPLICATE_SUSPECT_WINDOW_SECONDS", over_ceiling)
+    monkeypatch.setattr(
+        reconciliation, "DUPLICATE_SUSPECT_WINDOW_SECONDS", over_ceiling
+    )
+
+    assert "DUPLICATE_SUSPECT_WINDOW_SECONDS" in config.missing_required_secrets()
+    with pytest.raises(reconciliation.ReconciliationAbort):
+        reconciliation._duplicate_suspect_window_seconds()

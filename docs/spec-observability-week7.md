@@ -271,13 +271,25 @@ report a result for a path it did not verify.
 Exit codes, mirroring `scripts/prove_test.sh`'s convention:
 
 ```
-0  reconciled, no breaks
-1  reconciled, breaks found
+0  reconciled, nothing to report
+1  reconciled, breaks or duplicate suspects found
 2  ABORT — could not run the comparison
 ```
 
 "Could not check" is never reported as 0, and it is never reported as 1 either — a break count
 of zero from a run that read nothing is the failure this control exists to prevent.
+
+Exit 1 covers `DUPLICATE_SUSPECT` as well as breaks. A duplicate the matcher absorbed under the
+tolerance leaves the break list empty and both sides tying out, so a code derived from breaks
+alone reports the run clean and the operator's cron misses the one finding the run actually
+made. This does not contradict (e): a duplicate is still not a break and still enters no variance
+figure — it drives the status, not the arithmetic.
+
+Exit 0 is still correct when the only unusual figure is a nonzero variance with no breaks. That
+combination has exactly one cause — a match pairing across the window edge, the settlement lag
+the tolerance in (c) exists to absorb — and that money reconciles into the adjacent window rather
+than going missing. Forcing a non-clean exit on it would report ordinary cutoff timing as a
+break, which is the defect the boundary handling removed.
 
 **(h) Read-only.** The job issues `SELECT` only. It does not correct a balance, insert a
 payment, or write any table. Auto-correcting a balance would be an unauthorized money movement

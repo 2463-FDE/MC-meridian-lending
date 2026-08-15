@@ -9,11 +9,13 @@ admit staff or the owning borrower, denied as 404 so a serial id cannot be probe
 existence.
 """
 
+from datetime import date
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app import authz, config
+from app import authz, config, reconciliation
 from app.main import app
 
 
@@ -249,8 +251,15 @@ def test_reconciliation_peek_denied_with_wrong_internal_token(monkeypatch):
 
 def test_reconciliation_peek_allowed_with_internal_token(monkeypatch):
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
-    monkeypatch.setattr("app.reconciliation.ledger_total", lambda: 0.0)
-    monkeypatch.setattr("app.reconciliation.settlement_total", lambda: 0.0)
+    monkeypatch.setattr(
+        "app.reconciliation.reconcile",
+        lambda *a, **k: reconciliation.ReconciliationResult(
+            window_from=date(2026, 6, 1),
+            window_to=date(2026, 6, 7),
+            tolerance_days=1,
+            matched_count=0,
+        ),
+    )
     resp = TestClient(app).get(
         "/reconciliation/peek", headers={"X-Internal-Service": "sekret"}
     )

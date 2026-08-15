@@ -176,6 +176,11 @@ def missing_required_secrets() -> list:
     # 503 nobody attributes to config. Mirrors kyc/decision/disclosure.
     if not INTERNAL_SERVICE_TOKEN:
         missing.append("INTERNAL_SERVICE_TOKEN")
+    # Reconciliation's duplicate-charge scan aborts without this (D2(e)); unguarded,
+    # a deploy would pass /health and only fail when /reconciliation/peek is called —
+    # the hidden-control-failure class this whole change exists to remove.
+    if not duplicate_suspect_window_configured():
+        missing.append("DUPLICATE_SUSPECT_WINDOW_SECONDS")
     return missing
 
 
@@ -203,3 +208,29 @@ PROCESSOR_BASE_URL = os.getenv(
 INTERNAL_SERVICE_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
 SETTLEMENT_FILE = os.getenv("SETTLEMENT_FILE", "data/settlement.csv")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# Bound for reconciliation's duplicate-charge scan (spec D2(e)). No default: a guessed
+# bound is worse than no detection, since a wrong one would report a false clean. Env
+# only; reconciliation.py aborts (EXIT_ABORT) rather than run with it unset or invalid.
+DUPLICATE_SUSPECT_WINDOW_SECONDS = os.getenv("DUPLICATE_SUSPECT_WINDOW_SECONDS", "")
+# D2(e) says the bound is "scoped in minutes, not days". 30 days is far beyond that
+# intent but still a sane ceiling against a misconfigured operator value. Single
+# source of truth: reconciliation.py imports this rather than redeclaring it, so the
+# /health check below and the abort it mirrors can never drift apart.
+MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS = 30 * 24 * 60 * 60
+
+
+def duplicate_suspect_window_configured() -> bool:
+    """True only when DUPLICATE_SUSPECT_WINDOW_SECONDS is set to a positive integer
+    at or under the ceiling above — the same validity reconciliation.py's
+    _duplicate_suspect_window_seconds() enforces, checked here so an unset or
+    malformed value fails /health instead of only failing on the first
+    /reconciliation/peek call."""
+    raw = (DUPLICATE_SUSPECT_WINDOW_SECONDS or "").strip()
+    if not raw:
+        return False
+    try:
+        seconds = int(raw)
+    except ValueError:
+        return False
+    return 0 < seconds <= MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS
