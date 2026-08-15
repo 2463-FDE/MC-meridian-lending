@@ -809,6 +809,43 @@ def test_v_sample_reports_all_three_labelled_figures(ledger):
     assert result.gross_break_minor == 175318
 
 
+def test_a_duplicate_settlement_row_is_not_collapsed_by_a_set(ledger, tmp_path):
+    """Review finding — two settlement rows identical on every `SettlementRow` field
+    (date, processor_ref, loan_id, amount, type) are two real money movements, not
+    one. `settlement_captures_minor` was summed from a `frozenset` of `SettlementRow`,
+    so the two rows collapsed to one element and the reported capture total silently
+    dropped a duplicate. `settlement_by_loan` (net_variance) always summed the list, so
+    a real duplicate produced a report whose per-side totals did not reconcile to the
+    reported variance.
+    """
+    ledger(
+        [
+            {
+                "id": 1,
+                "loan_id": 4471,
+                "amount": 250.00,
+                "created_at": dt.datetime(2026, 6, 1, 9, 14, 11),
+            }
+        ]
+    )
+    path = write_settlement(
+        tmp_path,
+        [
+            "2026-06-01,PR-100231,4471,250.00,capture",
+            "2026-06-01,PR-100231,4471,250.00,capture",
+        ],
+    )
+
+    result = reconciliation.reconcile(settlement_path=path)
+
+    assert result.settlement_row_count == 2
+    assert result.settlement_captures_minor == 50000
+    assert result.settlement_net_minor == 50000
+    assert result.net_variance_minor == -25000
+    assert len(klass(result, reconciliation.MISSING_IN_LEDGER)) == 1
+    assert minor(klass(result, reconciliation.MISSING_IN_LEDGER)) == 25000
+
+
 def test_v_sample_tight_zero_day_window(ledger):
     """V-SAMPLE-TIGHT — ±0d: 7 breaks, gross 257418, net unchanged at −88882.
 
@@ -977,12 +1014,25 @@ def test_peek_returns_the_break_summary_to_an_internal_caller(ledger, monkeypatc
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["break_counts"][reconciliation.MISSING_IN_LEDGER] == 4
-    assert body["net_variance_minor"] == -88882
+    assert len(body["breaks"]) == 5
+    assert (
+        len(
+            [
+                b
+                for b in body["breaks"]
+                if b["class"] == reconciliation.MISSING_IN_LEDGER
+            ]
+        )
+        == 4
+    )
+    assert len(body["duplicate_suspects"]) == 1
+    assert body["figures"]["net_variance_minor"]["value"] == -88882
     assert body["exit_code"] == reconciliation.EXIT_BREAKS
     assert "ledger_total" not in body
     assert "settlement_total" not in body
-    assert body["duplicate_suspect_count"] == 1
+    # The count-only shape (`duplicate_suspect_count`) is superseded here: D3's report
+    # exists now, so peek renders the same document rather than a weaker summary of it.
+    assert "duplicate_suspect_count" not in body
 
 
 def test_fail_open_total_helpers_are_gone():
