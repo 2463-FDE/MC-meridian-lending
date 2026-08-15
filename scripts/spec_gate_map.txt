@@ -103,6 +103,13 @@ services/servicing-service/app => adr/0015-settlement-reconciliation-as-a-contro
 # footing as week 7 above — the code area is live today, so deleting it must
 # fail this gate.
 services/decision-service/app => docs/spec-fair-lending-monitoring-week8.md
+# ADR 0016 records the decision behind that spec — the platform emits, the
+# reporting environment computes, and no protected characteristic or proxy
+# probability is stored here. It binds to the same code area because what it
+# constrains is what decision-service may hold: the model card's six-input
+# claim rests on that data being absent, and the claim is demonstrated by this
+# service's own test.
+services/decision-service/app => adr/0016-fair-lending-monitoring-computes-outside-the-platform.md
 
 # --- Brownfield structure + trust boundary ----------------------------------
 # ADR 0004's decomposition is load-bearing through origination's sync HTTP
