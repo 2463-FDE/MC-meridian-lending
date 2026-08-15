@@ -21,7 +21,7 @@ import json
 import uuid
 from urllib.parse import quote
 
-from . import clients, kyc_gate
+from . import clients, kyc_gate, policy_retrieval
 from .logging_config import get_logger
 from .routers.applications import decision_request_payload
 
@@ -81,9 +81,25 @@ def _get_decision_record(app_id: int) -> dict:
     }
 
 
+def _search_policy(query: str, task: str) -> policy_retrieval.PolicyAnswer:
+    """Policy tool (ADR 0018): retrieve one corpus chunk for a model-chosen query.
+
+    Read-only and applicant-free — it takes no application id and touches no applicant
+    data. REFUSED on task="decision": the corpus carries the Reg B adverse-action guidance,
+    and reason codes are produced deterministically by decision-service, so retrieval must
+    stay off the path that produces a regulated outcome (ADR 0018 decision 5).
+
+    The answer's text is officer-facing; only `tool_result()` reaches the model.
+    """
+    if task == "decision":
+        return policy_retrieval.abstain(policy_retrieval.DECISION_TASK)
+    return policy_retrieval.search(query)
+
+
 _TOOLS = {
     "score_application": _score_application,
     "get_decision_record": _get_decision_record,
+    "search_policy": _search_policy,
 }
 
 
@@ -108,8 +124,29 @@ def _constructed_summary(record: dict) -> str:
     )
 
 
+def _policy_section(citations: list) -> str:
+    """Officer-facing policy excerpts, quoted VERBATIM from the corpus (ADR 0018).
+
+    Code renders this, not the model: the model never receives the chunk text, so it cannot
+    paraphrase or contradict it. Same principle as `_constructed_summary` — the officer reads
+    the source of record, not a narration of it. Each excerpt carries its chunk id so the
+    officer can open the document the quotation came from.
+    """
+    blocks = []
+    for answer in citations:
+        blocks.append(
+            f"Policy — {answer.chunk_id} (quoted verbatim from the policy corpus):\n"
+            f"{answer.text}"
+        )
+    return "\n\n".join(blocks)
+
+
 def _validated_final(
-    action: dict, app_id: int, task: str, request_id: str | None = None
+    action: dict,
+    app_id: int,
+    task: str,
+    request_id: str | None = None,
+    citations: list | None = None,
 ) -> dict:
     """Check the model's final answer against the persisted record (ADR 0009 §5:
     validated, not trusted). Returns the officer-facing result; on mismatch the
@@ -163,6 +200,12 @@ def _validated_final(
     # narration without exception (ADR 0009 §5), so the summary is record-derived and
     # `valid` is retained only as an audit signal on the model's structured claim.
     summary = _constructed_summary(record)
+    # Appended to the summary, not returned only as a structured field: the officer screen
+    # renders `summary`, so a citation that lived only in `policy_citations` would be
+    # retrieved, paid for, and never read by the person who asked for it.
+    citations = citations or []
+    if citations:
+        summary = f"{summary}\n\n{_policy_section(citations)}"
     # The model score comes from the persisted record's drivers, so the officer screen can
     # show the SAME decision facts for an assistant run as for a manual Run decision
     # (applications.py run_decision returns score + first principal reason). Without it the
@@ -181,6 +224,16 @@ def _validated_final(
         "decided_at": record.get("decided_at"),
         "summary": summary,
         "narration_validated": valid,
+        # Structured twin of the excerpts already inlined above, so a UI can render them
+        # as citations rather than parsing the summary text.
+        "policy_citations": [
+            {
+                "chunk_id": answer.chunk_id,
+                "score": round(answer.score, 4),
+                "text": answer.text,
+            }
+            for answer in citations
+        ],
     }
 
 
@@ -213,6 +266,7 @@ def run(
     history = []
     request = {"application_id": application_id, "task": task}
     score_result = None  # the regulated decision happens AT MOST ONCE per run
+    citations = []  # policy excerpts to quote to the OFFICER (never back to the model)
     for _ in range(_MAX_STEPS):
         action = client.complete(
             "decision_assistant",
@@ -240,8 +294,27 @@ def run(
                     # Repeat request returns the cached result — the model cannot
                     # compound bureau pulls or decision events within one request.
                     result = score_result
+            elif name == "search_policy":
+                # The one tool whose input is NOT the application id: the model chooses a
+                # query. That query is used here and nowhere else — it is not echoed into
+                # history (see the action rewrite below) and not logged, because it is
+                # model-authored free text whose contents we do not control.
+                answer = tool(str((action.get("input") or {}).get("query") or ""), task)
+                if answer.is_hit and all(
+                    c.chunk_id != answer.chunk_id for c in citations
+                ):
+                    citations.append(answer)
+                # Only the allowlisted status + score go back to the model; the chunk text
+                # stays on the officer's side of the boundary (ADR 0018 decision 3).
+                result = answer.tool_result()
             else:
                 result = tool(application_id)
+            if name == "search_policy":
+                # Strip the query before the action is replayed as history. The redaction
+                # contract would mask it anyway (request_builder._redact_scalar), but a
+                # boundary that holds only because the redactor catches it is one bad
+                # allowlist entry from leaking; drop it at the source instead.
+                action = {k: v for k, v in action.items() if k != "input"}
             history.append({"role": "assistant", "content": json.dumps(action)})
             history.append(
                 {
@@ -251,6 +324,6 @@ def run(
             )
             continue
         if kind == "final":
-            return _validated_final(action, application_id, task, request_id)
+            return _validated_final(action, application_id, task, request_id, citations)
         raise AssistantError(f"assistant returned unknown action {kind!r}")
     raise AssistantError(f"assistant gave no final answer within {_MAX_STEPS} steps")
