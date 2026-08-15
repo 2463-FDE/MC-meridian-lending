@@ -638,7 +638,8 @@ def reconcile(
     # candidates ahead of tolerance/edge ones instead of accepting whichever
     # candidate happened to sort first.
     true_window_ledger = frozenset(ledger)
-    true_window_captures = frozenset(r for r in settlement if r.row_type == CAPTURE)
+    true_window_capture_rows = [r for r in settlement if r.row_type == CAPTURE]
+    true_window_captures = frozenset(true_window_capture_rows)
     matched_count, unmatched_ledger, unmatched_captures, mismatches = _match(
         ledger_candidates,
         capture_candidates,
@@ -745,7 +746,7 @@ def reconcile(
         ledger_row_count=len(ledger),
         ledger_total_minor=sum(ledger_by_loan.values()),
         settlement_row_count=len(settlement),
-        settlement_captures_minor=sum(r.amount_minor for r in true_window_captures),
+        settlement_captures_minor=sum(r.amount_minor for r in true_window_capture_rows),
         settlement_refunds_minor=sum(r.amount_minor for r in refunds),
     )
 
