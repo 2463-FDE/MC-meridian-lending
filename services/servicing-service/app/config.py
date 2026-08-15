@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 import time
 from urllib.parse import unquote, urlparse
@@ -234,9 +235,17 @@ RECONCILIATION_ALERT_THRESHOLD_MINOR = os.getenv(
     "RECONCILIATION_ALERT_THRESHOLD_MINOR", ""
 )
 
+# D4's threshold, same posture as the money parsers it guards: `int()` alone accepts
+# "1_000" and "+500", neither of which reads like a figure a person typed into a
+# deploy. Single source of truth: reconciliation.py imports this rather than
+# redeclaring it, so the /health check below and the abort it mirrors can never
+# drift apart the way they did before (readiness took bare int(), runtime took this
+# regex, and the two disagreed on "1_000" and "+500").
+_PLAIN_INTEGER = re.compile(r"^\d+$")
+
 
 def reconciliation_alert_threshold_configured() -> bool:
-    """True only when RECONCILIATION_ALERT_THRESHOLD_MINOR is a positive integer.
+    """True only when RECONCILIATION_ALERT_THRESHOLD_MINOR is a plain positive integer.
 
     Zero is rejected rather than read as "alert on any variance": the one way variance
     is nonzero with an empty break list is a match pairing across the window edge, which
@@ -244,16 +253,14 @@ def reconciliation_alert_threshold_configured() -> bool:
     alert on ordinary cut-off timing every close. An operator who wants that should say
     so with a 1, not with a value that also reads as "unset".
 
-    Same validity reconciliation.py's _alert_threshold_minor() enforces, checked here so
-    a misconfigured deploy fails /health rather than only failing on the first run.
+    Same validity reconciliation.py's _alert_threshold_minor() enforces (same regex,
+    imported from here), checked here so a misconfigured deploy fails /health rather
+    than only failing on the first run.
     """
     raw = (RECONCILIATION_ALERT_THRESHOLD_MINOR or "").strip()
-    if not raw:
+    if not raw or not _PLAIN_INTEGER.match(raw):
         return False
-    try:
-        return int(raw) > 0
-    except ValueError:
-        return False
+    return int(raw) > 0
 
 
 def duplicate_suspect_window_configured() -> bool:

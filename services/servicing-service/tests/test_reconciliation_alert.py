@@ -54,7 +54,7 @@ def test_an_unset_threshold_aborts_rather_than_alerting_on_nothing(ledger, tmp_p
     assert "RECONCILIATION_ALERT_THRESHOLD_MINOR" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("bad", ["abc", "5.00", "-100", "0", " ", "1_000"])
+@pytest.mark.parametrize("bad", ["abc", "5.00", "-100", "0", " ", "1_000", "+500"])
 def test_an_unusable_threshold_aborts(ledger, tmp_path, threshold, bad):  # noqa: F811
     """Zero is refused too: the one way variance is nonzero with no breaks is a match
     pairing across the window edge, so a zero threshold would alert on ordinary cut-off
@@ -79,6 +79,20 @@ def test_health_reports_the_threshold_as_a_required_setting(monkeypatch):
     assert (
         "RECONCILIATION_ALERT_THRESHOLD_MINOR" not in config.missing_required_secrets()
     )
+
+
+@pytest.mark.parametrize("bad", ["1_000", "+500"])
+def test_health_rejects_what_the_runtime_parser_rejects(monkeypatch, bad):
+    """Readiness and the runtime parser (reconciliation._alert_threshold_minor, via
+    the shared config._PLAIN_INTEGER) must agree on what a valid value is. Before this
+    fix, readiness took bare int() (accepts "1_000" and "+500") while the runtime took
+    a plain-digit regex (rejects both) — a deploy could pass /health with a threshold
+    the month-end run then refused to use, aborting with no report while readiness
+    still says "configured"."""
+    monkeypatch.setattr(config, "RECONCILIATION_ALERT_THRESHOLD_MINOR", bad)
+
+    assert config.reconciliation_alert_threshold_configured() is False
+    assert "RECONCILIATION_ALERT_THRESHOLD_MINOR" in config.missing_required_secrets()
 
 
 # --- The alert itself -------------------------------------------------------------

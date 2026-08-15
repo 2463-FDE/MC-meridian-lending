@@ -39,6 +39,7 @@ from .config import (
     MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS,
     RECONCILIATION_ALERT_THRESHOLD_MINOR,
     SETTLEMENT_FILE,
+    _PLAIN_INTEGER,
 )
 
 # D2(c). The ledger stamps `created_at` at capture and the processor stamps
@@ -74,7 +75,8 @@ REQUIRED_COLUMNS = ("settlement_date", "processor_ref", "loan_id", "amount", "ty
 _PLAIN_DECIMAL = re.compile(r"^\d+(\.\d+)?$")
 _MINOR_UNITS_PER_MAJOR = Decimal(100)
 # D4's threshold, same posture: `int()` alone accepts "1_000" and "+500".
-_PLAIN_INTEGER = re.compile(r"^\d+$")
+# _PLAIN_INTEGER itself lives in config.py so this check and the /health rung that
+# mirrors it (config.reconciliation_alert_threshold_configured()) can never drift.
 
 
 class ReconciliationAbort(Exception):
