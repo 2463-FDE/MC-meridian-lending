@@ -1,6 +1,8 @@
 # ADR 0015: Settlement Reconciliation as a Control, and Correlation on the Payment Span
 
-- **Status:** **Proposed** — spec week. Implementation is scoped, not built.
+- **Status:** **Accepted** — D1 through D6 are built and merged. The exact matching key still
+  depends on migration `0017_payments_idempotency` (ADR 0013), which is not built, so matching
+  remains heuristic until that migration lands.
 - **Date:** 2026-08-12
 - **Author:** Claude Code
 - **Related:** ADR 0012 (Decimal / minor units precedent, applied here to the comparison),
@@ -344,5 +346,13 @@ remediation, and the write would race D3.
 
 ## Sign-off status
 
-Proposed. Depends on no unmerged branch. Client answers on the alert threshold and the cut-off
-convention change configured values, not the decisions above.
+Accepted. D1 through D6 are built and merged, and this ADR depends on no unmerged branch.
+
+The client answered both open values, and both are configuration rather than a change to the
+decisions above. The alert threshold is `RECONCILIATION_ALERT_THRESHOLD_MINOR=500` — five dollars
+per close, required, no default, so a missing value fails closed. The cut-off convention is UTC,
+pinned at the session and at the `load_ledger` row boundary.
+
+One decision is deliberately unchanged by those answers: matching stays heuristic, keyed on loan,
+amount and a one-day settlement tolerance, until migration `0017_payments_idempotency` supplies an
+exact key.
