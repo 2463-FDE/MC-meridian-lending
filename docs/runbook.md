@@ -123,7 +123,7 @@ docker compose exec servicing-service python -m app.reconcile --from 2026-06-01 
 Without `--from`/`--to` the window is the settlement file's own date range. The JSON report
 goes to **stdout** (pipe it), the human summary to **stderr** (read it).
 
-**Requires `DUPLICATE_SUSPECT_WINDOW_SECONDS`** (seconds; `300` in `.env.example`). It has no
+**Requires `DUPLICATE_SUSPECT_WINDOW_SECONDS`** (seconds; `120` in `.env.example`). It has no
 default and the job exits `2` without it, rather than scan for double charges against a
 guessed bound.
 

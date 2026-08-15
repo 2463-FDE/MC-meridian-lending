@@ -19,6 +19,7 @@ import pytest
 from app import reconciliation
 
 RUNBOOK = Path(__file__).resolve().parents[3] / "docs" / "runbook.md"
+ENV_EXAMPLE = Path(__file__).resolve().parents[3] / ".env.example"
 
 BREAK_CLASSES = (
     reconciliation.MISSING_IN_LEDGER,
@@ -64,6 +65,41 @@ def test_every_exit_code_is_documented_with_its_meaning(runbook):
 def test_the_fail_closed_setting_is_named(runbook):
     """The job exits 2 without it, so an operator must be told it exists."""
     assert "DUPLICATE_SUSPECT_WINDOW_SECONDS" in runbook
+
+
+def test_the_documented_window_value_matches_env_example(runbook):
+    """Naming the variable is not enough — the VALUE has to agree with the file.
+
+    The runbook cited 300 while `.env.example` shipped 120, so an operator following
+    the runbook would set a bound two and a half times the one the repo ships, and the
+    duplicate scan would report different pairs than every test and figure assumes.
+    The class of defect this whole file exists to catch, on the one setting the job
+    aborts without.
+
+    Asserting the number appears beside the variable's name, not merely somewhere in
+    the runbook, so an unrelated 120 elsewhere cannot satisfy it.
+    """
+    assert ENV_EXAMPLE.exists(), f".env.example not found at {ENV_EXAMPLE}"
+    declared = [
+        line.split("=", 1)[1].strip()
+        for line in ENV_EXAMPLE.read_text().splitlines()
+        if line.startswith("DUPLICATE_SUSPECT_WINDOW_SECONDS=")
+    ]
+    assert len(declared) == 1, (
+        f"expected exactly one DUPLICATE_SUSPECT_WINDOW_SECONDS in .env.example, "
+        f"found {len(declared)}"
+    )
+    value = declared[0]
+
+    for line in runbook.splitlines():
+        if "DUPLICATE_SUSPECT_WINDOW_SECONDS" in line and "`.env.example`" in line:
+            assert f"`{value}`" in line, (
+                f"runbook cites a different bound than .env.example ships "
+                f"({value}): {line.strip()}"
+            )
+            break
+    else:  # pragma: no cover - the test above already requires the name to appear
+        pytest.fail("the runbook never states the bound's value against .env.example")
 
 
 def test_the_runbook_does_not_reference_the_deleted_total_helpers(runbook):
