@@ -14,7 +14,6 @@ record of the movement, which is the ledger ADR 0014 Decision 3 specifies.
 
 import logging
 import os
-import re
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -77,6 +76,7 @@ def post_payment(
     body: PaymentIn,
     x_user_role: Optional[str] = Header(None),
     x_user_id: Optional[str] = Header(None),
+    x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
 ):
     # Same class of authorization failure closed elsewhere in this file (ADR 0014
     # Decision 1): a money role (CSR/admin), or the borrower who owns the loan
@@ -93,8 +93,17 @@ def post_payment(
             detail="payment processor not configured (PROCESSOR_API_KEY unset)",
         )
     # No idempotency key accepted or checked. Retried POST = second charge. (debt D2)
+    # X-Request-Id enters the span here too -- this route is a second front
+    # door for the same charge path as payment-service's /payments (D1(a)).
     return payments.charge(
-        body.loan_id, body.pan, body.cvv, body.amount, body.ssn, body.name, body.method
+        body.loan_id,
+        body.pan,
+        body.cvv,
+        body.amount,
+        body.ssn,
+        body.name,
+        body.method,
+        request_id=x_request_id,
     )
 
 
@@ -112,9 +121,15 @@ class ApplyPaymentIn(BaseModel):
 # shape is what makes separator- and letter-padded variants fail too. This route
 # is reachable directly (internal token only), so the rule cannot be left to the
 # upstream service. (Codex review)
-_REQUEST_ID_OK = re.compile(r"[A-Za-z0-9._-]{1,64}")
-_MAX_REQUEST_ID_DIGITS = 9
-_ASCII_DIGIT = re.compile(r"[0-9]")
+#
+# Sourced from payments.py (already imported below) rather than redefined here:
+# this module's own POST /payments route mints ids with the identical rule via
+# payments.new_request_id, and a second hand-copy of the same regex/ceiling in
+# this file is exactly the drift risk a prior review round found between the
+# two services -- don't reintroduce it within one.
+_REQUEST_ID_OK = payments._REQUEST_ID_OK
+_MAX_REQUEST_ID_DIGITS = payments._MAX_REQUEST_ID_DIGITS
+_ASCII_DIGIT = payments._ASCII_DIGIT
 
 
 def _span_request_id(supplied: Optional[str]) -> str:

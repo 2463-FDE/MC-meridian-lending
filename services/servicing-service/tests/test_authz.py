@@ -458,7 +458,7 @@ def test_post_payment_allowed_for_owner(monkeypatch):
     monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
     monkeypatch.setattr(
         "app.payments.charge",
-        lambda loan_id, pan, cvv, amount, ssn, name, method: {
+        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None: {
             "loan_id": loan_id,
             "amount": amount,
             "balance": 0.0,
@@ -510,7 +510,7 @@ def test_post_payment_allowed_for_money_role_without_db(monkeypatch):
     monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
     monkeypatch.setattr(
         "app.payments.charge",
-        lambda loan_id, pan, cvv, amount, ssn, name, method: {
+        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None: {
             "loan_id": loan_id,
             "amount": amount,
             "balance": 0.0,
