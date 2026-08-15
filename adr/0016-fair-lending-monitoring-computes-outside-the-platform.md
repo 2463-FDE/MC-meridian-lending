@@ -67,6 +67,25 @@ address for the proxy path.
 It computes no disparity metric, estimates no probability, and stores no result. The reporting
 environment performs the join, runs BISG where it is needed, and produces the report.
 
+**Field contract (provisional — step 3 of the implementation plan makes this the reviewed
+contract before the exporter is written; listed here so the boundary is not left to whoever
+writes the exporter to infer):**
+
+| Field | Source | Note |
+|---|---|---|
+| `application_id` | `applications.id` | join key |
+| decision outcome | `decision_events.outcome` | |
+| policy band | `decision_events.policy_band` | |
+| model score | `decision_events.drivers` | score component only, not the full JSONB |
+| principal reasons | `decision_events.principal_reasons` | |
+| decision timestamp | `decision_events.decided_at` | anchors the reporting-period boundary |
+| surname | derived from `applicants.name` | `applicants.name` stores a full name, not a surname field — the export derives it, a parsing step this ADR does not yet specify and the BISG match rate depends on |
+| address for geocoding | `applicants.address` | one unstructured TEXT column, not discrete street/city/state/zip fields — geocoding to block group needs parsing this ADR does not yet specify |
+
+**Explicitly excluded — never leaves this platform via this export:** SSN, date of birth, the
+full application payload, free-text notes, and any protected-characteristic or proxy-probability
+output (the last is already barred from existing here at all by Decision 2).
+
 ### Decision 2 — No protected characteristic and no proxy probability is stored here
 
 No table in `db/init/001_schema.sql` gains a race, ethnicity, sex or marital-status column, and
