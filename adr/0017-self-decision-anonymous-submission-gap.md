@@ -5,9 +5,9 @@
 - **Date:** 2026-08-14
 - **Author:** Claude Code
 - **Related:** ADR 0010 (application ownership authorization — the anonymous-apply design
-  this gap is inherent to). Debt D24 (`docs/debt-log.md`, on branch `fix/self-decision-authz`,
-  not yet merged to `main`) — the self-decision segregation-of-duties control this ADR
-  extends. The governance ask that produced it (2026-08-12 §5).
+  this gap is inherent to). Debt D24 (`docs/debt-log.md`, merged to `main` in PR #38) — the
+  self-decision segregation-of-duties control this ADR extends. The governance ask that
+  produced it (2026-08-12 §5).
 - **Source:** PR #38 review, rounds 1–4, against `fix/self-decision-authz`.
 
 Numbering note: `db/migrations/0017_applications_submitted_by_user_id.sql` (on
@@ -24,7 +24,7 @@ application: "block the decision route when the caller and the applicant are the
 account... log the blocked attempts." This is a segregation-of-duties control — the platform
 must not let staff act as underwriter on their own file.
 
-`deny_self_decision` (`services/origination-service/app/authz.py`, `fix/self-decision-authz`)
+`deny_self_decision` (`services/origination-service/app/authz.py`, on `main` since PR #38)
 closes this for two identifiable cases: an officer whose login is linked to the applicant
 record (`users.applicant_id == applications.applicant_id`), and an officer who submitted the
 application while authenticated (`applications.submitted_by_user_id`, captured from
@@ -57,11 +57,41 @@ second look, not the whole channel.
 **Trigger condition (both must hold):**
 1. `applications.submitted_by_user_id IS NULL` (no authenticated submitter captured — the
    anonymous-apply case check 2 cannot see).
-2. The deciding officer's own `users.display_name`, normalized (case-fold, whitespace-collapse,
-   punctuation-strip), is a plausible match against the application's `applicants.name`,
-   normalized the same way.
+2. The deciding officer's own `users.display_name` and the application's `applicants.name`,
+   each normalized by the rule below, are exactly equal.
 
-When both hold, `deny_self_decision` does not raise 403 outright (nothing here proves
+**Name-match rule.** Normalize both sides identically:
+
+1. Apply Unicode NFKC, then case-fold.
+2. Replace every character that is not a letter, a digit, or a space with a single space.
+   This turns `Mary-Jane` into `mary jane` and `O'Neil` into `o neil`.
+3. Collapse runs of whitespace to one space; strip leading and trailing spaces.
+
+Two names match when, and only when, the two normalized strings are equal. Nothing looser
+counts: no token containment, no initial expansion, no middle-name tolerance, no suffix
+stripping, no nickname table, and token order is significant. A side that normalizes to the
+empty string — a `display_name` that is NULL, blank, or punctuation only — never matches,
+including against an applicant name that also normalizes to empty.
+
+| `users.display_name` | `applicants.name` | Match | Why |
+|---|---|---|---|
+| `Dana Whitfield` | `dana whitfield` | yes | equal after case-fold |
+| `  Dana   Whitfield ` | `Dana Whitfield` | yes | whitespace collapse and trim |
+| `Mary-Jane Cole` | `Mary Jane Cole` | yes | rule 2 turns the hyphen into a space |
+| `Dana Whitfield` | `Dana R. Whitfield` | no | the middle initial is an extra token; no middle-name tolerance |
+| `D. Whitfield` | `Dana Whitfield` | no | no initial expansion |
+| `Dana Whitfield` | `Dana Whitfield Jr.` | no | no suffix stripping |
+| `Dana Whitfield` | `Whitfield, Dana` | no | token order is significant |
+| `Sean O'Neil` | `Sean ONeil` | no | rule 2 splits only the side carrying the apostrophe (`sean o neil` vs `sean oneil`) |
+| `` (blank) | `Dana Whitfield` | no | an empty normalized side never matches |
+
+The last three rows are false negatives by construction: an officer who submits under a
+reordered, suffixed, or differently punctuated form of their own `display_name` does not
+trigger the check. Exact equality is chosen over a looser rule because the trigger's cost is
+paid by whoever it fires on — a second officer's time — and because a rule with tolerances is
+one no test can pin down, which is how implementation and tests drift apart.
+
+When both conditions hold, `deny_self_decision` does not raise 403 outright (nothing here proves
 wrongdoing — a name match is a heuristic, not identity verification). It instead requires a
 second officer, distinct from the caller, to record an explicit approval before the decision
 proceeds to the credit pull. An application that fails condition 2 (no plausible name match)
@@ -101,8 +131,9 @@ closes the gap the way checks 1 and 2 close their cases. The manual audit query 
 
 - **Heuristic, not verification.** A name-match trigger has both false positives (a borrower who
   happens to share a name with staff, thankfully rare in a real staff roster but not impossible)
-  and false negatives (an officer applying under a name that does not match their
-  `display_name`). Neither direction is closed by this design.
+  and false negatives (an officer applying under a name that does not normalize to their
+  `display_name` — the middle-name, suffix, token-order and apostrophe rows in the rule
+  table above). Neither direction is closed by this design.
 - **`display_name` is not identity-verified data.** It is operator-entered at account creation
   and can be blank, a nickname, or stale. A blank `display_name` means the check never fires for
   that officer.
@@ -117,7 +148,8 @@ closes the gap the way checks 1 and 2 close their cases. The manual audit query 
 
 - No schema change to `applications` or `users` is required for the trigger condition itself
   (`display_name` and `submitted_by_user_id` already exist). Recording the second officer's
-  approval does need a new table or column — scoped in the implementation plan below, not built.
+  approval does need a new table or column. Its shape is scoped in the implementation plan
+  below, which fixes the minimum invariant that shape must satisfy; it is not built.
 
 ---
 
@@ -146,23 +178,47 @@ must be available to approve a flagged decision before it proceeds. Staffing and
 implications are a product question, not an engineering one — flagged in Sign-off status, not
 assumed away here.
 
-**Testing impact.** Needs regression coverage for: the trigger firing on a plausible match, not
-firing on a clear non-match, not firing when `display_name` is NULL/blank, the approval gate
-correctly blocking until a second, DIFFERENT officer approves, and a same-officer "approval"
-being rejected (closing the obvious bypass of self-approving one's own flagged decision).
+**Testing impact.** Needs regression coverage for: the trigger firing on each match row of the
+name-match rule table, not firing on each non-match row (middle initial, initial-only, suffix,
+reversed token order, split apostrophe), not firing when `display_name` is NULL or blank, the
+409 status and detail string being what step 2 specifies rather than a 403, the approval gate
+blocking until a second, DIFFERENT officer approves, a same-officer "approval" being rejected
+(closing the obvious bypass of self-approving one's own flagged decision), and an approval
+missing any of the four bindings in implementation step 3 being rejected rather than honored.
 
 ---
 
 ## Implementation plan (not started — Proposed only)
 
-1. Name-normalization helper (case-fold, whitespace-collapse, punctuation-strip) shared between
-   `applicants.name` and `users.display_name` comparison.
-2. `deny_self_decision` gains the trigger condition; on a match it raises a distinct status (not
-   a bare 403) that the caller can present as "needs second-officer approval" rather than "denied
-   outright."
-3. A minimal approval record — table or reused `decision_events`-style append-only row —
-   capturing which officer approved, when, and for which flagged attempt. Scoped in a follow-up
-   design pass, not decided here.
+1. Name-normalization helper implementing the three normalization steps of the name-match rule
+   above, shared between the `applicants.name` and `users.display_name` sides of the comparison.
+2. `deny_self_decision` gains the trigger condition; on a match it raises HTTP 409 with a plain
+   `detail` string ("a second officer must approve this decision before it can run"), not the
+   403 the two existing checks raise. 409 is already this service's status for "the
+   application's current state does not permit this action": `kyc_gate._block`
+   (`services/origination-service/app/kyc_gate.py`) blocks this same decision route with 409
+   and `detail="identity verification (KYC) has not passed for this application"`, and the
+   boarding and offer routes use 409 the same way (`routers/applications.py`,
+   `routers/offers.py`). The service carries no machine-readable error-code field — every
+   refusal is a FastAPI `HTTPException` with a human-readable `detail` string — so a caller
+   distinguishes this case by status plus that detail text. Introducing a structured error
+   code is a separate, service-wide decision and is out of scope here.
+3. A minimal approval record — table or reused `decision_events`-style append-only row. The
+   storage shape stays open for a follow-up design pass, but the minimum invariant does not. An
+   approval must bind all four of:
+   - the application it covers (`applications.id`);
+   - the original deciding officer it is granted for (`users.id` of the blocked caller);
+   - the approving officer who granted it (`users.id`), rejected when equal to the deciding
+     officer;
+   - the specific flagged decision attempt it authorizes.
+
+   Each binding closes a bypass. Without the deciding officer, any officer's approval unlocks
+   any other officer's blocked decision. Without the approving officer, the record cannot show
+   a second, different person acted. Without the flagged attempt, one approval becomes a
+   standing permission for every later attempt on that application. The attempt binding
+   requires the flagged attempt to have an identity the approval can reference — a pending
+   decision row, or an attempt id minted when the trigger fires — which the follow-up design
+   pass must supply.
 4. An endpoint for a second officer to review and approve a flagged application before the
    original caller's decision can proceed.
 5. Regression tests per the Testing impact list above, proven per the repository's
@@ -214,8 +270,9 @@ scoping and sign-off rather than being built unilaterally inside a review-respon
 
 ## Sign-off status
 
-**Proposed.** Depends on `fix/self-decision-authz` merging first (for `submitted_by_user_id`
-and D24 to exist on `main`). Open questions before implementation starts:
+**Proposed.** Its dependency is satisfied: `fix/self-decision-authz` merged in PR #38, so
+`applications.submitted_by_user_id` (migration `0017_applications_submitted_by_user_id.sql`),
+`deny_self_decision` and D24 all exist on `main`. Open questions before implementation starts:
 
 1. Is a `display_name`-match heuristic an acceptable trigger, given it is unverified,
    officer-entered data — or does the false-negative rate (blank/mismatched `display_name`)
