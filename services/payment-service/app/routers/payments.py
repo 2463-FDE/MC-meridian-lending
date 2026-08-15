@@ -82,9 +82,10 @@ def post_payment(
         raise HTTPException(
             status_code=424,
             detail=(
-                f"Payment captured (payment_id={result['payment_id']}) but "
-                "could not be applied to your balance. Do not retry -- contact "
-                "support to reconcile this payment."
+                f"Payment captured (payment_id={result['payment_id']}, "
+                f"request_id={result.get('request_id')}) but could not be "
+                "applied to your balance. Do not retry -- contact support to "
+                "reconcile this payment."
             ),
         )
     return result

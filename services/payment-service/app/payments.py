@@ -182,6 +182,10 @@ def charge(
         "loan_id": loan_id,
         "status": status,
         "applied_amount": float(amount) if applied else 0.0,
+        # The effective id: the caller's own when it was usable, else the
+        # generated replacement -- returned so a caller whose id was refused
+        # can still learn what the log lines are keyed on (Codex review).
+        "request_id": request_id,
     }
 
 

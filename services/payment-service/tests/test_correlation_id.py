@@ -311,3 +311,24 @@ def test_a_real_id_with_a_few_digits_is_still_used_verbatim():
     # 8 digits, one under the ceiling -- the boundary the rule is written on.
     for ok in ("abc123", "pay-2026-08-a1b2", "req.7", "a" * 64):
         assert payments.new_request_id(ok) == ok, ok
+
+
+def test_replaced_request_id_is_returned_to_the_caller(monkeypatch):
+    """A digit-heavy caller id (e.g. epoch-millis) is silently replaced by
+    new_request_id -- but charge() must hand the effective id back in its
+    result, or the caller and gateway have no way to learn what the payment
+    and servicing logs are keyed on (Codex review)."""
+    _stub_charge_path(monkeypatch)
+
+    hostile = "1755180000000"  # 13-digit epoch-millis id, over the ceiling
+    result = payments.charge(
+        loan_id=1,
+        pan="4111111111111111",
+        cvv="123",
+        amount=50.0,
+        request_id=hostile,
+    )
+
+    assert "request_id" in result, "caller has no way to recover the effective id"
+    assert result["request_id"] != hostile
+    assert re.fullmatch(r"[0-9a-f]{32}", result["request_id"])
