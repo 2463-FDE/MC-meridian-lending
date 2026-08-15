@@ -340,8 +340,12 @@ def _match(
     "first in sorted order" — the latter made claim order an accident of how
     `ordered_captures` happened to sort, not a decision.
 
-    Exact match always runs first: a row that matches perfectly on loan, amount and
-    date can never be reclassified as a mismatch of something else. A second pass
+    Exact match always runs first, INCLUDING an exact-amount candidate one day out
+    (review finding, rejected): amount equality does not drift, settlement date does,
+    which is the only reason a tolerance exists. Demoting an edge exact match below a
+    true-window differing-amount one turns a full uncredited capture into a delta and
+    drops the displaced edge row out of the report entirely —
+    `test_an_edge_exact_match_beats_a_true_window_amount_mismatch`. A second pass
     over what exact match left behind then pairs same-loan rows inside the tolerance
     window whose amounts DIFFER — AMOUNT_MISMATCH — so a rounding/typo discrepancy on
     an otherwise-present payment reports as one mismatch, not a MISSING_IN_SETTLEMENT
