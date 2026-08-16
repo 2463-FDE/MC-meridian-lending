@@ -123,7 +123,13 @@ def charge(
         (loan_id, pan, cvv, float(amount), method),  # full PAN + CVV persisted
     )
     payment_id = rows[0]["id"] if rows else None
-    new_balance = balance.apply_payment(loan_id, amount)
+    new_balance = balance.apply_payment(
+        loan_id,
+        amount,
+        request_id=request_id,
+        payment_id=payment_id,
+        outcome="captured",
+    )
     # The OUTCOME line: after the INSERT and the balance mutation, carrying
     # what actually happened, keyed by the same id as the entry line.
     log.info(

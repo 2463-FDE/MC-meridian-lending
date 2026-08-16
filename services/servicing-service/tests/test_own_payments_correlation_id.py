@@ -13,7 +13,7 @@ import re
 
 from fastapi.testclient import TestClient
 
-from app import authz, config, payments
+from app import authz, balance, config, payments
 from app.main import app
 
 FIELDS = re.compile(
@@ -154,3 +154,42 @@ def test_pii_shaped_request_id_reaches_no_log_line(monkeypatch):
         assert re.fullmatch(r"[a-p]{32}", next(iter(ids))), (
             f"{label}: a refused id must fall back to a generated one: {lines}"
         )
+
+
+def test_balance_apply_payment_own_log_line_carries_the_span(monkeypatch):
+    """Review comment (PR 50): balance.apply_payment's own log line -- the
+    actual balance mutation, distinct from payments.py's entry/outcome lines
+    around it -- previously carried none of the four span fields, and
+    _stub_charge_path replaced apply_payment with a lambda so that real line
+    never ran. Run the real helper (only its db.query is stubbed) and assert
+    its own line, not the caller's."""
+    insert_id = 7
+
+    def fake_query(sql, params=None):
+        if sql.strip().startswith("INSERT INTO payments"):
+            return [{"id": insert_id}]
+        if sql.strip().startswith("SELECT balance"):
+            return [{"balance": 500.0}]
+        return []
+
+    monkeypatch.setattr(payments.db, "query", fake_query)
+    monkeypatch.setattr(balance.db, "query", fake_query)
+    lines = []
+    monkeypatch.setattr(
+        balance.log, "info", lambda msg, *a, **k: lines.append(msg % a if a else msg)
+    )
+
+    result = payments.charge(
+        loan_id=1,
+        pan="4111111111111111",
+        cvv="123",
+        amount=50.0,
+        request_id="abc123",
+    )
+
+    parsed = _fields(lines)
+    assert parsed, f"balance.apply_payment must log the span fields: {lines}"
+    assert parsed[0]["request_id"] == "abc123"
+    assert parsed[0]["loan_id"] == "1"
+    assert parsed[0]["payment_id"] == str(insert_id) == str(result["payment_id"])
+    assert parsed[0]["outcome"] == "captured"

@@ -65,9 +65,7 @@ def _wire_cross_service(monkeypatch, servicing_main):
     real log.info run for real -- not a stub asserting the header shape."""
     monkeypatch.setattr(pay, "INTERNAL_SERVICE_TOKEN", "sekret")
     monkeypatch.setattr(servicing_main.config, "INTERNAL_SERVICE_TOKEN", "sekret")
-    monkeypatch.setattr(
-        servicing_main.balance, "apply_payment", lambda loan_id, amount: 450.0
-    )
+    monkeypatch.setattr(servicing_main.balance, "apply_payment", lambda *a, **k: 450.0)
     monkeypatch.setattr(pay.db, "query", lambda *a, **k: [{"id": 7}])
 
     class _Wrapped:

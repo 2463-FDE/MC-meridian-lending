@@ -169,7 +169,14 @@ def apply_payment(
     # The unlocked read-modify-write (D3) and the missing waterfall (D14) are unchanged
     # here: this commit gates the route, it does not fix the mutation.
     authz.require_internal_caller(x_internal_service)
-    new_balance = balance.apply_payment(loan_id, body.amount)
+    effective_request_id = _span_request_id(x_request_id)
+    new_balance = balance.apply_payment(
+        loan_id,
+        body.amount,
+        request_id=effective_request_id,
+        payment_id=body.payment_id,
+        outcome="applied",
+    )
     # The LSS half of the payment span. This handler logged NOTHING before, so a
     # payment crossing the seam left one line in payment-service and no
     # counterpart here at all. Logged AFTER the balance actually moves, never
@@ -177,7 +184,7 @@ def apply_payment(
     # payment-service uses, so one field query returns both halves.
     log.info(
         "apply-payment request_id=%s loan_id=%s payment_id=%s outcome=%s new_balance=%s",
-        _span_request_id(x_request_id),
+        effective_request_id,
         loan_id,
         body.payment_id,
         "applied",
