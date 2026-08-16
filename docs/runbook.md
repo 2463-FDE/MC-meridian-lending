@@ -76,7 +76,10 @@ orchestrates the LOS flow and calls them over HTTP.
   servicing `POST /accounts/{loan_id}/apply-payment` to post it). The legacy `POST /lss/payments`
   path is dead-but-present.
 - **Look at the portfolio:** `GET /lss/loans?limit=25&offset=0&status=current` (requires auth).
-- **Reconciliation eyeball:** `GET /lss/reconciliation/peek` (ledger vs settlement totals).
+- **Reconcile captures against settlement:** `python -m app.reconcile` on `servicing-service`
+  — see *Month-end reconciliation* below. `GET /lss/reconciliation/peek` returns the same
+  report but requires the `X-Internal-Service` secret and is a legacy caller, not the
+  interface.
 
 ### Idempotent decisions
 
@@ -105,6 +108,87 @@ term, monthly_debt, employment_years, or SSN) returns **409** rather than a stal
     committed production secret.
   - Rotating it invalidates in-flight fingerprints, so a retry mid-rotation may 409 (fails
     safe — never a stale decision).
+
+### Month-end reconciliation
+
+Compares the `payments` table (the capture side) against the processor settlement file
+row by row, in integer minor units. Read-only — it issues `SELECT` only and never corrects
+a balance.
+
+```bash
+docker compose exec servicing-service python -m app.reconcile
+docker compose exec servicing-service python -m app.reconcile --from 2026-06-01 --to 2026-06-30
+```
+
+Without `--from`/`--to` the window is the settlement file's own date range. The JSON report
+goes to **stdout** (pipe it), the human summary to **stderr** (read it).
+
+**Requires `DUPLICATE_SUSPECT_WINDOW_SECONDS`** (seconds; `120` in `.env.example`). It has no
+default and the job exits `2` without it, rather than scan for double charges against a
+guessed bound.
+
+**Requires `RECONCILIATION_ALERT_THRESHOLD_MINOR`** (minor units; `500` in `.env.example`,
+which is the $5.00 the client set on 2026-08-14). Also no default, also exit `2` without it.
+
+**The alert.** One alert, and it fires when the window's **per-loan absolute variance exceeds
+the threshold**. Not the net — the net cancels opposite-signed breaks, and on the sample file
+that is −88882 against 175318 absolute, so netting hides roughly half the error. Not the gross
+break value — that moves with the matching tolerance (175318 at ±1 day, 257418 at ±0), so a
+threshold measured against it would shift whenever someone tuned a constant. `DUPLICATE_SUSPECT`
+does not feed it: a duplicate carries no variance, and counting it would count the same money
+twice. The report states the threshold beside the result, so a reader never has to look up the
+deploy's environment to interpret it.
+
+**Individual breaks are listed whatever their size.** The threshold gates the alert only. A
+sub-threshold break still appears in the exception output — the client asked for that
+explicitly.
+
+**Expect it to fire on the current data.** Per-loan absolute variance on the seeded sample is
+175318 minor against a 500 threshold — roughly 350×, and loan 4471 alone is 50000, or 100×.
+That is the open exception for PR-100290 / PR-100311 showing up in the alert exactly as
+intended, not a mis-set threshold.
+
+A daily close is this same job run with `--from` and `--to` set to the same date. Nothing in
+this stack schedules it; the crontab line below is the operator's.
+
+**Exit codes — a cron must not treat these as pass/fail.**
+
+| Code | Meaning | Operator action |
+|---|---|---|
+| `0` | Reconciled, nothing found, variance within the threshold | None |
+| `1` | Reconciled, breaks found **or the alert fired** | Work the break list below |
+| `2` | **ABORT** — could not run the comparison | Fix the cause and re-run. **Not** a clean result |
+
+`2` means the settlement file was absent, unreadable, empty, missing a column, or held a row
+that would not parse — so nothing was verified. A cron that treats non-zero as one condition,
+or that only alerts on `1`, turns "could not check" into silence.
+
+```cron
+# 06:00 on the 1st. Exit 1 (breaks) and exit 2 (abort) both need a human, for different reasons.
+0 6 1 * * cd /srv/meridian && docker compose exec -T servicing-service python -m app.reconcile > /var/log/meridian/recon-$(date +\%Y\%m).json 2>> /var/log/meridian/recon.log || echo "reconciliation exit $? — see recon.log" | mail -s "Meridian month-end" ops@example.com
+```
+
+**Break classes.**
+
+| Class | Meaning | What to do |
+|---|---|---|
+| `MISSING_IN_LEDGER` | Settled capture with no `payments` row — money taken, never credited | Customer-affecting. Trace the `processor_ref`, credit the loan through the normal apply path |
+| `MISSING_IN_SETTLEMENT` | `payments` row with no settled capture — credited, never captured | Check whether the capture failed after the row was written; the balance may be understated |
+| `REFUND_UNREPRESENTED` | Settlement refund the `payments` table cannot hold (no direction column) | Expected today; a schema limitation, not a lost payment. Note it and move on |
+| `AMOUNT_MISMATCH` | Same loan and window, different amount | Compare the two figures in the report's `detail`; usually a partial capture |
+| `DUPLICATE_SUSPECT` | Two `payments` rows, same loan and amount, inside the gap bound | Suspected double charge. The entry names both rows — `first_payment_id` and `second_payment_id` — and those are the ids to act on; the summary prints them as `payments <first>,<second>`. **Reported separately from the breaks and never added to a variance figure** — the money is already counted on whichever side it landed |
+
+**The three figures are not interchangeable.** The report labels each with whether it moves
+with the matching tolerance:
+
+- **Net variance** — ledger total minus settlement net. Does not depend on the tolerance.
+- **Per-loan absolute variance** — the sum of each loan's variance, unsigned. Does not depend
+  on the tolerance. Where this and the net differ, the difference is error the net is hiding.
+- **Gross break value** — the sum of all break amounts. **Depends on the tolerance**, so it is
+  partly an artifact of a constant we chose, not purely a measurement.
+
+Quoting only the net is what produced "month-end is a little noisy": on the sample data it
+reads −88882 against a per-loan absolute of 175318, so netting hides roughly half the error.
 
 ## Known operational pain (unresolved)
 
@@ -135,8 +219,17 @@ term, monthly_debt, employment_years, or SSN) returns **409** rather than a stal
   synchronous HTTP with no timeout or retry. If `decision-service`'s credit pull hangs, the
   applicant-facing origination request hangs with it. Watch `decision-service` latency when
   intake requests pile up. (No circuit breaker / fallback.)
-- **Month-end close.** `reconciliation.peek` totals do not tie out and nothing runs on a
-  schedule. Finance reconciles by hand in a spreadsheet.
+- **Month-end reconciliation is schedulable, not scheduled.** The comparison itself now
+  exists (see *Month-end reconciliation* under Common tasks), but this stack runs no
+  scheduler and this work deliberately did not add one — nothing triggers the job until an
+  operator wires the `cron` line below. A scheduler that silently stops is the same defect
+  class as a comparison that silently reads nothing.
+- **A manual balance adjustment can still conceal a discrepancy.** Reconciliation compares
+  captures to settlement; it never reads `balances`. `adjust-balance` and `waive-fee` move
+  money without producing a `payments` row, so they create no break — and a representative
+  who adjusts a balance until it "looks right" changes nothing this job reads. Detecting
+  that needs the actor/before/after record the week-6 ledger work specifies. The two
+  controls are complementary; neither substitutes for the other.
 - **Logs contain card + SSN data.** `payment-service` logs full PAN/CVV/SSN at INFO to
   `logs/payment-service.log` (and origination still logs full PII at intake). Do not ship
   these logs to a third-party aggregator until redaction is added.

@@ -178,8 +178,8 @@ The `backend` matrix job runs pytest with `continue-on-error` + `|| true` — **
 
 ## Docs & decisions
 
-- ADRs in `adr/` — 0002 (single shared DB), 0003 (store card data, superseded by 0013), 0004 (service decomposition), 0005 (LLM client), 0006 (logging redaction), 0012 (Decimal/minor units, externalized rule config, FK-as-graph provenance), 0013 (payment idempotency + tokenization), 0014 (servicing money controls), 0015 (settlement reconciliation as a control). 0013–0015 are Proposed and specify work that is **not built**.
-- Weeks 4–7 have merged to `main`. Weeks 5, 6 and 7 landed as spec/ADR packages with no `services/` or `db/` change behind them — `docs/spec-payments-week5.md`, `docs/servicing-money-comprehension-week6.md` and `docs/spec-observability-week7.md` are the sources of truth for what is specified but unbuilt. Week 4's disclosure work is real code on `main`; `docs/spec-disclosure-week4.md` is its source of truth.
+- ADRs in `adr/` — 0002 (single shared DB), 0003 (store card data, superseded by 0013), 0004 (service decomposition), 0005 (LLM client), 0006 (logging redaction), 0012 (Decimal/minor units, externalized rule config, FK-as-graph provenance), 0013 (payment idempotency + tokenization), 0014 (servicing money controls), 0015 (settlement reconciliation as a control). 0013 and 0014 are Proposed and specify work that is **not built**; 0015 is Accepted and built.
+- Weeks 4–7 have merged to `main`. Weeks 5 and 6 landed as spec/ADR packages with no `services/` or `db/` change behind them — `docs/spec-payments-week5.md` and `docs/servicing-money-comprehension-week6.md` are the sources of truth for what is specified but unbuilt. Week 4's disclosure work and week 7's reconciliation and correlation work are real code on `main`; `docs/spec-disclosure-week4.md` and `docs/spec-observability-week7.md` are their sources of truth.
 - `docs/debt-log.md`, `docs/los-lss-seam.md`, `docs/runbook.md`, `docs/security-remediation-2026-07.md`.
 - An "AI underwriting assistant" is planned but not built (`docs/STAGE1-PLAN-AI-ASSISTANT.md`, `docs/spec-ai-assistant-week1.md`); RAG eval harness in `rag_eval/`.
 

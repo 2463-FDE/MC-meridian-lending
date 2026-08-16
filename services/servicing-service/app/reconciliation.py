@@ -27,7 +27,7 @@ import csv
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
@@ -37,12 +37,17 @@ from . import db
 from .config import (
     DUPLICATE_SUSPECT_WINDOW_SECONDS,
     MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS,
+    RECONCILIATION_ALERT_THRESHOLD_MINOR,
     SETTLEMENT_FILE,
+    _PLAIN_INTEGER,
 )
 
 # D2(c). The ledger stamps `created_at` at capture and the processor stamps
-# `settlement_date` at settlement; no cut-off convention has been confirmed by the
-# client (spec Client Questions Q5). Named, not buried in a comparison.
+# `settlement_date` at settlement. The client confirmed the convention on 2026-08-14
+# (spec Client Questions Q5, now answered): the cut-off is the PROCESSOR-SETTLED date,
+# read in UTC, with a tolerance of one calendar day. The window already keys on the
+# settled date; UTC is enforced at the connection (db.py) and at the row boundary
+# (load_ledger). Named, not buried in a comparison.
 MATCH_TOLERANCE_DAYS = 1
 
 # D2(f). Every unmatched row lands in exactly one of these.
@@ -72,6 +77,9 @@ REQUIRED_COLUMNS = ("settlement_date", "processor_ref", "loan_id", "amount", "ty
 # figure while reading nothing like one. Same posture as the disclosure figure check.
 _PLAIN_DECIMAL = re.compile(r"^\d+(\.\d+)?$")
 _MINOR_UNITS_PER_MAJOR = Decimal(100)
+# D4's threshold, same posture: `int()` alone accepts "1_000" and "+500".
+# _PLAIN_INTEGER itself lives in config.py so this check and the /health rung that
+# mirrors it (config.reconciliation_alert_threshold_configured()) can never drift.
 
 
 class ReconciliationAbort(Exception):
@@ -223,6 +231,45 @@ class ReconciliationResult:
     net_variance_minor: int = 0
     per_loan_absolute_minor: int = 0
     gross_break_minor: int = 0
+    # Per-side counts and totals, so a reader of the report can see what was compared
+    # rather than take the variance on trust (D3(b)).
+    ledger_row_count: int = 0
+    ledger_total_minor: int = 0
+    settlement_row_count: int = 0
+    settlement_captures_minor: int = 0
+    settlement_refunds_minor: int = 0
+    # D4. The threshold this run was measured against, carried on the result so the
+    # report states the number rather than leaving a reader to look it up in a deploy's
+    # environment.
+    alert_threshold_minor: int = 0
+
+    @property
+    def settlement_net_minor(self) -> int:
+        return self.settlement_captures_minor - self.settlement_refunds_minor
+
+    @property
+    def alert_triggered(self) -> bool:
+        """D4. One alert: per-loan absolute variance EXCEEDS the threshold.
+
+        Three properties, each against a rejected alternative (spec D4):
+
+        - Absolute, not net. Netting is the failure mode — it is what let three defects
+          present as one small number.
+        - Per-loan absolute, not gross break value. Gross moves with the matching
+          tolerance (175318 at +/-1 day, 257418 at +/-0); a threshold that shifts when
+          someone tunes a constant is not a threshold.
+        - Value, not count. Breaks exist in the sample today, so a count-based alert
+          fires every day until unrelated work lands, which is how an alert becomes
+          noise.
+
+        Strictly greater, matching "exceeds": a variance exactly at the threshold is the
+        largest variance the client called acceptable, not the smallest one they wanted
+        to hear about.
+
+        DUPLICATE_SUSPECT does not feed this — it carries no variance (D2(e)), and
+        adding it would count money already counted on one side.
+        """
+        return self.per_loan_absolute_minor > self.alert_threshold_minor
 
     @property
     def exit_code(self) -> int:
@@ -235,13 +282,19 @@ class ReconciliationResult:
         still not a break and still enters no variance figure — it changes the
         status, not the arithmetic.
 
-        Deliberately NOT driven by the variance figures: nonzero variance with an
-        empty `breaks` list has one cause, a match pairing across the window edge,
-        which is the settlement lag the tolerance absorbs by design (D2(c), and
-        `test_a_boundary_match_is_the_only_way_variance_survives_a_clean_exit`).
-        That money reconciles into the adjacent window rather than going missing.
+        Driven by the variance figures ONLY through D4's threshold, never by their
+        being nonzero. Nonzero variance with an empty `breaks` list has one cause, a
+        match pairing across the window edge, which is the settlement lag the tolerance
+        absorbs by design (D2(c), and
+        `test_a_boundary_match_is_the_only_way_variance_survives_a_clean_exit`) — that
+        money reconciles into the adjacent window rather than going missing, so it must
+        not force a non-clean exit on its own. Above the threshold the client set, it is
+        no longer "on its own": they asked to hear about an aggregate difference over
+        that value whatever produced it, and the exit code is the channel D4 delivers
+        through (no new alerting infrastructure). So the boundary case stays clean while
+        it is small and stops being clean once it is material.
         """
-        if self.breaks or self.duplicates:
+        if self.breaks or self.duplicates or self.alert_triggered:
             return EXIT_BREAKS
         return EXIT_CLEAN
 
@@ -278,6 +331,17 @@ def load_ledger(window_from: date, window_to: date) -> list:
         if row["loan_id"] is None:
             raise ReconciliationAbort(f"payments row {row['id']}: loan_id is missing")
         created_at = row["created_at"]
+        # D2(c), client answer 2026-08-14: the cut-off is the processor-settled date in
+        # UTC. `payments.created_at` is TIMESTAMPTZ, so psycopg2 hands back an aware
+        # datetime in the SESSION's timezone — `.date()` on it is a UTC date only if the
+        # session happens to be UTC. `db.py` pins the session, and this converts as well:
+        # the two are not redundant, because a caller passing rows from anywhere else
+        # (another pool, a fixture, a future reader) reaches the same nine `.date()` call
+        # sites downstream. Normalising once here, where rows enter, is what makes every
+        # one of them a UTC date. A naive datetime is left alone — it carries no offset to
+        # convert from, and inventing one would be a guess.
+        if created_at.tzinfo is not None:
+            created_at = created_at.astimezone(timezone.utc)
         # The window is a property of the job, not of the SQL string.
         if not window_from <= created_at.date() <= window_to:
             continue
@@ -340,8 +404,12 @@ def _match(
     "first in sorted order" — the latter made claim order an accident of how
     `ordered_captures` happened to sort, not a decision.
 
-    Exact match always runs first: a row that matches perfectly on loan, amount and
-    date can never be reclassified as a mismatch of something else. A second pass
+    Exact match always runs first, INCLUDING an exact-amount candidate one day out
+    (review finding, rejected): amount equality does not drift, settlement date does,
+    which is the only reason a tolerance exists. Demoting an edge exact match below a
+    true-window differing-amount one turns a full uncredited capture into a delta and
+    drops the displaced edge row out of the report entirely —
+    `test_an_edge_exact_match_beats_a_true_window_amount_mismatch`. A second pass
     over what exact match left behind then pairs same-loan rows inside the tolerance
     window whose amounts DIFFER — AMOUNT_MISMATCH — so a rounding/typo discrepancy on
     an otherwise-present payment reports as one mismatch, not a MISSING_IN_SETTLEMENT
@@ -464,6 +532,37 @@ def _duplicate_suspect_window_seconds() -> int:
             f"DUPLICATE_SUSPECT_WINDOW_SECONDS={seconds} must be positive"
         )
     return seconds
+
+
+def _alert_threshold_minor() -> int:
+    """D4. No default: a guessed threshold alerts on everything or on nothing.
+
+    Both read as a working control from the outside, which is the hidden-control-failure
+    class this whole change exists to remove. The client set the value on 2026-08-14
+    ($5.00 aggregate, so 500 minor units); it lives in configuration so that answer can
+    change without a code change. Zero is refused for the reason given in
+    config.reconciliation_alert_threshold_configured().
+    """
+    raw = (RECONCILIATION_ALERT_THRESHOLD_MINOR or "").strip()
+    if not raw:
+        raise ReconciliationAbort(
+            "RECONCILIATION_ALERT_THRESHOLD_MINOR is not set; the alert cannot run "
+            "without a threshold"
+        )
+    # A plain digit run, nothing else. `int()` accepts "1_000" and "+500", both of
+    # which read nothing like a figure a person typed into a deploy — the same reason
+    # _PLAIN_DECIMAL guards the money parser above. A threshold is money too.
+    if not _PLAIN_INTEGER.match(raw):
+        raise ReconciliationAbort(
+            f"RECONCILIATION_ALERT_THRESHOLD_MINOR={raw!r} is not a plain integer "
+            "number of minor units"
+        )
+    threshold = int(raw)
+    if threshold <= 0:
+        raise ReconciliationAbort(
+            f"RECONCILIATION_ALERT_THRESHOLD_MINOR={threshold} must be positive"
+        )
+    return threshold
 
 
 def _find_duplicate_suspects(
@@ -598,6 +697,9 @@ def reconcile(
     # datetime gap comparison still happens inside `_find_duplicate_suspects`, so
     # over-fetching by up to a day cannot manufacture a false pair, only avoid
     # missing a true one that a day-granularity fetch would otherwise cut off.
+    # Both fail-closed settings resolve before any comparison runs: an abort must
+    # mean 'this run produced nothing', not 'this run produced most of a report'.
+    alert_threshold_minor = _alert_threshold_minor()
     duplicate_window_seconds = _duplicate_suspect_window_seconds()
     duplicate_margin_days = duplicate_window_seconds // 86400 + 1
     duplicate_candidates = load_ledger(
@@ -623,7 +725,8 @@ def reconcile(
     # candidates ahead of tolerance/edge ones instead of accepting whichever
     # candidate happened to sort first.
     true_window_ledger = frozenset(ledger)
-    true_window_captures = frozenset(r for r in settlement if r.row_type == CAPTURE)
+    true_window_capture_rows = [r for r in settlement if r.row_type == CAPTURE]
+    true_window_captures = frozenset(true_window_capture_rows)
     matched_count, unmatched_ledger, unmatched_captures, mismatches = _match(
         ledger_candidates,
         capture_candidates,
@@ -727,4 +830,122 @@ def reconcile(
         net_variance_minor=net_variance_minor,
         per_loan_absolute_minor=per_loan_absolute_minor,
         gross_break_minor=sum(b.amount_minor for b in breaks),
+        ledger_row_count=len(ledger),
+        ledger_total_minor=sum(ledger_by_loan.values()),
+        settlement_row_count=len(settlement),
+        settlement_captures_minor=sum(r.amount_minor for r in true_window_capture_rows),
+        settlement_refunds_minor=sum(r.amount_minor for r in refunds),
+        alert_threshold_minor=alert_threshold_minor,
     )
+
+
+def _break_json(item: Break) -> dict:
+    """One break as JSON. Optional keys appear only when they are known.
+
+    Breaks only — a duplicate suspect goes through `_duplicate_json`; the two carry
+    different fields and neither dataclass holds the other's. `gap_seconds` was read
+    here while the two shared a type, and `Break` has never had it.
+
+    `pan` and `cvv` are never read, so they cannot reach this document; the report is
+    stdout and is not redactor-covered, which is why the column list is a review point
+    rather than an assumption (spec's redaction note).
+    """
+    document = {
+        "class": item.break_class,
+        "loan_id": item.loan_id,
+        "amount_minor": item.amount_minor,
+        "date": item.occurred_on.isoformat(),
+    }
+    for key, value in (
+        ("processor_ref", item.processor_ref),
+        ("payment_id", item.payment_id),
+        ("detail", item.detail or None),
+    ):
+        if value is not None:
+            document[key] = value
+    return document
+
+
+def _duplicate_json(item: DuplicateSuspect) -> dict:
+    """One duplicate suspect as JSON. A `DuplicateSuspect` is NOT a `Break`.
+
+    It has no `break_class` and no single `payment_id` — it names a PAIR, and the two
+    ids are the whole remediation instruction: they are what an operator refunds or
+    voids. Rendering it through `_break_json` raised
+    `AttributeError: 'DuplicateSuspect' object has no attribute 'break_class'` on any
+    run that found one, which the seeded sample always does (loan 5582), so both the
+    CLI and `peek` traceback rather than report. `class` is stamped here because the
+    dataclass does not carry one — the document's reader keys off it exactly as it does
+    for a break.
+    """
+    return {
+        "class": DUPLICATE_SUSPECT,
+        "loan_id": item.loan_id,
+        "amount_minor": item.amount_minor,
+        "date": item.occurred_on.isoformat(),
+        "gap_seconds": item.gap_seconds,
+        "first_payment_id": item.first_payment_id,
+        "second_payment_id": item.second_payment_id,
+    }
+
+
+def build_report(result: ReconciliationResult) -> dict:
+    """The D3(b) break report — ONE document shape, for the CLI and for `peek`.
+
+    Both callers render this, so there is no second, weaker comparison to drift away
+    from the real one. That drift is what the fee-schedule loader was built to end and
+    why `ledger_total()`/`settlement_total()` were deleted rather than left in place.
+
+    Each figure carries what it depends on (D3(c)). Reporting only the net variance is
+    the reporting failure behind "month-end is a little noisy" — on this sample -88882
+    against 175318, so the netting hides roughly half the error. Reporting the gross
+    break value without saying it moves with the tolerance would be the same mistake
+    again: a figure that looks like a measurement but is partly an artifact of a
+    constant we chose. The two coincide here at +/-1 day; that is a coincidence of this
+    data, not a property.
+    """
+    return {
+        "window": {
+            "from": result.window_from.isoformat(),
+            "to": result.window_to.isoformat(),
+            "tolerance_days": result.tolerance_days,
+        },
+        "ledger": {
+            "rows": result.ledger_row_count,
+            "total_minor": result.ledger_total_minor,
+        },
+        "settlement": {
+            "rows": result.settlement_row_count,
+            "captures_minor": result.settlement_captures_minor,
+            "refunds_minor": result.settlement_refunds_minor,
+            "net_minor": result.settlement_net_minor,
+        },
+        "matched": result.matched_count,
+        "figures": {
+            "net_variance_minor": {
+                "value": result.net_variance_minor,
+                "depends_on_matching_tolerance": False,
+            },
+            "per_loan_absolute_variance_minor": {
+                "value": result.per_loan_absolute_minor,
+                "depends_on_matching_tolerance": False,
+            },
+            "gross_break_value_minor": {
+                "value": result.gross_break_minor,
+                "depends_on_matching_tolerance": True,
+            },
+        },
+        # D4. One alert, stated with the threshold it was measured against so a reader
+        # never has to look up a deploy's environment to interpret the boolean.
+        "alert": {
+            "triggered": result.alert_triggered,
+            "threshold_minor": result.alert_threshold_minor,
+            "measured": "per_loan_absolute_variance_minor",
+            "value": result.per_loan_absolute_minor,
+        },
+        "breaks": [_break_json(b) for b in result.breaks],
+        # Separate from `breaks` on purpose: a duplicate is a signal, not a variance,
+        # and adding it to one would double-count money already counted on one side.
+        "duplicate_suspects": [_duplicate_json(d) for d in result.duplicates],
+        "exit_code": result.exit_code,
+    }

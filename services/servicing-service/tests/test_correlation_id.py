@@ -26,6 +26,10 @@ FIELDS = re.compile(
 
 
 def _capture_log(monkeypatch):
+    """Capture both main.log (the route handler) and balance.log (a distinct
+    logging.getLogger instance -- get_logger("servicing") vs get_logger("balance")
+    -- so a stray unlabeled line inside balance.apply_payment is not invisible to
+    this suite just because the two loggers are different objects."""
     lines = []
 
     def record(msg, *args, **kwargs):
@@ -33,12 +37,23 @@ def _capture_log(monkeypatch):
 
     monkeypatch.setattr(main.log, "info", record)
     monkeypatch.setattr(main.log, "error", record)
+    monkeypatch.setattr(balance.log, "info", record)
+    monkeypatch.setattr(balance.log, "error", record)
     return lines
+
+
+def _stub_db_query(sql, params=None):
+    """Stand in for app.db.query over a one-row balances table, so the real
+    balance.apply_payment runs (not a mock that would hide its own logging)."""
+    upper = sql.upper()
+    if upper.strip().startswith("SELECT"):
+        return [{"balance": 500.0}]
+    return []
 
 
 def _apply(monkeypatch, headers):
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
-    monkeypatch.setattr("app.balance.apply_payment", lambda *a, **k: 50.0)
+    monkeypatch.setattr("app.balance.db.query", _stub_db_query)
     lines = _capture_log(monkeypatch)
     resp = TestClient(app).post(
         "/accounts/1/apply-payment",
@@ -59,6 +74,20 @@ def test_apply_payment_logs_the_supplied_request_id(monkeypatch):
     assert parsed[0]["loan_id"] == "1"
     assert parsed[0]["payment_id"] == "7"
     assert parsed[0]["outcome"] == "applied"
+
+
+def test_every_line_on_a_successful_apply_carries_the_field_block(monkeypatch):
+    """balance.apply_payment used to log an unlabeled 'applied payment loan_id=...'
+    line with no request_id/payment_id/outcome, so a request_id-scoped log search
+    missed it -- the exact gap this span exists to close. Runs the real balance
+    function (not a mock of it) so that line, if reintroduced, is caught here."""
+    parsed, lines = _apply(monkeypatch, {"X-Request-Id": "abc123"})
+
+    assert lines, "apply_payment must log at least one line"
+    assert len(parsed) == len(lines), (
+        f"every log line on the apply-payment path must carry the "
+        f"request_id/loan_id/payment_id/outcome field block: {lines}"
+    )
 
 
 def test_direct_call_without_header_is_logged_as_uncorrelated(monkeypatch):

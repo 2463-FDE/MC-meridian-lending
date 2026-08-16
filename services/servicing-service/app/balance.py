@@ -28,7 +28,12 @@ def apply_payment(
     payment_id=None,
     outcome: str = "applied",
 ) -> float:
-    """Read-modify-write with no lock. Float math. No waterfall (fees/interest/principal)."""
+    """Read-modify-write with no lock. Float math. No waterfall (fees/interest/principal).
+
+    Both callers (main.apply_payment's route handler and payments.charge) pass
+    the span fields down, so this line joins the same request_id-scoped log
+    search as theirs (docs/spec-observability-week7.md P2).
+    """
     current = get_balance(loan_id)  # READ
     new_balance = current - float(amount)  # MODIFY (float, straight off principal)
     db.query(  # WRITE (overwrite in place)

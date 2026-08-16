@@ -275,7 +275,12 @@ def reconciliation_peek(
     borrower — on the same gateway, on the public internet — reads their own account
     only.
 
-    An abort is a 503, never a 200 carrying zeroes.
+    It returns the SAME document `python -m app.reconcile` writes to stdout (D3(d)),
+    built by `reconciliation.build_report`. Keeping a second, weaker comparison beside
+    the real one is the drift the fee-schedule loader was built to end.
+
+    An abort is a 503, never a 200 carrying zeroes. The command in D3(a) is the
+    interface for this control; this endpoint is a legacy caller kept working.
     """
     authz.require_internal_caller(x_internal_service)
     try:
@@ -283,19 +288,4 @@ def reconciliation_peek(
     except reconciliation.ReconciliationAbort as exc:
         log.error("reconciliation aborted: %s", exc)
         raise HTTPException(status_code=503, detail=f"reconciliation aborted: {exc}")
-    counts: dict = {}
-    for item in result.breaks:
-        counts[item.break_class] = counts.get(item.break_class, 0) + 1
-    return {
-        "window_from": result.window_from.isoformat(),
-        "window_to": result.window_to.isoformat(),
-        "tolerance_days": result.tolerance_days,
-        "break_counts": counts,
-        "net_variance_minor": result.net_variance_minor,
-        "per_loan_absolute_minor": result.per_loan_absolute_minor,
-        "gross_break_minor": result.gross_break_minor,
-        # Count only, matching break_counts' aggregate shape — the itemized pairs
-        # (loan_id, amount, gap) are for D3's report, not this summary route.
-        "duplicate_suspect_count": len(result.duplicates),
-        "exit_code": result.exit_code,
-    }
+    return reconciliation.build_report(result)
