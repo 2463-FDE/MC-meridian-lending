@@ -92,6 +92,21 @@ def format_summary(result: reconciliation.ReconciliationResult) -> str:
             f"  payments {item.first_payment_id},{item.second_payment_id}"
         )
 
+    # D4. Above the figures, not below them: an operator scanning the tail of a cron
+    # mail must not have to read three variance lines to learn whether it fired.
+    if result.alert_triggered:
+        lines += [
+            "",
+            f"ALERT: per-loan absolute variance {result.per_loan_absolute_minor} minor "
+            f"exceeds the {result.alert_threshold_minor} minor threshold",
+        ]
+    else:
+        lines += [
+            "",
+            f"no alert: per-loan absolute variance {result.per_loan_absolute_minor} "
+            f"minor is within the {result.alert_threshold_minor} minor threshold",
+        ]
+
     lines += [
         "",
         f"  net variance               {result.net_variance_minor:>9} minor   {_STABLE}",

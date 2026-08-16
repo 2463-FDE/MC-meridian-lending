@@ -27,6 +27,9 @@ def duplicate_window(monkeypatch):
     fixture.
     """
     monkeypatch.setattr(reconciliation, "DUPLICATE_SUSPECT_WINDOW_SECONDS", "300")
+    # D4's threshold, at the client's real value: the CLI is the surface the alert is
+    # delivered through, so these tests should see what an operator sees.
+    monkeypatch.setattr(reconciliation, "RECONCILIATION_ALERT_THRESHOLD_MINOR", "500")
 
 
 @pytest.fixture
