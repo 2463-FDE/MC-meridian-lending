@@ -21,22 +21,36 @@ def get_past_due(loan_id: int) -> float:
     return rows[0]["past_due"] if rows else 0.0
 
 
-def apply_payment(loan_id: int, amount: float) -> float:
+def apply_payment(
+    loan_id: int,
+    amount: float,
+    request_id: str = "-",
+    payment_id=None,
+    outcome: str = "applied",
+) -> float:
     """Read-modify-write with no lock. Float math. No waterfall (fees/interest/principal).
 
-    Logs nothing itself: an unlabeled line here would have no
-    request_id/payment_id/outcome fields, breaking a request_id-scoped log
-    search for the traced payment span (payment-service -> this route,
-    docs/spec-observability-week7.md P2). main.apply_payment's route handler
-    -- the traced caller -- logs the correlated line after this returns.
-    payments.charge is a second, untraced caller of this same function; it
-    is not part of that span and gets no correlated line either.
+    Both callers (main.apply_payment's route handler and payments.charge) pass
+    the span fields down, so this line joins the same request_id-scoped log
+    search as theirs (docs/spec-observability-week7.md P2).
     """
     current = get_balance(loan_id)  # READ
     new_balance = current - float(amount)  # MODIFY (float, straight off principal)
     db.query(  # WRITE (overwrite in place)
         "UPDATE balances SET balance = %s, updated_at = now() WHERE loan_id = %s",
         (new_balance, loan_id),
+    )
+    # Carries the same four span fields (request_id/loan_id/payment_id/outcome) as the
+    # callers' own log lines, keyed by the caller-supplied request_id, so this mutation
+    # is not a hole in the correlated span. Non-payment callers omit the ids and get "-".
+    log.info(
+        "applied payment request_id=%s loan_id=%s payment_id=%s outcome=%s balance %s -> %s",
+        request_id,
+        loan_id,
+        payment_id if payment_id is not None else "-",
+        outcome,
+        current,
+        new_balance,
     )
     return new_balance
 

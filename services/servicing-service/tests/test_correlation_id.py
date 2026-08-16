@@ -145,3 +145,38 @@ def test_a_real_id_with_a_few_digits_is_still_logged_verbatim(monkeypatch):
     parsed, lines = _apply(monkeypatch, {"X-Request-Id": "pay-2026-08-a1b2"})
 
     assert parsed[0]["request_id"] == "pay-2026-08-a1b2", lines
+
+
+def test_balance_apply_payment_own_log_line_carries_the_span(monkeypatch):
+    """Review comment (PR 50): balance.apply_payment's own log line -- the
+    actual balance mutation, not the handler's line around it -- previously
+    carried none of the four span fields, and every existing test replaced
+    apply_payment with a lambda so that real line never ran. Run the real
+    helper (only its db.query is stubbed) and assert its own line, not the
+    handler's."""
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+
+    def fake_query(sql, params=None):
+        if sql.strip().startswith("SELECT balance"):
+            return [{"balance": 500.0}]
+        return []
+
+    monkeypatch.setattr(balance.db, "query", fake_query)
+    lines = []
+    monkeypatch.setattr(
+        balance.log, "info", lambda msg, *a, **k: lines.append(msg % a if a else msg)
+    )
+
+    resp = TestClient(app).post(
+        "/accounts/1/apply-payment",
+        json={"amount": 50.0, "payment_id": 7},
+        headers={"X-Internal-Service": "sekret", "X-Request-Id": "abc123"},
+    )
+    assert resp.status_code == 200
+
+    parsed = [m.groupdict() for m in (FIELDS.search(x) for x in lines) if m]
+    assert parsed, f"balance.apply_payment must log the span fields: {lines}"
+    assert parsed[0]["request_id"] == "abc123"
+    assert parsed[0]["loan_id"] == "1"
+    assert parsed[0]["payment_id"] == "7"
+    assert parsed[0]["outcome"] == "applied"

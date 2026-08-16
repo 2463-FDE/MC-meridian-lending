@@ -213,7 +213,7 @@ def test_apply_payment_denied_without_internal_token(monkeypatch):
 
 def test_apply_payment_allowed_with_internal_token(monkeypatch):
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
-    monkeypatch.setattr("app.balance.apply_payment", lambda loan_id, amount: 50.0)
+    monkeypatch.setattr("app.balance.apply_payment", lambda *a, **k: 50.0)
     resp = TestClient(app).post(
         "/accounts/1/apply-payment",
         json={"amount": 50.0, "payment_id": 1},
@@ -458,7 +458,7 @@ def test_post_payment_allowed_for_owner(monkeypatch):
     monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
     monkeypatch.setattr(
         "app.payments.charge",
-        lambda loan_id, pan, cvv, amount, ssn, name, method: {
+        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None: {
             "loan_id": loan_id,
             "amount": amount,
             "balance": 0.0,
@@ -510,7 +510,7 @@ def test_post_payment_allowed_for_money_role_without_db(monkeypatch):
     monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
     monkeypatch.setattr(
         "app.payments.charge",
-        lambda loan_id, pan, cvv, amount, ssn, name, method: {
+        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None: {
             "loan_id": loan_id,
             "amount": amount,
             "balance": 0.0,

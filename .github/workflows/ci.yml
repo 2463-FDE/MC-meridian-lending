@@ -110,11 +110,24 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_logging_redaction.py -q
       - name: servicing-service correlation-id validation (client header into the log)
-        # Same header, same log-leak class, reachable on apply-payment with only the
-        # internal token — so the rule is enforced here too and gated here too.
+        # Same header, same log-leak class, reachable on apply-payment AND on
+        # servicing's own POST /payments (a second front door for the same
+        # charge path, ADR 0004) with only the internal token or a money role —
+        # so the rule is enforced and gated on both routes.
         run: |
           cd services/servicing-service
-          python -m pytest tests/test_correlation_id.py -q
+          python -m pytest tests/test_correlation_id.py tests/test_own_payments_correlation_id.py -q
+      - name: cross-service correlation-id end-to-end (payment-service's id on servicing's real log line)
+        # Comment 1 (PR 41) asked for a test that runs payment-service's real
+        # charge() against servicing's real apply-payment handler and compares
+        # the logged request_id, not two independently-maintained copies of
+        # the same validation rule. Runs after both services' deps are
+        # installed (steps above), from payment-service, which loads
+        # servicing-service's app package under an alias to avoid the two
+        # same-named `app` packages colliding.
+        run: |
+          cd services/payment-service
+          python -m pytest tests/test_correlation_id_e2e.py -q
       - name: kyc-service logging-redaction integration tests
         run: |
           cd services/kyc-service
