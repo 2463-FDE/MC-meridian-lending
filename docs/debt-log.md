@@ -99,7 +99,7 @@ alone — renumbering live code comments is a separate mechanical change.
 | | **Week 2:** Implement log rotation + deletion (30-day retention). |
 | | **Week 2:** Implement centralized logging (Loki/ELK) with redaction at ingest. |
 | | **Week 3:** Audit all existing backups; re-encrypt or delete any containing plaintext PII. |
-| **Status** | Open. **Planned:** redaction strategy is designed in ADR 0006; the `PiiRedactor` code + tests land in a separate PR (`feature/pii-redaction`) and are not part of this docs branch. Not marked fixed until that code + tests are merged. |
+| **Status** | **Mitigated** — the Week-1 redaction row is done and merged; the Week-2/Week-3 rows are not. `PiiRedactor` (ADR 0006) merged in PR #2 (`1f89ac1`) and now ships as `services/*/app/redactor.py` in all 7 services, kept identical by the blocking `redactor-drift` job and covered by six suites (`test_logging_redaction.py` in kyc/origination/payment/servicing, plus origination's `test_redactor.py` and `test_pii_matrix.py`) under the blocking `redaction-tests` job. `intake.py` also logs an allowlist of fields rather than the payload, so the redactor is a backstop there, not the only control. **Not closed.** Open residuals: encoded PII still bypasses the redactor (D22 closed the raw-separator gaps; D14 covers percent- and unicode-encoded PII and stays deferred); no log rotation or 30-day retention exists (`logging_config.py` configures no rotating handler); no centralized logging with redaction at ingest; the pre-redaction log files and any backups containing them are flagged here but not audited. |
 
 ---
 
@@ -263,7 +263,7 @@ logged here as pre-existing debt; not fixed, out of scope for "parts we touched"
 | Severity | Finding | Status | Week 1 Action |
 |---|---|---|---|
 | **Critical** | D1: Hardcoded credentials | Open | Document, flag, schedule rotation (Week 2+). |
-| **Critical** | D5: Plaintext PII in logs | Open | **Planned: ADR 0006 designs redaction; code + tests in `feature/pii-redaction` PR (not yet merged).** |
+| **Critical** | D5: Plaintext PII in logs | Mitigated | ADR 0006's `PiiRedactor` merged in PR #2 (`1f89ac1`): a copy in all 7 services, held identical by the blocking `redactor-drift` job and covered by the blocking `redaction-tests` job; `intake.py` logs an allowlist rather than the payload. Residuals open: encoded PII (D14, deferred), no log rotation/30-day retention, no redaction at ingest for centralized logging, pre-redaction logs and backups unaudited. |
 | **Critical** | D13: PAN/CVV in DB | Open | Document, flag, schedule tokenization (Week 2–3). |
 | **High** | D2: Float money math | Partially mitigated | Week 4 (ADR 0012): the disclosure compute path is `Decimal` end to end and the authoritative `disclosures` record is integer minor units, held by the blocking `tila-vectors-gate`. Intake, decisioning, servicing, payments, and `balances` remain float. |
 | **Medium** | D14: Encoded PII bypasses log redaction | Deferred | The log redactor matches literal shapes only, so percent-encoded (email=maria%40example.com, ssn=412%2D55%2D9981) and unicode-escaped (@) PII in uvicorn access-log query strings is not masked. Payload vector closed by allowlist logging; no sensitive route accepts PII via query/path today, so exposure is a client-crafted query param. Follow-up: bounded URL-decode + \uXXXX-unescape normalization pass in the (CI-synced) redactor, with regression tests for encoded email/SSN/phone. Not done now to avoid a byte-altering change to the shared redactor for a low-exposure case. |
@@ -334,7 +334,7 @@ columns and the ledger stay open.
 
 ✓ **D1:** Documented; flagged for rotation (Week 2).  
 ✓ **D2:** Documented; flagged for Decimal migration (Week 2+).  
-◻ **D5:** **Planned (ADR 0006).** Redaction strategy designed; `PiiRedactor` code + tests are in a separate PR (`feature/pii-redaction`) and not yet merged. Existing logs flagged (not deleted, out of scope). Not fixed until that code + tests land.  
+✓ **D5:** **Done for Week 1 (ADR 0006).** `PiiRedactor` code + tests merged in PR #2 (`1f89ac1`), one copy per service, guarded by the blocking `redactor-drift` and `redaction-tests` jobs. Existing logs flagged (not deleted, out of scope). The Week-2/Week-3 rows of the mitigation path — rotation/retention, redaction at ingest, backup audit — are still open, so D5 reads Mitigated, not Fixed.  
 ✓ **D13:** Documented; flagged for tokenization (Week 2–3).  
 
 ---
