@@ -400,3 +400,41 @@ def continuation_token_keys() -> list:
 CONTINUATION_TOKEN_TTL_DAYS = int(os.getenv("CONTINUATION_TOKEN_TTL_DAYS", "7"))
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# --- Policy retrieval (ADR 0018) ---------------------------------------------
+# Minimum match score a retrieved policy chunk must reach before the assistant
+# quotes it to an officer. NO COMMITTED DEFAULT, deliberately: the value is a
+# property of the corpus and the embedder, calibrated by `rag_eval` and printed
+# in rag_eval/eval_report.md, so a number baked in here would be wrong the first
+# time either changes. Unset means every query abstains -- a policy question is
+# answered "no policy match" rather than with a chunk nobody vouched for.
+#
+# Unlike DATABASE_URL this is NOT in missing_required_secrets(): origination
+# decisions, boards and discloses without retrieval, so an unset threshold is a
+# disabled feature, not an unhealthy service. policy_retrieval logs the reason
+# once per process instead.
+POLICY_RETRIEVAL_MIN_SCORE = os.getenv("POLICY_RETRIEVAL_MIN_SCORE", "")
+
+# Corpus location. Empty means "resolve it" -- policy_retrieval finds the mount
+# (/app/policies in the container, <repo>/policies in a checkout).
+POLICY_CORPUS_DIR = os.getenv("POLICY_CORPUS_DIR", "")
+
+
+def policy_retrieval_min_score() -> float | None:
+    """The configured abstain threshold, or None when unset or unusable.
+
+    A malformed value (non-numeric, negative, or above 1.0 -- cosine similarity
+    is bounded by 1) returns None rather than a guess, so a typo disables
+    retrieval instead of silently admitting every chunk (a threshold of 0 would
+    quote the worst match in the corpus for any query).
+    """
+    raw = POLICY_RETRIEVAL_MIN_SCORE.strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if value <= 0.0 or value > 1.0:
+        return None
+    return value

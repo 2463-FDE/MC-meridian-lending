@@ -69,11 +69,20 @@ _SAFE_CATEGORICAL = {
     # (plus numbers, which pass structurally). System-defined codes, not caller
     # data — none can collide with a plausible bare name.
     "action": {"tool", "final"},
-    "tool": {"score_application", "get_decision_record"},
+    "tool": {"score_application", "get_decision_record", "search_policy"},
     "task": {"decision", "explain"},
     "outcome": {"approve", "refer", "deny", "counteroffer"},
     "policy_band": {"approve", "refer", "deny"},
-    "status": {"recorded", "no_record_legacy", "not_found"},
+    # policy_hit / policy_abstain are the search_policy tool's whole model-visible
+    # vocabulary (ADR 0018): the retrieved passage itself is rendered to the OFFICER by
+    # code and never enters a turn, so nothing here admits corpus prose.
+    "status": {
+        "recorded",
+        "no_record_legacy",
+        "not_found",
+        "policy_hit",
+        "policy_abstain",
+    },
     "reason_codes": {"r01", "r02", "r03", "r04"},
 }
 

@@ -39,6 +39,25 @@ _SKIP_NAMES = {".gitkeep", ".gitignore", ".gitattributes", ".ds_store"}
 # name convention must not short-circuit that path.
 _SAFE_FILENAME = re.compile(r"\.?[a-z0-9][a-z0-9._-]*")
 
+
+def unsafe_corpus_path_reason(rel_path: Path) -> str | None:
+    """Why a corpus-relative path cannot be trusted as a chunk id / log/report entry.
+
+    A file with clean CONTENT can still leak identity through its NAME — the
+    chunker turns the stem into a chunk id, and refusal/report paths echo the
+    path. Shared by run()'s corpus-relative scan below and by
+    origination-service's policy_retrieval, which indexes a bind-mounted
+    corpus at runtime that this module's own CI-time scan never sees. Returns
+    "pii" or "non-slug", or None when the path is safe. Callers must not echo
+    the path itself when a reason comes back — the name can be the PII.
+    """
+    if scan_text(str(rel_path)):
+        return "pii"
+    if not all(_SAFE_FILENAME.fullmatch(part) for part in rel_path.parts):
+        return "non-slug"
+    return None
+
+
 # Gold-query STRUCTURED fields are locked to machine shapes so they cannot carry
 # free-text PII: an id is a slug, an expected entry is a chunk id (doc#section,
 # from chunker.py). That leaves only the natural-language query/note as free
@@ -209,35 +228,17 @@ def run(base: Path = Path(".")) -> RunResult:
     # pass scan_file, then its path is written into the report and its stem
     # becomes the chunk id. Scan the corpus-relative path and fail closed BEFORE
     # any report/chunk/cache work, identifying offenders by position only so the
-    # raw name is never echoed to logs or artifacts.
-    pii_paths = [
-        i for i, p in enumerate(candidates) if scan_text(str(p.relative_to(base)))
-    ]
+    # raw name is never echoed to logs or artifacts. unsafe_corpus_path_reason
+    # covers both the PII-shape check and the lowercase-slug convention (see its
+    # docstring); policy_retrieval reuses the same function at runtime.
+    path_reasons = [unsafe_corpus_path_reason(p.relative_to(base)) for p in candidates]
+    pii_paths = [i for i, r in enumerate(path_reasons) if r == "pii"]
     if pii_paths:
         raise RuntimeError(
             f"corpus file path(s) at position(s) {pii_paths} contain PII in their "
             "names — rename them (paths are not echoed here)"
         )
-
-    # scan_text above only catches self-identifying PII in a path (SSN, PAN,
-    # email). It CANNOT catch an unlabeled person name or street address —
-    # "Jane-Doe.md" is shape-identical to a policy title "Fee-Schedule.md", so a
-    # name-shape detector would refuse the whole policies/ tree. Instead require
-    # every corpus path COMPONENT (each parent directory AND the filename) to be
-    # a lowercase slug: a real name/address committed to the tree is
-    # conventionally Title-Cased or spaced ("Jane-Doe", "123 Main St"), so
-    # anything with an uppercase letter, space, or other unsafe char is refused
-    # before its stem becomes a chunk id / its path enters the report. Checking
-    # every component (not just p.name) closes the directory bypass — the report
-    # emits the full path, so a "policies/Jane-Doe/fees.md" dir would leak too.
-    # (A deliberately all-lowercase name is out of scope here; file CONTENT is
-    # still fully scanned by scan_file. A leading dot is allowed so hidden data
-    # files still reach the content scan rather than being refused on name.)
-    unsafe_names = [
-        i
-        for i, p in enumerate(candidates)
-        if not all(_SAFE_FILENAME.fullmatch(part) for part in p.relative_to(base).parts)
-    ]
+    unsafe_names = [i for i, r in enumerate(path_reasons) if r == "non-slug"]
     if unsafe_names:
         raise RuntimeError(
             f"corpus path(s) at position(s) {unsafe_names} have a non-slug "
