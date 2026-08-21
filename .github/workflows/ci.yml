@@ -278,12 +278,8 @@ jobs:
     # reopened gap would stay green. This job MUST block -- no continue-on-error, no
     # `|| true`.
     #
-    # The gate only holds if kyc-service actually persists a kyc_checks row for every
-    # successful KYC response: test_kyc_persistence.py proves /kyc/check fails closed (503)
-    # when the insert fails instead of reporting a pass with no row, and that a partial /
-    # entity request (no dob/ssn) persists a pass/fail row rather than 422-ing into a
-    # phantom "KYC unavailable". Runs under the continue-on-error backend job too, so it
-    # blocks here.
+    # The other half of the control -- that kyc-service actually persists a kyc_checks row --
+    # is kyc-persistence-gate below, deliberately its own job rather than a second step here.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -295,6 +291,29 @@ jobs:
           cd services/origination-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_kyc_gate.py -q
+
+  kyc-persistence-gate:
+    # The kyc-enforcement-gate above only holds if kyc-service actually persists a kyc_checks
+    # row for every successful KYC response: test_kyc_persistence.py proves /kyc/check fails
+    # closed (503) when the insert fails instead of reporting a pass with no row, and that a
+    # partial / entity request (no dob/ssn) persists a pass/fail row rather than 422-ing into
+    # a phantom "KYC unavailable". Runs under the continue-on-error backend job too, so it
+    # blocks here. No continue-on-error, no `|| true`.
+    #
+    # Its OWN job, not a second step on kyc-enforcement-gate, because steps in one job share a
+    # Python environment: as a trailing step it ran after origination-service's requirements
+    # were installed, and test_kyc_persistence.py's five `TestClient` uses need httpx, which
+    # kyc-service did not pin. The step passed on a dependency no manifest in its own service
+    # declared -- a gate green for a reason unrelated to what it asserts. A separate runner
+    # installs services/kyc-service/requirements.txt and nothing else, so the pin is
+    # load-bearing and CI itself is the regression test for it: drop the pin and this job
+    # errors at collection.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: kyc-service persistence + boundary-contract tests
         run: |
           cd services/kyc-service
