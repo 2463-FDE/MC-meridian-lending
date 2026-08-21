@@ -230,12 +230,57 @@ reads −88882 against a per-loan absolute of 175318, so netting hides roughly h
   who adjusts a balance until it "looks right" changes nothing this job reads. Detecting
   that needs the actor/before/after record the week-6 ledger work specifies. The two
   controls are complementary; neither substitutes for the other.
-- **Logs contain card + SSN data.** `payment-service` logs full PAN/CVV/SSN at INFO to
-  `logs/payment-service.log` (and origination still logs full PII at intake). Do not ship
-  these logs to a third-party aggregator until redaction is added.
-- **Secrets are in the repo.** `.env` is committed and the services' `config.py` hardcode
-  fallbacks — including Experian/core-banking keys in `decision-service` and the processor
-  key in `payment-service`. Rotate before any real go-live. (Long-standing TODO.)
+- **Redaction ships; the log files written before it do not.** New log lines are redacted:
+  `PiiRedactor` (ADR 0006) merged in PR #2 (`1f89ac1`) and runs in all 7 services, held
+  identical by the blocking `redactor-drift` job and covered by the blocking
+  `redaction-tests` job, and origination's intake logs an allowlist of fields rather than
+  the payload, so the redactor is a backstop there rather than the only control. What is
+  still unsafe is history: any `logs/payment-service.log` or `logs/origination-service.log`
+  written before that merge still holds plaintext PAN/CVV/SSN, and nothing has audited or
+  deleted them. Do not ship pre-redaction log files to a third-party aggregator, and do not
+  assume rotation has trimmed them — no rotating handler is configured, so D5's
+  retention/audit rows are still open.
+- **Secrets are purged from the tree, not rotated.** The committed `.env` and the hardcoded
+  `config.py` fallbacks are gone from `main` — PR #4 (`ed2cb35`, 2026-07-10) — and the
+  blocking `secret-scan` job fails on the literals and on a tracked `.env`; every key now
+  reads `os.getenv(..., "")` with no committed default. **The keys themselves are still live
+  and still owed a rotation:** the Experian and core-banking keys and the `payment-service`
+  processor key remain in git history and wherever they were already used, so a purge
+  removed them from the tree and nothing more. Rotate before any real go-live (D1, open).
+
+## Backup and recovery
+
+**There is no backup or recovery procedure. This section exists to say so, not to describe one.**
+Week-8 client-demo feedback recorded this as a baseline to capture; the honest baseline is that no
+value exists to report. Nothing below is a target, an RPO, or an RTO — none has been agreed.
+
+**What exists.** One Docker named volume, `pgdata`, mounted at `/var/lib/postgresql/data`
+(`docker-compose.yml:13`, declared at `:227`). `make seed` re-applies `db/init/002_seed.sql`, which
+restores *demo* rows and nothing a borrower ever touched. That is the whole of it.
+
+**What does not exist**, verified by search rather than assumed — the repo contains no `pg_dump`,
+`pg_basebackup`, or `pgbackrest` invocation in any script, Makefile target, or compose file, and no
+file whose name mentions backup or restore:
+
+- No scheduled dump, no WAL archiving, no replica.
+- No restore procedure and no restore drill, so recovery time is unmeasured, not merely unstated.
+- No retention or destruction policy for whatever backups the client already holds.
+- No encryption-at-rest statement for backup media.
+
+**Why this is a control question and not only an operations one.** `docs/debt-log.md` D13 records
+that WAL segments, replicas, and any backup taken before a card-data rewrite still contain
+cardholder data, and that historical card tokens are not recoverable — re-tokenizing the back book
+is its own migration. D5's mitigation path carries an explicit "audit all existing backups;
+re-encrypt or delete any containing plaintext PII" row, and **that row is open**: the redactor
+stops new plaintext PAN/CVV/SSN reaching logs, but it does nothing to files written before it
+merged, or to a database backup where the PAN is a stored column rather than a log line. So a
+restore is currently also a re-introduction of the exact data two blocking CI jobs exist to keep
+out.
+
+**Open, and owned by the client.** Who takes backups of the production database today, on what
+schedule, where they are stored, and whether any predate the card-data work. Until Lending Ops
+answers, this platform can state only what it does itself, which is nothing. Do not present a
+backup posture in a demo — say this section's first line instead.
 
 ## Tests
 
