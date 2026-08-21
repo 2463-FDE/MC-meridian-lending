@@ -11,8 +11,9 @@
   ADR 0004 (the decomposition that split capture from apply across two services).
   Debt D7 (no reconciliation job), D19 (no idempotency key), D3 (lost update),
   D2 (float money), D8 (servicing enforces no authorization).
-- **Source:** `docs/spec-observability-week7.md`,
-  `docs/client-asks-2026-08-12-observability.md`.
+- **Source:** `docs/spec-observability-week7.md`, and
+  docs/client-asks-2026-08-12-observability.md — local-only, on the docs/client-asks branch and in
+  no checkout, so it is named un-backticked rather than linked.
 
 ---
 
@@ -317,7 +318,7 @@ path only.
 |---|---|
 | Ambiguous tuples are common in an installment portfolio, so many breaks need manual review | The report abstains rather than guessing; migration `0017`'s `processor_ref` is the named successor, and Decision 1 is written to be replaced |
 | A reader treats gross break value as a stable measurement | Labelled in the report itself, not only in this ADR |
-| The client hears detection as prevention | Stated in `docs/client-asks-2026-08-12-observability.md` and repeated in the runbook |
+| The client hears detection as prevention | Stated in docs/client-asks-2026-08-12-observability.md (local-only, un-backticked — see **Source** above) and repeated in the runbook. **Still the live risk:** week-8 client-demo feedback names prevention at capture, user notification and refund status as unevidenced, and today's honest answer is detection only |
 | Nobody runs the job, so the control exists on paper | Exit codes make it CI-runnable; the runbook names the invocation. A scheduler is deferred, not assumed |
 | The cut-off convention turns out to differ from ±1 day, changing every classification | The window is configuration; the client question is open and the answer changes a value |
 | Someone tightens the window and believes duplicate detection improved | Decision 2 makes duplicate detection independent of the window, and a test vector asserts invariance across both values |

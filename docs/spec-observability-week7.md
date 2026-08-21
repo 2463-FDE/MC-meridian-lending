@@ -3,8 +3,9 @@
 **Status:** draft · **Written:** 2026-08-12 · **Base:** `main` @ `f375ef2`
 **Client ask:** observability / SRE / guardrails — "Payments feel flaky, and my finance team
 grumbles about 'noise' at month-end that they just write off."
-**Companion docs:** `docs/client-asks-2026-08-12-observability.md` (the asks and the evidence),
-ADR 0015 (the decisions), `docs/debt-log.md` (D7).
+**Companion docs:** docs/client-asks-2026-08-12-observability.md (the asks and the evidence) —
+local-only, on the docs/client-asks branch and in no checkout, so it is named un-backticked
+rather than linked; ADR 0015 (the decisions), `docs/debt-log.md` (D7).
 
 ---
 
@@ -415,7 +416,8 @@ a schedule. Finance reconciles by hand in a spreadsheet."*) is replaced rather t
   This week detects it. Saying "we can now see it" must not be mistaken for "it can no longer
   happen," and the client-asks draft states that explicitly.
 - **Fixing the lost update (D3).** Atomic `UPDATE` plus `payment_applications`, specified in
-  week-5 D3(d), slotted to W9 in `docs/plan-weeks7-10.md`.
+  week-5 D3(d), slotted to W9 in docs/plan-weeks7-10.md (local-only, absent from every checkout —
+  un-backticked for that reason).
 - **The processor integration.** No capture call exists. Building one is a prerequisite the
   payments spec assumes silently; it is named here and owned there.
 - **Exact matching on `processor_ref`.** Arrives with migration `0017_payments_idempotency`
@@ -567,8 +569,8 @@ about at the demo is a reduction they did not agree to.
 
 ## Client Questions
 
-Raised in `docs/client-asks-2026-08-12-observability.md`; none blocks the build, each changes a
-constant rather than a design.
+Raised in docs/client-asks-2026-08-12-observability.md (local-only, un-backticked — see
+**Companion docs** above); none blocks the build, each changes a constant rather than a design.
 
 - **Q1** Does the processor return a reference at capture, and in which field? Decides when
   exact matching replaces D2(c).
