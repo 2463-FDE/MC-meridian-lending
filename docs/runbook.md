@@ -230,12 +230,23 @@ reads −88882 against a per-loan absolute of 175318, so netting hides roughly h
   who adjusts a balance until it "looks right" changes nothing this job reads. Detecting
   that needs the actor/before/after record the week-6 ledger work specifies. The two
   controls are complementary; neither substitutes for the other.
-- **Logs contain card + SSN data.** `payment-service` logs full PAN/CVV/SSN at INFO to
-  `logs/payment-service.log` (and origination still logs full PII at intake). Do not ship
-  these logs to a third-party aggregator until redaction is added.
-- **Secrets are in the repo.** `.env` is committed and the services' `config.py` hardcode
-  fallbacks — including Experian/core-banking keys in `decision-service` and the processor
-  key in `payment-service`. Rotate before any real go-live. (Long-standing TODO.)
+- **Redaction ships; the log files written before it do not.** New log lines are redacted:
+  `PiiRedactor` (ADR 0006) merged in PR #2 (`1f89ac1`) and runs in all 7 services, held
+  identical by the blocking `redactor-drift` job and covered by the blocking
+  `redaction-tests` job, and origination's intake logs an allowlist of fields rather than
+  the payload, so the redactor is a backstop there rather than the only control. What is
+  still unsafe is history: any `logs/payment-service.log` or `logs/origination-service.log`
+  written before that merge still holds plaintext PAN/CVV/SSN, and nothing has audited or
+  deleted them. Do not ship pre-redaction log files to a third-party aggregator, and do not
+  assume rotation has trimmed them — no rotating handler is configured, so D5's
+  retention/audit rows are still open.
+- **Secrets are purged from the tree, not rotated.** The committed `.env` and the hardcoded
+  `config.py` fallbacks are gone from `main` — PR #4 (`ed2cb35`, 2026-07-10) — and the
+  blocking `secret-scan` job fails on the literals and on a tracked `.env`; every key now
+  reads `os.getenv(..., "")` with no committed default. **The keys themselves are still live
+  and still owed a rotation:** the Experian and core-banking keys and the `payment-service`
+  processor key remain in git history and wherever they were already used, so a purge
+  removed them from the tree and nothing more. Rotate before any real go-live (D1, open).
 
 ## Backup and recovery
 

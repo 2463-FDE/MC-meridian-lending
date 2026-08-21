@@ -79,10 +79,12 @@ decision/offer/board.
 
 These moved with the decomposition:
 
-- **Experian** — credit pull, now in `decision-service` (key still hardcoded, now in
-  `decision-service/app/config.py`, alongside a hardcoded core-banking key).
-- **Card/ACH processor** — charge capture, now in `payment-service` (processor key
-  hardcoded in its config).
+- **Experian** — credit pull, now in `decision-service`. The key and the core-banking key
+  read from the environment with no committed default (`decision-service/app/config.py`);
+  the hardcoded literals were purged in PR #4 (`ed2cb35`) and the blocking `secret-scan` job
+  keeps them out. They are still owed a rotation — D1 stays open.
+- **Card/ACH processor** — charge capture, now in `payment-service`; the processor key reads
+  from the environment on the same terms, with the same rotation still owed.
 
 ## Resolved since this doc was written
 

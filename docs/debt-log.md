@@ -80,20 +80,21 @@ alone — renumbering live code comments is a separate mechanical change.
 | Field | Value |
 |---|---|
 | **ID** | D5 |
-| **Finding** | Payment and origination services log full request/response bodies, including plaintext PAN, CVV, and SSN. |
+| **Finding** | *(As found 2026-07-01, and no longer true of `main` — see Status.)* Payment and origination services log full request/response bodies, including plaintext PAN, CVV, and SSN. |
 | **Location** | `services/payment-service/app/logging_config.py` (lines 1–4): docstring — "writes the full charge request body (PAN, CVV, SSN) at INFO. No redaction." |
 | | `services/payment-service/app/payments.py` (lines 23–27): `charge()` logs the full request body `{"pan","cvv","ssn","amount","loan_id","name"}` at INFO on `POST /payments`. |
 | | `services/origination-service/app/logging_config.py` (line 3–4): "Logs the full request body on every POST — including PII. No redaction." |
 | | `services/origination-service/app/intake.py` (line 15): `log.info("POST /applications intake req=%s", payload)` — payload includes SSN, email, phone. |
 | | **Log files:** `logs/payment-service.log`, `logs/origination-service.log` contain unredacted cardholder data. |
 | | **Sample from repo handover:** `INFO charge req={"pan":"4111111111111111","cvv":"123","ssn":"412-55-9981","amount":250.00}` |
+| | *(The two `logging_config.py` docstrings quoted above are the originals and no longer exist. PR #2 (`1f89ac1`) rewrote both on `main`: origination's now opens "Logging setup with PII redaction", payment's "Now redacts PII before writing to logs/payment-service.log". The log files named above are the pre-redaction ones, which still hold plaintext and are still unaudited — see Status.)* |
 | **Risk** | **Critical.** PCI-DSS 3.4: "Rendering PAN unreadable anywhere it is stored (including on portable digital media, backup media, and **in logs**)." |
 | | If log files are: |
 | | - Backed up to S3/tape (unencrypted or with lost key), PII is exposed. |
 | | - Aggregated to a central logging service (Loki, ELK, Splunk) without redaction, PII is searchable. |
 | | - Left on disk after server failure, physical recovery exposes PII. |
 | | Violation triggers: fines (up to $100k+ per incident under state laws), customer breach notifications, reputational damage. |
-| **Current Impact** | Logs are actively created and written to disk daily. No retention/rotation policy documented. If server is decommissioned, logs may be left in place. |
+| **Current Impact** | *(First sentence as found 2026-07-01, no longer true of `main`.)* Logs were actively created and written to disk daily with PII unredacted; new log lines are redacted as of PR #2 (`1f89ac1`). Still true today: no retention or rotation policy exists (`logging_config.py` configures no rotating handler), so logs grow without bound, and the pre-redaction files already on disk are neither audited nor deleted. If a server is decommissioned, those files may be left in place. |
 | **Mitigation Path** | **Week 1 (NOW):** Implement `PiiRedactor` class; apply to all 7 services' logging (ADR 0006). Redact PAN, CVV, full SSN, email, phone before writing to disk. Preserve last 4 of SSN for audit trails. |
 | | **Week 1 (ongoing):** Flag existing log files (in this debt-log). Do not delete; archive separately (out of scope). |
 | | **Week 2:** Implement log rotation + deletion (30-day retention). |
