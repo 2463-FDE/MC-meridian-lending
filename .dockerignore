@@ -22,3 +22,7 @@ logs/*.log.bak
 
 # Embedding cache: rebuilt per run, never part of the image.
 rag_eval/.cache
+
+# Legacy pre-remediation raw dump (ADR 0007) — carries ssn/pan/dob. Never lands in the
+# image, but a root-context build still ships it to the daemon and its cache.
+kb_dump

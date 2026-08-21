@@ -101,3 +101,12 @@ def test_dockerignore_does_not_exclude_the_package_being_copied():
         and entry != "rag_eval/.cache"
     ]
     assert offenders == [], f".dockerignore excludes part of rag_eval/: {offenders}"
+
+
+def test_dockerignore_excludes_the_legacy_contaminated_dump():
+    """kb_dump/applications.jsonl carries ssn/pan/dob (the ADR 0007 legacy raw dump).
+
+    It never lands in the built image, but a root-context build still ships it to the
+    daemon and its cache on every build unless .dockerignore excludes it.
+    """
+    assert "kb_dump" in _dockerignore_entries()
