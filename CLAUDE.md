@@ -183,6 +183,15 @@ The `backend` matrix job runs pytest with `continue-on-error` + `|| true` — **
 - `docs/debt-log.md`, `docs/los-lss-seam.md`, `docs/runbook.md`, `docs/security-remediation-2026-07.md`.
 - An "AI underwriting assistant" is planned but not built (`docs/STAGE1-PLAN-AI-ASSISTANT.md`, `docs/spec-ai-assistant-week1.md`); RAG eval harness in `rag_eval/`.
 
+### Debt-log status vocabulary
+
+`docs/debt-log.md` is what a fresh session reads to learn which controls exist. A stale status there is worse than a missing entry, because it is trusted.
+
+- **Never describe work as sitting in an unmerged PR.** That claim decays the moment the PR merges and nothing re-reads the entry. D5 said the `PiiRedactor` code was "in a separate PR (feature/pii-redaction) and not yet merged" in three places for five weeks after it merged (PR #2, `1f89ac1`, 2026-07-09) — while the redactor was live in all 7 services behind two blocking CI jobs. Cite the merge commit and the gate that holds the control, not the branch that carried it.
+- **Verify before you write either status.** `git merge-base --is-ancestor <branch> <base>` answers whether the code is actually on the base branch; a branch existing locally proves nothing. Same rule as the review-finding workflow above — ground-truth the claim first.
+- **Mitigated** means the control ships and something blocking keeps it from regressing. **Fixed** means every row of that entry's own Mitigation Path is done. D5 is Mitigated, not Fixed: the redactor merged, but the rotation/retention, redaction-at-ingest, and backup-audit rows are all still open, and encoded PII stays deferred under D14. Conflating the two retires an entry that still has work in it.
+- **Name each residual explicitly.** An entry whose status implies more coverage than the code has is the failure mode this section exists to prevent.
+
 ### ADR writing standards
 
 ADRs live in `adr/` (sequential `NNNN-short-title.md` — check the highest existing number and increment). Follow the ADR rules in the global `~/.claude/CLAUDE.md`: Nygard format, business problem before solution, 3+ options with rejection reasons, trade-offs/rollback/risks, the cross-cutting concerns, present-tense/active-voice prose, and plain literal language. The plain-language rule's membership test resolves against the project vocabulary below.
