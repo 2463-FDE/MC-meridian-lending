@@ -330,6 +330,58 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_tila_vectors.py tests/test_apr.py tests/test_rules.py -q
 
+  reconciliation-gate:
+    # Settlement reconciliation is the only thing that compares what the processor captured
+    # against what a loan was credited (ADR 0015). It is how a double charge and a payment
+    # that never reached a ledger are found at all -- there is no prevention at capture:
+    # payment-service has no idempotency key and every POST inserts a row
+    # (services/payment-service/app/payments.py:168). Detection is therefore the whole of the
+    # control today, and a regression in it is silent by construction: the report still runs,
+    # still exits 0, and still looks clean.
+    #
+    # Its 1,499-line test_reconciliation.py and the four files beside it ran ONLY in the
+    # `backend` matrix job, which is `continue-on-error: true` with `python -m pytest -q
+    # || true` (this file, the Tests step above) -- so a broken break-classifier shipped on a
+    # green build. Fourteen other control areas each hold a dedicated blocking job; this was
+    # the largest suite in the repo without one.
+    #
+    # Exactly the failure mode tila-vectors-gate exists to close, and the reason to state it
+    # twice: compute_apr was 4.5pp wrong on every loan for weeks because the money test that
+    # would have caught it inherited `|| true`. A money-math gate that inherits `|| true` is
+    # not a gate. This job MUST block -- no continue-on-error, no `|| true`.
+    #
+    # Why all five files and not just the big one:
+    #   test_reconciliation.py       the matcher, break classes, per-loan absolute vs net
+    #                                variance, and the duplicate pair found across a window
+    #                                edge -- the arithmetic a client reads off a slide.
+    #   test_reconciliation_alert.py the alert fires on the configured threshold, and ABORTS
+    #                                when the threshold is unset rather than reporting a
+    #                                clean close. Fail-closed is the control, not the alert.
+    #   test_reconcile_cli.py        exit 0 / 1 / 2 stay distinct (clean, breaks found, could
+    #                                not run) and stdout carries no report on an abort. A
+    #                                dashboard must never receive a well-formed zero from a
+    #                                run that could not read its own inputs.
+    #   test_reconciliation_utc.py   the cut-off is pinned to UTC (#47). A local-time cut-off
+    #                                silently reclassifies every row near a window boundary.
+    #   test_runbook_reconciliation.py  the documented invocation and exit codes still match
+    #                                the code, so docs/runbook.md cannot drift from the job
+    #                                an operator actually runs on their cron.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: servicing-service settlement reconciliation, alert fail-closed, and exit codes
+        run: |
+          cd services/servicing-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_reconciliation.py \
+                           tests/test_reconciliation_alert.py \
+                           tests/test_reconcile_cli.py \
+                           tests/test_reconciliation_utc.py \
+                           tests/test_runbook_reconciliation.py -q
+
   db-readiness-gate:
     # DB readiness is a security control: a passwordless / placeholder / stale
     # DATABASE_URL must report unhealthy, not connect unauthenticated or fail
@@ -606,4 +658,9 @@ jobs:
         run: ./scripts/check_doc_claims.sh
 
   # GAP: no dependency audit, no SAST, no container image scan.
-  # GAP: backend tests are continue-on-error, so failing money-math tests are green.
+  # GAP: backend tests are continue-on-error, so failing money-math tests are green --
+  # EXCEPT where a dedicated blocking job runs the same file outside the matrix. The money
+  # paths carved out so far: the disclosure compute path (tila-vectors-gate) and settlement
+  # reconciliation (reconciliation-gate). Still inside the suppression, and therefore still
+  # able to regress on a green build: the apply-payment and balance write paths, including
+  # the red lost-update test (D3, week 9).
