@@ -5,9 +5,9 @@ module decides what is true and hands back the corpus text VERBATIM for the offi
 model never sees that text — the loop feeds it only the status code and the score (ADR 0018
 decision 3), which is why nothing here is shaped for a prompt.
 
-Everything fails closed to an abstention: no corpus, a corpus file the ADR 0007 hygiene scan
-refuses, an unset or malformed threshold, an empty query, or a best match below the threshold
-all return `PolicyAnswer(status="policy_abstain", ...)`. An officer then reads "no policy
+Everything fails closed to an abstention: an unimportable `rag_eval`, no corpus, a corpus
+file the ADR 0007 hygiene scan refuses, an unset or malformed threshold, an empty query, or a
+best match below the threshold all return `PolicyAnswer(status="policy_abstain", ...)`. An officer then reads "no policy
 match", which is honest; a fabricated or unvouched-for quotation would not be.
 
 The index is built once per process from `rag_eval` (importable in the container since card
@@ -18,10 +18,23 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from rag_eval.chunker import chunk_markdown
-from rag_eval.hygiene import scan_file
-from rag_eval.index import InMemoryIndex
-from rag_eval.run import make_embedder
+try:
+    from rag_eval.chunker import chunk_markdown
+    from rag_eval.hygiene import scan_file
+    from rag_eval.index import InMemoryIndex
+    from rag_eval.run import make_embedder
+except ImportError as exc:
+    # `rag_eval` is repo-root, and card G2a puts it in the IMAGE (copied to /app/rag_eval,
+    # WORKDIR /app) — it does not put it on the sys.path of every checkout. A bare
+    # `python -c "import app.main"` from this directory has neither the image layout nor
+    # pytest.ini's `pythonpath = ../..`, which is exactly what CI's `backend` import smoke
+    # runs. Importing origination must not depend on the assistant's optional retrieval
+    # tool, so record the failure and abstain at call time instead of taking the service
+    # down. rag-eval-import-gate proves the import inside the shipped image, so a
+    # container that silently lost the harness still fails CI.
+    _HARNESS_IMPORT_ERROR: ImportError | None = exc
+else:
+    _HARNESS_IMPORT_ERROR = None
 
 from . import config
 from .logging_config import get_logger
@@ -34,6 +47,7 @@ NO_THRESHOLD = "threshold_unset"
 NO_CORPUS = "corpus_unavailable"
 EMPTY_QUERY = "empty_query"
 BELOW_THRESHOLD = "below_threshold"
+HARNESS_UNAVAILABLE = "harness_unavailable"
 DECISION_TASK = "refused_on_decision_task"
 
 _HIT = "policy_hit"
@@ -175,6 +189,13 @@ def search(query: str) -> PolicyAnswer:
         return abstain(NO_THRESHOLD)
     if not isinstance(query, str) or not query.strip():
         return abstain(EMPTY_QUERY)
+    if _HARNESS_IMPORT_ERROR is not None:
+        log.warning(
+            "policy retrieval disabled: rag_eval is not importable (%s) — every query "
+            "abstains (ADR 0018)",
+            _HARNESS_IMPORT_ERROR,
+        )
+        return abstain(HARNESS_UNAVAILABLE)
     state = _index()
     if state is None:
         log.warning(

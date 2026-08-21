@@ -7,6 +7,10 @@ code and a number, and the model-authored query never crosses to the provider at
 """
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -295,3 +299,42 @@ def test_corpus_prose_is_still_masked_by_the_redactor():
     )
     assert masked["status"] == "policy_hit"
     assert prose not in masked["text"]
+
+
+# --- an absent harness is a disabled feature, not a dead service -------------------
+
+
+def test_search_abstains_when_the_harness_is_not_importable(threshold, monkeypatch):
+    """Same class as an unset threshold (`config.py`): retrieval off, service healthy."""
+    threshold("0.05")
+    monkeypatch.setattr(
+        policy_retrieval,
+        "_HARNESS_IMPORT_ERROR",
+        ModuleNotFoundError("No module named 'rag_eval'"),
+    )
+    answer = policy_retrieval.search(ELIGIBILITY_QUERY)
+    assert not answer.is_hit
+    assert answer.reason == policy_retrieval.HARNESS_UNAVAILABLE
+    assert answer.text == ""
+    assert answer.chunk_id == ""
+
+
+def test_app_imports_without_the_repo_root_on_sys_path():
+    """Reproduces CI's `backend` import smoke: `cd services/origination-service` then
+    `python -c "import app.main"`. A bare interpreter never reads `pytest.ini`, so
+    `pythonpath = ../..` does not apply and `rag_eval` is absent. Card G2a puts the
+    harness in the IMAGE; it does not put it on a checkout's sys.path. The service must
+    still import — the alternative is that installing the assistant's optional retrieval
+    tool takes origination down wherever the repo root is not a package root.
+    """
+    service_dir = Path(__file__).resolve().parents[1]
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    proc = subprocess.run(
+        [sys.executable, "-c", "import app.main"],
+        cwd=service_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert "No module named 'rag_eval'" not in proc.stderr
+    assert proc.returncode == 0, proc.stderr
