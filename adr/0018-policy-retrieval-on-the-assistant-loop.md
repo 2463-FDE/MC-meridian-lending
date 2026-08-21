@@ -71,8 +71,11 @@ look up; code decides what is true and what the officer reads.
    policy text, so it cannot paraphrase, compress, or contradict it.
 4. **Retrieval abstains below a configured score threshold**
    (`POLICY_RETRIEVAL_MIN_SCORE`), which has no committed default. Unset means the tool
-   abstains on every query and `/health` reports the gap — the same fail-closed posture as the
-   origination fee schedule and the reconciliation alert threshold.
+   abstains on every query — a fail-closed posture, but not the same one as the origination fee
+   schedule: origination decisions, boards and discloses without retrieval, so an unset
+   threshold is a disabled feature rather than an unhealthy service, and `/health` does not
+   report it (`config.py::missing_required_secrets`). `policy_retrieval` logs the reason once
+   per process instead.
 5. **Retrieval is refused entirely on `task="decision"`.** The tool is available on the
    read-only `explain` task. A decision run that requests it receives an explicit refusal
    code, so policy prose can never enter the turn sequence that produces a regulated outcome.
