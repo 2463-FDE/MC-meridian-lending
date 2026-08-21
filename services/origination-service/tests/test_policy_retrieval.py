@@ -150,6 +150,31 @@ def test_contaminated_corpus_file_is_refused_not_indexed(
     assert "123-45-6789" not in logged  # the scan names the type, never the value
 
 
+def test_unsafe_filename_is_refused_even_with_clean_content(
+    threshold, monkeypatch, tmp_path
+):
+    """M1: scan_file only scans CONTENT. A file whose NAME carries an identity
+    (a bind-mounted policies/jane-doe-123-45-6789.md, say) must not reach the
+    chunker just because its prose is clean — the stem becomes the officer-
+    visible chunk id (chunk_markdown, doc = path.stem)."""
+    (tmp_path / "clean.md").write_text(
+        "# Clean\n\n## Fees\n\nThe late fee is $35 flat.\n", encoding="utf-8"
+    )
+    (tmp_path / "jane-doe-123-45-6789.md").write_text(
+        "# Fees\n\n## Late\n\nThe late fee is $35 flat.\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(config, "POLICY_CORPUS_DIR", str(tmp_path))
+    threshold("0.05")
+    recorder = _RecordingLog()
+    monkeypatch.setattr(policy_retrieval, "log", recorder)
+
+    indexed = {chunk.doc for chunk in policy_retrieval._load_corpus()}
+    assert indexed == {"clean"}, "the unsafe-named file must not be indexed"
+    logged = "\n".join(recorder.lines)
+    assert "REFUSED" in logged
+    assert "jane-doe-123-45-6789" not in logged  # the name is the PII, never logged
+
+
 def test_missing_corpus_directory_abstains(threshold, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "POLICY_CORPUS_DIR", str(tmp_path / "nope"))
     threshold("0.05")

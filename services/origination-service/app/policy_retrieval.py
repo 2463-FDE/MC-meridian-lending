@@ -22,7 +22,7 @@ try:
     from rag_eval.chunker import chunk_markdown
     from rag_eval.hygiene import scan_file
     from rag_eval.index import InMemoryIndex
-    from rag_eval.run import make_embedder
+    from rag_eval.run import make_embedder, unsafe_corpus_path_reason
 except ImportError as exc:
     # `rag_eval` is repo-root, and card G2a puts it in the IMAGE (copied to /app/rag_eval,
     # WORKDIR /app) — it does not put it on the sys.path of every checkout. A bare
@@ -126,7 +126,25 @@ def _load_corpus() -> list:
     corpus file must not take the assistant down, and it must not be quoted either.
     """
     chunks = []
-    for path in sorted(corpus_dir().glob("*.md")):
+    base = corpus_dir()
+    for path in sorted(base.glob("*.md")):
+        # The hygiene gate below scans CONTENT only. A file mounted with clean
+        # content but an unsafe NAME (jane-doe-123-45-6789.md) would still pass
+        # it, then leak identity through the officer-visible chunk id (doc =
+        # path.stem, ADR 0007 rule 6) and this loop's own log lines. ADR 0007's
+        # CI-time scan never sees this bind-mounted copy, so re-check the path
+        # here with the same function rag_eval.run applies to the committed
+        # corpus (rag_eval/run.py::run).
+        reason = unsafe_corpus_path_reason(path.relative_to(base))
+        if reason is not None:
+            # The filename itself is the flagged problem — unlike the branches
+            # below, path.name is not safe to log here.
+            log.warning(
+                "policy corpus file REFUSED for an unsafe name (%s), not "
+                "indexed (name withheld)",
+                reason,
+            )
+            continue
         try:
             verdict = scan_file(path)
         except OSError as exc:
