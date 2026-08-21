@@ -273,6 +273,31 @@ def test_no_citation_when_retrieval_abstains(threshold, record_seam):
     assert "quoted verbatim" not in result["summary"]
 
 
+def test_abstained_search_is_visible_and_distinct_from_no_search(
+    threshold, record_seam
+):
+    """B1: an abstained search must not read the same as a run that never
+    searched at all — the officer needs to see that retrieval was tried and
+    came back empty, not just that no policy text is quoted."""
+    threshold("0.99")
+    client, _ = _client(SEARCH_CALL, FINAL_EXPLAIN)
+    searched = assistant.run(42, client, task="explain")
+    assert searched["policy_searches"] == [
+        {
+            "status": "policy_abstain",
+            "score": searched["policy_searches"][0]["score"],
+            "reason": policy_retrieval.BELOW_THRESHOLD,
+        }
+    ]
+    assert "no passage matched above the required threshold" in searched["summary"]
+
+    client, _ = _client(FINAL_EXPLAIN)
+    never_searched = assistant.run(42, client, task="explain")
+    assert never_searched["policy_searches"] == []
+    assert never_searched["summary"] != searched["summary"]
+    assert "Policy search" not in never_searched["summary"]
+
+
 def test_repeated_hits_on_one_chunk_are_cited_once(threshold, record_seam):
     threshold("0.05")
     client, _ = _client(SEARCH_CALL, SEARCH_CALL, FINAL_EXPLAIN)

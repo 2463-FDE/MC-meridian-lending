@@ -124,6 +124,38 @@ def _constructed_summary(record: dict) -> str:
     )
 
 
+# Officer-facing text for a search that ran but produced nothing to quote.
+# Reason-specific (not one generic "no match" line): B1 found that a run
+# where retrieval abstained looked identical to a run that never searched at
+# all — the false-confidence failure ADR 0018 cites from q11 — and a single
+# generic line would still blur "no passage cleared the bar" against "search
+# is not configured/available", which are different facts an officer should
+# not read as the same thing.
+_ABSTAIN_OFFICER_TEXT = {
+    policy_retrieval.NO_THRESHOLD: "Policy search is not configured.",
+    policy_retrieval.NO_CORPUS: "Policy search found no usable policy corpus.",
+    policy_retrieval.EMPTY_QUERY: "Policy search ran but returned no match.",
+    policy_retrieval.BELOW_THRESHOLD: (
+        "Policy search ran; no passage matched above the required threshold."
+    ),
+    policy_retrieval.HARNESS_UNAVAILABLE: (
+        "Policy search is unavailable in this environment."
+    ),
+    policy_retrieval.DECISION_TASK: "Policy search is not available on decision runs.",
+}
+
+
+def _no_match_line(searches: list) -> str:
+    """Deterministic, code-rendered line for a search that abstained.
+
+    Reports the LAST search attempt's reason — the one closest to the
+    officer's actual answer — never the model's narration of it.
+    """
+    reason = searches[-1].reason
+    text = _ABSTAIN_OFFICER_TEXT.get(reason, "Policy search ran; no policy match.")
+    return f"Policy search — {text}"
+
+
 def _policy_section(citations: list) -> str:
     """Officer-facing policy excerpts, quoted VERBATIM from the corpus (ADR 0018).
 
@@ -147,6 +179,7 @@ def _validated_final(
     task: str,
     request_id: str | None = None,
     citations: list | None = None,
+    searches: list | None = None,
 ) -> dict:
     """Check the model's final answer against the persisted record (ADR 0009 §5:
     validated, not trusted). Returns the officer-facing result; on mismatch the
@@ -204,8 +237,15 @@ def _validated_final(
     # renders `summary`, so a citation that lived only in `policy_citations` would be
     # retrieved, paid for, and never read by the person who asked for it.
     citations = citations or []
+    searches = searches or []
     if citations:
         summary = f"{summary}\n\n{_policy_section(citations)}"
+    elif searches:
+        # A search ran and came back empty-handed. Without this branch the
+        # screen is indistinguishable from a run that never searched at all
+        # (B1) — say so, deterministically, from the reason code the module
+        # recorded, not from the model's account of what happened.
+        summary = f"{summary}\n\n{_no_match_line(searches)}"
     # The model score comes from the persisted record's drivers, so the officer screen can
     # show the SAME decision facts for an assistant run as for a manual Run decision
     # (applications.py run_decision returns score + first principal reason). Without it the
@@ -233,6 +273,19 @@ def _validated_final(
                 "text": answer.text,
             }
             for answer in citations
+        ],
+        # Every search attempt, hit or abstain — never just hits — so the officer
+        # screen (and any caller inspecting the response, not just `summary`'s
+        # prose) can tell "searched, found nothing" from "never searched" (B1).
+        # No chunk_id/text here even for a hit: that identical information is
+        # already in policy_citations; this field exists for the abstain case.
+        "policy_searches": [
+            {
+                "status": answer.status,
+                "score": round(answer.score, 4),
+                "reason": answer.reason,
+            }
+            for answer in searches
         ],
     }
 
@@ -267,6 +320,8 @@ def run(
     request = {"application_id": application_id, "task": task}
     score_result = None  # the regulated decision happens AT MOST ONCE per run
     citations = []  # policy excerpts to quote to the OFFICER (never back to the model)
+    searches = []  # every search_policy attempt, hit or abstain (B1: makes an
+    # abstention visible instead of indistinguishable from a run that never searched)
     for _ in range(_MAX_STEPS):
         action = client.complete(
             "decision_assistant",
@@ -300,6 +355,7 @@ def run(
                 # history (see the action rewrite below) and not logged, because it is
                 # model-authored free text whose contents we do not control.
                 answer = tool(str((action.get("input") or {}).get("query") or ""), task)
+                searches.append(answer)
                 if answer.is_hit and all(
                     c.chunk_id != answer.chunk_id for c in citations
                 ):
@@ -324,6 +380,8 @@ def run(
             )
             continue
         if kind == "final":
-            return _validated_final(action, application_id, task, request_id, citations)
+            return _validated_final(
+                action, application_id, task, request_id, citations, searches
+            )
         raise AssistantError(f"assistant returned unknown action {kind!r}")
     raise AssistantError(f"assistant gave no final answer within {_MAX_STEPS} steps")
