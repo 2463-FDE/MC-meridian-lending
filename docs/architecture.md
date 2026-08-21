@@ -68,9 +68,12 @@ the one shared Postgres.
 
 The gateway handles login (`/auth/*`) against the `users` table, mints an opaque session
 token stored in Redis, and forwards the resolved identity downstream as `X-User-*`
-headers. Servicing-service trusts those headers and does **not** re-check role on
-money-moving actions (the weak-authz gap) — balance adjustments and fee waivers are
-unrestricted by role. `origination-service` is the exception: `app/authz.py` (ADR 0010)
+headers. Servicing-service re-checks role on money-moving actions as of PR #32
+(`app/authz.py`): `adjust-balance` and `waive-fee` require a money role, the loan and
+balance reads require staff or the owner, and `apply-payment` requires an internal caller.
+The **gateway** still enforces no role authz on those actions, so servicing is the sole
+enforcement point, and no second approver exists — maker-checker stays unbuilt (ADR 0017,
+Proposed). `origination-service` came first: `app/authz.py` (ADR 0010)
 enforces officer-OR-owner authorization on application-scoped routes, fail-closed 404 on
 mismatch, and `app/kyc_gate.py` (ADR 0011) requires a passed KYC check before
 decision/offer/board.

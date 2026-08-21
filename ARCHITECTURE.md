@@ -152,7 +152,8 @@ redaction), 0007 (RAG corpus hygiene), 0008 (retrievable decision records), 0009
 |---------|--------|--------|
 | PII redactor consistency | Implemented | `redactor-drift` + `redaction-tests`, blocking |
 | Origination application authz (ADR 0010) | Implemented | officer-OR-owner, fail-closed 404 |
-| Servicing role authz | Not implemented | balance adjustments / fee waivers unrestricted by role |
+| Servicing role authz | Partially implemented | `app/authz.py` role-gates `adjust-balance` and `waive-fee` and owner-gates the loan reads (#32); maker-checker is unbuilt (ADR 0017, Proposed) and the gateway still enforces no role authz |
+| Settlement reconciliation (ADR 0015) | Implemented, ungated | `app/reconciliation.py` compares captures to settlement and classifies breaks; its suite has **no** blocking CI job |
 | Mandatory KYC gate (ADR 0011) | Implemented | blocks decision/offer/board pre-KYC |
 | Disclosure Decimal/minor units (ADR 0012) | Partially mitigated | `disclosures` is Decimal/`BIGINT`; `offers`/`loans`/`balances`/`payments` still `DOUBLE PRECISION` |
 | Origination fee externalized config | Implemented | `policies/fee_schedule.json`, fails closed |
@@ -171,8 +172,9 @@ there do not block the build (known-flaky, tolerated). Everything else listed is
 `gateway-trust-boundary-gate`, `compose-hardening-gate`, `kyc-enforcement-gate`,
 `tila-vectors-gate`, `db-readiness-gate`, `decision-db-readiness-gate`,
 `migration-numbering-gate`, `disclosure-lifecycle-gate`, `rag-eval-gate`, `frontend`,
-`secret-scan`, `doc-path-lint`, `docs-drift`. Only the two doc gates carry a companion
-self-test job (`doc-path-lint-tests`, `docs-drift-tests`) that asserts the gate's own logic
+`secret-scan`, `doc-path-lint`, `docs-drift`, `spec-diff-gate`. Three of those carry a
+companion self-test job (`doc-path-lint-tests`, `docs-drift-tests`, `spec-diff-gate-tests`)
+that asserts the gate's own logic
 against a throwaway fixture, independent of the docs' actual state; `redaction-tests` is
 not a self-test of `redactor-drift` — it is its own independent blocking gate on the
 redaction logic. See `CLAUDE.md` for the exception to the tolerated-money-math rule
