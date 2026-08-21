@@ -237,6 +237,40 @@ reads −88882 against a per-loan absolute of 175318, so netting hides roughly h
   fallbacks — including Experian/core-banking keys in `decision-service` and the processor
   key in `payment-service`. Rotate before any real go-live. (Long-standing TODO.)
 
+## Backup and recovery
+
+**There is no backup or recovery procedure. This section exists to say so, not to describe one.**
+Week-8 client-demo feedback recorded this as a baseline to capture; the honest baseline is that no
+value exists to report. Nothing below is a target, an RPO, or an RTO — none has been agreed.
+
+**What exists.** One Docker named volume, `pgdata`, mounted at `/var/lib/postgresql/data`
+(`docker-compose.yml:13`, declared at `:227`). `make seed` re-applies `db/init/002_seed.sql`, which
+restores *demo* rows and nothing a borrower ever touched. That is the whole of it.
+
+**What does not exist**, verified by search rather than assumed — the repo contains no `pg_dump`,
+`pg_basebackup`, or `pgbackrest` invocation in any script, Makefile target, or compose file, and no
+file whose name mentions backup or restore:
+
+- No scheduled dump, no WAL archiving, no replica.
+- No restore procedure and no restore drill, so recovery time is unmeasured, not merely unstated.
+- No retention or destruction policy for whatever backups the client already holds.
+- No encryption-at-rest statement for backup media.
+
+**Why this is a control question and not only an operations one.** `docs/debt-log.md` D13 records
+that WAL segments, replicas, and any backup taken before a card-data rewrite still contain
+cardholder data, and that historical card tokens are not recoverable — re-tokenizing the back book
+is its own migration. D5's mitigation path carries an explicit "audit all existing backups;
+re-encrypt or delete any containing plaintext PII" row, and **that row is open**: the redactor
+stops new plaintext PAN/CVV/SSN reaching logs, but it does nothing to files written before it
+merged, or to a database backup where the PAN is a stored column rather than a log line. So a
+restore is currently also a re-introduction of the exact data two blocking CI jobs exist to keep
+out.
+
+**Open, and owned by the client.** Who takes backups of the production database today, on what
+schedule, where they are stored, and whether any predate the card-data work. Until Lending Ops
+answers, this platform can state only what it does itself, which is nothing. Do not present a
+backup posture in a demo — say this section's first line instead.
+
 ## Tests
 
 ```bash
