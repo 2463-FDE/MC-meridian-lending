@@ -172,7 +172,7 @@ or that only alerts on `1`, turns "could not check" into silence.
 
 | Class | Meaning | What to do |
 |---|---|---|
-| `MISSING_IN_LEDGER` | Settled capture with no `payments` row — money taken, never credited | Customer-affecting. Trace the `processor_ref`, credit the loan through the normal apply path |
+| `MISSING_IN_LEDGER` | Settled capture with no `payments` row — money taken, never credited | Customer-affecting. **Finance Ops owns these** (see **Ownership** below). Trace the `processor_ref`, credit the loan through the normal apply path |
 | `MISSING_IN_SETTLEMENT` | `payments` row with no settled capture — credited, never captured | Check whether the capture failed after the row was written; the balance may be understated |
 | `REFUND_UNREPRESENTED` | Settlement refund the `payments` table cannot hold (no direction column) | Expected today; a schema limitation, not a lost payment. Note it and move on |
 | `AMOUNT_MISMATCH` | Same loan and window, different amount | Compare the two figures in the report's `detail`; usually a partial capture |
@@ -189,6 +189,33 @@ with the matching tolerance:
 
 Quoting only the net is what produced "month-end is a little noisy": on the sample data it
 reads −88882 against a per-loan absolute of 175318, so netting hides roughly half the error.
+
+**Ownership.** **Finance Ops owns `MISSING_IN_LEDGER` breaks** — the client's decision of
+2026-08-14, given when asked who owned the $500 on loan 4471: treat it as an open exception, not
+a write-off, put both processor references in the first exception report, and mark them for
+Finance Ops review.
+
+Two limits of that decision, stated so nobody reads more into the report than it carries:
+
+- **Marking is what this report does. It is not a workflow.** The client ruled out anything
+  larger — no owner column, no status field, no ticket integration, no remediation path. A break
+  appears in the report with its `processor_ref`; a human reads it. There is nothing here that
+  tracks whether they did.
+- **Not a write-off means the money stays visible.** The alert keeps firing on an unresolved
+  break every run, by design. Loan 4471 alone is 50000 minor against a 500 threshold, so it will
+  fire until the underlying exception is actually worked. Do not raise the threshold to quiet it.
+
+**No recipient is configured.** The cron example above mails `ops@example.com`, which is a
+placeholder, not an address anyone reads. Who receives the alert, at what time, through what
+channel was asked on 2026-08-12 and has not been answered — the reply that came back on 08-14
+settled the threshold and the cut-off, and that question was bundled in the same row as the
+cut-off, so it is easy to read as answered. **Until a real recipient is set, this control detects
+and reports to nobody.** Substitute a distribution list before wiring the cron, and do not
+present the alert as covered until then.
+
+`DUPLICATE_SUSPECT` has no equivalent owner. The client's 08-14 answer was about
+`MISSING_IN_LEDGER`; what a double-charged borrower is told, whether a refund is submitted, and
+who owns that refund is an open question and not a gap in this runbook.
 
 ## Known operational pain (unresolved)
 

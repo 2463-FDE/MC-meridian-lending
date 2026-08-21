@@ -157,3 +157,39 @@ def test_the_report_is_not_described_as_scheduled(runbook):
     nothing: it reports coverage it does not have.
     """
     assert "cron" in runbook.lower(), "the operator must be told they wire the schedule"
+
+
+def test_finance_ops_is_named_as_the_owner_of_missing_in_ledger(runbook):
+    """The client's 2026-08-14 answer, satisfied at document level or not at all.
+
+    Asked who owned the $500 on loan 4471, she said: open exception, not a write-off,
+    both processor references in the first exception report, marked for Finance Ops
+    review. She then ruled out everything larger — "no separate remediation or
+    ticketing workflow is needed in this build" — so there is no owner column and no
+    status field to assert against. A runbook line IS the deliverable, which makes it
+    exactly the kind of thing that gets dropped and never noticed.
+
+    It was dropped: "Finance Ops" appeared nowhere in the repo for four days after the
+    answer landed, while every other item that reply created shipped.
+    """
+    assert "Finance Ops" in runbook, (
+        "the client asked for MISSING_IN_LEDGER breaks to be marked for Finance Ops "
+        "review; naming the owner is the whole of that deliverable"
+    )
+    assert reconciliation.MISSING_IN_LEDGER in runbook
+
+
+def test_the_runbook_does_not_present_the_alert_recipient_as_configured(runbook):
+    """`ops@example.com` is a placeholder and must not read as an address.
+
+    Who receives the alert was asked on 2026-08-12, bundled into one row with the
+    cut-off convention. The cut-off half was answered on 08-14 and the recipient half
+    was not, so the row scans as answered. An operator copying the cron example gets a
+    control that detects correctly and reports to nobody.
+
+    This asserts the runbook says so wherever it still shows the placeholder, rather
+    than asserting the placeholder is gone — it is a legitimate example address.
+    """
+    if "ops@example.com" not in runbook:
+        pytest.skip("placeholder recipient no longer present; a real one was set")
+    assert "No recipient is configured" in runbook
