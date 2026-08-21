@@ -42,7 +42,7 @@ Stated plainly, because the demo must not imply more than this. Each row is veri
 | Is the borrower notified? | **No, and no channel exists to notify them through.** `applicants.email` and `applicants.phone` are unverified columns, and no outbound sender of any kind exists in any service. | `db/init/001_schema.sql:24-25`; no `smtplib`, `sendgrid`, or `twilio` anywhere under `services/` |
 | Is a refund submitted? | **No.** The payment service has no refund, void, or reversal path, and the processor client exposes none. | `services/payment-service/app/payments.py` |
 | Where does refund status show? | **Nowhere.** No status field, no borrower screen, no officer screen. | — |
-| Is the duplicate detected? | **Yes**, as a pair, including across a window edge, and excluded from the variance figures. | `app/reconciliation.py:61`, `:211-218` |
+| Is the duplicate detected? | **Yes**, as a pair, including across a window edge, and excluded from the variance figures. | `services/servicing-service/app/reconciliation.py:61`, `services/servicing-service/app/reconciliation.py:211` |
 | Does an alert reach a human? | **Undetermined.** The alert fires on the client's $5.00 threshold, and the runbook's recipient is `ops@example.com`. | `docs/runbook.md` |
 
 The client already scoped the operator half of this, on 2026-08-14, when asked who owned the
@@ -233,9 +233,11 @@ three separate deferrals.
 
 ## Sign-off status
 
-**Open, and this ADR does not proceed past step 3 without it.** When reconciliation finds a
-duplicate charge, is the borrower told, is a refund submitted on their behalf, and who owns
-that refund? Steps 1 to 4 are unblocked and do not wait on the answer.
+**Open, and it blocks only the borrower-facing path this ADR defers — notification, refund
+submission, and refund status.** When reconciliation finds a duplicate charge, is the
+borrower told, is a refund submitted on their behalf, and who owns that refund? Steps 1 to 4
+— attribution, the runbook sentence, the ask, and prevention — are unblocked and proceed
+without it; only step 5, revisiting this ADR to build that path, waits on the answer.
 
 Two further questions are open in the same area and are tracked with the reconciliation
 asks, not here: who receives the alert, and whether the processor returns a reference at
