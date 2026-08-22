@@ -11,7 +11,6 @@ credentials — see `BedrockAdapter`, not `CLAUDE_API_KEY`).
 """
 
 import os
-import re
 from dataclasses import dataclass, field
 
 from .errors import LLMConfigError
@@ -30,11 +29,48 @@ _PROVIDERS = ("anthropic", "bedrock")
 # runs — the freeze requires a reproducible selection, so the literal lives here
 # and AWS_REGION only overrides it. `.env.example` documents the same value.
 _DEFAULT_BEDROCK_REGION = "us-east-1"
-# AWS region literal: two-letter partition, one or more name segments, a digit
-# suffix ("us-east-1", "us-gov-west-1"). Rejects the near-misses that read like a
-# region but are not one — "us-east" (no suffix), "US-EAST-1" (SDKs are
-# case-sensitive here) — rather than handing them to the SDK.
-_AWS_REGION_RE = re.compile(r"^[a-z]{2}(?:-[a-z]+)+-\d{1,2}$")
+# Known AWS region codes (commercial partitions + GovCloud). An override must
+# name a real region, not merely something region-shaped — a shape-only regex
+# (two-letter prefix + hyphenated words + digit suffix) still accepts a typo
+# like "us-eats-1" or a fabricated "zz-fake-1" (review finding RGN-001), and
+# those reach the SDK and fail mid-call instead of at boot. Regions are added
+# to AWS rarely enough that a static allowlist does not go stale in practice;
+# widen it if a real region 400s here.
+_AWS_REGIONS = frozenset(
+    {
+        "us-east-1",
+        "us-east-2",
+        "us-west-1",
+        "us-west-2",
+        "af-south-1",
+        "ap-east-1",
+        "ap-south-1",
+        "ap-south-2",
+        "ap-northeast-1",
+        "ap-northeast-2",
+        "ap-northeast-3",
+        "ap-southeast-1",
+        "ap-southeast-2",
+        "ap-southeast-3",
+        "ap-southeast-4",
+        "ca-central-1",
+        "ca-west-1",
+        "eu-central-1",
+        "eu-central-2",
+        "eu-west-1",
+        "eu-west-2",
+        "eu-west-3",
+        "eu-north-1",
+        "eu-south-1",
+        "eu-south-2",
+        "il-central-1",
+        "me-south-1",
+        "me-central-1",
+        "sa-east-1",
+        "us-gov-east-1",
+        "us-gov-west-1",
+    }
+)
 
 # Opt-in trace-content flag. OFF unless the value is exactly "true" (case-insensitive,
 # surrounding whitespace ignored) — see trace_content_enabled.
@@ -148,12 +184,12 @@ def _aws_region(provider: str) -> str | None:
     raw = os.getenv("AWS_REGION", "").strip()
     if not raw:
         return _DEFAULT_BEDROCK_REGION
-    if not _AWS_REGION_RE.match(raw):
+    if raw not in _AWS_REGIONS:
         raise LLMConfigError(
-            f"AWS_REGION={raw!r} is not an AWS region literal (expected e.g. "
+            f"AWS_REGION={raw!r} is not a known AWS region (expected e.g. "
             f"{_DEFAULT_BEDROCK_REGION!r}). Bedrock model access is granted per "
-            "region, so a near-miss value fails at call time rather than at boot. "
-            "Unset it to use the pinned default."
+            "region, so a value that merely looks region-shaped fails at boot "
+            "instead of reaching the SDK. Unset it to use the pinned default."
         )
     return raw
 

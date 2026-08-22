@@ -1650,9 +1650,7 @@ def _boot_warnings(monkeypatch, **env) -> list[str]:
         load_llm_config()
     finally:
         logger.removeHandler(handler)
-    return [
-        r.getMessage() for r in handler.records if r.levelno >= logging.WARNING
-    ]
+    return [r.getMessage() for r in handler.records if r.levelno >= logging.WARNING]
 
 
 def test_trace_content_flag_warns_at_boot(monkeypatch):
@@ -1670,7 +1668,9 @@ def test_no_boot_warning_when_flag_off(monkeypatch):
 # --- LLM_TRACE_CONTENT: the environment gate (PR review) -------------------
 
 
-@pytest.mark.parametrize("environment", ["production", "staging", "prod", "", "PRODUCTION"])
+@pytest.mark.parametrize(
+    "environment", ["production", "staging", "prod", "", "PRODUCTION"]
+)
 def test_trace_content_refused_outside_development(monkeypatch, environment):
     # The flag alone left regulated lending content one stray environment variable away
     # from a third-party sink, with a startup warning as the only protection. ENVIRONMENT
@@ -1771,7 +1771,19 @@ def test_anthropic_provider_ignores_aws_region(monkeypatch):
     assert load_llm_config().aws_region is None
 
 
-@pytest.mark.parametrize("value", ["us-east", "US-EAST-1", "us east 1", "useast1"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "us-east",
+        "US-EAST-1",
+        "us east 1",
+        "useast1",
+        # Region-shaped but not a real region — the old shape-only regex accepted
+        # these (review finding RGN-001); the allowlist must not.
+        "us-eats-1",
+        "zz-fake-1",
+    ],
+)
 def test_malformed_aws_region_rejected_at_boot(monkeypatch, value):
     monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_PROVIDER", "bedrock")
