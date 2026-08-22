@@ -126,6 +126,15 @@ it does not gate the freeze.
 #52  head=docs/debt-log-d5-status      base=main
 ```
 
+**Outcome, recorded 2026-08-22: the drain ran and the trap fired anyway.** #52 (`253ea28`),
+#53 (`bec5bf3`), #55 (`399fb73`), #54 (`9cfce81`) and #56 (`fb1fc66`) are on `main`. **#57 is not.**
+Its base was never retargeted, so it merged into `chore/rag-eval-import-seam` at 22:59:18 — 39
+seconds after that branch had already merged to `main` at 22:58:39 — leaving `0cdee4e` on the
+branch alone. `main` has no `policy_retrieval` module and no `adr/0019`. The base check below was
+the mitigation and it was not performed. Recovery: a fresh PR from `feat/policy-retrieval` rebased
+onto `main`, since the stale base branch is now behind `main` by the whole week-7 reconciliation set
+and re-merging it would regress `main`.
+
 **#57 is stacked on #56.** #56 must reach `main` first; #57's base then auto-retargets. **This exact
 shape already cost this repo once** — #45 and #46 merged into *branches* rather than `main` and
 nearly stranded the D4 alert and the D6 runbook. Check #57's base immediately before merging it
@@ -138,8 +147,10 @@ with it. That agrees with the lower-PR-keeps-the-number rule, so there is nothin
 
 ### Merge order
 
-1. **#54** — the only one whose absence lets a defect ship silently. First regardless.
-2. **#52**, **#53** — both based on `main`. #53 keeps ADR 0018.
+1. **#54** — the only one whose absence lets a defect ship silently. First regardless. *(Done,
+   `9cfce81`.)*
+2. **#52**, **#53** — both based on `main`. #53 keeps ADR 0018. *(Done, `253ea28` and `bec5bf3`;
+   #53 kept the number as predicted.)*
 3. **#56** — the `rag_eval` import seam. Load-bearing: CI's backend import smoke does not tolerate
    failures, and an unimportable `rag_eval` makes the policy tool abstain rather than retrieve, which
    their criteria fail as a mock-only path.
@@ -203,7 +214,8 @@ root trace covers the officer path, and the D4 suppression stays.
 
 1. **Drain the five PRs to `main`** — Bedrock is proven, so nothing external gates the work and this
    is now first on the critical path. `#54` first; `#57` renumbers its ADR to `0019`. Order and the
-   stacked-base trap above.
+   stacked-base trap above. **Status 2026-08-22: four of five landed; #57 did not and needs a fresh
+   PR rebased onto `main`.** Still first on the critical path.
 2. Pin the reproducible Bedrock selection — provider default, fixed region, `LLM_ENABLED` handling
    for the demo — and correct the provider and execution-mode metadata.
 3. Migrate the officer assistant to native tool calling, preserving the bounded loop, the

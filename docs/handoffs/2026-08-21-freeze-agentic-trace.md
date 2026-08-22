@@ -1,7 +1,8 @@
 # Handoff — agentic design + LangSmith root trace for the 2026-09-02 code freeze (2026-08-21)
 
 **Branch:** `docs/freeze-handoff` (this doc plus the scope response) · **Base for the actual build: `main`**
-**Status:** analysis complete and committed, **no build work started**. Not blocked.
+**Status:** analysis complete and committed, **no build work started**.
+**Blocked on one thing as of 2026-08-22: PR #57 did not reach `main`** — see "Drain state" below.
 
 **Scope of this handoff: the program code-freeze thread only.** The client-ask / Dana thread is
 separate and has its own docs, which stay local-only (`docs/client-asks-*` and its own handoff, on
@@ -69,20 +70,20 @@ a disconnected framework, a mock-only path, or an agent label without real tool 
 
 ## What's left, in order
 
-1. **Drain the remaining PRs to `main`** — order and the stacked-base trap in the source-of-truth
-   doc. **#52 has since merged** (`253ea28` on `origin/main`), so four are left: `#54`, `#53`, `#56`,
-   then `#57`, which renumbers its ADR to `0019` and needs its base re-checked. **This is the first
-   thing on the critical path**: a live Bedrock call succeeded on 2026-08-21, so nothing external
+1. **Recover PR #57 onto `main`** — the drain otherwise completed on 2026-08-22, but #57 merged
+   into its stacked base instead of `main` and its content is not on `main`. Details and the
+   recovery step in "Drain state" below. **This is the first thing on the critical path**: it is
+   freeze requirement 7, and a live Bedrock call succeeded on 2026-08-21, so nothing external
    gates the work.
-3. **Pin reproducible Bedrock selection** — provider default, region literal, `LLM_ENABLED` handling
+2. **Pin reproducible Bedrock selection** — provider default, region literal, `LLM_ENABLED` handling
    for the demo — and add **provider + execution-mode metadata** to the spans.
-4. **Migrate the officer assistant to LangChain v1 with native tool calling.** Preserve exactly:
+3. **Migrate the officer assistant to LangChain v1 with native tool calling.** Preserve exactly:
    the bounded loop (`_MAX_STEPS = 6`), the app id taken from the officer's request rather than the
    model's echo, the single-score cache, and `_validated_final`'s check against the persisted record.
-5. **Build the root trace** — entry → agent decisions → policy retrieval → Bedrock → existing tools
+4. **Build the root trace** — entry → agent decisions → policy retrieval → Bedrock → existing tools
    → deterministic validation → business outcome. Keep the existing strippers and content-exclusion
    tests green.
-6. **Injection-resistance suite, reproducible demo steps, real/fixture/fallback status, provenance,
+5. **Injection-resistance suite, reproducible demo steps, real/fixture/fallback status, provenance,
    known limitations, handoff ownership, exact-SHA proof run.**
 
 ## Blockers / open questions
@@ -122,7 +123,8 @@ analysis and documents only. Run the suites before trusting any inherited green.
 
 ## Branch state
 
-- `main` = the client's real state, and the freeze deliverable. Currently missing all five open PRs.
+- `main` = the client's real state, and the freeze deliverable. As of 2026-08-22 it carries #52,
+  #53, #54, #55 and #56, but **not #57** — see "Drain state". #58 and #59 are still open.
 - `docs/freeze-handoff` = this doc and the scope response, based on `origin/main`. Documents only.
 - `docs/cycle-w9-finalise` = local-only, carries the client-ask corrections, the unpublished reply,
   and the full copies of both freeze docs. **Do not build the agentic work here** — branch from `main`.
@@ -134,8 +136,37 @@ analysis and documents only. Run the suites before trusting any inherited green.
   runnable failing test as its before-number (`services/servicing-service/tests/test_lost_update.py`).
 - No debt entries opened or closed by this session.
 
+## Drain state — 2026-08-22
+
+Verified against the public API and `git merge-base --is-ancestor <sha> origin/main`, not recalled.
+
+| PR | Merged | Merge commit | On `main` |
+|---|---|---|---|
+| #52 | 2026-08-22 21:59 | `253ea28` | yes |
+| #53 | 2026-08-22 22:16 | `bec5bf3` | yes |
+| #55 | 2026-08-21 12:31 | `399fb73` | yes |
+| #54 | 2026-08-22 22:58:23 | `9cfce81` | yes |
+| #56 | 2026-08-22 22:58:39 | `fb1fc66` | yes |
+| **#57** | 2026-08-22 22:59:18 | `0cdee4e` | **no** |
+
+Two PRs opened after this plan was written and are still open: **#58** (`docs/client-qa-register`,
++140/-0) and **#59** (`feat/bedrock-pin`, +592/-2, which is plan item 2 below).
+
+**#57's base was never retargeted, and the stacked-base trap fired.** It merged into
+`chore/rag-eval-import-seam` at 22:59:18 — **39 seconds after** that branch had itself merged to
+`main` at 22:58:39. So `0cdee4e` lives only on `origin/chore/rag-eval-import-seam`: `main` carries
+no `policy_retrieval` module and no `adr/0019`, which means **freeze requirement 7 — the bounded
+read-only retrieval tool the model actually invokes — is not on the deliverable branch.** This is
+the third occurrence of the same shape; #45 and #46 did it in week 7.
+
+Recovery is not a re-merge of the stale base branch: `origin/chore/rag-eval-import-seam` is behind
+`main` by the whole week-7 reconciliation set, so merging it now would regress `main`. Open a fresh
+PR from `feat/policy-retrieval` **rebased onto `main`**, confirm the base reads `main` in the API
+immediately before merging, and check that `adr/0019-policy-retrieval-on-the-assistant-loop.md` and
+its `scripts/spec_gate_map.txt` row land with it.
+
 ## Next session: start here
 
-Merge **#54** to `main`, then #53, then #56, then #57 with its ADR renumbered to `0019` and its base
-re-checked (#52 is already in, `253ea28`). Bedrock is proven, so the drain is what everything else
-waits on.
+Recover **#57** onto `main` as above — it is freeze requirement 7 and nothing else in the plan
+substitutes for it. Then #59 (the Bedrock pin, plan item 2) and #58. Bedrock itself is proven, so
+the recovery is what everything else waits on.
