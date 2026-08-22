@@ -23,12 +23,18 @@ OUTPUT_SCHEMA = {
         # action == "tool"
         "tool": {
             "type": "string",
-            "enum": ["score_application", "get_decision_record"],
+            "enum": ["score_application", "get_decision_record", "search_policy"],
         },
         "input": {
             "type": "object",
             "additionalProperties": False,
-            "properties": {"application_id": {"type": "integer"}},
+            # `query` is search_policy's input (ADR 0019) and the only free text the model
+            # may send. It is consumed in-process by the retrieval module and stripped
+            # before the action is replayed as history, so it never crosses the boundary.
+            "properties": {
+                "application_id": {"type": "integer"},
+                "query": {"type": "string", "maxLength": 200},
+            },
         },
         # action == "final"
         "outcome": {
@@ -54,6 +60,14 @@ SYSTEM = (
     'persists the regulated decision record. Input: {"application_id": <int>}.\n'
     "- get_decision_record: fetches the persisted decision record for an application. "
     'Input: {"application_id": <int>}.\n'
+    "- search_policy: looks up Meridian's written lending policy (fees, payment "
+    "waterfall, eligibility, underwriting guidelines). Input: "
+    '{"query": <short phrase describing what to look up>}. It returns only whether a '
+    'policy passage matched ("policy_hit") or not ("policy_abstain") and a score — you '
+    "never see the passage itself. When it returns policy_hit the officer is shown the "
+    "exact policy text automatically, so say that the policy passage is quoted below "
+    "rather than trying to state what it says. Available only on task=explain, and never "
+    "for questions about a specific application.\n"
     "\n"
     "Adverse-action reason codes (the only reasons that exist; use these texts when "
     "narrating):\n"
@@ -82,7 +96,11 @@ SYSTEM = (
     "4. Never include names, SSNs, or any applicant identity in your output. Refer to "
     "'the applicant'.\n"
     "5. A human officer owns the relationship with the applicant; your summary is a "
-    "report of the recorded decision, not advice to override it."
+    "report of the recorded decision, not advice to override it.\n"
+    "6. Never put an applicant's details, or anything about one application, into a "
+    "search_policy query — it looks up written policy only. If search_policy returns "
+    "policy_abstain, say plainly that no policy passage matched; never state a policy "
+    "rule from memory."
 )
 
 USER_TEMPLATE = (
@@ -93,7 +111,7 @@ USER_TEMPLATE = (
 register(
     PromptTemplate(
         name="decision_assistant",
-        version="2026-07-15",
+        version="2026-08-15",  # search_policy added (ADR 0019)
         system=SYSTEM,
         user_template=USER_TEMPLATE,
         required_vars=("request_json",),

@@ -41,4 +41,29 @@ assert hits[0][1] > hits[1][1], hits
 print(f"OK: rag_eval imports and searches inside the image ({len(idx)} chunks indexed)")
 PY
 
+echo "== retrieve from the mounted corpus inside the image =="
+# The seam exists to carry ADR 0019's policy retrieval, and that path resolves the corpus
+# directory from __file__ — which has FEWER parents in the image (/app/app/...) than in a
+# checkout. A host-only test cannot see that difference; an IndexError here shipped once
+# and this step is why it did not ship twice. Mount the corpus the way compose does.
+docker run --rm \
+  -e POLICY_RETRIEVAL_MIN_SCORE=0.05 \
+  -v "$PWD/policies:/app/policies:ro" \
+  "$IMAGE" python - <<'PY'
+from app import assistant, policy_retrieval
+
+answer = policy_retrieval.search("minimum age eligibility")
+assert answer.is_hit, f"expected a corpus hit, got {answer.status}/{answer.reason}"
+assert answer.text.strip(), "hit carried no corpus text"
+assert set(answer.tool_result()) == {"status", "score"}, answer.tool_result()
+
+refused = assistant._search_policy("late fee", "decision")
+assert refused.reason == policy_retrieval.DECISION_TASK, refused
+
+print(
+    f"OK: retrieved {answer.chunk_id} at {answer.score:.4f}; "
+    "decision task refused; model-visible keys are status+score only"
+)
+PY
+
 echo "PASS: the rag_eval import seam holds in the built image."
