@@ -177,11 +177,15 @@ def run_call(config, *, adapter: BedrockAdapter | None = None) -> dict:
     supplies a fresh `_RecordingBedrockAdapter`.
 
     No extra retry here beyond what `ClaudeClient` already does: a proof run
-    reports what happened on the call it made. The response text is recorded
-    as a length and a SHA-256 rather than verbatim — the model is answering
-    about a synthetic applicant, but a receipt is an artifact people paste
-    around, and a hash proves a response arrived without making the artifact a
-    place model output accumulates.
+    reports what happened on the call it made. `latency_ms` now brackets the
+    whole client pipeline (build, transport retry/backoff, validate/guard),
+    not just the raw network round trip the old raw-adapter call measured —
+    a transient retry inflates it, which is correct: it is what a real caller
+    of this path experiences. The response text is recorded as a length and a
+    SHA-256 rather than verbatim — the model is answering about a synthetic
+    applicant, but a receipt is an artifact people paste around, and a hash
+    proves a response arrived without making the artifact a place model
+    output accumulates.
     """
     adapter = (
         adapter
