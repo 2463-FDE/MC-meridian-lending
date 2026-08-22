@@ -1,8 +1,8 @@
-"""Policy retrieval over the committed corpus (ADR 0018).
+"""Policy retrieval over the committed corpus (ADR 0019).
 
 The assistant's `search_policy` tool calls `search()`. The model chooses the query; this
 module decides what is true and hands back the corpus text VERBATIM for the officer. The
-model never sees that text — the loop feeds it only the status code and the score (ADR 0018
+model never sees that text — the loop feeds it only the status code and the score (ADR 0019
 decision 3), which is why nothing here is shaped for a prompt.
 
 Everything fails closed to an abstention: an unimportable `rag_eval`, no corpus, a corpus
@@ -202,7 +202,7 @@ def search(query: str) -> PolicyAnswer:
     if threshold is None:
         log.warning(
             "policy retrieval disabled: POLICY_RETRIEVAL_MIN_SCORE is unset or unusable "
-            "— every query abstains (ADR 0018)"
+            "— every query abstains (ADR 0019)"
         )
         return abstain(NO_THRESHOLD)
     if not isinstance(query, str) or not query.strip():
@@ -210,7 +210,7 @@ def search(query: str) -> PolicyAnswer:
     if _HARNESS_IMPORT_ERROR is not None:
         log.warning(
             "policy retrieval disabled: rag_eval is not importable (%s) — every query "
-            "abstains (ADR 0018)",
+            "abstains (ADR 0019)",
             _HARNESS_IMPORT_ERROR,
         )
         return abstain(HARNESS_UNAVAILABLE)

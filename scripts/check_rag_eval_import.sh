@@ -42,7 +42,7 @@ print(f"OK: rag_eval imports and searches inside the image ({len(idx)} chunks in
 PY
 
 echo "== retrieve from the mounted corpus inside the image =="
-# The seam exists to carry ADR 0018's policy retrieval, and that path resolves the corpus
+# The seam exists to carry ADR 0019's policy retrieval, and that path resolves the corpus
 # directory from __file__ — which has FEWER parents in the image (/app/app/...) than in a
 # checkout. A host-only test cannot see that difference; an IndexError here shipped once
 # and this step is why it did not ship twice. Mount the corpus the way compose does.

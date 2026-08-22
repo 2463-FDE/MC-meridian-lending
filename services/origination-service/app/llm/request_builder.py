@@ -74,7 +74,7 @@ _SAFE_CATEGORICAL = {
     "outcome": {"approve", "refer", "deny", "counteroffer"},
     "policy_band": {"approve", "refer", "deny"},
     # policy_hit / policy_abstain are the search_policy tool's whole model-visible
-    # vocabulary (ADR 0018): the retrieved passage itself is rendered to the OFFICER by
+    # vocabulary (ADR 0019): the retrieved passage itself is rendered to the OFFICER by
     # code and never enters a turn, so nothing here admits corpus prose.
     "status": {
         "recorded",

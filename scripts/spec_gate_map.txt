@@ -125,10 +125,10 @@ services/gateway/app/main.py => adr/0010-application-ownership-authorization.md
 services/origination-service/app/authz.py => adr/0017-self-decision-anonymous-submission-gap.md
 
 # --- Policy retrieval on the assistant loop ---------------------------------
-# ADR 0018 is built, and policy_retrieval.py is the module its decision is
+# ADR 0019 is built, and policy_retrieval.py is the module its decision is
 # about: the abstain-by-default retrieval seam whose deletion would leave the
 # assistant quoting policy from nowhere.
-services/origination-service/app/policy_retrieval.py => adr/0018-policy-retrieval-on-the-assistant-loop.md
+services/origination-service/app/policy_retrieval.py => adr/0019-policy-retrieval-on-the-assistant-loop.md
 
 # --- Exemptions: docs with no code path whose deletion would violate them ---
 # EXEMPT: adr/0001-record-architecture-decisions.md — establishes the ADR process itself; obligates no source file.

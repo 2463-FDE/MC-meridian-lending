@@ -1,4 +1,4 @@
-# ADR 0018: Policy Retrieval on the Assistant Loop — the Model Chooses the Lookup, Code Renders the Citation
+# ADR 0019: Policy Retrieval on the Assistant Loop — the Model Chooses the Lookup, Code Renders the Citation
 
 - **Status:** **Accepted** — built in this PR (`search_policy` tool, `app/policy_retrieval.py`).
 - **Date:** 2026-08-15

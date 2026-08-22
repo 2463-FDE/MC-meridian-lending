@@ -1,4 +1,4 @@
-"""Policy retrieval on the assistant loop (ADR 0018).
+"""Policy retrieval on the assistant loop (ADR 0019).
 
 Two halves. The retrieval module against the REAL committed corpus — abstention is the
 default and every failure path reaches it — and the loop integration, which is where the
@@ -272,7 +272,7 @@ def test_policy_query_never_reaches_the_provider(threshold, record_seam):
 
 def test_retrieval_is_refused_on_the_decision_task(threshold, record_seam, monkeypatch):
     """Reg B: the corpus carries adverse-action guidance, so retrieval stays off the path
-    that produces a regulated outcome (ADR 0018 decision 5)."""
+    that produces a regulated outcome (ADR 0019 decision 5)."""
     threshold("0.05")
 
     def _must_not_run(query):
@@ -341,7 +341,7 @@ def test_policy_status_codes_survive_the_redactor():
 
 
 def test_corpus_prose_is_still_masked_by_the_redactor():
-    """ADR 0018 adds no exemption. If this ever passes prose through, the decision to keep
+    """ADR 0019 adds no exemption. If this ever passes prose through, the decision to keep
     the policy text on the officer's side of the boundary has been undone somewhere else."""
     prose = "Minimum age: 18. US residency / valid SSN or ITIN required."
     masked = json.loads(

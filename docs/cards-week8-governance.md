@@ -124,15 +124,16 @@ edited away, because two of them are the reason the estimate was wrong.
 - **G2b — `search_policy` on the assistant loop, plus the drafted wording. Next cycle. BUILT
   (the retrieval half; the drafted wording stays with G1).** A third entry in `_TOOLS`
   (`services/origination-service/app/assistant.py`), backed by `rag_eval.index`, declared in
-  `app/prompts/decision_assistant.py`. Needs **ADR 0018** (0014 through 0017 are taken — this
-  card said 0016 when 0016 and 0017 were still free) and two design constraints settled:
+  `app/prompts/decision_assistant.py`. Needs **ADR 0019** (0014 through 0018 are taken — this
+  card said 0016 when 0016 and 0017 were still free, and 0018 went to the
+  double-charge interim ADR, which merges first) and two design constraints settled:
   retrieval abstains below the score threshold, and is excluded from the `task="decision"`
   path entirely so generation never reaches the causal path. Both are built as specified.
   **Correction, and this is why 0.5–1 day was wrong:** loop dispatch DID need changing — it
   passes only the application id to every tool, and `search_policy` takes a model-supplied
   query. And the export contract refuses free text in history turns
   (`app/llm/request_builder.py:236-238` masks any whitespace-bearing string), so retrieved
-  policy prose cannot reach the model at all. ADR 0018 resolves that by keeping the text on
+  policy prose cannot reach the model at all. ADR 0019 resolves that by keeping the text on
   the officer's side: the model picks the query, code quotes the corpus chunk verbatim.
 
 **Why split rather than defer or build whole.** Building all of it costs 4–6 days against a cycle

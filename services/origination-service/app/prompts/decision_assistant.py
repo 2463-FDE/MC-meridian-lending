@@ -28,7 +28,7 @@ OUTPUT_SCHEMA = {
         "input": {
             "type": "object",
             "additionalProperties": False,
-            # `query` is search_policy's input (ADR 0018) and the only free text the model
+            # `query` is search_policy's input (ADR 0019) and the only free text the model
             # may send. It is consumed in-process by the retrieval module and stripped
             # before the action is replayed as history, so it never crosses the boundary.
             "properties": {
@@ -111,7 +111,7 @@ USER_TEMPLATE = (
 register(
     PromptTemplate(
         name="decision_assistant",
-        version="2026-08-15",  # search_policy added (ADR 0018)
+        version="2026-08-15",  # search_policy added (ADR 0019)
         system=SYSTEM,
         user_template=USER_TEMPLATE,
         required_vars=("request_json",),

@@ -82,12 +82,12 @@ def _get_decision_record(app_id: int) -> dict:
 
 
 def _search_policy(query: str, task: str) -> policy_retrieval.PolicyAnswer:
-    """Policy tool (ADR 0018): retrieve one corpus chunk for a model-chosen query.
+    """Policy tool (ADR 0019): retrieve one corpus chunk for a model-chosen query.
 
     Read-only and applicant-free — it takes no application id and touches no applicant
     data. REFUSED on task="decision": the corpus carries the Reg B adverse-action guidance,
     and reason codes are produced deterministically by decision-service, so retrieval must
-    stay off the path that produces a regulated outcome (ADR 0018 decision 5).
+    stay off the path that produces a regulated outcome (ADR 0019 decision 5).
 
     The answer's text is officer-facing; only `tool_result()` reaches the model.
     """
@@ -127,7 +127,7 @@ def _constructed_summary(record: dict) -> str:
 # Officer-facing text for a search that ran but produced nothing to quote.
 # Reason-specific (not one generic "no match" line): B1 found that a run
 # where retrieval abstained looked identical to a run that never searched at
-# all — the false-confidence failure ADR 0018 cites from q11 — and a single
+# all — the false-confidence failure ADR 0019 cites from q11 — and a single
 # generic line would still blur "no passage cleared the bar" against "search
 # is not configured/available", which are different facts an officer should
 # not read as the same thing.
@@ -157,7 +157,7 @@ def _no_match_line(searches: list) -> str:
 
 
 def _policy_section(citations: list) -> str:
-    """Officer-facing policy excerpts, quoted VERBATIM from the corpus (ADR 0018).
+    """Officer-facing policy excerpts, quoted VERBATIM from the corpus (ADR 0019).
 
     Code renders this, not the model: the model never receives the chunk text, so it cannot
     paraphrase or contradict it. Same principle as `_constructed_summary` — the officer reads
@@ -361,7 +361,7 @@ def run(
                 ):
                     citations.append(answer)
                 # Only the allowlisted status + score go back to the model; the chunk text
-                # stays on the officer's side of the boundary (ADR 0018 decision 3).
+                # stays on the officer's side of the boundary (ADR 0019 decision 3).
                 result = answer.tool_result()
             else:
                 result = tool(application_id)

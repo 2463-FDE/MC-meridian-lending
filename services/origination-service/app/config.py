@@ -401,7 +401,7 @@ CONTINUATION_TOKEN_TTL_DAYS = int(os.getenv("CONTINUATION_TOKEN_TTL_DAYS", "7"))
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
-# --- Policy retrieval (ADR 0018) ---------------------------------------------
+# --- Policy retrieval (ADR 0019) ---------------------------------------------
 # Minimum match score a retrieved policy chunk must reach before the assistant
 # quotes it to an officer. NO COMMITTED DEFAULT, deliberately: the value is a
 # property of the corpus and the embedder, calibrated by `rag_eval` and printed
