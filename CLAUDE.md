@@ -178,10 +178,19 @@ The `backend` matrix job runs pytest with `continue-on-error` + `|| true` — **
 
 ## Docs & decisions
 
-- ADRs in `adr/` — 0002 (single shared DB), 0003 (store card data, superseded by 0013), 0004 (service decomposition), 0005 (LLM client), 0006 (logging redaction), 0012 (Decimal/minor units, externalized rule config, FK-as-graph provenance), 0013 (payment idempotency + tokenization), 0014 (servicing money controls), 0015 (settlement reconciliation as a control). 0013 and 0014 are Proposed and specify work that is **not built**; 0015 is Accepted and built.
-- Weeks 4–7 have merged to `main`. Weeks 5 and 6 landed as spec/ADR packages with no `services/` or `db/` change behind them — `docs/spec-payments-week5.md` and `docs/servicing-money-comprehension-week6.md` are the sources of truth for what is specified but unbuilt. Week 4's disclosure work and week 7's reconciliation and correlation work are real code on `main`; `docs/spec-disclosure-week4.md` and `docs/spec-observability-week7.md` are their sources of truth.
+- ADRs in `adr/` — 0002 (single shared DB), 0003 (store card data, superseded by 0013), 0004 (service decomposition), 0005 (LLM client), 0006 (logging redaction), 0012 (Decimal/minor units, externalized rule config, FK-as-graph provenance), 0013 (payment idempotency + tokenization), 0014 (servicing money controls), 0015 (settlement reconciliation as a control), 0016 (fair-lending monitoring computes outside the platform), 0017 (self-decision anonymous-submission gap). 0013, 0014, 0016 and 0017 are Proposed and specify work that is **not built**; 0015 is Accepted and built. Seventeen ADR files exist on `main` — check the highest number before writing a new one.
+- Weeks 4–8 have merged to `main`. Week 5 and the *original* Week 6 deliverables landed as spec/ADR packages with no `services/` or `db/` change behind them — `docs/spec-payments-week5.md` and `docs/servicing-money-comprehension-week6.md` are the sources of truth for what is specified but unbuilt. Week 6's follow-on authz fix is real code (`services/servicing-service/app/authz.py`), so what stays unbuilt from that week is maker-checker, the append-only ledger and the lost-update fix. Week 4's disclosure work, week 7's reconciliation and correlation work, and week 8's governance work are real code on `main`; `docs/spec-disclosure-week4.md`, `docs/spec-observability-week7.md` and `docs/spec-fair-lending-monitoring-week8.md` are their sources of truth.
 - `docs/debt-log.md`, `docs/los-lss-seam.md`, `docs/runbook.md`, `docs/security-remediation-2026-07.md`.
 - An "AI underwriting assistant" is planned but not built (`docs/STAGE1-PLAN-AI-ASSISTANT.md`, `docs/spec-ai-assistant-week1.md`); RAG eval harness in `rag_eval/`.
+
+### Debt-log status vocabulary
+
+`docs/debt-log.md` is what a fresh session reads to learn which controls exist. A stale status there is worse than a missing entry, because it is trusted.
+
+- **Never describe work as sitting in an unmerged PR.** That claim decays the moment the PR merges and nothing re-reads the entry. D5 said the `PiiRedactor` code was "in a separate PR (feature/pii-redaction) and not yet merged" in three places for five weeks after it merged (PR #2, `1f89ac1`, 2026-07-09) — while the redactor was live in all 7 services behind two blocking CI jobs. Cite the merge commit and the gate that holds the control, not the branch that carried it.
+- **Verify before you write either status.** `git merge-base --is-ancestor <branch> <base>` answers whether the code is actually on the base branch; a branch existing locally proves nothing. Same rule as the review-finding workflow above — ground-truth the claim first.
+- **Mitigated** means the control ships and something blocking keeps it from regressing. **Fixed** means every row of that entry's own Mitigation Path is done. D5 is Mitigated, not Fixed: the redactor merged, but the rotation/retention, redaction-at-ingest, and backup-audit rows are all still open, and encoded PII stays deferred under D14. Conflating the two retires an entry that still has work in it.
+- **Name each residual explicitly.** An entry whose status implies more coverage than the code has is the failure mode this section exists to prevent.
 
 ### ADR writing standards
 

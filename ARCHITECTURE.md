@@ -49,12 +49,12 @@ roles*). The port numbers in the table below are container-network ports, not ho
 | Service | Port | Tech | Owns / Responsibility |
 |---------|------|------|-----------------------|
 | `gateway` | 8000 | FastAPI + httpx + Redis | Session auth (`/auth/*`), role forwarding, reverse-proxy: `/los/*` → origination, `/lss/*` → servicing, `/kyc/*` → kyc, `/decision/*` → decision, `/disclosure/*` → disclosure, `/payments/*` → payment. Still does **not** enforce role authz on money actions. |
-| `origination-service` (LOS) | 8001 | FastAPI + SQLAlchemy + psycopg2 | Application intake & listing (still logs full PII), LOS→LSS boarding seam (`intake.board_to_servicing`), and **orchestration** — calls kyc/decision/disclosure over synchronous HTTP via `app/clients.py`. The old in-process `apr.py`/`fees.py`/`offer.py`/`decision.py`/`kyc.py` were deleted from here and moved to the new services. Also owns the decisioning assistant (`app/assistant.py`, `app/llm/`, `app/prompts/` — see *Decisioning assistant* below), `app/authz.py` (ADR 0010: officer-OR-owner authorization on application-scoped routes, fail-closed 404), and `app/kyc_gate.py` (ADR 0011: mandatory KYC gate before decision/offer/board). |
-| `servicing-service` (LSS) | 8002 | FastAPI + SQLAlchemy + psycopg2 | Loan portfolio, balances, amortization schedule, delinquency/late fees, reconciliation peek, loan reads. New `POST /accounts/{loan_id}/apply-payment` (called by payment-service). Legacy `POST /payments` + `payments.py` remain dead-but-present. |
+| `origination-service` (LOS) | 8001 | FastAPI + SQLAlchemy + psycopg2 | Application intake & listing (logs an allowlist of fields, with the ADR 0006 redactor as a backstop), LOS→LSS boarding seam (`intake.board_to_servicing`), and **orchestration** — calls kyc/decision/disclosure over synchronous HTTP via `app/clients.py`. The old in-process `apr.py`/`fees.py`/`offer.py`/`decision.py`/`kyc.py` were deleted from here and moved to the new services. Also owns the decisioning assistant (`app/assistant.py`, `app/llm/`, `app/prompts/` — see *Decisioning assistant* below), `app/authz.py` (ADR 0010: officer-OR-owner authorization on application-scoped routes, fail-closed 404), and `app/kyc_gate.py` (ADR 0011: mandatory KYC gate before decision/offer/board). |
+| `servicing-service` (LSS) | 8002 | FastAPI + SQLAlchemy + psycopg2 | Loan portfolio, balances, amortization schedule, delinquency/late fees, reconciliation peek, loan reads. New `POST /accounts/{loan_id}/apply-payment` (called by payment-service). Legacy `POST /payments` + `payments.py` are **not** dead: the route is live at `app/main.py:74` and calls `payments.charge`, so two handlers insert into the same `payments` table (D23). |
 | `kyc-service` | 8003 | FastAPI + SQLAlchemy + psycopg2 | CIP-only identity check; persists `kyc_checks`. No OFAC/sanctions, no UBO, no ongoing monitoring, no SAR. |
-| `decision-service` | 8004 | FastAPI + SQLAlchemy + psycopg2 | Synchronous credit pull + scorecard; persists `decisions` (outcome only) and, since Week 3, an append-only `decision_events` record (inputs, model outputs, reason codes — ADR 0008/0009). Experian + core-banking keys hardcoded in its `config.py`. |
+| `decision-service` | 8004 | FastAPI + SQLAlchemy + psycopg2 | Synchronous credit pull + scorecard; persists `decisions` (outcome only) and, since Week 3, an append-only `decision_events` record (inputs, model outputs, reason codes — ADR 0008/0009). Experian + core-banking keys read from the environment with no committed default (`config.py`); the literals were purged in PR #4 and are still owed a rotation (D1). |
 | `disclosure-service` | 8005 | FastAPI + SQLAlchemy + psycopg2 | TILA/Reg-Z offer + APR + amortization. The compute path (`apr.py`/`schedule.py`/`offer.py`) is `Decimal` end to end, converting to float only at the response schema and the `offers` columns (ADR 0012). The origination fee has one source, `policies/fee_schedule.json` via `app/rules.py`, which fails closed (no default rate) — replacing three previously-drifted hardcoded copies. Also owns `disclosures`, the authoritative TILA record (integer minor units + `NUMERIC` APR, ADR 0012/0007) and its delivery lifecycle (draft → in_review → approved → delivered, frozen on delivery). |
-| `payment-service` | 8006 | FastAPI + SQLAlchemy + psycopg2 | Card/ACH charge. No idempotency (retried POST double-charges); logs + stores full PAN/CVV; processor key hardcoded. After inserting the `payments` row it calls servicing's `apply-payment`. |
+| `payment-service` | 8006 | FastAPI + SQLAlchemy + psycopg2 | Card/ACH charge. No idempotency (retried POST double-charges); still **stores** full PAN/CVV (D13), though log lines are redacted (ADR 0006); processor key read from the environment with no committed default. After inserting the `payments` row it calls servicing's `apply-payment`. |
 | `frontend` | 3000 | Next.js 15 (App Router) | Borrower application wizard, offer/disclosure screen, servicing dashboard + loan detail. |
 
 ### Data access — a partial ORM migration
@@ -96,12 +96,16 @@ model can later replace. A RAG corpus-hygiene layer (ADR 0007) and eval harness
 
 `users` table holds staff + borrower logins (`admin`, `underwriter`, `csr`, `borrower`).
 Login → unsalted-sha256 password check → opaque token in Redis (`session:<token>`, 8h
-TTL). The gateway resolves the session and forwards `X-User-Id` / `X-User-Role`.
-Downstream services still **do not enforce role** on balance adjustments or fee waivers
-(servicing-service). `origination-service` is the exception: `app/authz.py` (ADR 0010)
-enforces officer-OR-owner authorization on application-scoped routes, fail-closed 404 on
-mismatch, and `app/kyc_gate.py` (ADR 0011) requires a passed KYC check before
-decision/offer/board can proceed.
+TTL). The gateway resolves the session and forwards `X-User-Id` / `X-User-Role`, but
+**does not itself enforce role authz** on money actions. `servicing-service` re-checks
+role on money-moving actions as of PR #32 (`app/authz.py`): `adjust-balance` and
+`waive-fee` require a money role, the loan and balance reads require staff or the owner,
+and `apply-payment` requires an internal caller — servicing is the sole enforcement
+point, and no second approver exists (maker-checker stays unbuilt, ADR 0017, Proposed).
+`origination-service` came first: `app/authz.py` (ADR 0010) enforces officer-OR-owner
+authorization on application-scoped routes, fail-closed 404 on mismatch, and
+`app/kyc_gate.py` (ADR 0011) requires a passed KYC check before decision/offer/board can
+proceed.
 
 ## Data model (Postgres)
 
@@ -139,12 +143,12 @@ maker-checker) lives behind that endpoint and is unchanged.
 
 ## ADRs
 
-`adr/0001` through `adr/0013`. Beyond the decomposition-era 0002 (single shared DB), 0003
-(store card data), 0004 (service decomposition): 0005 (LLM client design), 0006 (logging
-redaction), 0007 (RAG corpus hygiene), 0008 (retrievable decision records), 0009
-(decisioning assistant design), 0010 (application ownership authorization), 0011
-(mandatory KYC before decisioning), 0012 (Decimal minor units + externalized rule config),
-0013 (payment idempotency/tokenization — proposed, not yet implemented).
+`adr/0001` through `adr/0017`. Canonical index with status per ADR: `docs/kb.md`. This
+file names only the ones the sections above depend on: 0002 (single shared DB), 0004
+(service decomposition), 0010 (origination ownership authorization), 0011 (mandatory
+KYC), 0012 (Decimal minor units + externalized rule config), 0013 (payment idempotency/
+tokenization — proposed, not built), 0014 (servicing money controls), 0015 (settlement
+reconciliation), 0017 (maker-checker for servicing — proposed, not built).
 
 ## Status of major controls
 
@@ -152,7 +156,8 @@ redaction), 0007 (RAG corpus hygiene), 0008 (retrievable decision records), 0009
 |---------|--------|--------|
 | PII redactor consistency | Implemented | `redactor-drift` + `redaction-tests`, blocking |
 | Origination application authz (ADR 0010) | Implemented | officer-OR-owner, fail-closed 404 |
-| Servicing role authz | Not implemented | balance adjustments / fee waivers unrestricted by role |
+| Servicing role authz | Partially implemented | `app/authz.py` role-gates `adjust-balance` and `waive-fee` and owner-gates the loan reads (#32); maker-checker is unbuilt (ADR 0017, Proposed) and the gateway still enforces no role authz |
+| Settlement reconciliation (ADR 0015) | Implemented, ungated | `app/reconciliation.py` compares captures to settlement and classifies breaks; its suite has **no** blocking CI job |
 | Mandatory KYC gate (ADR 0011) | Implemented | blocks decision/offer/board pre-KYC |
 | Disclosure Decimal/minor units (ADR 0012) | Partially mitigated | `disclosures` is Decimal/`BIGINT`; `offers`/`loans`/`balances`/`payments` still `DOUBLE PRECISION` |
 | Origination fee externalized config | Implemented | `policies/fee_schedule.json`, fails closed |
@@ -171,8 +176,9 @@ there do not block the build (known-flaky, tolerated). Everything else listed is
 `gateway-trust-boundary-gate`, `compose-hardening-gate`, `kyc-enforcement-gate`,
 `tila-vectors-gate`, `db-readiness-gate`, `decision-db-readiness-gate`,
 `migration-numbering-gate`, `disclosure-lifecycle-gate`, `rag-eval-gate`, `frontend`,
-`secret-scan`, `doc-path-lint`, `docs-drift`. Only the two doc gates carry a companion
-self-test job (`doc-path-lint-tests`, `docs-drift-tests`) that asserts the gate's own logic
+`secret-scan`, `doc-path-lint`, `docs-drift`, `spec-diff-gate`. Three of those carry a
+companion self-test job (`doc-path-lint-tests`, `docs-drift-tests`, `spec-diff-gate-tests`)
+that asserts the gate's own logic
 against a throwaway fixture, independent of the docs' actual state; `redaction-tests` is
 not a self-test of `redactor-drift` — it is its own independent blocking gate on the
 redaction logic. See `CLAUDE.md` for the exception to the tolerated-money-math rule
