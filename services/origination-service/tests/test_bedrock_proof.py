@@ -10,8 +10,9 @@ import json
 
 import pytest
 
+from app.llm.adapter import FakeAdapter
 from app.llm.config import LLMConfig
-from scripts.bedrock_proof import build_receipt, credential_form, main
+from scripts.bedrock_proof import build_receipt, credential_form, main, run_call
 
 _TOKEN = "ABSK-fake-bearer-value-never-in-a-receipt"
 
@@ -49,6 +50,25 @@ def test_key_pair_reported_only_when_both_halves_are_present():
     env = {"AWS_ACCESS_KEY_ID": "AKIA_fake"}
     assert credential_form(env) is None  # secret half missing
     env["AWS_SECRET_ACCESS_KEY"] = "s"
+    assert credential_form(env) == "AWS_ACCESS_KEY_ID+AWS_SECRET_ACCESS_KEY"
+
+
+def test_key_pair_with_session_token_is_reported_as_all_three():
+    # Temporary credentials (STS/SSO) add AWS_SESSION_TOKEN alongside the key
+    # pair; the SDK signs with it, so the receipt must name it too (RGN-001
+    # sibling finding PRF-002) rather than understating the credential used.
+    env = {
+        "AWS_ACCESS_KEY_ID": "AKIA_fake",
+        "AWS_SECRET_ACCESS_KEY": "s",
+        "AWS_SESSION_TOKEN": "t",
+    }
+    assert credential_form(env) == (
+        "AWS_ACCESS_KEY_ID+AWS_SECRET_ACCESS_KEY+AWS_SESSION_TOKEN"
+    )
+
+
+def test_key_pair_without_session_token_omits_it():
+    env = {"AWS_ACCESS_KEY_ID": "AKIA_fake", "AWS_SECRET_ACCESS_KEY": "s"}
     assert credential_form(env) == "AWS_ACCESS_KEY_ID+AWS_SECRET_ACCESS_KEY"
 
 
@@ -160,6 +180,47 @@ def test_refuses_when_no_aws_credential_is_present(monkeypatch, capsys):
         monkeypatch.delenv(name, raising=False)
     assert main([]) == 2
     assert "no AWS credential" in capsys.readouterr().err
+
+
+# --- run_call: must go through ClaudeClient, not a raw adapter call -------
+#
+# RGN-001 sibling finding PRF-001: a raw `adapter.complete()` call bypasses the
+# retry policy, schema validation/guards, and trace stamps ClaudeClient wires
+# in. These inject a FakeAdapter (no network, no credentials) to prove run_call
+# actually exercises that pipeline instead of calling the adapter directly.
+
+
+def test_run_call_validates_output_through_the_client_pipeline():
+    adapter = FakeAdapter(
+        response=json.dumps(
+            {
+                "summary": "Applicant requests $12,000 over 36 months.",
+                "risk_flags": [],
+                "recommended_next_step": "approve_review",
+            }
+        )
+    )
+    result = run_call(_config(), adapter=adapter)
+
+    assert result["succeeded"] is True
+    assert result["validated_result_type"] == "dict"
+    # FakeAdapter isn't a BedrockAdapter, so _execution_mode correctly reports
+    # "fixture" here — proving the label reflects the injected adapter, not a
+    # hardcoded claim of a real call.
+    assert result["execution_mode"] == "fixture"
+    assert len(adapter.calls) == 1
+
+
+def test_run_call_reports_a_schema_violation_as_a_failed_call():
+    # Model text that is not valid JSON never reaches the schema — validate_structured
+    # raises ValidationFailed, which run_call must record as a failure, not let escape
+    # as an uncaught exception (a raw adapter.complete() call would never surface this
+    # at all, since it skips validation entirely).
+    adapter = FakeAdapter(response="not a JSON object")
+    result = run_call(_config(), adapter=adapter)
+
+    assert result["succeeded"] is False
+    assert result["error_class"] == "ValidationFailed"
 
 
 def test_a_malformed_region_stops_the_run_before_any_call(monkeypatch):

@@ -34,6 +34,11 @@ The credential VALUE never enters the receipt — only the name of the environme
 variable that supplied it. The applicant below is synthetic (the canonical test
 SSN), and it goes through the real prompt path, so the request the provider sees
 is the redacted one.
+
+The call itself goes through ``ClaudeClient.summarize_application()`` — the
+production entry point ``app/main.py`` wires at boot — not a raw adapter call,
+so the receipt also proves the retry policy, schema validation/guards, and the
+trace-metadata stamps a raw ``adapter.complete()`` call would bypass.
 """
 
 from __future__ import annotations
@@ -49,11 +54,10 @@ from time import perf_counter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.llm.adapter import BedrockAdapter  # noqa: E402
+from app.llm.adapter import BedrockAdapter, Completion, CompletionRequest  # noqa: E402
+from app.llm.client import ClaudeClient, _execution_mode  # noqa: E402
 from app.llm.config import load_llm_config  # noqa: E402
 from app.llm.errors import LLMError  # noqa: E402
-from app.llm.request_builder import build_request  # noqa: E402
-from app.prompts import get_prompt  # noqa: E402
 
 # Synthetic applicant, same shape and same fake identifiers as scripts/langsmith_demo.py.
 # Redaction happens inside build_request for the prompt's declared json_vars, so the
@@ -73,6 +77,7 @@ APPLICATION = {
 
 _BEARER_ENV = "AWS_BEARER_TOKEN_BEDROCK"
 _KEY_PAIR_ENV = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+_SESSION_TOKEN_ENV = "AWS_SESSION_TOKEN"
 
 
 def credential_form(env: dict) -> str | None:
@@ -82,10 +87,17 @@ def credential_form(env: dict) -> str | None:
     ``AWS_BEARER_TOKEN_BEDROCK``, so reporting the key pair would name a
     credential the call did not use. Returns None when neither is set — the
     caller refuses rather than letting the SDK chain surface it later.
+
+    Temporary credentials (STS/SSO — the common case) add ``AWS_SESSION_TOKEN``
+    alongside the key pair; the SDK includes it in the signed request, so a
+    receipt naming only the key pair would understate the credential actually
+    used (review finding PRF-002).
     """
     if env.get(_BEARER_ENV, "").strip():
         return _BEARER_ENV
     if all(env.get(name, "").strip() for name in _KEY_PAIR_ENV):
+        if env.get(_SESSION_TOKEN_ENV, "").strip():
+            return "AWS_ACCESS_KEY_ID+AWS_SECRET_ACCESS_KEY+AWS_SESSION_TOKEN"
         return "AWS_ACCESS_KEY_ID+AWS_SECRET_ACCESS_KEY"
     return None
 
@@ -133,30 +145,54 @@ def build_receipt(
     }
 
 
-def run_call(config) -> dict:
-    """One real Bedrock call. Returns the call half of the receipt.
+class _RecordingBedrockAdapter(BedrockAdapter):
+    """BedrockAdapter that remembers the last real Completion it returned.
 
-    No retry: a proof run reports what happened on the attempt it made. The
-    response text is recorded as a length and a SHA-256 rather than verbatim —
-    the model is answering about a synthetic applicant, but a receipt is an
-    artifact people paste around, and a hash proves a response arrived without
-    making the artifact a place model output accumulates.
+    `ClaudeClient` does not hand the raw `Completion` back to its caller (it
+    returns the validated result, per `complete()`'s contract), and the receipt
+    needs provider-echoed fields (model, stop_reason, token counts) that only
+    exist on that `Completion`. Subclassing rather than wrapping keeps
+    `isinstance(adapter, BedrockAdapter)` true, so `_execution_mode` still
+    reports "real" for this call exactly as it would in production.
     """
-    template = get_prompt("loan_application_summary")
-    built = build_request(
-        template,
-        model=config.model,
-        max_tokens=config.max_tokens,
-        temperature=config.temperature,
-        timeout=config.timeout,
-        token_budget=config.token_budget,
-        application_json=json.dumps(APPLICATION),
+
+    def __init__(self, region: str | None = None):
+        super().__init__(region=region)
+        self.last_completion: Completion | None = None
+
+    def complete(self, req: CompletionRequest) -> Completion:
+        completion = super().complete(req)
+        self.last_completion = completion
+        return completion
+
+
+def run_call(config, *, adapter: BedrockAdapter | None = None) -> dict:
+    """One real call through the production path. Returns the call half of the receipt.
+
+    Goes through `ClaudeClient.summarize_application()` — the same entry point
+    `app/main.py` wires at boot — not a raw adapter call, so the receipt also
+    proves the retry policy (transport), schema validation/guards, and the
+    `llm_provider`/`execution_mode` trace stamps that a raw `adapter.complete()`
+    call would bypass. `adapter` is injectable for tests; production always
+    supplies a fresh `_RecordingBedrockAdapter`.
+
+    No extra retry here beyond what `ClaudeClient` already does: a proof run
+    reports what happened on the call it made. The response text is recorded
+    as a length and a SHA-256 rather than verbatim — the model is answering
+    about a synthetic applicant, but a receipt is an artifact people paste
+    around, and a hash proves a response arrived without making the artifact a
+    place model output accumulates.
+    """
+    adapter = (
+        adapter
+        if adapter is not None
+        else _RecordingBedrockAdapter(region=config.aws_region)
     )
-    adapter = BedrockAdapter(region=config.aws_region)
+    client = ClaudeClient(config, adapter=adapter)
 
     t0 = perf_counter()
     try:
-        completion = adapter.complete(built.request)
+        result = client.summarize_application(json.dumps(APPLICATION))
     except LLMError as exc:
         return {
             "succeeded": False,
@@ -164,17 +200,22 @@ def run_call(config) -> dict:
             "error_class": type(exc).__name__,
             "error": str(exc),
         }
+    completion = getattr(adapter, "last_completion", None)
     return {
         "succeeded": True,
         "latency_ms": round((perf_counter() - t0) * 1000, 1),
+        "execution_mode": _execution_mode(adapter),
+        "validated_result_type": type(result).__name__,
         # The model id the PROVIDER echoed back. The strongest single element in
         # here: it is the one field the local configuration did not choose.
-        "model_returned": completion.model,
-        "stop_reason": completion.stop_reason,
-        "input_tokens": completion.input_tokens,
-        "output_tokens": completion.output_tokens,
-        "response_chars": len(completion.text),
-        "response_sha256": hashlib.sha256(completion.text.encode()).hexdigest(),
+        "model_returned": completion.model if completion else None,
+        "stop_reason": completion.stop_reason if completion else None,
+        "input_tokens": completion.input_tokens if completion else None,
+        "output_tokens": completion.output_tokens if completion else None,
+        "response_chars": len(completion.text) if completion else None,
+        "response_sha256": (
+            hashlib.sha256(completion.text.encode()).hexdigest() if completion else None
+        ),
     }
 
 
