@@ -10,7 +10,8 @@
   ADR 0002 (single shared database — why the job reads `payments` directly),
   ADR 0004 (the decomposition that split capture from apply across two services).
   Debt D7 (no reconciliation job), D19 (no idempotency key), D3 (lost update),
-  D2 (float money), D8 (servicing enforces no authorization).
+  D2 (float money), D8 (servicing authz — partially mitigated by #32; maker-checker
+  still open).
 - **Source:** `docs/spec-observability-week7.md`, and
   docs/client-asks-2026-08-12-observability.md — local-only, on the docs/client-asks branch and in
   no checkout, so it is named un-backticked rather than linked.

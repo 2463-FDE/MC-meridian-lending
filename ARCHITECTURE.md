@@ -96,12 +96,16 @@ model can later replace. A RAG corpus-hygiene layer (ADR 0007) and eval harness
 
 `users` table holds staff + borrower logins (`admin`, `underwriter`, `csr`, `borrower`).
 Login → unsalted-sha256 password check → opaque token in Redis (`session:<token>`, 8h
-TTL). The gateway resolves the session and forwards `X-User-Id` / `X-User-Role`.
-Downstream services still **do not enforce role** on balance adjustments or fee waivers
-(servicing-service). `origination-service` is the exception: `app/authz.py` (ADR 0010)
-enforces officer-OR-owner authorization on application-scoped routes, fail-closed 404 on
-mismatch, and `app/kyc_gate.py` (ADR 0011) requires a passed KYC check before
-decision/offer/board can proceed.
+TTL). The gateway resolves the session and forwards `X-User-Id` / `X-User-Role`, but
+**does not itself enforce role authz** on money actions. `servicing-service` re-checks
+role on money-moving actions as of PR #32 (`app/authz.py`): `adjust-balance` and
+`waive-fee` require a money role, the loan and balance reads require staff or the owner,
+and `apply-payment` requires an internal caller — servicing is the sole enforcement
+point, and no second approver exists (maker-checker stays unbuilt, ADR 0017, Proposed).
+`origination-service` came first: `app/authz.py` (ADR 0010) enforces officer-OR-owner
+authorization on application-scoped routes, fail-closed 404 on mismatch, and
+`app/kyc_gate.py` (ADR 0011) requires a passed KYC check before decision/offer/board can
+proceed.
 
 ## Data model (Postgres)
 
@@ -139,12 +143,12 @@ maker-checker) lives behind that endpoint and is unchanged.
 
 ## ADRs
 
-`adr/0001` through `adr/0013`. Beyond the decomposition-era 0002 (single shared DB), 0003
-(store card data), 0004 (service decomposition): 0005 (LLM client design), 0006 (logging
-redaction), 0007 (RAG corpus hygiene), 0008 (retrievable decision records), 0009
-(decisioning assistant design), 0010 (application ownership authorization), 0011
-(mandatory KYC before decisioning), 0012 (Decimal minor units + externalized rule config),
-0013 (payment idempotency/tokenization — proposed, not yet implemented).
+`adr/0001` through `adr/0017`. Canonical index with status per ADR: `docs/kb.md`. This
+file names only the ones the sections above depend on: 0002 (single shared DB), 0004
+(service decomposition), 0010 (origination ownership authorization), 0011 (mandatory
+KYC), 0012 (Decimal minor units + externalized rule config), 0013 (payment idempotency/
+tokenization — proposed, not built), 0014 (servicing money controls), 0015 (settlement
+reconciliation), 0017 (maker-checker for servicing — proposed, not built).
 
 ## Status of major controls
 
