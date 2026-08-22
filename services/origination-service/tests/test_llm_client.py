@@ -1729,3 +1729,106 @@ def test_trace_hooks_stay_metadata_only_in_production(monkeypatch):
     traced_out = _trace_complete_outputs(body)
     assert "result" not in traced_out
     assert "42,000" not in json.dumps(traced_out)
+
+
+# --- Reproducible Bedrock selection (2026-09-02 freeze) -------------------
+#
+# The freeze requires a REPRODUCIBLE provider/region selection: an unset AWS_REGION
+# let boto3 resolve the region from whatever ambient config the host happened to
+# carry, so two runs of the same commit could reach two regions. The region is now
+# a literal on the bedrock path, and a malformed value is refused at boot rather
+# than handed to the SDK ("us-east" is not a region string).
+
+
+def test_bedrock_region_is_pinned_by_default(monkeypatch):
+    monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_PROVIDER", "bedrock")
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    assert load_llm_config().aws_region == "us-east-1"
+
+
+def test_blank_aws_region_falls_back_to_the_pin(monkeypatch):
+    # An exported-but-empty AWS_REGION is the same as unset, not a malformed value.
+    monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_PROVIDER", "bedrock")
+    monkeypatch.setenv("AWS_REGION", "   ")
+    assert load_llm_config().aws_region == "us-east-1"
+
+
+def test_aws_region_env_overrides_the_pinned_default(monkeypatch):
+    monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_PROVIDER", "bedrock")
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+    assert load_llm_config().aws_region == "us-west-2"
+
+
+def test_anthropic_provider_ignores_aws_region(monkeypatch):
+    # aws_region is documented bedrock-only; carrying a region on the direct
+    # Anthropic path would report a region the call never used in the trace.
+    monkeypatch.setenv("CLAUDE_API_KEY", "k")
+    monkeypatch.delenv("CLAUDE_PROVIDER", raising=False)
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+    assert load_llm_config().aws_region is None
+
+
+@pytest.mark.parametrize("value", ["us-east", "US-EAST-1", "us east 1", "useast1"])
+def test_malformed_aws_region_rejected_at_boot(monkeypatch, value):
+    monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_PROVIDER", "bedrock")
+    monkeypatch.setenv("AWS_REGION", value)
+    with pytest.raises(LLMConfigError):
+        load_llm_config()
+
+
+def test_execution_mode_separates_live_adapters_from_the_fixture():
+    from app.llm.client import _execution_mode
+
+    assert _execution_mode(ClaudeAdapter("k")) == "real"
+    assert _execution_mode(BedrockAdapter(region="us-east-1")) == "real"
+    assert _execution_mode(FakeAdapter()) == "fixture"
+
+
+def test_complete_span_records_provider_region_and_execution_mode(monkeypatch):
+    # The freeze wants provider + execution-mode metadata on the trace. ls_provider
+    # is NOT that field: transport pins it to "anthropic" for both routes so
+    # LangSmith can price the canonical model, so the route is reported separately.
+    from app.llm import client as client_mod
+
+    run_tree = _FakeRunTree()
+    monkeypatch.setattr(client_mod, "get_current_run_tree", lambda: run_tree)
+    client = ClaudeClient(
+        _config(provider="bedrock", aws_region="us-east-1"),
+        adapter=FakeAdapter(response=GOOD_SUMMARY),
+    )
+    client.summarize_application("{}")
+
+    assert run_tree.metadata["llm_provider"] == "bedrock"
+    assert run_tree.metadata["aws_region"] == "us-east-1"
+    assert run_tree.metadata["execution_mode"] == "fixture"
+
+
+def test_anthropic_span_carries_no_region(monkeypatch):
+    from app.llm import client as client_mod
+
+    run_tree = _FakeRunTree()
+    monkeypatch.setattr(client_mod, "get_current_run_tree", lambda: run_tree)
+    ClaudeClient(
+        _config(), adapter=FakeAdapter(response=GOOD_SUMMARY)
+    ).summarize_application("{}")
+
+    assert run_tree.metadata["llm_provider"] == "anthropic"
+    assert "aws_region" not in run_tree.metadata
+
+
+def test_served_fallback_reports_execution_mode_fallback(monkeypatch):
+    # A fallback is neither a real nor a fixture answer; the mode must say so, or
+    # the span reads as a healthy call of whatever adapter was configured.
+    from app.llm import client as client_mod
+
+    run_tree = _FakeRunTree()
+    monkeypatch.setattr(client_mod, "get_current_run_tree", lambda: run_tree)
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response="garbage"))
+    out = client.summarize_application("{}", fallback={"summary": "unavailable"})
+
+    assert out == {"summary": "unavailable"}
+    assert run_tree.metadata["execution_mode"] == "fallback"

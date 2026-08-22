@@ -81,6 +81,19 @@ def _trace_complete_outputs(output: Any) -> dict:
     return traced
 
 
+def _execution_mode(adapter: ModelAdapter) -> str:
+    """"real" if this adapter reaches a provider, "fixture" otherwise.
+
+    The freeze deliverable requires the trace to state which of real/fixture/
+    fallback produced an answer. This is an ALLOWLIST of the two adapters that
+    actually call out, not a FakeAdapter check: an unrecognized adapter reports
+    "fixture", because claiming a real provider call for something that never made
+    one is the worse error of the two. "fallback" is stamped by `complete` when it
+    serves one — that is a property of the call, not of the adapter.
+    """
+    return "real" if isinstance(adapter, (ClaudeAdapter, BedrockAdapter)) else "fixture"
+
+
 def _default_adapter(config: LLMConfig) -> ModelAdapter:
     """Pick the adapter for `config.provider`. No adapter was injected."""
     if config.provider == "bedrock":
@@ -123,6 +136,17 @@ class ClaudeClient:
         """
         template = get_prompt(prompt_name)
         request_id = idempotency_key or uuid.uuid4().hex
+
+        # Reproducibility metadata on the root span. Deliberately NOT ls_provider:
+        # transport pins that to "anthropic" on both routes so LangSmith can price
+        # the canonical model (see transport._LS_PROVIDER), so it cannot report
+        # which route ran. Config values only — no prompt or response content.
+        run_tree = get_current_run_tree()
+        if run_tree is not None:
+            run_tree.metadata["llm_provider"] = self.config.provider
+            run_tree.metadata["execution_mode"] = _execution_mode(self.adapter)
+            if self.config.aws_region:
+                run_tree.metadata["aws_region"] = self.config.aws_region
 
         # Concern 3: build + cost guard (raises TokenBudgetExceeded before network).
         built = build_request(
@@ -194,6 +218,9 @@ class ClaudeClient:
                 if run_tree is not None:
                     run_tree.metadata["validation_failed"] = True
                     run_tree.metadata["fallback_used"] = True
+                    # Overrides the mode stamped at entry: the answer came from
+                    # neither the provider nor the fixture.
+                    run_tree.metadata["execution_mode"] = "fallback"
                     run_tree.metadata["rejection_error"] = type(exc).__name__
                 return fallback
             raise
