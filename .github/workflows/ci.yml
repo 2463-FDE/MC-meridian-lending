@@ -513,6 +513,21 @@ jobs:
       - name: rag_eval real-corpus smoke (refusal + no raw PII in report/cache)
         run: ./scripts/smoke_rag_eval.sh
 
+  rag-eval-import-gate:
+    # Card G2a: origination builds from the REPO ROOT so the image carries the repo-root
+    # rag_eval/ package — `import rag_eval` did not resolve in the container before that,
+    # and G2b's search_policy tool is built on top of this holding. The file assertions in
+    # test_rag_eval_seam.py also run in the `backend` job under continue-on-error/|| true,
+    # so a reverted build context would stay green there. This job MUST block — no
+    # continue-on-error, no `|| true` — and it proves the import in the built image, not in
+    # the Dockerfile text: a gate that checks only the spelling verifies nothing about the
+    # artifact that ships.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: rag_eval imports inside the origination image
+        run: ./scripts/check_rag_eval_import.sh
+
   frontend:
     runs-on: ubuntu-latest
     steps:

@@ -8,3 +8,21 @@
 .git
 *.md
 logs/*.log.bak
+
+# origination-service builds from the REPO ROOT so the image can carry rag_eval/ (card G2a).
+# Every other context is a subdirectory, so this file was inert until that change; it is live
+# now, and .env sits at the root of the new context.
+#
+# Credentials must never enter a build context. .env carries POSTGRES_PASSWORD (no committed
+# default) and a developer's .env.local may carry CLAUDE_API_KEY or AWS keys, which compose
+# injects from the host shell precisely so they stay out of the tree.
+.env
+.env.*
+!.env.example
+
+# Embedding cache: rebuilt per run, never part of the image.
+rag_eval/.cache
+
+# Legacy pre-remediation raw dump (ADR 0007) — carries ssn/pan/dob. Never lands in the
+# image, but a root-context build still ships it to the daemon and its cache.
+kb_dump
