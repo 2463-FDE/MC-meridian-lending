@@ -11,10 +11,17 @@ is load-bearing for a decision, a short phrase is quoted; nothing longer.
 **Client:** VP Lending Ops, Meridian (referred to below as the client). **Register maintained:**
 2026-08-21.
 
+**Relationship to `docs/client-answers-week6-servicing.md`.** This register is a roll-up:
+Exchange 1 below condenses the same eleven questions to one line each. The week-6 file stays the
+detailed backing record — per-question notes and where ADR 0014 goes further than the answer live
+there, and it is what ADR 0014 cites. Update both when a servicing answer changes.
+
 ---
 
-## Exchange 1 — servicing money controls · answered 2026-08-12
+## Exchange 1 — servicing money controls
 
+**Asked:** not captured. **Answered:** 2026-08-12, in writing. **Respondent:** VP Lending Ops,
+Meridian. **Source reference:** not captured.
 Feeds `adr/0014-servicing-money-controls.md` and `docs/cards-week6-servicing.md`.
 
 | # | Question | Answer | Feeds |
@@ -31,8 +38,10 @@ Feeds `adr/0014-servicing-money-controls.md` and `docs/cards-week6-servicing.md`
 | 10 | Is the $150 monthly fee-waiver guideline a limit the system should enforce? | The ops manual sets $150 per account per month with escalation above it. The system has never enforced it and this work does not start | Card C4. **Untested assumption: whether the window is a calendar month or rolling 30 days was never asked** |
 | 11 | What is in scope this cycle? | The comprehension work — report, characterization tests, the failing lost-update test, and the decision record. The dashboard waits, and deferrals are to be carded | `docs/cards-week6-servicing.md` C1–C5 exist because of this answer |
 
-## Exchange 2 — decisioning governance · answered 2026-08-13
+## Exchange 2 — decisioning governance
 
+**Asked:** not captured. **Answered:** 2026-08-13, in writing. **Respondent:** VP Lending Ops,
+Meridian. **Source reference:** not captured.
 Feeds `docs/spec-fair-lending-monitoring-week8.md`, `adr/0016-fair-lending-monitoring-computes-outside-the-platform.md`, `docs/cards-week8-governance.md`, `docs/model-card-decisioning-scorecard.md`.
 
 | # | Question | Answer | Feeds |
@@ -47,8 +56,10 @@ Feeds `docs/spec-fair-lending-monitoring-week8.md`, `adr/0016-fair-lending-monit
 work must not be displaced, and anything bigger than it looks becomes a card and gets reported rather
 than absorbed.
 
-## Exchange 3 — settlement reconciliation · answered 2026-08-14
+## Exchange 3 — settlement reconciliation
 
+**Asked:** not captured. **Answered:** 2026-08-14, in writing. **Respondent:** VP Lending Ops,
+Meridian. **Source reference:** not captured.
 Feeds `docs/spec-observability-week7.md` (D2, D3, D4), `adr/0015-settlement-reconciliation-as-a-control.md`, `docs/runbook.md`.
 
 | # | Question | Answer | Feeds |
@@ -59,20 +70,27 @@ Feeds `docs/spec-observability-week7.md` (D2, D3, D4), `adr/0015-settlement-reco
 | 4 | The month-end gap was described as small; in this extract it is 28% of settled amount. Unrepresentative, or judged against a larger portfolio? | **Treat 28% as material.** "Small" was an inherited assumption, not a measured conclusion. No portfolio-level modelling | ADR 0015 Context |
 | 5 | The $500 on loan 4471 — two settled captures with no ledger row. Known and written off, or open? | **An open exception, not a write-off.** Both processor references in the first exception report, marked for Finance Ops review. **"No separate remediation or ticketing workflow is needed in this build"** | Runbook ownership line — Finance Ops named as owner of missing-in-ledger breaks |
 
-## Exchange 4 — payment integrity, card data, monitoring labels · answered 2026-08-17
+## Exchange 4 — payment integrity, card data, monitoring labels
 
+**Asked:** not captured. **Answered:** 2026-08-17, in writing. **Respondent:** VP Lending Ops,
+Meridian. **Source reference:** not captured.
 Feeds the payment-integrity design, `adr/0013-payment-idempotency-and-tokenization.md`, `docs/spec-payments-week5.md`, `docs/spec-fair-lending-monitoring-week8.md`.
 
 | # | Question | Answer | Feeds |
 |---|---|---|---|
 | 1 | How long after a payment completes should a repeat submission be treated as the same payment rather than a new one? | **Keep it configurable, keep 24 hours as the working value.** A product choice, not an industry default; a later change is configuration, not rework. **Unprompted addition: forward a separate key to the processor** rather than reusing ours, so the two retention windows cannot cancel each other out | Both halves were already the design. **No spec change needed**, and the vendor's own retention window drops from blocking to informational |
 | 2 | Does anything use the second card-charge path? If not, we retire it and enforce a single payment path | **Retirement refused, with a stronger requirement in its place:** do not retire it this cycle; enforce the uniqueness rule in the database so every writer is bound the same way regardless of route; add logging that identifies which handler took a charge; retire later from observed traffic, with a rollback. "A path that still accepts requests is still a live path" | **Surfaced a gap in our design.** The arbiter is a *partial* unique index and the second handler supplies no key, so its rows fall outside the index and are not bound at all. Closing that makes the fix a two-service change |
-| 3 | (a) Which processor, and does it offer hosted fields? (b) Which PCI scope — SAQ-A or SAQ-D? (c) Who owns the purge of stored card numbers and security codes, and by when? | **(a) and (b) declined deliberately** — neither is needed for the fix to proceed; design toward hosted fields or client-side tokenisation. **Firm on security codes: collecting them to authorise is fine, keeping them afterwards is not** — encrypted or consented makes no difference. **(c) left open on purpose** — the purge is a separate effort from the double-charge fix, owner and target date to follow | The fix proceeds without tokenisation. The stop-write on security codes becomes its own thin change that waits for nothing — nothing in the platform reads that column |
-| 4 | Were the three double-charge customers made whole? | **No answer, deliberately** — "I would rather leave that open than hand you an instruction I cannot stand behind." No customer list, no corrections, and loan 4471 stays an open Finance Ops exception, not a write-off, with no new workflow | Removes work rather than adding it. **Still open on the client's authority** |
-| 5 | What is the source of the back-office export — screen, report, or direct database extract? | **Deferred by the client to 2026-08-28** | Would validate the assumption behind exchange 2 question 2 |
-| 6 | Are the guidelines and fee schedule current, what else should be indexed, how do updates reach us — and which is right where they disagree with the system? | Currency question **deferred to 2026-08-28**. **Both disagreements answered and confirmed real:** there is no hard cutoff behind the documented debt-to-income rules, and the platform offers a flat rate against a published band. Both are **product direction, not configuration**, so the assistant keeps quoting the documents as written | Confirms current retrieval behaviour. Neither is a defect to fix; both need a recorded home |
-| 7 | When a decision returns *Refer*, who makes the final determination and where is it recorded? | **Deferred to 2026-08-28** | Coverage of the monitoring report — referrals leave no captured outcome |
-| 8 | Who is the print-and-mail vendor, what does their intake look like, and who owns the spreadsheet timing process? | **Deferred to 2026-08-28** | Card G1's estimate cannot close without all three |
+| 3 | Which processor, and does it offer hosted fields? | **Declined deliberately** — not needed for the fix to proceed; design toward hosted fields or client-side tokenisation | The fix proceeds without tokenisation |
+| 4 | Which PCI scope — SAQ-A or SAQ-D? | **Declined deliberately**, same reasoning as the processor question | The fix proceeds without tokenisation |
+| 5 | Who owns the purge of stored card numbers and security codes, and by when? | **Left open on purpose** — the purge is a separate effort from the double-charge fix, owner and target date to follow. **Firm on security codes regardless:** collecting them to authorise is fine, keeping them afterwards is not — encrypted or consented makes no difference | The stop-write on security codes becomes its own thin change that waits for nothing — nothing in the platform reads that column |
+| 6 | Were the three double-charge customers made whole? | **No answer, deliberately** — "I would rather leave that open than hand you an instruction I cannot stand behind." No customer list, no corrections, and loan 4471 stays an open Finance Ops exception, not a write-off, with no new workflow | Removes work rather than adding it. **Still open on the client's authority** |
+| 7 | What is the source of the back-office export — screen, report, or direct database extract? | **Deferred by the client to 2026-08-28** | Would validate the assumption behind exchange 2 question 2 |
+| 8 | Are the guidelines and fee schedule current? | **Deferred to 2026-08-28** | Open items summary |
+| 9 | What else should be indexed? | **Deferred to 2026-08-28** — asked alongside the currency question, not answered separately | Open items summary |
+| 10 | How do updates reach us? | **Deferred to 2026-08-28** — asked alongside the currency question, not answered separately | Open items summary |
+| 11 | Which is right where the guidelines/fee schedule disagree with the system? | **Both disagreements answered and confirmed real:** there is no hard cutoff behind the documented debt-to-income rules, and the platform offers a flat rate against a published band. Both are **product direction, not configuration**, so the assistant keeps quoting the documents as written | Confirms current retrieval behaviour. Neither is a defect to fix; both need a recorded home |
+| 12 | When a decision returns *Refer*, who makes the final determination and where is it recorded? | **Deferred to 2026-08-28** | Coverage of the monitoring report — referrals leave no captured outcome |
+| 13 | Who is the print-and-mail vendor, what does their intake look like, and who owns the spreadsheet timing process? | **Deferred to 2026-08-28** | Card G1's estimate cannot close without all three |
 
 **Also settled in this exchange.** Our four stated monitoring assumptions stand as written, with one
 caveat: the per-group volume floor, the geocoding level, and who owns the reporting environment are
@@ -86,12 +104,12 @@ earlier "this is the compliance position" line on status though not on substance
 ## Open items
 
 **Deferred by the client to 2026-08-28** — asked and waiting, not outstanding on us: the export
-source · policy-corpus currency and how updates reach us · who determines a *Refer* and where it is
-recorded · the print-and-mail vendor, intake and clock owner.
+source · policy-corpus currency, what else should be indexed, and how updates reach us · who
+determines a *Refer* and where it is recorded · the print-and-mail vendor, intake and clock owner.
 
 **Open on the client's authority** — they will return to these: the purge owner and target date ·
-whether the three double-charge customers were made whole · a control-owner walkthrough of corrected
-audit-trail statements · the ops-manual reason-code list (**no record it has arrived**).
+whether the three double-charge customers were made whole · the ops-manual reason-code list (**no
+record it has arrived**).
 
 **Declined, deliberately** — the answer is the refusal: which processor, and which PCI scope.
 
@@ -103,7 +121,9 @@ duplicate-detection fingerprint excludes the card security code · whether a sec
 the legacy path is ever legitimate · the APR method of record, the applicable tolerance regime, and
 whether earlier disclosures need curing · whether the fee-waiver window is a calendar month or rolling
 30 days · who runs the daily close and escalates a failed one · what happens to adjustment history at
-year eight · who owns each item specified but not built · who accepts the residual risk register.
+year eight · who owns each item specified but not built · who accepts the residual risk register · a
+control-owner walkthrough of corrected audit-trail statements — no exchange row records this question
+having been put to the client.
 
 ## Conventions this register follows
 
