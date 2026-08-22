@@ -20,8 +20,9 @@ there, and it is what ADR 0014 cites. Update both when a servicing answer change
 
 ## Exchange 1 — servicing money controls
 
-**Asked:** not captured. **Answered:** 2026-08-12, in writing. **Respondent:** VP Lending Ops,
-Meridian. **Source reference:** not captured.
+**Asked:** 2026-08-08. **Answered:** 2026-08-12, in writing. **Respondent:** VP Lending Ops,
+Meridian. **Source reference:** `docs/client-asks-week6-servicing.md` on `docs/client-asks`
+(pushed); verbatim reply on `docs/client-asks-originals` (not pushed).
 Feeds `adr/0014-servicing-money-controls.md` and `docs/cards-week6-servicing.md`.
 
 | # | Question | Answer | Feeds |
@@ -30,18 +31,20 @@ Feeds `adr/0014-servicing-money-controls.md` and `docs/cards-week6-servicing.md`
 | 2 | Are the servicing endpoints reachable from outside the network? | Yes — the borrower portal sits behind the same gateway, so a borrower login is on the public internet | ADR 0014 Context; raised the finding from internal misuse to internet-facing, which is why the authz fix shipped separately from the dashboard |
 | 3 | Should a second person approve a discretionary balance move before it lands? | Not this cycle. Record every move now; approval comes next cycle | ADR 0014 Decision 2 and card C1. The approval *design* is engineering's, not the client's |
 | 4 | How many discretionary moves happen, and how many people could approve? | ~30 balance adjustments and 15 fee waivers a week, across 9 representatives, with 3 who could approve | The deferral in Q3 rests on this ratio. **Client operating figures, not measured from the database** — nothing in the schema records who adjusted what |
-| 5 | What reason must a representative give, and is there a code list? | A reason is required on every manual move. The ops-manual code list was to follow | ADR 0014 Decision 3 — free text plus a permanent `other` escape hatch, so the column is never a closed enum. **List still not received** |
-| 6 | What does a controller need to see on an adjustment record? | The figure before and the figure after, on the record itself | ADR 0014 Decision 3 — both stored rather than derived |
-| 7 | How long must adjustment history be retained? | **Seven years**, confirmed by the control owner rather than Lending Ops | ADR 0014 Operational impact. **What happens at year eight is undecided and has never been asked** |
-| 8 | Should balances be reconciled against payment records before the ledger starts? | No — an honest line in the sand beats a reconstructed history that cannot be defended | ADR 0014 Decision 3 — the ledger opens with one `opening` posting carrying today's stored balance, labelled as such because it may be wrong |
-| 9 | Should the borrower be told when a representative adjusts their balance? | No notification for now; record only. Take it together with the payments delivery-channel decision — both need a verified way to reach the borrower, and none exists | Card C2, explicitly not estimable until a channel exists |
-| 10 | Is the $150 monthly fee-waiver guideline a limit the system should enforce? | The ops manual sets $150 per account per month with escalation above it. The system has never enforced it and this work does not start | Card C4. **Untested assumption: whether the window is a calendar month or rolling 30 days was never asked** |
-| 11 | What is in scope this cycle? | The comprehension work — report, characterization tests, the failing lost-update test, and the decision record. The dashboard waits, and deferrals are to be carded | `docs/cards-week6-servicing.md` C1–C5 exist because of this answer |
+| 5 | What reason must a representative give? | A reason is required on every manual move | ADR 0014 Decision 3 — free text plus a permanent `other` escape hatch, so the column is never a closed enum |
+| 6 | Is there a code list for that reason, in the ops manual? | The ops-manual code list was to follow | **List still not received** |
+| 7 | What does a controller need to see on an adjustment record? | The figure before and the figure after, on the record itself | ADR 0014 Decision 3 — both stored rather than derived |
+| 8 | How long must adjustment history be retained? | **Seven years**, confirmed by the control owner rather than Lending Ops | ADR 0014 Operational impact. **What happens at year eight is undecided and has never been asked** |
+| 9 | Should balances be reconciled against payment records before the ledger starts? | No — an honest line in the sand beats a reconstructed history that cannot be defended | ADR 0014 Decision 3 — the ledger opens with one `opening` posting carrying today's stored balance, labelled as such because it may be wrong |
+| 10 | Should the borrower be told when a representative adjusts their balance? | No notification for now; record only. Take it together with the payments delivery-channel decision — both need a verified way to reach the borrower, and none exists | Card C2, explicitly not estimable until a channel exists |
+| 11 | Is the $150 monthly fee-waiver guideline a limit the system should enforce? | The ops manual sets $150 per account per month with escalation above it. The system has never enforced it and this work does not start | Card C4. **Untested assumption: whether the window is a calendar month or rolling 30 days was never asked** |
+| 12 | What is in scope this cycle? | The comprehension work — report, characterization tests, the failing lost-update test, and the decision record. The dashboard waits, and deferrals are to be carded | `docs/cards-week6-servicing.md` C1–C5 exist because of this answer |
 
 ## Exchange 2 — decisioning governance
 
-**Asked:** not captured. **Answered:** 2026-08-13, in writing. **Respondent:** VP Lending Ops,
-Meridian. **Source reference:** not captured.
+**Asked:** 2026-08-12. **Answered:** 2026-08-13, in writing. **Respondent:** VP Lending Ops,
+Meridian. **Source reference:** `docs/client-asks-2026-08-12-governance.md` on
+`docs/client-asks` (pushed).
 Feeds `docs/spec-fair-lending-monitoring-week8.md`, `adr/0016-fair-lending-monitoring-computes-outside-the-platform.md`, `docs/cards-week8-governance.md`, `docs/model-card-decisioning-scorecard.md`.
 
 | # | Question | Answer | Feeds |
@@ -58,8 +61,9 @@ than absorbed.
 
 ## Exchange 3 — settlement reconciliation
 
-**Asked:** not captured. **Answered:** 2026-08-14, in writing. **Respondent:** VP Lending Ops,
-Meridian. **Source reference:** not captured.
+**Asked:** 2026-08-12. **Answered:** 2026-08-14, in writing. **Respondent:** VP Lending Ops,
+Meridian. **Source reference:** `docs/client-asks-2026-08-12-observability.md` on
+`docs/client-asks` (pushed).
 Feeds `docs/spec-observability-week7.md` (D2, D3, D4), `adr/0015-settlement-reconciliation-as-a-control.md`, `docs/runbook.md`.
 
 | # | Question | Answer | Feeds |
@@ -72,8 +76,9 @@ Feeds `docs/spec-observability-week7.md` (D2, D3, D4), `adr/0015-settlement-reco
 
 ## Exchange 4 — payment integrity, card data, monitoring labels
 
-**Asked:** not captured. **Answered:** 2026-08-17, in writing. **Respondent:** VP Lending Ops,
-Meridian. **Source reference:** not captured.
+**Asked:** 2026-08-16. **Answered:** 2026-08-17, in writing. **Respondent:** VP Lending Ops,
+Meridian. **Source reference:** `docs/client-asks-2026-08-16.md` on `docs/client-asks`
+(pushed).
 Feeds the payment-integrity design, `adr/0013-payment-idempotency-and-tokenization.md`, `docs/spec-payments-week5.md`, `docs/spec-fair-lending-monitoring-week8.md`.
 
 | # | Question | Answer | Feeds |
