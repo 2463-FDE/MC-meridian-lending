@@ -70,8 +70,10 @@ had no entry in this log. It has one now, with a measurement.)*
 **Bookkeeping note:** the D-numbers used in service code and the ones defined in this log
 have drifted. Code cites `D3`, `D4`, `D7`, `D11`, `D12`, and `D14`; this log defines `D14`
 as *"Encoded PII bypasses log redaction"* while `servicing-service/app/main.py:83` uses
-`D14` for *"no payment waterfall"*. D3 is reconciled here. The remaining collisions are left
-alone — renumbering live code comments is a separate mechanical change.
+`D14` for *"no payment waterfall"*. D3 is reconciled here, and **D4 is reconciled in the
+2026-08-22 sweep below** — both now have entries matching what the code already cites.
+`D7`, `D11`, `D12` and the `D14` collision are left alone — renumbering live code comments
+is a separate mechanical change.
 
 ---
 
@@ -282,6 +284,10 @@ logged here as pre-existing debt; not fixed, out of scope for "parts we touched"
 | **High** | D24: Self-decision block missed an officer's own account-linked-elsewhere submission | **Partially fixed** | Week 8. PR #38 review. `deny_self_decision` compared only `users.applicant_id` to `applications.applicant_id`; intake never linked the two, so an officer who self-submitted via the ordinary apply flow was not caught. Fixed for logged-in self-submits landing AFTER migration 0017 (`applications.submitted_by_user_id` captured at intake + a second comparison in the guard). Open: pre-migration rows and any anonymous self-submit are permanently NULL and indistinguishable from a genuine anonymous applicant at the SQL level — no fail-closed gate is possible without blocking the platform's primary anonymous-apply channel forever, not just a legacy backlog. Mitigated operationally via a manual audit query (`docs/runbook.md`). |
 | **Low** | D25: A per-checkout `.env` can hold a password the shared data volume never had | Open (pre-existing) | Week 7 live verification, 2026-08-15. Postgres reads `POSTGRES_PASSWORD` only when initializing an empty data directory; the data volume is shared across checkouts while `.env` is per-checkout and git-ignored, so the two can disagree with nothing comparing them. Services report unhealthy and every DB-backed route 503s on a correctly built stack. The shared volume is **not** the defect — the pinned Compose project name is deliberate and correct, since published host ports allow only one stack per machine anyway. What is missing is detection and documentation: a runbook line naming this cause, and optionally a fail-fast check in `make up`. Cannot lose data; the connection is refused, not mis-written. |
 | **High** | D26: Three of four scored features are unverified applicant assertions, with no provenance on the record | Open (pre-existing) | Agentic scoping, 2026-08-22. Only `delinquency_history` comes from the bureau; `payment_burden`, `income_sufficiency` and `employment_tenure` are computed from applicant-typed income, debt and tenure that nothing verifies (`ge=0` bounds are the whole validation, and no verification step exists anywhere in the tree). Those three carry reason codes R02/R03/R04, so adverse-action notices name figures the platform never checked. Applicant-controlled features span ~182 score points against a 60-point gap between the approve and deny cutoffs. `decision_events.inputs` has no field distinguishing a verified figure from a stated one. Mitigation is three rungs: provenance field, a written stated-income policy, then a document store plus a consistency check feeding refer routing only. |
+| **High** | D27: Passwords are unsalted SHA-256 | Open (pre-existing) | Sweep, 2026-08-22. `gateway/app/auth.py:32` is a bare single-round `sha256(password)` with no salt and no work factor. One precomputed table covers every user, and identical passwords produce identical hashes, so reuse across accounts is visible without cracking anything — including the `admin` and `underwriter` money roles. Any read of the shared `users` table is enough. Kept deliberately and documented in the module docstring, but never logged here, so nothing has scheduled it. Fix: argon2id/bcrypt with per-user salt and rehash-on-login so rows drain without a forced reset (needs a dependency — ask first). |
+| **Medium** | D28: Equal nested timeouts, so the outer one can never fire first | Open (ours, partly) | Sweep, 2026-08-22. `origination-service/app/clients.py:21` sets `_TIMEOUT = 30.0` on every downstream call; `decision-service/app/decision.py:78` gives the bureau pull the same 30. The outer budget is not smaller than the inner, so origination cannot tell a slow bureau from a dead service, and no deadline is passed down. No retry anywhere in origination — which is right for the billable, inquiry-generating bureau pull and unexamined for everything else. Compounds ADR 0009 §6's deferred load behaviour. Found stale `CLAUDE.md` text alongside it ("no timeout/retry contract"), corrected. |
+| **Medium** | D4: The outcome-only `decisions` table is still what the offer path reads | Open (pre-existing; code cited D4 since the baseline, no entry until now) | Sweep, 2026-08-22. `decisions` holds `app_id` + `outcome` and nothing else; ADR 0009's `decision_events` is the real record but did not retire it. `origination-service/app/routers/offers.py:80` gates offer creation on the thin table, and three officer reads join it. One atomic statement writes both today, but no constraint or append-only guard enforces agreement, so a manual UPDATE moves the offer gate while the append-only history still looks clean. Point readers at `decision_events`; guard or drop the table. |
+| **Medium** | D29: The set of controls that cannot regress is a hand-maintained allowlist | Open (ours) | Sweep, 2026-08-22. `.github/workflows/ci.yml:30,33` runs the whole matrix under `continue-on-error` + `\|\| true`, so protection means hand-copying a control into its own blocking job and the default for a new one is unprotected. This is the mechanism the 4.5pp APR defect came through, and `CLAUDE.md` already names the live instance (apply-payment, balance, the red D3 test). Not an argument for flipping the flag — the tolerated failures are deliberate D2 documentation. Fix: enumerate the known-red tests and let everything outside that list block. |
 
 ---
 
@@ -339,6 +345,79 @@ logged here as pre-existing debt; not fixed, out of scope for "parts we touched"
 | **Mitigation Path** | Three rungs, independently shippable, smallest first. (a) **Provenance field** — add a per-figure verification flag to the intake record and carry it into `decision_events.inputs`, so the record states whether each scored figure was verified, stated, or unverifiable. Closes the evidentiary half without building any verification capability. (b) **Policy statement** — a `policies/` entry declaring the product accepts stated income and employment, with the compensating controls, so the position is a decision rather than an omission. (c) **Verification capability** — a document store (none exists: no paystub, W-2, bank-statement or upload table anywhere in `db/init/001_schema.sql`) plus a stated-vs-evidence consistency check feeding **refer routing only**, never the score. Rung (c) is the large one and is not scoped. |
 | **On putting an agent here** | Raised 2026-08-22 while scoping the agentic freeze work. A stated-vs-evidence consistency classifier is a genuine fit for rung (c) — unbounded document input, a bounded label set (`consistent` / `inconsistent` / `unverifiable`), and a deterministic abstain. It is unbuildable today because there is no document corpus to classify. Two hard constraints if it is ever built: it emits a **refer-routing flag, never a score input or a reason code** — ADR 0009 locks the reason table and `reasons.py` fails closed on any feature it cannot explain, and a model-derived reason would break both; and it must **not** read `employer`, `job_title` or `purpose` free text, which is proxy-rich for protected characteristics and is precisely why ADR 0016 computes fair-lending monitoring outside the platform. |
 | **Status** | Open; documented 2026-08-22; not fixed and not scoped into a cycle. Recorded during agentic scoping for the 2026-09-02 freeze, which it does not block — the agentic and trace work touches the officer assistant's narration path, not the scorecard inputs. Priority to be set later. |
+
+---
+
+## Debt sweep 2026-08-22 — new entries
+
+*(Swept while scoping D26. Three findings that were live in the code and absent from this log,
+plus one process hole. `D4` is not a new number: service code has cited it since the baseline
+and this log never defined it — the same gap D3 had until Week 5. The sweep found no `TODO`,
+`FIXME` or `HACK` anywhere under `services/`, and table-level parity between `db/migrations/`
+and `db/init/001_schema.sql` holds, so the standing "migrations lag the init DDL" note has no
+missing-table instance behind it today.)*
+
+### D27: Passwords are unsalted SHA-256
+
+| Field | Value |
+|---|---|
+| **ID** | D27 |
+| **Finding** | `hash_password` is a bare `hashlib.sha256(password.encode("utf-8")).hexdigest()` — no salt, no key-derivation function, no work factor. Login compares the stored hex to a freshly computed one with `!=`. The schema column comment states the scheme outright. |
+| **Location** | `services/gateway/app/auth.py:32` (`hash_password`), `:46` (the comparison), `db/init/001_schema.sql:9` (`password_hash TEXT NOT NULL, -- sha256(password), unsalted`). Declared as a kept brownfield caveat in the `auth.py` module docstring (lines 8–9). |
+| **Risk** | **High.** Unsalted single-round SHA-256 over human-chosen passwords is recoverable at GPU speed from precomputed tables — cracking is not the hard part, obtaining the table is. Two properties make it worse than slow hashing: one rainbow table covers every user at once, and identical passwords produce byte-identical hashes, so password reuse across accounts is visible without cracking anything. The affected roles include `admin` and `underwriter`, which are the money-action roles. |
+| **Reachability** | Any read of `users` is sufficient. All seven services connect to the one shared Postgres with the same credentials (ADR 0002), so a single service compromise reaches the table; the base compose also publishes 5432 to the host (D21); and D1's credentials remain unrotated. No SQL-injection path is needed for the exposure to matter. |
+| **Attribution** | **Pre-existing** (baseline Halcyon auth). Deliberately kept and *documented in the module docstring* — but never entered in this log, so nothing has ever scheduled it. The docstring is the only place it is written down, and a docstring does not appear on a remediation plan. |
+| **Mitigation Path** | Argon2id (or bcrypt) with a per-user salt and a tuned work factor, plus **rehash-on-successful-login** so the existing rows drain without a forced org-wide reset: verify against the legacy SHA-256 when the stored value is in the old format, then immediately re-store under the new one, and drop the legacy branch when the last row is migrated. Use `hmac.compare_digest` for the comparison while the legacy branch survives — a non-constant-time compare of a hash is a minor leak, but it is free to close. **Needs a dependency** (`argon2-cffi` or `passlib[bcrypt]`); nothing in the stdlib provides a tuned password KDF beyond `hashlib.scrypt`, which is a usable no-new-dependency fallback. Ask before adding, per the YAGNI rule. |
+| **Status** | Open; documented 2026-08-22; not fixed. |
+
+---
+
+### D28: Origination and decisioning use equal nested timeouts, so the outer one can never fire first
+
+| Field | Value |
+|---|---|
+| **ID** | D28 |
+| **Finding** | Origination calls kyc, decision and disclosure through one httpx seam with a module-level `_TIMEOUT = 30.0` applied to every helper. Decision-service's own bureau call uses `timeout=30` as well. The outer budget equals the inner one rather than being strictly smaller, so on a slow bureau the inner call is what expires — origination cannot distinguish "the bureau is slow" from "decision-service is dead", and no deadline is passed down or decremented across the hop. There is no retry or backoff anywhere in origination. |
+| **Location** | `services/origination-service/app/clients.py:21` (`_TIMEOUT = 30.0`), applied at `:36`, `:50`, `:57`; `services/decision-service/app/decision.py:78` (`timeout=30` on the bureau pull). |
+| **Risk** | **Medium.** An applicant-facing `POST` can block for the full budget on a single downstream stall, and 30 seconds is far past where a submitting borrower has abandoned the form. It compounds the load behaviour ADR 0009 §6 already records and defers — timeouts past roughly 20 concurrent applications on the synchronous chain. It is a latency and diagnosability defect, not a correctness one: nothing is mis-written, and decisioning fails closed. |
+| **Retry is not simply missing** | For the bureau pull, no-retry is arguably the correct policy and should be written down as one rather than left as an absence: a credit pull is billable and is a regulated inquiry, so a blind retry duplicates a charge and can duplicate an inquiry on the consumer's file. The gap is that idempotent reads and the paid write share one silent policy. |
+| **Attribution** | **Ours, partly.** `clients.py` is the ADR 0004 decomposition seam. Choosing a timeout at all was right; choosing the same number as the downstream, and choosing it once for every call class, is the defect. |
+| **Doc drift found alongside** | `CLAUDE.md`'s "Non-obvious facts" section states origination calls downstream "with no timeout/retry contract". The timeout half of that is false — `_TIMEOUT` has been there since the seam was written. Corrected in the same change as this entry. |
+| **Mitigation Path** | Give the outer call a budget strictly smaller than the inner one so the caller attributes the stall, or pass an explicit deadline downstream and decrement it. Split connect from read timeouts. State the retry policy per call class — no retry on the paid bureau pull, bounded retry on idempotent reads — rather than leaving one constant to imply it. |
+| **Status** | Open; documented 2026-08-22; not fixed. |
+
+---
+
+### D4: The outcome-only `decisions` table is still the one the offer path reads
+
+*(Cited in service code since the baseline — `decision-service/app/models.py:17` and
+`origination-service/app/models.py:62` both carry `(debt D4)` — and never defined in this log
+until now. Same bookkeeping gap D3 had; this drains one of the collisions the D3 note names.)*
+
+| Field | Value |
+|---|---|
+| **ID** | D4 |
+| **Finding** | `decisions` holds one row per application with nothing but `app_id` and `outcome` — no reasons, no drivers, no inputs, no `decided_by`, no timestamp of the model run. ADR 0009's `decision_events` is the append-only regulated record that fixes this, but `decisions` was not retired: `_persist_event` upserts both in one statement, and several read paths still query the thin table rather than the record. |
+| **Location** | `db/init/001_schema.sql:87-91` (the table, with the comment `-- Decision: OUTCOME ONLY. No reason, no model drivers, no inputs, no timestamp of model run.`); written at `services/decision-service/app/decision.py:241-242`. Read at `services/origination-service/app/routers/offers.py:80`, `services/origination-service/app/routers/applications.py:518,641,848`, and `services/decision-service/app/routers/decisions.py:100`. |
+| **Risk** | **Medium.** The sharpest instance is `offers.py:80`: offer creation gates on `SELECT outcome FROM decisions`, so the money-adjacent step reads the thin copy rather than the regulated record. Today the two cannot disagree — one atomic statement writes both — but nothing *enforces* that. `decisions` carries no append-only trigger and no constraint tying it to `decision_events`, so a manual `UPDATE`, a repair script, or a future writer that touches only the current-state table would move the offer gate without leaving a record, and the append-only history would still look clean. Same fix-propagation shape as D23, and the same forgeability shape as D20. |
+| **Attribution** | **Pre-existing** table; **ours by omission** that it still has readers. The ADR 0009 work added the correct record beside it and left the callers pointed at the old one. |
+| **Mitigation Path** | Point the readers at `decision_events` (a current-state view over the latest event per `app_id` keeps the query shape) and reduce `decisions` to a derived projection, or drop it. Until then, an append-only or restricted-write guard on `decisions` closes the forgeability half without touching any caller. Either way it is its own PR. |
+| **Status** | Open; entry created 2026-08-22 to reconcile a long-standing code citation; not fixed. |
+
+---
+
+### D29: The set of controls that cannot regress is a hand-maintained allowlist
+
+| Field | Value |
+|---|---|
+| **ID** | D29 |
+| **Finding** | The `backend` matrix runs the whole test suite under `continue-on-error: true` and `python -m pytest -q || true`, so no test in it can fail the build. Everything that must not regress is protected by being *copied out* into its own blocking job, one per control, added by hand. The default for a new control is therefore unprotected, and the failure is silent — the suite stays green either way. |
+| **Location** | `.github/workflows/ci.yml:30,33`. `make test` inherits the same posture (each service's invocation ends in `\|\| true`), so the local command cannot fail either. |
+| **Risk** | **Medium**, and it is the mechanism behind a shipped Reg Z defect rather than a hypothetical: the add-on-vs-actuarial APR error (4.5pp, roughly 36× the disclosure tolerance, on every loan) survived because the money test that would have caught it ran under `\|\| true`. `CLAUDE.md` already names the current instance in its own words — the apply-payment and balance write paths, including the red D3 lost-update test, are "still inside the `\|\| true` suppression, and able to regress on a green build". |
+| **Not an argument for flipping the flag** | The matrix is tolerated for a real reason (known-failing money-math tests that document D2 by design), and turning it blocking today would fail the build on tests that are *supposed* to be red. The debt is the absence of a middle rung, not the presence of the flag. |
+| **Attribution** | **Ours.** Every blocking job in the list was added by this program; the allowlist pattern is the program's own convention, and it works — the gap is that it has no backstop when someone forgets. |
+| **Mitigation Path** | Make the tolerated set explicit rather than implicit: pin the known-red tests by name (an `xfail` list or a deselect file) and let everything outside that list block. A new control is then protected by default and a newly-red test fails loudly, while the documented D2 failures stay tolerated and, unlike today, stay *enumerated*. Smaller interim step: a check that fails when a test file matching a control's name has no corresponding blocking job. |
+| **Status** | Open; documented 2026-08-22; not fixed. Process debt — no code defect of its own. |
 
 ---
 
