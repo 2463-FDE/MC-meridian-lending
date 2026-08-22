@@ -124,6 +124,12 @@ services/gateway/app/main.py => adr/0010-application-ownership-authorization.md
 # though ADR 0017's own maker-checker decision is Proposed, not built.
 services/origination-service/app/authz.py => adr/0017-self-decision-anonymous-submission-gap.md
 
+# --- Policy retrieval on the assistant loop ---------------------------------
+# ADR 0019 is built, and policy_retrieval.py is the module its decision is
+# about: the abstain-by-default retrieval seam whose deletion would leave the
+# assistant quoting policy from nowhere.
+services/origination-service/app/policy_retrieval.py => adr/0019-policy-retrieval-on-the-assistant-loop.md
+
 # --- Exemptions: docs with no code path whose deletion would violate them ---
 # EXEMPT: adr/0001-record-architecture-decisions.md — establishes the ADR process itself; obligates no source file.
 # EXEMPT: adr/0002-single-database-shared-schema.md — records the existing one-database constraint; no artifact whose deletion violates it (DDL numbering is covered by migration-numbering-gate).

@@ -107,17 +107,34 @@ The second dependency above — policy retrieval that answers — is the plan's 
 drafted wording. Deferring it whole means the W10 handover cannot claim RAG works, which is the
 bar the weeks 7–10 arc is assessed against. So the retrieval half is split:
 
-- **G2a — the import seam. This cycle, 1–2 days.** `rag_eval/` is repo-root, origination imports
-  are `app.*` relative to the service directory, and there is no repo-wide venv, so
+**Both halves are now BUILT** on `chore/rag-eval-import-seam` (unmerged, 2026-08-15). The
+scoping below stands as written except where marked; the corrections are kept rather than
+edited away, because two of them are the reason the estimate was wrong.
+
+- **G2a — the import seam. This cycle, 1–2 days. BUILT.** `rag_eval/` is repo-root, origination
+  imports are `app.*` relative to the service directory, and there is no repo-wide venv, so
   `import rag_eval` does not resolve in the container. Closing that is the expensive half of
   retrieval and it stands alone as a commit. Do not fix it by copying modules into the service —
   that reproduces the per-service redactor duplication `redactor-drift` exists to police.
-- **G2b — `search_policy` on the assistant loop, plus the drafted wording. Next cycle.** A third
-  entry in `_TOOLS` (`services/origination-service/app/assistant.py`), backed by `rag_eval.index`,
-  declared in `app/prompts/decision_assistant.py`; loop dispatch needs no change. **0.5–1 day once
-  G2a is done**, against 4–6 for the whole thing today. Needs ADR 0016 (0014 and 0015 are taken)
-  and two design constraints settled: retrieval abstains below the score threshold, and is
-  excluded from the `task="decision"` path entirely so generation never reaches the causal path.
+  **Correction:** the cause is narrower than "no venv". Origination's build context was
+  `./services/origination-service`, so the package was outside the context and never entered
+  the image at all. The close is a repo-root context plus a `COPY`, no path plumbing. The
+  corpus needed nothing — `docker-compose.yml` has bind-mounted `./policies` read-only into
+  this service since the initial scaffold.
+- **G2b — `search_policy` on the assistant loop, plus the drafted wording. Next cycle. BUILT
+  (the retrieval half; the drafted wording stays with G1).** A third entry in `_TOOLS`
+  (`services/origination-service/app/assistant.py`), backed by `rag_eval.index`, declared in
+  `app/prompts/decision_assistant.py`. Needs **ADR 0019** (0014 through 0018 are taken — this
+  card said 0016 when 0016 and 0017 were still free, and 0018 went to the
+  double-charge interim ADR, which merges first) and two design constraints settled:
+  retrieval abstains below the score threshold, and is excluded from the `task="decision"`
+  path entirely so generation never reaches the causal path. Both are built as specified.
+  **Correction, and this is why 0.5–1 day was wrong:** loop dispatch DID need changing — it
+  passes only the application id to every tool, and `search_policy` takes a model-supplied
+  query. And the export contract refuses free text in history turns
+  (`app/llm/request_builder.py:236-238` masks any whitespace-bearing string), so retrieved
+  policy prose cannot reach the model at all. ADR 0019 resolves that by keeping the text on
+  the officer's side: the model picks the query, code quotes the corpus chunk verbatim.
 
 **Why split rather than defer or build whole.** Building all of it costs 4–6 days against a cycle
 that already owes week-7 reconciliation (6–8) and the lost-update fix; nothing fits. Deferring all
