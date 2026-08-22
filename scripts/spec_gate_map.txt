@@ -130,3 +130,11 @@ services/origination-service/app/authz.py => adr/0017-self-decision-anonymous-su
 # EXEMPT: adr/0003-store-card-data-for-convenience.md — documents the PCI debt scheduled for removal; mapping it would require the violating code to keep existing.
 # EXEMPT: adr/0008-retrievable-decision-records.md — Accepted as a field contract only; its own Status defers the schema migration and write path, so there is no implementation to pin yet.
 # EXEMPT: docs/spec-rag-week2.md — Status is Draft, pending gate approval; not approved for build.
+
+# --- Week 8 feedback: interim handling of a double-charged borrower ---------
+# ADR 0018's decision is Proposed, but the code area it obligates is live: the
+# duplicate-suspect detector IS the whole of the interim control today, so
+# deleting it must fail this gate. Same footing as ADR 0017 above -- the ADR's
+# own build (prevention at capture, ADR 0013) is deferred to week 9, while the
+# detection it decides to keep and attribute exists on main right now.
+services/servicing-service/app/reconciliation.py => adr/0018-interim-handling-of-a-double-charged-borrower.md
