@@ -455,6 +455,9 @@ def run(
     citations = []  # policy excerpts to quote to the OFFICER (never back to the model)
     searches = []  # every search_policy attempt, hit or abstain (B1: makes an
     # abstention visible instead of indistinguishable from a run that never searched)
+    searched = False  # search_policy is honored AT MOST ONCE per run, same cap
+    # pattern as score_result — otherwise the model could compound retrieval calls
+    # (and citations) within one run with no code enforcing a single search (PT-001)
     # Root of the trace. `request_id` is the decision idempotency key forwarded to
     # decision-service, so it still ties this run to the exact decision_events row
     # it created or replayed -- but that tie is internal (threaded to the score
@@ -513,24 +516,32 @@ def run(
                                 # one request.
                                 result = score_result
                         elif name == "search_policy":
-                            # The one tool whose input is NOT the application id: the
-                            # model chooses a query. That query is used here and nowhere
-                            # else — it is not echoed into history (see the action
-                            # rewrite below) and not logged, because it is model-authored
-                            # free text whose contents we do not control.
-                            answer = tool(
-                                str((action.get("input") or {}).get("query") or ""),
-                                task,
-                            )
-                            searches.append(answer)
-                            if answer.is_hit and all(
-                                c.chunk_id != answer.chunk_id for c in citations
-                            ):
-                                citations.append(answer)
-                            # Only the allowlisted status + score go back to the model;
-                            # the chunk text stays on the officer's side of the boundary
-                            # (ADR 0019 decision 3).
-                            result = answer.tool_result()
+                            if searched:
+                                # Repeat request returns the cached result — search_policy
+                                # is capped at one call per run, same pattern as
+                                # score_application, so the model cannot compound retrieval
+                                # calls (or citations) within one run (PT-001).
+                                result = searches[-1].tool_result()
+                            else:
+                                # The one tool whose input is NOT the application id: the
+                                # model chooses a query. That query is used here and nowhere
+                                # else — it is not echoed into history (see the action
+                                # rewrite below) and not logged, because it is model-authored
+                                # free text whose contents we do not control.
+                                answer = tool(
+                                    str((action.get("input") or {}).get("query") or ""),
+                                    task,
+                                )
+                                searches.append(answer)
+                                searched = True
+                                if answer.is_hit and all(
+                                    c.chunk_id != answer.chunk_id for c in citations
+                                ):
+                                    citations.append(answer)
+                                # Only the allowlisted status + score go back to the model;
+                                # the chunk text stays on the officer's side of the boundary
+                                # (ADR 0019 decision 3).
+                                result = answer.tool_result()
                         else:
                             result = tool(application_id)
                         record(result)
@@ -550,6 +561,17 @@ def run(
                     )
                     continue
                 if kind == "final":
+                    if policy_topic is not None and task == "explain" and not searched:
+                        # The officer asked a policy question (policy_topic set) — a final
+                        # answer that never called search_policy would reach the officer
+                        # with an empty policy_searches/no citation, indistinguishable from
+                        # a run that genuinely searched and found nothing (PT-001). Enforce
+                        # in code, not the prompt: refuse the final outright.
+                        raise AssistantError(
+                            "assistant returned a final answer without calling "
+                            "search_policy for the requested policy_topic — refusing an "
+                            "unsearched policy answer"
+                        )
                     with trace(name=_SPAN_VALIDATE, run_type="chain") as validation:
                         final = _validated_final(
                             action,

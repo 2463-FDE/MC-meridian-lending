@@ -256,3 +256,38 @@ def test_run_refuses_a_topic_outside_the_vocabulary(loop):
     with pytest.raises(assistant.AssistantError):
         assistant.run(42, client, "explain", policy_topic="not_a_topic")
     assert adapter.calls == []  # refused before the model is paid for
+
+
+def test_a_final_without_a_search_is_refused_not_answered(loop):
+    """PT-001: a model that skips search_policy entirely and goes straight to `final`
+    must not reach the officer with a policy_topic request answered as if nothing was
+    asked — that response is indistinguishable from a run that searched and abstained.
+    Code must refuse it, not trust the model to have searched."""
+    client, adapter = _client(FINAL)  # FINAL with no preceding SEARCH_ACTION
+    with pytest.raises(assistant.AssistantError):
+        assistant.run(42, client, "explain", policy_topic="debt_to_income")
+    assert len(adapter.calls) == 1  # the model was paid for; the refusal is post-hoc
+
+
+def test_a_second_search_is_ignored_not_re_run(loop, monkeypatch):
+    """PT-001: search_policy is capped at one call per run — a model that searches
+    twice must not compound retrieval calls or citations; the second call is answered
+    from the cached first result, deterministically, without hitting retrieval again."""
+    calls = []
+
+    def _counting_search(q):
+        calls.append(q)
+        return policy_retrieval.PolicyAnswer(
+            status="policy_hit",
+            score=0.53,
+            chunk_id="underwriting_guidelines#debt-to-income-dti",
+            text="DTI must not exceed 43%.",
+            reason="",
+        )
+
+    monkeypatch.setattr(assistant.policy_retrieval, "search", _counting_search)
+    client, _ = _client(SEARCH_ACTION, SEARCH_ACTION, FINAL)
+    out = assistant.run(42, client, "explain", policy_topic="debt_to_income")
+    assert len(calls) == 1  # retrieval hit exactly once despite two tool calls
+    assert len(out["policy_searches"]) == 1
+    assert len(out["policy_citations"]) == 1
