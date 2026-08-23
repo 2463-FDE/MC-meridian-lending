@@ -6,8 +6,10 @@
 # `import rag_eval` resolves in the container that actually ships. Run from the repo root or
 # anywhere; needs docker. CI runs it as the blocking `rag-eval-import-gate` job.
 #
-# The retrieval TOOL (`search_policy` on the assistant loop) is card G2b and is not built, so
-# there is no route to smoke yet. This is the seam, not the feature.
+# The retrieval TOOL (`search_policy` on the assistant loop) is card G2b and IS built --
+# on `main` since PR #64. The third step below smokes it: it asserts a real corpus hit
+# with non-empty text, that the model-visible tool result carries only status+score, and
+# that the decision task is refused. So this gate covers the seam AND the feature.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

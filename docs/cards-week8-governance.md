@@ -85,9 +85,13 @@ never sit on the causal path** — codes come from real attributions, the model 
 **Depends on.**
 - **G1.** Drafted wording with no channel to carry it goes nowhere. Ordering this before G1 builds
   a sentence nothing sends.
-- Policy retrieval that actually answers. `rag_eval/` is an offline evaluation harness; no
-  retrieval tool is wired into the assistant — there is no `search_policy` anywhere under
-  `services/`, and `assistant.py`'s `_TOOLS` does not carry one. That gap is its own work.
+- Policy retrieval that actually answers. **Closed 2026-08-23 (PR #64).** `search_policy` is
+  the third entry in `assistant.py`'s `_TOOLS`, backed by
+  `services/origination-service/app/policy_retrieval.py` over the committed `policies/`
+  corpus. The original wording — that `rag_eval/` was an offline harness with no retrieval
+  tool wired into the assistant — was true when this card was written and is kept in the
+  history, not here, because a dependency list that still names a closed dependency reads
+  as blocked work.
 - A compliance review queue, so a human approves wording before send — Path B in the plan, also
   unbuilt.
 
@@ -107,7 +111,8 @@ The second dependency above — policy retrieval that answers — is the plan's 
 drafted wording. Deferring it whole means the W10 handover cannot claim RAG works, which is the
 bar the weeks 7–10 arc is assessed against. So the retrieval half is split:
 
-**Both halves are now BUILT** on `chore/rag-eval-import-seam` (unmerged, 2026-08-15). The
+**Both halves are now BUILT and on `main`** — G2a as PR #56 (`fb1fc66`) and G2b as PR #64
+(`609605b`), both 2026-08-23. Cite the merge commits, not the branch that carried them. The
 scoping below stands as written except where marked; the corrections are kept rather than
 edited away, because two of them are the reason the estimate was wrong.
 
