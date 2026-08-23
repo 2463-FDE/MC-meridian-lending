@@ -320,6 +320,48 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_kyc_persistence.py -q
 
+  payment-idempotency-gate:
+    # D19: a retried POST /payments used to insert a second payments row and charge the
+    # card again (measured 2026-08-02: one $100 intent sent eight ways captured $800.00).
+    # The control is a PARTIAL unique index plus an insert-first claim against it, and it
+    # is exactly the class of money-math test the `backend` matrix runs under
+    # continue-on-error + `|| true` -- which is how the 4.5pp APR defect survived. So it
+    # blocks here. No continue-on-error, no `|| true`.
+    #
+    # Three suites, one runner:
+    #   test_idempotency_vectors.py  the D1 behaviour table (R1/R2/R3/R3b/R6/R6c/R7) plus
+    #                                the 2026-08-02 reproduction inverted. R3c is
+    #                                xfail(strict) and MUST stay red -- it goes green only
+    #                                when D4b adds bank_token, and strict makes an
+    #                                unexpected pass a failure rather than a silent win.
+    #   test_payments_idempotency_ddl.py  the init DDL and migration 0018 declare the same
+    #                                columns and indexes, so a fresh volume and an upgraded
+    #                                one cannot end up with different schemas.
+    #   test_idempotency_parity.py   the claim block has not drifted between the two charge
+    #                                handlers (debt D23), same duty redactor-drift carries.
+    #
+    # test_idempotency_ddl_live.py (R-DDL/R-DDL2) is NOT run here: it needs a real Postgres
+    # and SKIPS without one, and a gate whose vectors skip is a gate reporting success for
+    # a path it verified nothing on. Run it against a live database before merge; the
+    # services job below has no Postgres attached.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: payment-service idempotency vectors + DDL parity
+        run: |
+          cd services/payment-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_idempotency_vectors.py \
+                           tests/test_payments_idempotency_ddl.py -q
+      - name: servicing-service second-handler parity
+        run: |
+          cd services/servicing-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_idempotency_parity.py -q
+
   tila-vectors-gate:
     # The disclosed APR is a regulated number with a Reg Z TOLERANCE: exceeding it is a
     # violation, not a rounding nit. compute_apr shipped an add-on annualization instead of

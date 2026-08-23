@@ -12,10 +12,9 @@ deferred to the next cycle by the client, with the design fixed in that ADR — 
 record of the movement, which is the ledger ADR 0014 Decision 3 specifies.
 """
 
-import logging
-import os
+import uuid
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -74,9 +73,11 @@ class PaymentIn(BaseModel):
 @app.post("/payments")
 def post_payment(
     body: PaymentIn,
+    response: Response,
     x_user_role: Optional[str] = Header(None),
     x_user_id: Optional[str] = Header(None),
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     # Same class of authorization failure closed elsewhere in this file (ADR 0014
     # Decision 1): a money role (CSR/admin), or the borrower who owns the loan
@@ -92,10 +93,25 @@ def post_payment(
             status_code=503,
             detail="payment processor not configured (PROCESSOR_API_KEY unset)",
         )
-    # No idempotency key accepted or checked. Retried POST = second charge. (debt D2)
+    # D19. This route is a SECOND front door onto the same payments table (debt D23),
+    # and the client confirmed 2026-08-17 that it stays -- so it enforces the identical
+    # contract. Deduping in one handler and not the other would leave the double charge
+    # reachable through this one, which is exactly why the arbiter is a DB constraint.
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Idempotency-Key header is required (ADR 0013 Decision 1).",
+        )
+    try:
+        # Canonicalize (lowercase, hyphenated): uuid.UUID() accepts hyphenless and
+        # uppercase spellings as the same UUID, but the key is stored as raw TEXT, so
+        # two spellings of one UUID would claim two distinct rows and dedupe nothing.
+        idempotency_key = str(uuid.UUID(idempotency_key))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="Idempotency-Key must be a UUID.")
     # X-Request-Id enters the span here too -- this route is a second front
     # door for the same charge path as payment-service's /payments (D1(a)).
-    return payments.charge(
+    result = payments.charge(
         body.loan_id,
         body.pan,
         body.cvv,
@@ -104,7 +120,25 @@ def post_payment(
         body.name,
         body.method,
         request_id=x_request_id,
+        idempotency_key=idempotency_key,
     )
+    if result.get("idempotency") == payments.FINGERPRINT_MISMATCH:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This Idempotency-Key was already used for a different payment. "
+                "Use a new key for a new payment."
+            ),
+        )
+    if result.get("idempotency") == payments.IN_FLIGHT:
+        raise HTTPException(
+            status_code=409,
+            detail="A payment with this Idempotency-Key is still in progress.",
+            headers={"Retry-After": "5"},
+        )
+    if result.get("idempotency") == payments.REPLAY:
+        response.headers["Idempotent-Replay"] = "true"
+    return result
 
 
 class ApplyPaymentIn(BaseModel):

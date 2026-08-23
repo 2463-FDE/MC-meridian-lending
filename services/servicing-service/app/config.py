@@ -154,8 +154,11 @@ def _payments_idempotency_ready(cur) -> tuple[bool, str | None]:
     """Assert migration 0018 is actually applied, by definition and not by name."""
     for column, want_type in _IDEMPOTENCY_COLUMNS:
         cur.execute(
+            # table_schema is not optional: information_schema.columns spans every
+            # schema, so an unqualified lookup can validate a different `payments`.
             "SELECT data_type FROM information_schema.columns "
-            "WHERE table_name = 'payments' AND column_name = %s",
+            "WHERE table_schema = current_schema() "
+            "AND table_name = 'payments' AND column_name = %s",
             (column,),
         )
         row = cur.fetchone()
@@ -168,7 +171,8 @@ def _payments_idempotency_ready(cur) -> tuple[bool, str | None]:
     # either insert path, which omits status.
     cur.execute(
         "SELECT is_nullable, column_default FROM information_schema.columns "
-        "WHERE table_name = 'payments' AND column_name = 'status'"
+        "WHERE table_schema = current_schema() "
+        "AND table_name = 'payments' AND column_name = 'status'"
     )
     row = cur.fetchone()
     if row is None:
@@ -191,8 +195,11 @@ def _payments_idempotency_ready(cur) -> tuple[bool, str | None]:
             "            ON a.attrelid = x.indrelid AND a.attnum = k.attnum) "
             "  FROM pg_index x "
             "  JOIN pg_class i ON i.oid = x.indexrelid "
+            "  JOIN pg_namespace n ON n.oid = i.relnamespace "
             "  JOIN pg_class c ON c.oid = x.indrelid "
-            " WHERE i.relname = %s",
+            # relname is unique per SCHEMA, not per database: an index of the same
+            # name in another schema would otherwise answer this probe.
+            " WHERE i.relname = %s AND n.nspname = current_schema()",
             (index,),
         )
         row = cur.fetchone()
@@ -238,7 +245,8 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             # type, and the ORM maps it as a float.
             cur.execute(
                 "SELECT 1 FROM information_schema.columns "
-                "WHERE table_name = 'loans' AND column_name = 'note_rate' "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = 'loans' AND column_name = 'note_rate' "
                 "AND data_type = 'double precision'"
             )
             if cur.fetchone() is None:
@@ -377,3 +385,32 @@ def duplicate_suspect_window_configured() -> bool:
     except ValueError:
         return False
     return 0 < seconds <= MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS
+
+
+# D19 replay window. Client answer 2026-08-17: "keep it configurable, keep 24 hours as
+# the working value -- that number is our product choice, not an industry default. If
+# real retry behaviour argues for a different figure later, that is a configuration
+# change rather than a rework."
+#
+# The window governs how long a FINISHED payment's key stays claimable for replay, not
+# how long the system waits for a payment: an intent still in flight keeps its key
+# however old it is (an ACH row sits `submitted` for days), because releasing it would
+# free the key for a new charge while the original is still live.
+#
+# Deliberately NOT in missing_required_secrets(): unlike PROCESSOR_API_KEY there is a
+# correct default, so an unset value is not a misconfiguration and must not read as
+# unhealthy. A non-numeric or non-positive value IS a misconfiguration and falls back to
+# the default rather than silently disabling the window (a zero or negative TTL would
+# expire every key instantly and reinstate the double charge).
+PAYMENT_IDEMPOTENCY_TTL_HOURS_DEFAULT = 24
+
+
+def payment_idempotency_ttl_hours() -> int:
+    raw = os.getenv("PAYMENT_IDEMPOTENCY_TTL_HOURS", "")
+    if not raw:
+        return PAYMENT_IDEMPOTENCY_TTL_HOURS_DEFAULT
+    try:
+        hours = int(raw)
+    except ValueError:
+        return PAYMENT_IDEMPOTENCY_TTL_HOURS_DEFAULT
+    return hours if hours > 0 else PAYMENT_IDEMPOTENCY_TTL_HOURS_DEFAULT
