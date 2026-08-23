@@ -154,8 +154,11 @@ def _payments_idempotency_ready(cur) -> tuple[bool, str | None]:
     """Assert migration 0018 is actually applied, by definition and not by name."""
     for column, want_type in _IDEMPOTENCY_COLUMNS:
         cur.execute(
+            # table_schema is not optional: information_schema.columns spans every
+            # schema, so an unqualified lookup can validate a different `payments`.
             "SELECT data_type FROM information_schema.columns "
-            "WHERE table_name = 'payments' AND column_name = %s",
+            "WHERE table_schema = current_schema() "
+            "AND table_name = 'payments' AND column_name = %s",
             (column,),
         )
         row = cur.fetchone()
@@ -191,8 +194,11 @@ def _payments_idempotency_ready(cur) -> tuple[bool, str | None]:
             "            ON a.attrelid = x.indrelid AND a.attnum = k.attnum) "
             "  FROM pg_index x "
             "  JOIN pg_class i ON i.oid = x.indexrelid "
+            "  JOIN pg_namespace n ON n.oid = i.relnamespace "
             "  JOIN pg_class c ON c.oid = x.indrelid "
-            " WHERE i.relname = %s",
+            # relname is unique per SCHEMA, not per database: an index of the same
+            # name in another schema would otherwise answer this probe.
+            " WHERE i.relname = %s AND n.nspname = current_schema()",
             (index,),
         )
         row = cur.fetchone()

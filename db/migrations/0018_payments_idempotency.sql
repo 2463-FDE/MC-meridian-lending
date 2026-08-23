@@ -58,9 +58,14 @@ BEGIN
     FOR i IN 1 .. array_length(expected, 1) LOOP
         col  := expected[i][1];
         want := expected[i][2];
+        -- table_schema is not optional: information_schema.columns spans EVERY
+        -- schema, so an unqualified lookup can read a different `payments` table
+        -- (another tenant schema, a leftover staging copy) and validate the wrong one.
         SELECT data_type INTO got
           FROM information_schema.columns
-         WHERE table_name = 'payments' AND column_name = col;
+         WHERE table_schema = current_schema()
+           AND table_name = 'payments'
+           AND column_name = col;
         IF got IS NULL THEN
             RAISE EXCEPTION
                 'payments.% is missing after ADD COLUMN IF NOT EXISTS', col;
@@ -155,8 +160,12 @@ BEGIN
           INTO is_uniq, tbl, pred, cols
           FROM pg_index x
           JOIN pg_class i ON i.oid = x.indexrelid
+          JOIN pg_namespace n ON n.oid = i.relnamespace
           JOIN pg_class c ON c.oid = x.indrelid
-         WHERE i.relname = idx;
+         -- relname is unique per SCHEMA, not per database. Without this an index of
+         -- the same name in any other schema satisfies (or fails) the check, and the
+         -- guard reports on an object this migration never touched.
+         WHERE i.relname = idx AND n.nspname = current_schema();
 
         IF is_uniq IS NULL THEN
             RAISE EXCEPTION 'index % is missing after CREATE UNIQUE INDEX IF NOT EXISTS', idx;

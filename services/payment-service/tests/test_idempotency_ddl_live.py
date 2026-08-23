@@ -41,7 +41,9 @@ DSN = os.getenv("TEST_DATABASE_URL") or os.getenv("DATABASE_URL") or ""
 
 def _connect():
     if not DSN:
-        pytest.skip("no TEST_DATABASE_URL/DATABASE_URL set — R-DDL needs a real Postgres")
+        pytest.skip(
+            "no TEST_DATABASE_URL/DATABASE_URL set — R-DDL needs a real Postgres"
+        )
     try:
         return psycopg2.connect(DSN, connect_timeout=3)
     except Exception as exc:
@@ -72,7 +74,18 @@ def schema():
 
 
 def _claim_params(key):
-    return (1, "4111111111111111", "123", 250.0, 25000, "card", key, 24, "fp", uuid.uuid4().hex)
+    return (
+        1,
+        "4111111111111111",
+        "123",
+        250.0,
+        25000,
+        "card",
+        key,
+        24,
+        "fp",
+        uuid.uuid4().hex,
+    )
 
 
 def test_r_ddl_the_shipped_conflict_target_can_infer_the_partial_arbiter(schema):
@@ -129,3 +142,45 @@ def test_r_ddl2_a_duplicate_processor_key_is_refused_before_any_processor_call(s
             else:
                 with pytest.raises(psycopg2.errors.UniqueViolation):
                     cur.execute(_CLAIM_SQL, tuple(params))
+
+
+def test_the_guards_read_their_own_schema_not_a_same_named_object_elsewhere(schema):
+    """pg_class.relname and information_schema.columns are NOT database-unique.
+
+    Found the hard way: a decoy schema holding a `payments` table and a NON-unique
+    index called `payments_idempotency_key_uniq` made migration 0018 raise "exists but
+    is NOT unique" while validating a schema it had never touched. The same
+    unqualified lookup is in the services' readiness rungs, where it would report
+    schema_not_ready over a perfectly good `payments`.
+
+    This is reachable outside a test: any database carrying a second schema with a
+    `payments` table -- a staging copy, a restored snapshot, a per-tenant schema.
+    """
+    conn, name = schema
+    decoy = "decoy_" + uuid.uuid4().hex[:8]
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE SCHEMA {decoy}")
+        cur.execute(f"SET search_path TO {decoy}")
+        cur.execute(
+            "CREATE TABLE payments (id SERIAL PRIMARY KEY, idempotency_key TEXT, amount_minor TEXT)"
+        )
+        # Same NAME, wrong definition: non-unique, no predicate.
+        cur.execute(
+            "CREATE INDEX payments_idempotency_key_uniq ON payments (idempotency_key)"
+        )
+    try:
+        with conn.cursor() as cur:
+            # Re-run the migration over the REAL schema while the decoy exists. It must
+            # validate its own objects and succeed.
+            cur.execute(f"SET search_path TO {name}")
+            cur.execute(MIGRATION.read_text())
+
+            # And the readiness rung must agree, rather than reading the decoy.
+            from app import config
+
+            cur.execute(f"SET search_path TO {name}")
+            ok, reason = config._payments_idempotency_ready(cur)
+            assert ok is True, f"rung read the wrong schema: {reason}"
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA {decoy} CASCADE")
