@@ -18,6 +18,7 @@ DECLARATIONS agree, which no live-database test can establish (a live test sees 
 schema, whichever the fixture built).
 """
 
+import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
@@ -103,3 +104,88 @@ def test_status_default_matches_what_pre_migration_rows_factually_are():
     table_ddl = _payments_table_ddl()
     assert "status      TEXT NOT NULL DEFAULT 'captured'" in table_ddl
     assert "status                    TEXT NOT NULL DEFAULT 'captured'" in MIGRATION_SQL
+
+
+# --- the migration has to PARSE, not just say the right things -----------------
+#
+# Everything above is a text assertion over the two declarations, and 0018 passed all
+# of it while being unable to execute at all: its verification block opened `DO $$` and
+# then compared a column default against the literal `$$'captured'::text$$`. Postgres
+# closes a dollar-quoted body at the first occurrence of its OWN tag, so the body ended
+# mid-expression and psql reported `syntax error at or near "::"`. With ON_ERROR_STOP
+# the migration aborted there, taking the index-definition block after it down too — so
+# a hand-applied 0018 verified nothing and left the operator with a failure they could
+# not act on.
+#
+# Nothing caught it: no CI job executes migration SQL (`.github/workflows/ci.yml` has no
+# `psql` step and no postgres service), and `make prove` was satisfied by the text tests
+# above, which read the file as a string. So the executability check is a text check too —
+# it reproduces Postgres's dollar-quote lexing rule rather than needing a live database,
+# and it sweeps every SQL file in the repo so the next migration cannot reintroduce it.
+
+SQL_FILES = sorted(
+    (REPO / "db" / "init").glob("*.sql")
+) + sorted((REPO / "db" / "migrations").glob("*.sql"))
+
+
+def _strip_line_comments(sql: str) -> str:
+    """Blank out whole-line `--` comments, keeping line numbering intact.
+
+    Only whole-line comments: a `--` after code could sit inside a string literal, and
+    telling those apart needs the lexer this function exists to stand in for. Whole-line
+    comments are the case that matters here, because the fix's own explanation quotes
+    both `$mig$` and `$$'captured'::text$$` in prose and neither is a real tag.
+    """
+    out = []
+    for line in sql.split("\n"):
+        out.append("" if line.strip().startswith("--") else line)
+    return "\n".join(out)
+
+
+def _early_closed_do_blocks(sql: str) -> list[tuple[int, str]]:
+    """Every `DO <tag>` block whose body is closed by a nested literal, not by its end.
+
+    Postgres closes a dollar-quoted body at the FIRST later occurrence of the opening
+    tag. A well-formed block's closing tag is therefore followed by `;` (optionally after
+    whitespace) — `END $mig$;`. Anything else means the body ended early and the rest of
+    the block is being parsed as ordinary SQL. Returns (line number, tag) per offender.
+    """
+    body = _strip_line_comments(sql)
+    offenders = []
+    for match in re.finditer(r"\bDO\s+(\$[A-Za-z_]*\$)", body):
+        tag = match.group(1)
+        close = body.find(tag, match.end())
+        if close == -1:
+            offenders.append((body.count("\n", 0, match.start()) + 1, tag))
+            continue
+        rest = body[close + len(tag) :].lstrip()
+        if not rest.startswith(";"):
+            offenders.append((body.count("\n", 0, close) + 1, tag))
+    return offenders
+
+
+def test_migration_0018_do_blocks_are_not_closed_by_a_nested_literal():
+    """The D19 defect itself: `$$'captured'::text$$` inside a `DO $$` body."""
+    offenders = _early_closed_do_blocks(MIGRATION_SQL)
+    assert offenders == [], (
+        "0018 has a DO block closed early by a nested dollar-quote with the same tag "
+        f"(line, tag): {offenders}. Postgres ends the body at the first repeat of the "
+        "tag, so the migration aborts with a syntax error and every check after it is "
+        "skipped. Give the outer block a distinct tag, e.g. DO $mig$ ... END $mig$;"
+    )
+
+
+def test_no_sql_file_has_a_do_block_closed_by_a_nested_literal():
+    """Repo-wide sweep. 0018 is the one that shipped broken; the rule holds for all of
+    them, and no CI job executes this SQL, so this is the only thing standing between a
+    nested tag and a hand-applied migration that aborts halfway."""
+    assert SQL_FILES, "no SQL files found — the glob is wrong, not the tree"
+    broken = {
+        path.name: _early_closed_do_blocks(path.read_text())
+        for path in SQL_FILES
+        if _early_closed_do_blocks(path.read_text())
+    }
+    assert broken == {}, (
+        f"DO block(s) closed early by a same-tagged nested dollar-quote: {broken}. "
+        "Postgres closes the body at the first repeat of the tag."
+    )

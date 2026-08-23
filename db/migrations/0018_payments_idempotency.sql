@@ -39,7 +39,15 @@ ALTER TABLE payments ALTER COLUMN status SET NOT NULL;
 -- ALTER above reports success and every reader is handed a string. Assert each type and
 -- RAISE EXCEPTION on a mismatch -- never a NOTICE, which would let the migration report
 -- success over a column the service cannot use.
-DO $$
+--
+-- Tagged $mig$, not $$: the status-default check below compares against the literal
+-- $$'captured'::text$$, and a nested dollar-quote with the SAME tag as the block that
+-- contains it closes that block early. With both at $$ this DO body ended mid-expression
+-- and the migration aborted at "syntax error at or near ::" -- taking the index-definition
+-- block after it down too, so an operator ran a migration that reported a failure it
+-- could not act on and verified nothing. Keep the outer tag distinct from any tag used
+-- inside it.
+DO $mig$
 DECLARE
     expected CONSTANT text[][] := ARRAY[
         ['idempotency_key',           'text'],
@@ -102,7 +110,7 @@ BEGIN
                 'payments.status has default %, expected captured', coalesce(status_default, '<none>');
         END IF;
     END;
-END $$;
+END $mig$;
 
 -- The Meridian key's arbiter. PARTIAL (WHERE idempotency_key IS NOT NULL) so the index
 -- only covers rows that actually carry a key -- Postgres already treats every NULL as
