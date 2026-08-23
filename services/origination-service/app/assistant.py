@@ -413,17 +413,20 @@ def run(
     searches = []  # every search_policy attempt, hit or abstain (B1: makes an
     # abstention visible instead of indistinguishable from a run that never searched)
     # Root of the trace. `request_id` is the decision idempotency key forwarded to
-    # decision-service, so this span ties to the exact decision_events row the run
-    # created or replayed. It is NOT the week-7 payment correlation id: that is a
-    # different concept under the same name (payment-service mints its own), and
-    # presenting them as one would invite a reader to join two unrelated things.
+    # decision-service, so it still ties this run to the exact decision_events row
+    # it created or replayed -- but that tie is internal (threaded to the score
+    # tool call below), not exported here. `application_id` and `request_id` are
+    # caller/applicant-linked identifiers, same exposure class as the idempotency_key
+    # `app/llm/client.py` and `app/llm/transport.py` strip before tracing: shipping
+    # either to LangSmith would make traces linkable to a specific customer record
+    # with no service-owned secret to key an HMAC instead (same omit-vs-hash call as
+    # those two spans). Neither is an enum code, integer, boolean, or retrieval score
+    # -- the CONTENT RULE above -- so neither belongs on this span at all.
     with trace(
         name=_SPAN_REQUEST,
         run_type="chain",
         metadata={
             "task": task,
-            "application_id": application_id,
-            "request_id": request_id,
             "max_steps": _MAX_STEPS,
         },
     ) as root:

@@ -179,14 +179,23 @@ def test_the_root_carries_the_business_outcome(spans, tools):
     assistant.run(42, _client(TOOL_CALL, FINAL_DENY))
     root = spans[0].metadata
     assert root["task"] == "decision"
-    assert root["application_id"] == 42
     assert root["outcome"] == "deny"
     assert root["record_status"] == "recorded"
     assert root["policy_band"] == "deny"
     assert root["narration_validated"] is True
     assert root["steps_used"] == 2
     assert root["scored"] is True
-    assert root["request_id"]
+
+
+def test_the_root_never_carries_caller_linkable_identifiers(spans, tools):
+    """B1 (review): application_id/request_id are caller/applicant-linked
+    identifiers -- same exposure class as the idempotency_key app/llm/client.py
+    and app/llm/transport.py strip before tracing. Exporting either would make a
+    LangSmith trace linkable to a specific customer record."""
+    assistant.run(42, _client(TOOL_CALL, FINAL_DENY))
+    root = spans[0].metadata
+    assert "application_id" not in root
+    assert "request_id" not in root
 
 
 def test_the_validation_span_records_the_control_working(spans, tools):
