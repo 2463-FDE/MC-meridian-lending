@@ -12,9 +12,11 @@ is load-bearing for a decision, a short phrase is quoted; nothing longer.
 2026-08-21.
 
 **Relationship to `docs/client-answers-week6-servicing.md`.** This register is a roll-up:
-Exchange 1 below condenses the same eleven questions to one line each. The week-6 file stays the
-detailed backing record — per-question notes and where ADR 0014 goes further than the answer live
-there, and it is what ADR 0014 cites. Update both when a servicing answer changes.
+Exchange 1 below condenses the same eleven questions (Q1–Q11) to one line each, except Q5, which
+this register splits into two rows (5 and 6) so the still-open code-list item stays traceable in
+the open-items summary — row 6 has no separate counterpart in the week-6 file. The week-6 file
+stays the detailed backing record — per-question notes and where ADR 0014 goes further than the
+answer live there, and it is what ADR 0014 cites. Update both when a servicing answer changes.
 
 ---
 
