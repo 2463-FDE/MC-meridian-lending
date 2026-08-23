@@ -19,7 +19,10 @@ Compliance posture:
 
 import json
 import uuid
+from contextlib import contextmanager
 from urllib.parse import quote
+
+from langsmith.run_helpers import trace
 
 from . import clients, kyc_gate, policy_retrieval
 from .logging_config import get_logger
@@ -28,6 +31,76 @@ from .routers.applications import decision_request_payload
 log = get_logger("assistant")
 
 _MAX_STEPS = 6  # tool round-trips before we refuse (2 is the expected path)
+
+# --- root trace ------------------------------------------------------------------
+#
+# Before this, the only spans in the service were `llm.complete` and its
+# `llm.transport` child, so a trace showed that a model call happened and nothing about
+# the agent that made it. These hang above them: one root per officer request, with a
+# child per loop step, per tool dispatch, per retrieval, and one for the deterministic
+# validation that decides what the officer actually reads.
+#
+# CONTENT RULE, and it is the whole design constraint: a span carries enum codes,
+# integers, booleans, and the retrieval's own scores and chunk ids. Never an applicant
+# field, never the model's prose, never the model-authored policy query, never corpus
+# text. Same posture as `llm.complete`'s input/output strippers
+# (`app/llm/client.py`) -- and the reason these are explicit spans rather than a
+# framework tracer, which ships whatever state it is handed. That is exactly why
+# `disclosure_coordinator.run()` suppresses tracing unconditionally, and nothing here
+# relaxes that suppression.
+#
+# `trace()` is a no-op unless LANGSMITH_TRACING is set, so this costs nothing when the
+# feature is off and needs no second code path for the disabled case.
+#
+# The credit score is deliberately ABSENT from tool spans. It already crosses to the
+# provider inside the tool result the model reads, so including it would not be a new
+# exposure class -- but it is the most sensitive number in the flow and it tells a trace
+# reader nothing that `outcome` and `policy_band` do not. Omitted on least-privilege
+# grounds, not because it is unreachable.
+
+_SPAN_REQUEST = "assistant.request"
+_SPAN_STEP = "assistant.step"
+_SPAN_VALIDATE = "assistant.validate"
+_SPAN_RETRIEVAL = "policy.retrieval"
+
+# Enum-valued keys worth lifting from a tool result onto its span. `score` is not here.
+_SPAN_RESULT_KEYS = ("status", "outcome", "policy_band")
+
+
+def _result_metadata(result) -> dict:
+    """The enum-only projection of a tool result that may go on a span.
+
+    Type-checked rather than truthiness-checked: a container arriving as something other
+    than a dict must not be indexed, and a value arriving as a dict or list must not be
+    stringified onto a span.
+    """
+    if not isinstance(result, dict):
+        return {}
+    metadata = {}
+    for key in _SPAN_RESULT_KEYS:
+        value = result.get(key)
+        if isinstance(value, str) and value:
+            metadata[key] = value
+    reasons = result.get("principal_reasons")
+    if isinstance(reasons, list):
+        # The codes only -- never the reason prose, which is borrower-facing text.
+        metadata["reason_codes"] = [
+            r.get("code")
+            for r in reasons
+            if isinstance(r, dict) and isinstance(r.get("code"), str)
+        ]
+    return metadata
+
+
+@contextmanager
+def _tool_span(name: str):
+    """Span for one tool dispatch, named for the tool so the tree reads as the loop ran.
+
+    Yields a recorder rather than the run: a caller holding the run could attach anything
+    to it, and the point of these spans is that what they carry is decided in one place.
+    """
+    with trace(name=f"tool.{name}", run_type="tool") as run:
+        yield lambda result: run.add_metadata(_result_metadata(result))
 
 
 class AssistantError(RuntimeError):
@@ -91,9 +164,26 @@ def _search_policy(query: str, task: str) -> policy_retrieval.PolicyAnswer:
 
     The answer's text is officer-facing; only `tool_result()` reaches the model.
     """
-    if task == "decision":
-        return policy_retrieval.abstain(policy_retrieval.DECISION_TASK)
-    return policy_retrieval.search(query)
+    with trace(name=_SPAN_RETRIEVAL, run_type="retriever") as run:
+        if task == "decision":
+            answer = policy_retrieval.abstain(policy_retrieval.DECISION_TASK)
+        else:
+            answer = policy_retrieval.search(query)
+        # status/reason are closed vocabularies from policy_retrieval, score is a cosine
+        # similarity, and chunk_id is a `document#section` id -- corpus metadata, not
+        # applicant data. The QUERY and the retrieved TEXT are both absent on purpose:
+        # the query is model-authored free text, the text is the passage the officer
+        # reads, and a span is not where either of them travels.
+        run.add_metadata(
+            {
+                "status": answer.status,
+                "reason": answer.reason,
+                "score": round(answer.score, 4),
+                "chunk_id": answer.chunk_id if answer.is_hit else None,
+                "refused_on_decision_task": task == "decision",
+            }
+        )
+        return answer
 
 
 _TOOLS = {
@@ -322,66 +412,131 @@ def run(
     citations = []  # policy excerpts to quote to the OFFICER (never back to the model)
     searches = []  # every search_policy attempt, hit or abstain (B1: makes an
     # abstention visible instead of indistinguishable from a run that never searched)
-    for _ in range(_MAX_STEPS):
-        action = client.complete(
-            "decision_assistant",
-            history=history,
-            request_json=json.dumps(request),
+    # Root of the trace. `request_id` is the decision idempotency key forwarded to
+    # decision-service, so this span ties to the exact decision_events row the run
+    # created or replayed. It is NOT the week-7 payment correlation id: that is a
+    # different concept under the same name (payment-service mints its own), and
+    # presenting them as one would invite a reader to join two unrelated things.
+    with trace(
+        name=_SPAN_REQUEST,
+        run_type="chain",
+        metadata={
+            "task": task,
+            "application_id": application_id,
+            "request_id": request_id,
+            "max_steps": _MAX_STEPS,
+        },
+    ) as root:
+        for step in range(_MAX_STEPS):
+            with trace(name=_SPAN_STEP, run_type="chain", metadata={"step": step + 1}):
+                action = client.complete(
+                    "decision_assistant",
+                    history=history,
+                    request_json=json.dumps(request),
+                )
+                kind = action.get("action")
+                if kind == "tool":
+                    name = action.get("tool") or ""
+                    tool = _TOOLS.get(name)
+                    if tool is None:
+                        raise AssistantError(
+                            f"assistant requested unknown tool {name!r}"
+                        )
+                    with _tool_span(name) as record:
+                        # The model's only accepted input is the application id — and we
+                        # use the ID FROM THE OFFICER'S REQUEST, not the model's echo, so
+                        # the agent can never wander to another applicant's file.
+                        if name == "score_application":
+                            if task == "explain":
+                                # Read-only task: a scoring request would be a fresh
+                                # credit pull the officer never asked for. Serve the
+                                # record instead.
+                                result = _TOOLS["get_decision_record"](application_id)
+                            elif score_result is None:
+                                score_result = tool(application_id, request_id)
+                                result = score_result
+                            else:
+                                # Repeat request returns the cached result — the model
+                                # cannot compound bureau pulls or decision events within
+                                # one request.
+                                result = score_result
+                        elif name == "search_policy":
+                            # The one tool whose input is NOT the application id: the
+                            # model chooses a query. That query is used here and nowhere
+                            # else — it is not echoed into history (see the action
+                            # rewrite below) and not logged, because it is model-authored
+                            # free text whose contents we do not control.
+                            answer = tool(
+                                str((action.get("input") or {}).get("query") or ""),
+                                task,
+                            )
+                            searches.append(answer)
+                            if answer.is_hit and all(
+                                c.chunk_id != answer.chunk_id for c in citations
+                            ):
+                                citations.append(answer)
+                            # Only the allowlisted status + score go back to the model;
+                            # the chunk text stays on the officer's side of the boundary
+                            # (ADR 0019 decision 3).
+                            result = answer.tool_result()
+                        else:
+                            result = tool(application_id)
+                        record(result)
+                    if name == "search_policy":
+                        # Strip the query before the action is replayed as history. The
+                        # redaction contract would mask it anyway
+                        # (request_builder._redact_scalar), but a boundary that holds only
+                        # because the redactor catches it is one bad allowlist entry from
+                        # leaking; drop it at the source instead.
+                        action = {k: v for k, v in action.items() if k != "input"}
+                    history.append({"role": "assistant", "content": json.dumps(action)})
+                    history.append(
+                        {
+                            "role": "user",
+                            "content": json.dumps({"tool": name, "result": result}),
+                        }
+                    )
+                    continue
+                if kind == "final":
+                    with trace(name=_SPAN_VALIDATE, run_type="chain") as validation:
+                        final = _validated_final(
+                            action,
+                            application_id,
+                            task,
+                            request_id,
+                            citations,
+                            searches,
+                        )
+                        # `narration_validated` is the audit signal on the model's
+                        # structured claim; the officer-facing summary is record-derived
+                        # either way. Recording it is the point of the span: a trace that
+                        # cannot show a narration diverging from the record cannot show
+                        # the control working.
+                        validation.add_metadata(
+                            {
+                                "narration_validated": final.get("narration_validated"),
+                                "record_status": final.get("record_status"),
+                                "outcome": final.get("outcome"),
+                                "policy_band": final.get("policy_band"),
+                            }
+                        )
+                    # The business outcome, on the root. Not its own span: a span with no
+                    # duration and no children is a metadata bag, and this metadata
+                    # describes the request the root already represents.
+                    root.add_metadata(
+                        {
+                            "outcome": final.get("outcome"),
+                            "record_status": final.get("record_status"),
+                            "policy_band": final.get("policy_band"),
+                            "narration_validated": final.get("narration_validated"),
+                            "steps_used": step + 1,
+                            "policy_citations": len(citations),
+                            "policy_searches": len(searches),
+                            "scored": score_result is not None,
+                        }
+                    )
+                    return final
+                raise AssistantError(f"assistant returned unknown action {kind!r}")
+        raise AssistantError(
+            f"assistant gave no final answer within {_MAX_STEPS} steps"
         )
-        kind = action.get("action")
-        if kind == "tool":
-            name = action.get("tool") or ""
-            tool = _TOOLS.get(name)
-            if tool is None:
-                raise AssistantError(f"assistant requested unknown tool {name!r}")
-            # The model's only accepted input is the application id — and we use the
-            # ID FROM THE OFFICER'S REQUEST, not the model's echo, so the agent can
-            # never wander to another applicant's file.
-            if name == "score_application":
-                if task == "explain":
-                    # Read-only task: a scoring request would be a fresh credit pull
-                    # the officer never asked for. Serve the record instead.
-                    result = _TOOLS["get_decision_record"](application_id)
-                elif score_result is None:
-                    score_result = tool(application_id, request_id)
-                    result = score_result
-                else:
-                    # Repeat request returns the cached result — the model cannot
-                    # compound bureau pulls or decision events within one request.
-                    result = score_result
-            elif name == "search_policy":
-                # The one tool whose input is NOT the application id: the model chooses a
-                # query. That query is used here and nowhere else — it is not echoed into
-                # history (see the action rewrite below) and not logged, because it is
-                # model-authored free text whose contents we do not control.
-                answer = tool(str((action.get("input") or {}).get("query") or ""), task)
-                searches.append(answer)
-                if answer.is_hit and all(
-                    c.chunk_id != answer.chunk_id for c in citations
-                ):
-                    citations.append(answer)
-                # Only the allowlisted status + score go back to the model; the chunk text
-                # stays on the officer's side of the boundary (ADR 0019 decision 3).
-                result = answer.tool_result()
-            else:
-                result = tool(application_id)
-            if name == "search_policy":
-                # Strip the query before the action is replayed as history. The redaction
-                # contract would mask it anyway (request_builder._redact_scalar), but a
-                # boundary that holds only because the redactor catches it is one bad
-                # allowlist entry from leaking; drop it at the source instead.
-                action = {k: v for k, v in action.items() if k != "input"}
-            history.append({"role": "assistant", "content": json.dumps(action)})
-            history.append(
-                {
-                    "role": "user",
-                    "content": json.dumps({"tool": name, "result": result}),
-                }
-            )
-            continue
-        if kind == "final":
-            return _validated_final(
-                action, application_id, task, request_id, citations, searches
-            )
-        raise AssistantError(f"assistant returned unknown action {kind!r}")
-    raise AssistantError(f"assistant gave no final answer within {_MAX_STEPS} steps")
