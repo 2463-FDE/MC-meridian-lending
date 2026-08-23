@@ -23,6 +23,17 @@ ALTER TABLE payments
   ADD COLUMN IF NOT EXISTS amount_minor              BIGINT,
   ADD COLUMN IF NOT EXISTS updated_at                TIMESTAMPTZ;
 
+-- ADD COLUMN IF NOT EXISTS on an EXISTING status column no-ops entirely, including its
+-- NOT NULL DEFAULT 'captured' clause: a volume where status already exists nullable or
+-- undefaulted keeps that shape after this statement reports success. Both insert paths
+-- omit status, so those rows would land NULL instead of the legacy-compatible 'captured'.
+-- Backfill before enforcing NOT NULL, then set the constraint and default explicitly --
+-- these two ALTERs are unconditional (not IF NOT EXISTS) so they always bring an
+-- already-existing column up to the same contract a fresh ADD COLUMN would have given it.
+UPDATE payments SET status = 'captured' WHERE status IS NULL;
+ALTER TABLE payments ALTER COLUMN status SET DEFAULT 'captured';
+ALTER TABLE payments ALTER COLUMN status SET NOT NULL;
+
 -- ADD COLUMN IF NOT EXISTS swallows a same-named column of ANY type: on a volume where
 -- an operator or an earlier hand-applied attempt created `amount_minor` as TEXT, the
 -- ALTER above reports success and every reader is handed a string. Assert each type and
@@ -61,12 +72,41 @@ BEGIN
                 col, got, want;
         END IF;
     END LOOP;
+
+    -- data_type alone does not prove the NOT NULL DEFAULT 'captured' contract: the
+    -- ALTER COLUMN statements above are supposed to enforce it unconditionally, but
+    -- assert the actual catalog state here too, so a future edit that drops or
+    -- reorders those ALTERs is caught by this migration rather than by a NULL row on
+    -- an insert path that omits status.
+    DECLARE
+        status_nullable text;
+        status_default  text;
+    BEGIN
+        SELECT is_nullable, column_default INTO status_nullable, status_default
+          FROM information_schema.columns
+         WHERE table_name = 'payments' AND column_name = 'status';
+        IF status_nullable <> 'NO' THEN
+            RAISE EXCEPTION
+                'payments.status is nullable, expected NOT NULL -- both insert paths '
+                'omit status and would write NULL rows instead of the legacy-compatible '
+                'captured';
+        END IF;
+        -- information_schema.columns.column_default is the quoted+cast expression
+        -- ('captured'::text), not the bare value -- match the substring, not a prefix.
+        IF status_default IS NULL OR status_default NOT LIKE '%captured%' THEN
+            RAISE EXCEPTION
+                'payments.status has default %, expected captured', coalesce(status_default, '<none>');
+        END IF;
+    END;
 END $$;
 
--- The Meridian key's arbiter. PARTIAL (WHERE idempotency_key IS NOT NULL) so the
--- pre-migration rows, whose key is NULL, stay valid and non-conflicting -- and so a
--- retired key (set back to NULL once its window passes on a terminal row) drops out of
--- the index and frees the value for reuse. The index cannot be time-scoped: now() is
+-- The Meridian key's arbiter. PARTIAL (WHERE idempotency_key IS NOT NULL) so the index
+-- only covers rows that actually carry a key -- Postgres already treats every NULL as
+-- distinct in a unique index, so pre-migration and retired-key rows (key set back to
+-- NULL once its window passes on a terminal row) were never at risk of colliding with
+-- each other even without the predicate. The partial form keeps the index small and, by
+-- naming the predicate explicitly, matches the ON CONFLICT target the claim insert must
+-- spell to let Postgres infer this arbiter. The index cannot be time-scoped: now() is
 -- not immutable and cannot appear in a predicate, which is why the window is the
 -- idempotency_expires_at column plus a retirement transition, not an index property.
 CREATE UNIQUE INDEX IF NOT EXISTS payments_idempotency_key_uniq

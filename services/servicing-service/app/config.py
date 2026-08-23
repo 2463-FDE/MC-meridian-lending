@@ -140,7 +140,9 @@ _IDEMPOTENCY_COLUMNS = (
     ("request_fingerprint", "text"),
     ("status", "text"),
     ("processor_idempotency_key", "text"),
+    ("processor_ref", "text"),
     ("amount_minor", "bigint"),
+    ("updated_at", "timestamp with time zone"),
 )
 _IDEMPOTENCY_INDEXES = (
     ("payments_idempotency_key_uniq", "idempotency_key"),
@@ -159,6 +161,23 @@ def _payments_idempotency_ready(cur) -> tuple[bool, str | None]:
         row = cur.fetchone()
         if row is None or row[0] != want_type:
             return False, f"schema_not_ready:payments.{column}"
+    # data_type alone does not prove the NOT NULL DEFAULT 'captured' contract migration
+    # 0018 sets: ADD COLUMN IF NOT EXISTS no-ops on an existing status column, including
+    # its NOT NULL DEFAULT clause, so a volume where status was already TEXT but nullable
+    # or undefaulted would pass the loop above and then take a NULL/wrong-status row from
+    # either insert path, which omits status.
+    cur.execute(
+        "SELECT is_nullable, column_default FROM information_schema.columns "
+        "WHERE table_name = 'payments' AND column_name = 'status'"
+    )
+    row = cur.fetchone()
+    if row is None:
+        return False, "schema_not_ready:payments.status"
+    status_nullable, status_default = row
+    # column_default is the quoted+cast expression ('captured'::text), not the bare
+    # value -- match the substring, not a prefix.
+    if status_nullable != "NO" or "captured" not in (status_default or ""):
+        return False, "schema_not_ready:payments.status"
     for index, column in _IDEMPOTENCY_INDEXES:
         cur.execute(
             "SELECT x.indisunique, c.relname, "
@@ -181,8 +200,13 @@ def _payments_idempotency_ready(cur) -> tuple[bool, str | None]:
             return False, f"schema_not_ready:{index}"
         # The predicate is what makes the arbiter inferable by the shipped
         # ON CONFLICT ... WHERE clause; a non-partial index of the same name would
-        # make that insert raise.
-        if predicate is None or "IS NOT NULL" not in predicate:
+        # make that insert raise. A bare "IS NOT NULL" substring check would also pass
+        # a predicate on a DIFFERENT column (e.g. "loan_id IS NOT NULL" on an index that
+        # otherwise covers idempotency_key) -- bind the check to the column this index
+        # is supposed to be partial on, same as migration 0018's own assertion.
+        if predicate is None or not re.search(
+            rf"\b{re.escape(column)}\b.*IS NOT NULL", predicate
+        ):
             return False, f"schema_not_ready:{index}"
     return True, None
 

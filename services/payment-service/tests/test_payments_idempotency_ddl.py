@@ -81,9 +81,10 @@ def test_both_indexes_are_declared_partial_and_unique_in_both_places():
             assert f"CREATE UNIQUE INDEX IF NOT EXISTS {index}" in sql, (
                 f"{index} is not declared in the {name}"
             )
-            # The predicate is the whole point: without it the index is not partial,
-            # pre-0018 NULL rows collide, retirement cannot free a key, and the shipped
-            # ON CONFLICT target cannot infer the arbiter.
+            # The predicate is the whole point: without it the index is not partial and
+            # the shipped ON CONFLICT target -- which names this same predicate -- cannot
+            # infer the arbiter. (Not because NULLs would collide: Postgres treats every
+            # NULL as distinct in a unique index regardless of the partial predicate.)
             assert predicate in " ".join(sql.split()), (
                 f"{index} in the {name} is missing its partial predicate "
                 f"({predicate}) — the claim insert's ON CONFLICT would raise"

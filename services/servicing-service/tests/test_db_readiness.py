@@ -119,7 +119,9 @@ _PAYMENTS_COLUMN_TYPES = {
     "request_fingerprint": "text",
     "status": "text",
     "processor_idempotency_key": "text",
+    "processor_ref": "text",
     "amount_minor": "bigint",
+    "updated_at": "timestamp with time zone",
 }
 _PAYMENTS_INDEX_COLUMNS = {
     "payments_idempotency_key_uniq": "idempotency_key",
@@ -154,6 +156,10 @@ class _FakeCursor:
                 return self.overrides[name]
             column = _PAYMENTS_INDEX_COLUMNS[name]
             return (True, "payments", f"({column} IS NOT NULL)", column)
+        if "is_nullable" in sql:
+            # status NOT NULL DEFAULT 'captured' contract query -- unparameterized
+            # (column_name is a literal in the SQL), so it is not keyed by `name`.
+            return self.overrides.get("status_contract", ("NO", "'captured'::text"))
         if "information_schema.columns" in sql and "'payments'" in sql:
             if name in self.overrides:
                 return self.overrides[name]
@@ -473,6 +479,60 @@ def test_rung_not_ready_when_amount_minor_has_the_wrong_type(monkeypatch):
     assert err == "schema_not_ready:payments.amount_minor"
 
 
+def test_rung_not_ready_when_processor_ref_is_absent(monkeypatch):
+    """The rung must prove ALL of migration 0018's columns, not a subset -- a volume
+    missing processor_ref (present in the migration and init DDL) previously read
+    ready anyway."""
+    ok, err = _probe_with(monkeypatch, {"processor_ref": None})
+    assert ok is False
+    assert err == "schema_not_ready:payments.processor_ref"
+
+
+def test_rung_not_ready_when_updated_at_has_the_wrong_type(monkeypatch):
+    ok, err = _probe_with(monkeypatch, {"updated_at": ("text",)})
+    assert ok is False
+    assert err == "schema_not_ready:payments.updated_at"
+
+
+def test_rung_not_ready_when_status_is_nullable(monkeypatch):
+    """data_type alone does not prove the NOT NULL DEFAULT contract: ADD COLUMN IF NOT
+    EXISTS no-ops on an existing nullable status column of the right type."""
+    ok, err = _probe_with(monkeypatch, {"status_contract": ("YES", "'captured'::text")})
+    assert ok is False
+    assert err == "schema_not_ready:payments.status"
+
+
+def test_rung_not_ready_when_status_default_is_not_captured(monkeypatch):
+    ok, err = _probe_with(monkeypatch, {"status_contract": ("NO", "'pending'::text")})
+    assert ok is False
+    assert err == "schema_not_ready:payments.status"
+
+
+def test_rung_not_ready_when_status_has_no_default(monkeypatch):
+    ok, err = _probe_with(monkeypatch, {"status_contract": ("NO", None)})
+    assert ok is False
+    assert err == "schema_not_ready:payments.status"
+
+
+def test_rung_not_ready_when_the_index_predicate_is_on_the_wrong_column(monkeypatch):
+    """A predicate containing "IS NOT NULL" anywhere is not enough -- it must be on the
+    column this index is supposed to be partial on, or a drifted index (e.g. a stray
+    loan_id predicate on what is otherwise the idempotency_key index) reads as ready."""
+    ok, err = _probe_with(
+        monkeypatch,
+        {
+            "payments_idempotency_key_uniq": (
+                True,
+                "payments",
+                "(loan_id IS NOT NULL)",
+                "idempotency_key",
+            )
+        },
+    )
+    assert ok is False
+    assert err == "schema_not_ready:payments_idempotency_key_uniq"
+
+
 def test_rung_not_ready_when_the_index_is_absent(monkeypatch):
     ok, err = _probe_with(monkeypatch, {"payments_idempotency_key_uniq": None})
     assert ok is False
@@ -497,10 +557,12 @@ def test_rung_not_ready_when_the_index_exists_but_is_not_unique(monkeypatch):
 
 
 def test_rung_not_ready_when_the_index_is_not_partial(monkeypatch):
-    """No predicate means the shipped ON CONFLICT ... WHERE cannot infer the arbiter.
+    """No predicate means the shipped ON CONFLICT ... WHERE cannot infer the arbiter --
 
-    It also means pre-0018 rows, whose key is NULL, collide with each other, and that a
-    retired key can never be freed for reuse.
+    Postgres cannot pick an arbiter for a partial-predicate ON CONFLICT clause without a
+    matching partial index, regardless of whether the underlying index would otherwise
+    behave correctly (it never collides pre-0018 NULL rows either way; Postgres treats
+    every NULL as distinct in a unique index).
     """
     ok, err = _probe_with(
         monkeypatch,
