@@ -247,6 +247,38 @@ def test_post_payment_424_when_captured_unapplied(monkeypatch):
     assert "not retry" in body["detail"].lower()
 
 
+def test_post_payment_424_on_replay_of_a_captured_unapplied_row(monkeypatch):
+    """B1 (carried): a REPLAY of a captured_unapplied payment must still 424, not
+    silently return 200. The REPLAY branch used to return before the
+    captured_unapplied check ever ran, so a retry of a 424'd request came back a
+    plain success -- and the frontend treats any non-throwing call as submitted."""
+    monkeypatch.setattr(authz, "require_money_role_or_owner", lambda *a, **k: None)
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    monkeypatch.setattr(
+        "app.payments.charge",
+        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None, **kw: {
+            "payment_id": 42,
+            "loan_id": loan_id,
+            "status": "captured_unapplied",
+            "applied_amount": 0.0,
+            "idempotency": "replay",
+        },
+    )
+    resp = TestClient(app).post(
+        "/payments",
+        json={"loan_id": 1, "amount": 50.0},
+        headers={"Idempotency-Key": _IDEM_KEY, "X-User-Role": "csr"},
+    )
+    assert resp.status_code == 424, (
+        f"a retry of a captured_unapplied payment must not come back 200, got "
+        f"{resp.status_code}: {resp.text}"
+    )
+    assert resp.headers.get("Idempotent-Replay") == "true"
+    body = resp.json()
+    assert "42" in body["detail"]
+
+
 # --- m1: the stored key is the canonical UUID spelling -----------------------------
 #
 # The route validates the header with uuid.UUID(), which accepts hyphenless and
