@@ -1782,6 +1782,9 @@ def test_anthropic_provider_ignores_aws_region(monkeypatch):
         # these (review finding RGN-001); the allowlist must not.
         "us-eats-1",
         "zz-fake-1",
+        # A real AWS region that does not serve bedrock-runtime (review finding
+        # RGN-002): a general-AWS-region allowlist would wrongly accept this.
+        "ap-east-1",
     ],
 )
 def test_malformed_aws_region_rejected_at_boot(monkeypatch, value):
@@ -1790,6 +1793,26 @@ def test_malformed_aws_region_rejected_at_boot(monkeypatch, value):
     monkeypatch.setenv("AWS_REGION", value)
     with pytest.raises(LLMConfigError):
         load_llm_config()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Current bedrock-runtime regions that RGN-002 found missing from the
+        # allowlist (present here at review time but absent from the fixed
+        # commit's set): https://docs.aws.amazon.com/bedrock/latest/userguide/
+        # endpoints-region-availability.html.
+        "ap-southeast-5",
+        "ap-southeast-6",
+        "ap-southeast-7",
+        "ap-east-2",
+    ],
+)
+def test_newly_added_bedrock_regions_are_accepted(monkeypatch, value):
+    monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_PROVIDER", "bedrock")
+    monkeypatch.setenv("AWS_REGION", value)
+    assert load_llm_config().aws_region == value
 
 
 def test_execution_mode_separates_live_adapters_from_the_fixture():

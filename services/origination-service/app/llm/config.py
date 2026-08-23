@@ -29,43 +29,53 @@ _PROVIDERS = ("anthropic", "bedrock")
 # runs — the freeze requires a reproducible selection, so the literal lives here
 # and AWS_REGION only overrides it. `.env.example` documents the same value.
 _DEFAULT_BEDROCK_REGION = "us-east-1"
-# Known AWS region codes (commercial partitions + GovCloud). An override must
-# name a real region, not merely something region-shaped — a shape-only regex
-# (two-letter prefix + hyphenated words + digit suffix) still accepts a typo
-# like "us-eats-1" or a fabricated "zz-fake-1" (review finding RGN-001), and
-# those reach the SDK and fail mid-call instead of at boot. Regions are added
-# to AWS rarely enough that a static allowlist does not go stale in practice;
-# widen it if a real region 400s here.
+# Regions where the bedrock-runtime endpoint is available (source of truth:
+# https://docs.aws.amazon.com/bedrock/latest/userguide/endpoints-region-availability.html,
+# checked 2026-08-22). An override must name a region Bedrock actually serves,
+# not merely something region-shaped — a shape-only regex (two-letter prefix +
+# hyphenated words + digit suffix) accepted a typo like "us-eats-1" or a
+# fabricated "zz-fake-1" (review finding RGN-001) and let it reach the SDK
+# instead of failing at boot. This list is NOT the general AWS region list:
+# ap-east-1 (Hong Kong) is a real AWS region but does not serve bedrock-runtime,
+# so it is deliberately absent (review finding RGN-002 — an earlier version of
+# this allowlist used the general AWS region set, which was too loose in one
+# direction and too tight in another: it admitted ap-east-1, which 400s at
+# call time, while missing ap-southeast-5/6/7 and ap-east-2, which are valid).
+# AWS adds Bedrock regions a few times a year; re-check the source above and
+# widen this set if a real Bedrock region is rejected here.
 _AWS_REGIONS = frozenset(
     {
         "us-east-1",
         "us-east-2",
         "us-west-1",
         "us-west-2",
-        "af-south-1",
-        "ap-east-1",
-        "ap-south-1",
-        "ap-south-2",
-        "ap-northeast-1",
-        "ap-northeast-2",
-        "ap-northeast-3",
-        "ap-southeast-1",
-        "ap-southeast-2",
-        "ap-southeast-3",
-        "ap-southeast-4",
         "ca-central-1",
         "ca-west-1",
         "eu-central-1",
         "eu-central-2",
-        "eu-west-1",
-        "eu-west-2",
-        "eu-west-3",
         "eu-north-1",
         "eu-south-1",
         "eu-south-2",
+        "eu-west-1",
+        "eu-west-2",
+        "eu-west-3",
+        "ap-east-2",
+        "ap-northeast-1",
+        "ap-northeast-2",
+        "ap-northeast-3",
+        "ap-south-1",
+        "ap-south-2",
+        "ap-southeast-1",
+        "ap-southeast-2",
+        "ap-southeast-3",
+        "ap-southeast-4",
+        "ap-southeast-5",
+        "ap-southeast-6",
+        "ap-southeast-7",
         "il-central-1",
-        "me-south-1",
         "me-central-1",
+        "me-south-1",
+        "af-south-1",
         "sa-east-1",
         "us-gov-east-1",
         "us-gov-west-1",
