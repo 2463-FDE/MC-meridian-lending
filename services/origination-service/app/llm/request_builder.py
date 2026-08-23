@@ -460,6 +460,17 @@ def _turn_role(turn: dict) -> str:
 # on a field the redactor is not asked to look at.
 _TOOL_USE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
+# A tool `name` is not just "a bare identifier token" (`_is_field_name`'s notion,
+# scoped to the PII-key gate) — it is echoed to the provider on `tools[].name` and
+# `tool_use.name` unredacted, so it must match the provider's own tool-name
+# contract (`^[a-zA-Z0-9_-]{1,64}$`, ASCII only, 64-char cap). `_is_field_name`
+# accepts non-ASCII letters via `str.isalpha()` and has no length bound, so a
+# schema it calls valid can still be rejected by the provider on the wire —
+# reintroducing the reject-at-the-network failure this boundary exists to
+# prevent, one layer down. Shared by both name paths (schema `name`, `tool_use`
+# history block `name`) so they cannot drift apart.
+_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
 # Content-block types this boundary carries, by the role allowed to send them.
 # Anthropic's shape: the assistant asks (`tool_use`), the user answers
 # (`tool_result`). Enforcing the pairing catches a mis-assembled message list here
@@ -492,10 +503,11 @@ def _redacted_tool_use(block: dict) -> dict:
             "it is echoed to the provider unredacted, so an arbitrary string is refused"
         )
     name = block.get("name")
-    if not isinstance(name, str) or not _is_field_name(name):
+    if not isinstance(name, str) or not _TOOL_NAME.match(name):
         raise LLMError(
-            "tool_use block 'name' must be a bare identifier token naming a tool; it "
-            "selects which in-process tool runs and is not redacted"
+            "tool_use block 'name' must match the provider tool-name contract "
+            "([A-Za-z0-9_-], 1-64 chars); it selects which in-process tool runs "
+            "and is not redacted"
         )
     raw_input = block.get("input", {})
     if not isinstance(raw_input, dict):
@@ -643,8 +655,11 @@ def _validated_tools(tools) -> list[dict]:
                 f"schemas are not redacted, so only the three authored keys are sent"
             )
         name = tool.get("name")
-        if not isinstance(name, str) or not _is_field_name(name):
-            raise LLMError("each tool needs a 'name' that is a bare identifier token")
+        if not isinstance(name, str) or not _TOOL_NAME.match(name):
+            raise LLMError(
+                "each tool needs a 'name' matching the provider tool-name "
+                "contract ([A-Za-z0-9_-], 1-64 chars)"
+            )
         if name in seen:
             raise LLMError(
                 f"duplicate tool name {name!r}: the provider would bind one schema "

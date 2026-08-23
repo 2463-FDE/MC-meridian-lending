@@ -107,6 +107,24 @@ def test_tool_schemas_count_against_the_token_budget():
                 "input_schema": {"type": "object"},
             }
         ],
+        # non-ASCII passes _is_field_name (str.isalpha()) but not the provider's
+        # tool-name contract (^[a-zA-Z0-9_-]{1,64}$) — would be rejected on the
+        # wire instead of before it
+        [
+            {
+                "name": "búscar_política",
+                "description": "d",
+                "input_schema": {"type": "object"},
+            }
+        ],
+        # over the provider's 64-char cap
+        [
+            {
+                "name": "t" * 65,
+                "description": "d",
+                "input_schema": {"type": "object"},
+            }
+        ],
         [{"name": "t", "description": "  ", "input_schema": {"type": "object"}}],
         [{"name": "t", "description": "d"}],  # no input_schema
         [{"name": "t", "description": "d", "input_schema": "object"}],
@@ -402,6 +420,26 @@ def test_tool_result_that_is_not_an_object_is_refused(content):
             "role": "assistant",
             "content": [
                 {"type": "tool_use", "id": "toolu_1", "name": "1 Main St", "input": {}}
+            ],
+        },
+        # non-ASCII name: passes _is_field_name's str.isalpha() but not the
+        # provider's tool-name contract
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "búscar_política",
+                    "input": {},
+                }
+            ],
+        },
+        # over the provider's 64-char cap
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "t" * 65, "input": {}}
             ],
         },
         # input must be an object to be masked structurally
