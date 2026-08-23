@@ -109,8 +109,12 @@ its shape — point here instead.
   with no AWS credential in the environment; runs against a dirty tree only with `--allow-dirty`,
   and the receipt then records `exact_sha_proof: false` rather than claiming more than the run
   supports.
-- **Storage path:** `logs/bedrock-proof-<sha>.json` by default (`logs/` is gitignored — a receipt is
-  a run artifact, not source); also printed to stdout.
+- **Storage path — not yet reviewable as shipped.** The default `logs/bedrock-proof-<sha>.json` is
+  under `.gitignore:41-42` (`logs/`, `**/logs/`), so a run at that default never reaches the PR — it
+  proves the path locally and nothing lands on `main`. Until the script gains a non-gitignored
+  default, the PR-attachment step is: run with `--out /tmp/bedrock-proof-<sha>.json` (outside the
+  ignored tree) and paste the resulting JSON into the PR description or a PR comment. That paste is
+  the reviewable artifact, not a path on disk.
 - **Shape:** JSON with `artifact: "bedrock-exact-sha-proof"`, `generated_at`, `commit`,
   `tree_clean`, `exact_sha_proof` (true only when the tree was clean **and** the call succeeded), a
   `selection` block (`provider`, `model`, `aws_region`, `credential_form` — the name of the env var
@@ -119,6 +123,15 @@ its shape — point here instead.
 - **Redaction rules:** the credential *value* never enters the receipt, only the name of the
   environment variable that supplied it. The applicant is synthetic and passes through the real
   redaction path. The model's response text is recorded as a length and a SHA-256, never verbatim.
+- **No `trace_id`/`trace_url` field — this is deliberately a separate artifact from the root
+  trace, not a stand-in for it.** `run_call()` calls `client.summarize_application()`, which is
+  `@traceable` (`app/llm/client.py:101`), but `bedrock_proof.py` never calls
+  `get_current_run_tree()` after that call the way `client.py:193-197` does for its own metadata
+  stamps — so today's receipt has no run id to attach even if a field existed for one. The proof
+  answers "did this commit really call Bedrock and what came back"; the root trace (freeze
+  requirement 8, plan item 4, still unbuilt) answers "what did the agent do end to end". Wiring
+  `trace_id` into the receipt is a `feat/bedrock-pin` (PR #59) code change, not a doc fix — tracked
+  there, not restated as done here.
 - **What it proves:** the call goes through `ClaudeClient.summarize_application()` — the production
   entry point, not a raw adapter call — so the receipt also covers the retry policy, schema
   validation/guards, and the `llm_provider`/`execution_mode` trace stamps.
