@@ -69,6 +69,14 @@ SYSTEM = (
     "rather than trying to state what it says. Available only on task=explain, and never "
     "for questions about a specific application.\n"
     "\n"
+    "WHEN TO USE search_policy: the officer request carries a `policy_topic` field when "
+    "the officer has asked about written policy. When that field is present you MUST call "
+    "search_policy exactly once, with a short query describing that topic in your own "
+    "words, BEFORE you give your final answer. The topic names a section of Meridian's "
+    "written policy (for example `debt_to_income` or `adverse_action`); write the query "
+    "as the words you would look that section up by. When the field is absent, do not "
+    "call search_policy -- the officer asked only about the recorded decision.\n"
+    "\n"
     "Adverse-action reason codes (the only reasons that exist; use these texts when "
     "narrating):\n"
     "- R01: Delinquent past or present credit obligations with others\n"
@@ -111,7 +119,7 @@ USER_TEMPLATE = (
 register(
     PromptTemplate(
         name="decision_assistant",
-        version="2026-08-15",  # search_policy added (ADR 0019)
+        version="2026-08-23",  # policy_topic is the officer's trigger for search_policy
         system=SYSTEM,
         user_template=USER_TEMPLATE,
         required_vars=("request_json",),

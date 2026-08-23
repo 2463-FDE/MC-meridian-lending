@@ -43,6 +43,31 @@ log = get_logger("policy_retrieval")
 
 # Abstention reasons. Operational codes for the log and the tests — the model sees only
 # `status`, so these never cross the LLM boundary.
+# The officer-selectable policy topics, one per retrievable section of the committed
+# corpus. This is a CLOSED vocabulary, and it is the officer's whole channel into
+# retrieval: the boundary masks free text (an officer question would arrive at the model
+# as a redaction placeholder, which is why one was never plumbed), and an enum code
+# passes it intact. Each code is a compound operational token, so none can collide with
+# a plausible bare name — the property `_SAFE_CATEGORICAL` depends on.
+#
+# Tied to the corpus, not invented: `test_policy_topic.py` asserts every code here
+# actually retrieves a hit, so a topic cannot survive the section behind it being
+# renamed or dropped. Adding a code without corpus text to back it fails that test.
+#
+# Duplicated into `llm/request_builder._SAFE_CATEGORICAL` rather than imported, with a
+# parity test: `app/llm/` deliberately depends on nothing in the app domain, and
+# importing this module there would drag `rag_eval` into the redaction path.
+POLICY_TOPICS = (
+    "fee_schedule",
+    "apr_finance_charge",
+    "interest_rate",
+    "eligibility_rules",
+    "credit_decisioning",
+    "adverse_action",
+    "debt_to_income",
+    "records_retention",
+)
+
 NO_THRESHOLD = "threshold_unset"
 NO_CORPUS = "corpus_unavailable"
 EMPTY_QUERY = "empty_query"
