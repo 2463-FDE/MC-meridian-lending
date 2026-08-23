@@ -62,6 +62,49 @@ check "interpolation defaulting to true fails"   1 'LLM_TRACE_CONTENT: ${LLM_TRA
 check "interpolation with no default fails"      1 'LLM_TRACE_CONTENT: ${LLM_TRACE_CONTENT}'
 check "interpolation defaulting to a non-bool fails" 1 'LLM_TRACE_CONTENT: ${LLM_TRACE_CONTENT:-yes}'
 
+# --- list-form environment (`- KEY=value`) is checked, not silently skipped ---
+# Regression: the map-only anchor (`^[[:space:]]*LLM_TRACE_CONTENT:`) never even
+# sees this shape, so `- LLM_TRACE_CONTENT=true` passed clean through the first
+# fixed version of this script -- not flagged unsafe, just never examined.
+list_check() {
+  local name=$1 want=$2 line=$3
+  local repo out got
+  repo=$(new_repo)
+  printf 'services:\n  x:\n    environment:\n      %s\n' "$line" > "$repo/docker-compose.yml"
+  out=$(cd "$repo" && "$SCRIPT" docker-compose.yml 2>&1)
+  got=$?
+  if [ "$got" -ne "$want" ]; then
+    echo "FAIL  $name — exit $got, wanted $want"
+    printf '%s\n' "$out" | sed 's/^/        /'
+    fail=$((fail + 1))
+    return
+  fi
+  echo "ok    $name"
+  pass=$((pass + 1))
+}
+list_check "list-form literal false passes"                  0 '- LLM_TRACE_CONTENT=false'
+list_check "list-form interpolation defaulting to false passes" 0 '- LLM_TRACE_CONTENT=${LLM_TRACE_CONTENT:-false}'
+list_check "list-form literal true fails"                    1 '- LLM_TRACE_CONTENT=true'
+list_check "list-form interpolation defaulting to true fails" 1 '- LLM_TRACE_CONTENT=${LLM_TRACE_CONTENT:-true}'
+
+# --- single-line flow mapping is refused outright, not parsed -----------------
+# Regression: `environment: {LLM_TRACE_CONTENT: true}` puts the key mid-line, so
+# the block-mapping anchor never sees it either. Rather than parse a form whose
+# `}` collides with the interpolation's own closing brace, the gate refuses any
+# flow-style environment block and asks for the block form.
+repo=$(new_repo)
+printf 'services:\n  x:\n    environment: {LLM_TRACE_CONTENT: true}\n' > "$repo/docker-compose.yml"
+out=$(cd "$repo" && "$SCRIPT" docker-compose.yml 2>&1)
+got=$?
+if [ "$got" -eq 1 ] && printf '%s' "$out" | grep -qF "flow mapping"; then
+  echo "ok    flow-style environment block is refused, not parsed"
+  pass=$((pass + 1))
+else
+  echo "FAIL  flow-style environment block is refused — exit $got, wanted 1 with 'flow mapping'"
+  printf '%s\n' "$out" | sed 's/^/        /'
+  fail=$((fail + 1))
+fi
+
 # --- no matching key at all passes (nothing unsafe to report) -----------------
 repo=$(new_repo)
 printf 'services:\n  x:\n    environment:\n      OTHER_VAR: true\n' > "$repo/docker-compose.yml"
