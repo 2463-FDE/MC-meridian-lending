@@ -365,6 +365,36 @@ def test_probe_ready_when_note_rate_column_present(monkeypatch):
     assert err is None
 
 
+def test_note_rate_probe_is_schema_qualified(monkeypatch):
+    """Same defect class as the payments.status probe: information_schema.columns
+    spans every schema, and this probe filtered only on table_name/column_name -- a
+    same-named loans.note_rate column in another schema would be reachable by it."""
+    seen = {}
+
+    class _RecordingCursor(_SchemaAwareCursor):
+        def execute(self, sql, params=None):
+            if "'loans'" in sql:
+                seen["sql"] = sql
+            super().execute(sql, params)
+
+    class _RecordingConn(_SchemaAwareConn):
+        def cursor(self):
+            return _RecordingCursor(self._present)
+
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2,
+        "connect",
+        lambda *a, **k: _RecordingConn(note_rate_present=True),
+    )
+    config.database_reachable()
+
+    assert "sql" in seen, "note_rate probe never ran"
+    assert "table_schema = current_schema()" in seen["sql"]
+
+
 # --- Processor-key readiness + fail-closed capture -------------------------
 # The direct /payments path inserts a payment AND mutates the balance. After the
 # secret purge PROCESSOR_API_KEY has no committed fallback, so without it the

@@ -245,7 +245,8 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             # type, and the ORM maps it as a float.
             cur.execute(
                 "SELECT 1 FROM information_schema.columns "
-                "WHERE table_name = 'loans' AND column_name = 'note_rate' "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = 'loans' AND column_name = 'note_rate' "
                 "AND data_type = 'double precision'"
             )
             if cur.fetchone() is None:

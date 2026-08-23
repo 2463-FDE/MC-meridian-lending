@@ -195,6 +195,35 @@ def test_r1b_replay_after_captured_unapplied_replays_the_unapplied_state(
     assert second["applied_amount"] == 0.0
 
 
+def test_expired_captured_unapplied_never_retires_or_double_charges(
+    fake_db, monkeypatch
+):
+    """_RETIRE_SQL deliberately excludes captured_unapplied from the statuses that
+    release a key (see the comment above it): the card was actually charged and the
+    balance was not, so retiring the key on TTL expiry would let a later retry mint a
+    SECOND real charge under the same logical intent while the first sits unresolved.
+    Past the TTL, the row must still hold its key and still replay 424/0 -- not go
+    IN_FLIGHT (which would 409 forever) and not silently free the key for a new
+    charge (the double-charge D19 exists to prevent)."""
+    key = _key()
+
+    class _Denied:
+        status_code = 403
+
+    monkeypatch.setattr(payments.httpx, "post", lambda *a, **k: _Denied())
+    first = _charge(key)
+    assert first["status"] == "captured_unapplied"
+
+    fake_db.age_out(key)
+
+    second = _charge(key)
+    assert second["idempotency"] == payments.REPLAY
+    assert second["status"] == "captured_unapplied"
+    assert second["applied_amount"] == 0.0
+    assert len(fake_db.rows) == 1, "an expired unapplied capture must not free its key"
+    assert fake_db.rows[0]["idempotency_key"] == key
+
+
 def test_r2_two_simultaneous_identical_requests_capture_once(fake_db):
     """R2: the vector `make prove` runs. Exactly one caller claims the key.
 

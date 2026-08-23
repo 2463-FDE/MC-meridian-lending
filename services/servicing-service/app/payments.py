@@ -141,6 +141,17 @@ _CLAIM_SQL = (
 # the second re-evaluates against the committed row, matches nothing, and updates zero
 # rows. Exactly one caller can then win the re-claim; the losers get the ordinary 409.
 # That is why retirement is not "read the timestamp and decide in the service".
+#
+# DELIBERATELY narrower than _TERMINAL_STATUSES: captured_unapplied is terminal for
+# REPLAY purposes (a finished intent, so claim_or_branch answers it instead of 409ing
+# forever) but NOT listed here for RETIREMENT. The card was actually charged and the
+# balance was not; retiring the key would let a client's later retry mint a SECOND
+# real charge under the same logical intent while the first sits unresolved -- exactly
+# the double charge D19 exists to prevent. An expired captured_unapplied row keeps
+# its key and keeps replaying 424/0 past the TTL (see
+# test_expired_captured_unapplied_never_retires_or_double_charges) until the D3d
+# resolution path (payment_applications) or an operator resolves it; it does not
+# silently age into a fresh charge attempt like a genuine "failed" or "returned".
 _RETIRE_SQL = (
     "UPDATE payments SET idempotency_key = NULL, updated_at = now() "
     "WHERE idempotency_key = %s "
