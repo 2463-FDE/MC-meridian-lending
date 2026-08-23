@@ -88,13 +88,18 @@ a disconnected framework, a mock-only path, or an agent label without real tool 
 
 ## Blockers / open questions
 
-- **No blockers.** The Bedrock escalation closed the day it was raised, and the credential path was
-  then **proven with a live call** — `anthropic==0.116.0`'s `AnthropicBedrock` does honour
+- **Bedrock: no external blocker.** The escalation closed the day it was raised, and the credential
+  path was then **proven with a live call** — `anthropic==0.116.0`'s `AnthropicBedrock` does honour
   `AWS_BEARER_TOKEN_BEDROCK`.
-- **Two things still owed on Bedrock, neither blocking:** the freeze wants an **exact-SHA proof
-  artifact**, which a working call is not; and **no test covers the credential path**, so CI cannot
-  catch a regression in it — the httpx cross-step defect is the precedent for a green local run
-  proving nothing about a clean environment.
+- **Delivery: blocked on recovering PR #57 to `main`.** Freeze requirement 7 — the bounded
+  read-only retrieval tool the model actually invokes — is not on the deliverable branch. See
+  "Drain state" below; this is first on the critical path and nothing else in this plan
+  substitutes for it.
+- **Two things still owed on Bedrock, neither blocking:** the freeze wants an exact-SHA proof
+  artifact (defined in `docs/handoffs/2026-08-21-freeze-scope-response.md`, "Exact-SHA proof
+  artifact — definition" — not restated here); and **no test covers the credential path**, so CI
+  cannot catch a regression in it — the httpx cross-step defect is the precedent for a green local
+  run proving nothing about a clean environment.
 - **Two questions out to the requester, both with a stated fallback** so neither stops work:
   which flow is the demo (gap 1 — we proceed on `explain`), and whether "add no extra agents" caps
   the total at one (we proceed as *add none*).
@@ -113,9 +118,11 @@ a disconnected framework, a mock-only path, or an agent label without real tool 
 ## How to verify / run
 
 ```bash
-cd services/origination-service && python -m pytest -q          # service suite
+./scripts/check_doc_paths.sh                                     # repo root; same invocation CI uses
+
+cd services/origination-service
+python -m pytest -q          # service suite
 python -m pytest tests/test_llm_client.py tests/test_prompt_contracts.py -q   # content exclusion + the no-tool_choice assertion
-./scripts/check_doc_paths.sh                                     # same invocation CI uses
 ```
 
 **Current result: not run this session.** Nothing was rebuilt or re-tested — the session produced

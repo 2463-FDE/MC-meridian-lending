@@ -92,12 +92,36 @@ in the repo asserted the path — it worked by inheritance rather than by design
 **Two things still follow from that, and neither is a blocker:**
 
 - **The freeze wants an *exact-SHA proof*, not a working call.** A successful run is what unblocks
-  the work; a captured, reproducible artifact pinned to a commit is the deliverable. That stays on
-  the list.
+  the work; a captured, reproducible artifact pinned to a commit is the deliverable. Defined below.
 - **A green local run proves nothing about a clean environment** — the lesson from the httpx
   cross-step defect, where a gate passed locally and died at collection in CI. Since no test covers
   the credential path, CI will not catch a regression in it. Worth one test that asserts the provider
   and region actually selected, rather than trusting the env.
+
+### Exact-SHA proof artifact — definition
+
+Built as `services/origination-service/scripts/bedrock_proof.py` on `feat/bedrock-pin` (PR #59,
+open, not yet on `main`). This is the definition; nothing else in either freeze doc should restate
+its shape — point here instead.
+
+- **Producing command:** `cd services/origination-service && PYTHONPATH=. python
+  scripts/bedrock_proof.py [--out PATH] [--allow-dirty]`. Refuses to run off the Bedrock path or
+  with no AWS credential in the environment; runs against a dirty tree only with `--allow-dirty`,
+  and the receipt then records `exact_sha_proof: false` rather than claiming more than the run
+  supports.
+- **Storage path:** `logs/bedrock-proof-<sha>.json` by default (`logs/` is gitignored — a receipt is
+  a run artifact, not source); also printed to stdout.
+- **Shape:** JSON with `artifact: "bedrock-exact-sha-proof"`, `generated_at`, `commit`,
+  `tree_clean`, `exact_sha_proof` (true only when the tree was clean **and** the call succeeded), a
+  `selection` block (`provider`, `model`, `aws_region`, `credential_form` — the name of the env var
+  that supplied credentials, e.g. `AWS_BEARER_TOKEN_BEDROCK`), and a `call` block with the
+  provider-echoed response metadata.
+- **Redaction rules:** the credential *value* never enters the receipt, only the name of the
+  environment variable that supplied it. The applicant is synthetic and passes through the real
+  redaction path. The model's response text is recorded as a length and a SHA-256, never verbatim.
+- **What it proves:** the call goes through `ClaudeClient.summarize_application()` — the production
+  entry point, not a raw adapter call — so the receipt also covers the retry policy, schema
+  validation/guards, and the `llm_provider`/`execution_mode` trace stamps.
 
 ### Legacy vs current Bedrock client — noted, deliberately not changed
 
@@ -135,17 +159,24 @@ the mitigation and it was not performed. Recovery: a fresh PR from `feat/policy-
 onto `main`, since the stale base branch is now behind `main` by the whole week-7 reconciliation set
 and re-merging it would regress `main`.
 
-**#57 is stacked on #56.** #56 must reach `main` first; #57's base then auto-retargets. **This exact
-shape already cost this repo once** — #45 and #46 merged into *branches* rather than `main` and
-nearly stranded the D4 alert and the D6 runbook. Check #57's base immediately before merging it
-rather than trusting the default.
+**#57 was stacked on #56.** The plan was: #56 reaches `main` first, #57's base auto-retargets. It
+did not — the base was never retargeted, and this exact shape had already cost this repo once
+before (#45 and #46 merged into *branches* rather than `main` and nearly stranded the D4 alert and
+the D6 runbook). It is now a third occurrence. See "Outcome, recorded 2026-08-22" above for what
+actually happened and the recovery path — a fresh PR, not a re-merge of this stack.
 
 **The ADR collision resolves itself as a consequence.** #57 sits last in the chain, so #53 lands
 first and keeps `adr/0018-interim-handling-of-a-double-charged-borrower.md`. **#57 renumbers to
 `adr/0019-policy-retrieval-on-the-assistant-loop.md`**, moving its `scripts/spec_gate_map.txt` row
 with it. That agrees with the lower-PR-keeps-the-number rule, so there is nothing to arbitrate.
 
-### Merge order
+### Merge order — Historical, superseded 2026-08-22
+
+This was the plan going in. Items 1–3 ran as written and are done. Item 4 is what the drain
+actually hit: #57's base was never retargeted, so it merged into the stale `chore/rag-eval-import-seam`
+instead of `main` (see "Outcome, recorded 2026-08-22" above). Do not follow item 4 — it describes a
+procedure that already failed once. The live recovery path is a fresh PR from `feat/policy-retrieval`
+rebased onto `main`, with the base read from the API immediately before merging, not this list.
 
 1. **#54** — the only one whose absence lets a defect ship silently. First regardless. *(Done,
    `9cfce81`.)*
@@ -153,9 +184,9 @@ with it. That agrees with the lower-PR-keeps-the-number rule, so there is nothin
    #53 kept the number as predicted.)*
 3. **#56** — the `rag_eval` import seam. Load-bearing: CI's backend import smoke does not tolerate
    failures, and an unimportable `rag_eval` makes the policy tool abstain rather than retrieve, which
-   their criteria fail as a mock-only path.
-4. **#57** — confirm the base retargeted to `main`, renumber the ADR to 0019 with its gate-map row,
-   then merge. This is requirement 7 arriving on `main`.
+   their criteria fail as a mock-only path. *(Done, `fb1fc66`.)*
+4. ~~**#57** — confirm the base retargeted to `main`, renumber the ADR to 0019 with its gate-map row,
+   then merge.~~ Did not happen this way — superseded, see above.
 
 ## Secondary risks on the path
 
