@@ -84,6 +84,30 @@ nothing shows the request happening. That absence is this plan's subject.
 8. **Wire the demo into `docker-compose.demo.yml`.** Reproducible demo steps cannot rest on a
    manual `.env` edit.
 
+9. **Read "retain no identifiers" as PII and sensitive data, and keep the two internal
+   surrogate keys.** The requirement bans retaining identifiers. Two internal keys are on
+   every span: `request_id` — the decision idempotency key forwarded to decision-service,
+   so a span ties to the exact `decision_events` row the run created or replayed — and
+   `application_id`. Neither is client identity: they are our own surrogate keys, they
+   carry no applicant attribute, and they are meaningless outside this database. Dropping
+   them would make the trace unjoinable to the business record it describes, which is the
+   property that makes it an audit artifact rather than a latency chart, and it would
+   remove the step the demo runs on (the officer screen's `request_id` opens the root
+   trace). So the clause we adhere to is: **no personal or sensitive data on a span —
+   no name, date of birth, address, SSN, PAN, email, employer, no prompt or response
+   text, no retrieved passage, no model-authored query, no credential, no raw provider
+   error — and internal surrogate keys are retained deliberately.** This reading is
+   disclosed at handover rather than left implicit, because a reader applying the literal
+   reading would score the two keys as a violation.
+
+   Enforced, not asserted. Assistant spans carry no `inputs` and no `outputs` at all;
+   metadata is enum codes (`outcome`, `policy_band`, `record_status`, `status`,
+   `reason_codes`), counters (`step`, `steps_used`, `max_steps`), booleans and the two
+   keys. `_result_metadata` (`app/assistant.py`) is the enum-only projection of a tool
+   result, and the `llm.*` spans are allowlists (`app/llm/client.py`,
+   `app/llm/transport.py`). Verified against the live project on 2026-08-23 by reading
+   back every span of a real Bedrock run.
+
 ## 4. What the migration does not change, and the four interlocks it does
 
 The regulated output is deterministic today, and it is established below and after the loop
@@ -134,7 +158,22 @@ Each slice is one pull request, at or under 800 changed lines, with at most two 
 - The week-3 alternatives round recommended a self-hosted trace backend on data-residency
   grounds, and this platform sends spans to LangSmith. The mitigation is the payload
   allowlisting at `app/llm/client.py:39-75` and `app/llm/transport.py:61-140`, which limits
-  what leaves the boundary to enumerations, counts and hashes.
+  what leaves the boundary to enumerations, counts, hashes and the two surrogate keys of
+  decision 9. Two exceptions to state plainly rather than imply, both found by reading a
+  live run back on 2026-08-23:
+  - `LLM_TRACE_CONTENT=true` adds the prompt (`system`, `messages`), the raw provider
+    response (`text`) and the validated body (`result`) to the spans. It defaults to
+    false and **must be false for the graded run** — with it on, the trace retains
+    prompts and responses, which the requirement forbids outright.
+  - The allowlists shape SUCCESSFUL payloads only, so they never covered the error path.
+    A provider 400 put a 1606-character traceback carrying the provider's own
+    `{'message': ...}` body on the `llm.complete` span. Fixed by raising with
+    `from None` at both translation sites in `app/llm/adapter.py`, with
+    `tests/test_trace_error_boundary.py` asserting the rendered traceback.
+- The trace root opens inside `assistant.run()`, so "entry" means entry to the assistant,
+  not the officer's HTTP request. The route wrapper (`app/main.py::_run_assistant`) and the
+  gateway hop are not spans, so a 404/422/503 refused before the loop starts produces no
+  trace at all.
 - The model is Claude Haiku 4.5, not an Opus- or Sonnet-tier model.
 
 ## 7. Verification
