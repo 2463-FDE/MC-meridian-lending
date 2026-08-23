@@ -463,6 +463,17 @@ def test_rung_not_ready_when_status_has_no_default(monkeypatch):
     assert err == "schema_not_ready:payments.status"
 
 
+def test_rung_not_ready_when_status_default_merely_contains_captured(monkeypatch):
+    """An unanchored substring match ('captured' in default) would pass 'recaptured' or
+    'uncaptured' -- a wrong default that happens to share the substring. The rung must
+    compare the full rendered expression, not just contain the right word."""
+    ok, err = _probe_with(
+        monkeypatch, {"status_contract": ("NO", "'recaptured'::text")}
+    )
+    assert ok is False
+    assert err == "schema_not_ready:payments.status"
+
+
 def test_rung_not_ready_when_the_index_predicate_is_on_the_wrong_column(monkeypatch):
     """A predicate containing "IS NOT NULL" anywhere is not enough -- it must be on the
     column this index is supposed to be partial on, or a drifted index (e.g. a stray
@@ -474,6 +485,28 @@ def test_rung_not_ready_when_the_index_predicate_is_on_the_wrong_column(monkeypa
                 True,
                 "payments",
                 "(loan_id IS NOT NULL)",
+                "idempotency_key",
+            )
+        },
+    )
+    assert ok is False
+    assert err == "schema_not_ready:payments_idempotency_key_uniq"
+
+
+def test_rung_not_ready_when_indexed_column_is_null_and_another_is_not_null(
+    monkeypatch,
+):
+    """A loose ".*IS NOT NULL" gap would pass a compound predicate where the INDEXED
+    column is checked IS NULL and an unrelated column is IS NOT NULL later in the same
+    expression -- the column name and "IS NOT NULL" must be adjacent, not just both
+    present somewhere in the predicate."""
+    ok, err = _probe_with(
+        monkeypatch,
+        {
+            "payments_idempotency_key_uniq": (
+                True,
+                "payments",
+                "(idempotency_key IS NULL) OR (processor_ref IS NOT NULL)",
                 "idempotency_key",
             )
         },

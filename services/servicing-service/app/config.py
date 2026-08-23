@@ -174,9 +174,12 @@ def _payments_idempotency_ready(cur) -> tuple[bool, str | None]:
     if row is None:
         return False, "schema_not_ready:payments.status"
     status_nullable, status_default = row
-    # column_default is the quoted+cast expression ('captured'::text), not the bare
-    # value -- match the substring, not a prefix.
-    if status_nullable != "NO" or "captured" not in (status_default or ""):
+    # column_default is the quoted+cast expression ('captured'::text). An unanchored
+    # substring match ('captured' in status_default) would also pass a wrong default
+    # like 'recaptured' or 'uncaptured' -- exactly the class of loose match this rung
+    # exists to refuse. Compare the FULL expression, since status's data_type is
+    # already asserted 'text' above and so is its rendering.
+    if status_nullable != "NO" or status_default != "'captured'::text":
         return False, "schema_not_ready:payments.status"
     for index, column in _IDEMPOTENCY_INDEXES:
         cur.execute(
@@ -200,12 +203,15 @@ def _payments_idempotency_ready(cur) -> tuple[bool, str | None]:
             return False, f"schema_not_ready:{index}"
         # The predicate is what makes the arbiter inferable by the shipped
         # ON CONFLICT ... WHERE clause; a non-partial index of the same name would
-        # make that insert raise. A bare "IS NOT NULL" substring check would also pass
-        # a predicate on a DIFFERENT column (e.g. "loan_id IS NOT NULL" on an index that
-        # otherwise covers idempotency_key) -- bind the check to the column this index
-        # is supposed to be partial on, same as migration 0018's own assertion.
+        # make that insert raise. Require the column IMMEDIATELY (only whitespace
+        # between) followed by IS NOT NULL, not just present somewhere before it -- a
+        # loose ".*" gap would also pass a predicate where this column is checked IS
+        # NULL and an unrelated column is IS NOT NULL later in the same expression, or
+        # a predicate on a different column entirely (e.g. "loan_id IS NOT NULL" on an
+        # index that otherwise covers idempotency_key). Matches pg_get_expr's stable
+        # "(col IS NOT NULL)" rendering, same as migration 0018's own assertion.
         if predicate is None or not re.search(
-            rf"\b{re.escape(column)}\b.*IS NOT NULL", predicate
+            rf"\b{re.escape(column)}\s+IS\s+NOT\s+NULL\b", predicate
         ):
             return False, f"schema_not_ready:{index}"
     return True, None

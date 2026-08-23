@@ -92,8 +92,12 @@ BEGIN
                 'captured';
         END IF;
         -- information_schema.columns.column_default is the quoted+cast expression
-        -- ('captured'::text), not the bare value -- match the substring, not a prefix.
-        IF status_default IS NULL OR status_default NOT LIKE '%captured%' THEN
+        -- ('captured'::text), not the bare value -- an unanchored substring match (e.g.
+        -- '%captured%') would also pass a wrong default like 'recaptured' or 'uncaptured',
+        -- exactly the class of loose match this migration exists to refuse. Compare the
+        -- FULL expression, since status's data_type is already asserted 'text' above and
+        -- so is its rendering.
+        IF status_default IS DISTINCT FROM $$'captured'::text$$ THEN
             RAISE EXCEPTION
                 'payments.status has default %, expected captured', coalesce(status_default, '<none>');
         END IF;
@@ -171,8 +175,12 @@ BEGIN
         -- spell the SAME predicate in its ON CONFLICT target or Postgres cannot infer
         -- the arbiter. A missing or different predicate here means the shipped insert
         -- raises "no unique or exclusion constraint matching the ON CONFLICT
-        -- specification" on first use.
-        IF pred IS NULL OR pred NOT LIKE '%' || col || '%IS NOT NULL%' THEN
+        -- specification" on first use. Require the column IMMEDIATELY (only whitespace
+        -- between) followed by IS NOT NULL, not just present somewhere before it -- a
+        -- wildcard gap ('%col%IS NOT NULL%') would also pass a predicate where col is
+        -- checked IS NULL and an unrelated column is IS NOT NULL later in the same
+        -- expression, matching pg_get_expr's stable "(col IS NOT NULL)" rendering.
+        IF pred IS NULL OR pred NOT LIKE '%' || col || ' IS NOT NULL%' THEN
             RAISE EXCEPTION
                 'index % has predicate %, expected a partial index on (% IS NOT NULL)',
                 idx, coalesce(pred, '<none>'), col;
