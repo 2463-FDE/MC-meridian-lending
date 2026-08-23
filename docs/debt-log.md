@@ -438,6 +438,23 @@ until now. Same bookkeeping gap D3 had; this drains one of the collisions the D3
 
 ---
 
+## Payment-idempotency review round 2026-08-23 — new entry
+
+### D31: Schema-readiness probes for a fresh column are unqualified by schema in three migrations
+
+| Field | Value |
+|---|---|
+| **ID** | D31 |
+| **Finding** | The pattern D19's own migration was just fixed for (a readiness/migration probe against `information_schema.columns` filtered by `table_name`/`column_name` alone, with no `table_schema = current_schema()`) also exists, unfixed, in three earlier migrations, each for a different feature. `information_schema.columns` spans every schema a connection can see, so a same-named table/column in another schema (a decoy, a restored snapshot, a per-tenant schema) is reachable by any of these queries — passing a bad schema or failing a good one, the same failure mode named in the D19 payments-idempotency review round that prompted this entry. |
+| **Location** | `db/migrations/0011_applicants_dob_readable.sql:104` (`t.relname = 'applicants'`, no `nspname`/`current_schema()` qualifier on the `pg_class` join); `db/migrations/0013_disclosures_document_body.sql:45-46` (`information_schema.columns` filtered on `table_name = 'disclosures' AND column_name = 'document_body'`); `db/migrations/0014_loans_note_rate.sql:35-36` (`table_name = 'loans' AND column_name = 'note_rate'`). |
+| **Trigger** | A database that carries a second schema with a same-named table (`applicants`, `disclosures`, or `loans`) — a staging copy, a restored snapshot, a per-tenant schema — while migrating or checking readiness. |
+| **Risk** | **Low.** No reproduction against a real decoy schema for these three specifically (unlike D19's own probe, which was proven this way — see `test_the_guards_read_their_own_schema_not_a_same_named_object_elsewhere`, `services/payment-service/tests/test_idempotency_ddl_live.py`). Scored Low rather than Medium because none of the three guards money movement directly (DOB display, disclosure document body, and the note-rate schedule input are all read-path or disclosure-path, not payment capture), and this repo's docker-compose stack has no per-tenant or decoy schema in normal operation. |
+| **Attribution** | **Ours.** Each migration was written by this program (0011, 0013, 0014), and each copied the same unqualified query shape — the same shape D19's own migration 0018 shipped with and a 2026-08-23 review round on `feat/payment-idempotency-capture` (finding M1) then found and fixed there, plus a fourth sibling in `servicing-service/app/config.py`'s `loans.note_rate` readiness probe (same review round). Found while widening context for that fix; not fixed here because migrations 0011/0013/0014 are unrelated features (applicant DOB readability, disclosure document storage, servicing note-rate) and touching them is out of scope for a payments-idempotency PR. |
+| **Mitigation Path** | Add `table_schema = current_schema()` (or the `pg_class`/`nspname` equivalent for 0011's `relname` join) to each of the three queries, following the exact fix already applied to migration 0018 and both services' `_payments_idempotency_ready`/`database_reachable` probes. Small, mechanical, one migration file at a time — each is independent and does not need to land together. |
+| **Status** | Open; documented 2026-08-23; not fixed. |
+
+---
+
 **Week 5 status changes (2026-08-02, spec-only — designs recorded, nothing built):**
 **D19** measured and design recorded (client-minted key + partial unique index + insert-first
 claim before the processor call). **D13** design recorded, superseding ADR 0003 — CVV dropped
