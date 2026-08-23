@@ -108,7 +108,7 @@ def _redacted_charge_req(pan, cvv, ssn, amount, loan_id) -> dict:
 # routinely outlives the window; retiring its key would free the value for a NEW charge
 # while the original intent is still live -- reintroducing the exact double charge this
 # closes. So an unfinished intent keeps its key past the window and answers 409.
-_TERMINAL_STATUSES = ("captured", "failed", "settled", "returned")
+_TERMINAL_STATUSES = ("captured", "captured_unapplied", "failed", "settled", "returned")
 
 # What charge() reports back to the route, which maps each to a status code.
 CLAIMED = "claimed"  # we own this intent; proceed
@@ -338,7 +338,14 @@ def charge(
         )
         return {
             "loan_id": loan_id,
-            "amount": float(existing["amount"] or 0.0) if outcome == REPLAY else 0.0,
+            # `amount` is what the CARD captured, not what the balance absorbed. This
+            # route is a second writer of the SAME payments table (D23) -- a row this
+            # replay reads back may have been captured_unapplied by payment-service's
+            # handler, so only a status of "captured" means the balance genuinely got
+            # this amount.
+            "amount": float(existing["amount"] or 0.0)
+            if outcome == REPLAY and existing["status"] == "captured"
+            else 0.0,
             # No balance read on a non-capture: this request moved no money, and
             # reporting a balance it did not produce would invite the caller to treat
             # a refusal as a settled figure.

@@ -49,8 +49,16 @@ class FakePayments:
 
     def _insert(self, params):
         (
-            loan_id, pan, cvv, amount, amount_minor, method,
-            key, ttl_hours, fingerprint, processor_key,
+            loan_id,
+            pan,
+            cvv,
+            amount,
+            amount_minor,
+            method,
+            key,
+            ttl_hours,
+            fingerprint,
+            processor_key,
         ) = params
         if self.claim_barrier is not None:
             # Hold every caller until all of them have built their INSERT, so the
@@ -61,9 +69,15 @@ class FakePayments:
             if key is not None and any(r["idempotency_key"] == key for r in self.rows):
                 return []
             row = {
-                "id": self._next_id, "loan_id": loan_id, "pan": pan, "cvv": cvv,
-                "amount": amount, "amount_minor": amount_minor, "method": method,
-                "status": "processing", "idempotency_key": key,
+                "id": self._next_id,
+                "loan_id": loan_id,
+                "pan": pan,
+                "cvv": cvv,
+                "amount": amount,
+                "amount_minor": amount_minor,
+                "method": method,
+                "status": "processing",
+                "idempotency_key": key,
                 "request_fingerprint": fingerprint,
                 "processor_idempotency_key": processor_key,
                 "idempotency_expires_at": self.now + timedelta(hours=ttl_hours),
@@ -131,8 +145,12 @@ def _key():
 
 def _charge(key, *, loan_id=4471, amount=250.00, pan="4111111111111111", method="card"):
     return payments.charge(
-        loan_id=loan_id, pan=pan, cvv="123", amount=amount,
-        method=method, idempotency_key=key,
+        loan_id=loan_id,
+        pan=pan,
+        cvv="123",
+        amount=amount,
+        method=method,
+        idempotency_key=key,
     )
 
 
@@ -147,6 +165,34 @@ def test_r1_same_key_same_body_charges_once_and_replays(fake_db):
     assert second["idempotency"] == payments.REPLAY
     assert second["payment_id"] == first["payment_id"]
     assert second["status"] == "captured"
+
+
+def test_r1b_replay_after_captured_unapplied_replays_the_unapplied_state(
+    fake_db, monkeypatch
+):
+    """B1: the first call's apply to servicing fails -- captured_unapplied, 424.
+    The row's FINALIZE write must persist that actual status, not a hardcoded
+    "captured": a replay reconstructs its response from the row (see charge()'s
+    REPLAY branch), so a wrongly-persisted "captured" row turns the replay into a
+    200 reporting the full amount applied, silently losing the 424 signal.
+    """
+    key = _key()
+
+    class _Denied:
+        status_code = 403
+
+    monkeypatch.setattr(payments.httpx, "post", lambda *a, **k: _Denied())
+
+    first = _charge(key)
+    assert first["status"] == "captured_unapplied"
+    assert first["applied_amount"] == 0.0
+
+    second = _charge(key)
+    assert second["idempotency"] == payments.REPLAY
+    assert second["status"] == "captured_unapplied", (
+        "a replay of a request whose apply failed must not report a captured success"
+    )
+    assert second["applied_amount"] == 0.0
 
 
 def test_r2_two_simultaneous_identical_requests_capture_once(fake_db):

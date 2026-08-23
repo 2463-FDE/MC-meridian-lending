@@ -154,7 +154,7 @@ def _redacted_charge_req(pan, cvv, ssn, amount, loan_id) -> dict:
 # routinely outlives the window; retiring its key would free the value for a NEW charge
 # while the original intent is still live -- reintroducing the exact double charge this
 # closes. So an unfinished intent keeps its key past the window and answers 409.
-_TERMINAL_STATUSES = ("captured", "failed", "settled", "returned")
+_TERMINAL_STATUSES = ("captured", "captured_unapplied", "failed", "settled", "returned")
 
 # What charge() reports back to the route, which maps each to a status code.
 CLAIMED = "claimed"  # we own this intent; proceed
@@ -396,10 +396,13 @@ def charge(
             "loan_id": loan_id,
             # A replay reconstructs its response from the persisted row rather than
             # from a stored response snapshot, which would be a second source of truth
-            # for the same facts.
+            # for the same facts. `amount` is what the CARD captured, not what the
+            # balance absorbed -- only a status of "captured" means both happened, so
+            # a captured_unapplied replay must report 0.0 the same as its original
+            # 424 did, not the card amount.
             "status": existing["status"] if outcome == REPLAY else outcome,
             "applied_amount": float(existing["amount"] or 0.0)
-            if outcome == REPLAY
+            if outcome == REPLAY and existing["status"] == "captured"
             else 0.0,
             "request_id": request_id,
             "idempotency": outcome,
@@ -416,11 +419,11 @@ def charge(
     # and a row left `processing` would hold its key forever, so every later retry of a
     # finished payment would answer 409 instead of replaying.
     #
-    # Residual: the ROW cannot distinguish captured-and-applied from captured-unapplied,
-    # so a replay of a request that first returned 424 returns a 200 replay instead.
-    # Closing that needs the payment_applications record (spec D3(c): "unapplied is the
-    # absence of a record"), which is D3d's change, not this one.
-    db.query(_FINALIZE_SQL, ("captured", payment_id))
+    # Persist the COMPUTED status, not a hardcoded "captured": a replay reconstructs
+    # its response from this row (see the REPLAY branch above), so writing "captured"
+    # unconditionally here made a replay of a request that first returned 424 come
+    # back 200 with the full amount, silently losing the unapplied signal.
+    db.query(_FINALIZE_SQL, (status, payment_id))
     # The OUTCOME line: after the INSERT and after the apply attempt, carrying
     # what actually happened. Same id as the entry line and as servicing's own
     # line, so both halves of the span come back from one field query.

@@ -220,3 +220,35 @@ def test_balance_apply_payment_own_log_line_carries_the_span(monkeypatch):
     assert parsed[0]["loan_id"] == "1"
     assert parsed[0]["payment_id"] == str(insert_id) == str(result["payment_id"])
     assert parsed[0]["outcome"] == "captured"
+
+
+def test_replay_of_a_row_captured_unapplied_by_the_other_writer_reports_zero(
+    monkeypatch,
+):
+    """B1 sibling: this route is a second writer of the SAME payments table (D23).
+
+    A row this route replays may have been captured_unapplied by payment-service's
+    handler -- `amount` is what the CARD captured, not what the balance absorbed, so
+    reporting it on a replay of an unapplied row would tell the caller money moved
+    that never did.
+    """
+    monkeypatch.setattr(
+        payments,
+        "claim_or_branch",
+        lambda *a, **k: (
+            payments.REPLAY,
+            7,
+            {"status": "captured_unapplied", "amount": 250.0},
+        ),
+    )
+
+    result = payments.charge(
+        loan_id=1,
+        pan="4111111111111111",
+        cvv="123",
+        amount=250.0,
+        idempotency_key=_IDEM_KEY,
+    )
+
+    assert result["idempotency"] == payments.REPLAY
+    assert result["amount"] == 0.0
