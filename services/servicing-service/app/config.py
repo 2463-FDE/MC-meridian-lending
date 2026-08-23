@@ -377,3 +377,32 @@ def duplicate_suspect_window_configured() -> bool:
     except ValueError:
         return False
     return 0 < seconds <= MAX_DUPLICATE_SUSPECT_WINDOW_SECONDS
+
+
+# D19 replay window. Client answer 2026-08-17: "keep it configurable, keep 24 hours as
+# the working value -- that number is our product choice, not an industry default. If
+# real retry behaviour argues for a different figure later, that is a configuration
+# change rather than a rework."
+#
+# The window governs how long a FINISHED payment's key stays claimable for replay, not
+# how long the system waits for a payment: an intent still in flight keeps its key
+# however old it is (an ACH row sits `submitted` for days), because releasing it would
+# free the key for a new charge while the original is still live.
+#
+# Deliberately NOT in missing_required_secrets(): unlike PROCESSOR_API_KEY there is a
+# correct default, so an unset value is not a misconfiguration and must not read as
+# unhealthy. A non-numeric or non-positive value IS a misconfiguration and falls back to
+# the default rather than silently disabling the window (a zero or negative TTL would
+# expire every key instantly and reinstate the double charge).
+PAYMENT_IDEMPOTENCY_TTL_HOURS_DEFAULT = 24
+
+
+def payment_idempotency_ttl_hours() -> int:
+    raw = os.getenv("PAYMENT_IDEMPOTENCY_TTL_HOURS", "")
+    if not raw:
+        return PAYMENT_IDEMPOTENCY_TTL_HOURS_DEFAULT
+    try:
+        hours = int(raw)
+    except ValueError:
+        return PAYMENT_IDEMPOTENCY_TTL_HOURS_DEFAULT
+    return hours if hours > 0 else PAYMENT_IDEMPOTENCY_TTL_HOURS_DEFAULT

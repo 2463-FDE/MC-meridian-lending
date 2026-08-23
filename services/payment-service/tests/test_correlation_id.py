@@ -24,6 +24,12 @@ from fastapi.testclient import TestClient
 from app import authz, config, payments
 from app.main import app
 
+# D19: the Idempotency-Key is required and client-minted (ADR 0013 Decision 1), so every
+# call into the charge path has to carry one. A fixed valid UUID keeps these cases
+# deterministic; the idempotency behaviour itself is covered by the R-vector suite.
+_IDEM_KEY = "11111111-1111-4111-8111-111111111111"
+
+
 # request_id, loan_id, payment_id, outcome -- the documented order (spec D1(c)).
 FIELDS = re.compile(
     r"request_id=(?P<request_id>\S+) "
@@ -81,6 +87,7 @@ def test_supplied_request_id_used_verbatim_on_every_line(monkeypatch):
         cvv="123",
         amount=50.0,
         request_id="abc123",
+        idempotency_key=_IDEM_KEY,
     )
 
     parsed = _fields(lines)
@@ -97,7 +104,7 @@ def test_generated_request_id_is_one_id_shared_by_the_whole_span(monkeypatch):
     captured = _stub_charge_path(monkeypatch)
     lines = _capture_log(monkeypatch)
 
-    payments.charge(loan_id=1, pan="4111111111111111", cvv="123", amount=50.0)
+    payments.charge(loan_id=1, pan="4111111111111111", cvv="123", amount=50.0, idempotency_key=_IDEM_KEY)
 
     ids = {p["request_id"] for p in _fields(lines)}
     assert len(ids) == 1, f"the span must share one id, got {ids}: {lines}"
@@ -126,6 +133,7 @@ def test_unreachable_failure_line_carries_the_same_id(monkeypatch):
         cvv="123",
         amount=50.0,
         request_id="abc123",
+        idempotency_key=_IDEM_KEY,
     )
 
     assert out["status"] == "captured_unapplied"
@@ -159,6 +167,7 @@ def test_no_line_claims_success_before_the_insert(monkeypatch):
             cvv="123",
             amount=50.0,
             request_id="abc123",
+            idempotency_key=_IDEM_KEY,
         )
     except RuntimeError:
         pass
@@ -185,6 +194,7 @@ def test_every_payment_path_line_carries_the_four_named_fields(monkeypatch):
         cvv="123",
         amount=50.0,
         request_id="abc123",
+        idempotency_key=_IDEM_KEY,
     )
 
     assert len(_fields(lines)) == len(lines), (
@@ -208,7 +218,9 @@ def test_route_forwards_the_x_request_id_header_to_charge(monkeypatch):
 
     seen = {}
 
-    def fake_charge(loan_id, pan, cvv, amount, ssn, name, method, request_id=None):
+    def fake_charge(
+        loan_id, pan, cvv, amount, ssn, name, method, request_id=None, **kwargs
+    ):
         seen["request_id"] = request_id
         return {
             "payment_id": 1,
@@ -222,7 +234,7 @@ def test_route_forwards_the_x_request_id_header_to_charge(monkeypatch):
     resp = TestClient(app).post(
         "/payments",
         json={"loan_id": 1, "amount": 50.0},
-        headers={
+        headers={"Idempotency-Key": _IDEM_KEY, 
             "X-User-Role": "csr",
             "X-Request-Id": "abc123",
         },
@@ -247,6 +259,7 @@ def test_hostile_request_id_is_not_logged_verbatim(monkeypatch):
         cvv="123",
         amount=50.0,
         request_id="abc\nINFO 2026-08-13 forged line 4111111111111111",
+        idempotency_key=_IDEM_KEY,
     )
 
     joined = "\n".join(lines)
@@ -287,6 +300,7 @@ def test_pii_shaped_request_id_reaches_neither_the_log_nor_servicing(monkeypatch
             cvv="123",
             amount=50.0,
             request_id=hostile,
+            idempotency_key=_IDEM_KEY,
         )
 
         joined = "\n".join(lines)
@@ -327,6 +341,7 @@ def test_replaced_request_id_is_returned_to_the_caller(monkeypatch):
         cvv="123",
         amount=50.0,
         request_id=hostile,
+        idempotency_key=_IDEM_KEY,
     )
 
     assert "request_id" in result, "caller has no way to recover the effective id"

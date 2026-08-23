@@ -11,7 +11,13 @@ import time
 
 import pytest
 
+from fastapi import Response
+
 from app import config
+
+# D19: the Idempotency-Key is required and client-minted (ADR 0013 Decision 1).
+_IDEM_KEY = "11111111-1111-4111-8111-111111111111"
+
 
 
 @pytest.fixture(autouse=True)
@@ -313,7 +319,12 @@ def test_payments_503_without_processor_key(monkeypatch):
     from app.schemas import PaymentIn
 
     with pytest.raises(HTTPException) as exc_info:
-        post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
+        post_payment(
+            PaymentIn(loan_id=1, amount=100.0),
+            Response(),
+            x_user_role="csr",
+            idempotency_key=_IDEM_KEY,
+        )
     assert exc_info.value.status_code == 503
 
 
@@ -335,7 +346,12 @@ def test_payments_allowed_with_processor_key(monkeypatch):
     from app.routers.payments import post_payment
     from app.schemas import PaymentIn
 
-    out = post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
+    out = post_payment(
+            PaymentIn(loan_id=1, amount=100.0),
+            Response(),
+            x_user_role="csr",
+            idempotency_key=_IDEM_KEY,
+        )
     assert out["status"] == "captured"
 
 
@@ -370,7 +386,12 @@ def test_payments_503_without_internal_service_token(monkeypatch):
     from app.schemas import PaymentIn
 
     with pytest.raises(HTTPException) as exc_info:
-        post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
+        post_payment(
+            PaymentIn(loan_id=1, amount=100.0),
+            Response(),
+            x_user_role="csr",
+            idempotency_key=_IDEM_KEY,
+        )
     assert exc_info.value.status_code == 503
 
 
@@ -382,7 +403,12 @@ def test_payments_503_with_non_ascii_internal_service_token(monkeypatch):
     from app.schemas import PaymentIn
 
     with pytest.raises(HTTPException) as exc_info:
-        post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
+        post_payment(
+            PaymentIn(loan_id=1, amount=100.0),
+            Response(),
+            x_user_role="csr",
+            idempotency_key=_IDEM_KEY,
+        )
     assert exc_info.value.status_code == 503
 
 
