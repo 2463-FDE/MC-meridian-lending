@@ -304,6 +304,88 @@ def test_a_final_action_keeps_the_validated_object_as_content():
     assert json.loads(reply.content) == json.loads(FINAL_ACTION)
 
 
+# --- pinning: the framework tool call must never trust the model's echoed input ----
+
+
+def test_score_application_args_are_pinned_to_the_officers_application_id():
+    """B1: a model-echoed application_id must never reach the framework tool call.
+
+    The model asks to score application 42, but the officer's own request is for
+    application 7. If the seam forwarded the model's `input` unchanged, the framework
+    would dispatch score_application against 7's tool call with application_id 42 --
+    an application the officer never asked about.
+    """
+    model, _ = _model(TOOL_ACTION)  # TOOL_ACTION carries input.application_id == 42
+    reply = model.invoke(
+        [HumanMessage(content=json.dumps({"application_id": 7, "task": "decision"}))]
+    )
+    call = reply.tool_calls[0]
+    assert call["name"] == "score_application"
+    assert call["args"] == {"application_id": 7}
+
+
+def test_score_application_is_redirected_to_a_read_when_task_is_explain():
+    """B1: task=explain must never trigger a fresh credit pull through the seam."""
+    model, _ = _model(TOOL_ACTION)
+    reply = model.invoke(
+        [HumanMessage(content=json.dumps({"application_id": 42, "task": "explain"}))]
+    )
+    call = reply.tool_calls[0]
+    assert call["name"] == "get_decision_record"
+    assert call["args"] == {"application_id": 42}
+
+
+def test_a_repeat_score_request_in_one_run_is_served_from_the_cache():
+    """B1: a second score_application in the same run must not repeat the regulated pull.
+
+    A prior ToolMessage named score_application in history is the signal the tool
+    already ran once (mirrors assistant.run's score_result cache) -- a further request
+    is rewritten to a read instead of a second dispatch.
+    """
+    model, _ = _model(TOOL_ACTION)
+    reply = model.invoke(
+        [
+            HumanMessage(
+                content=json.dumps({"application_id": 42, "task": "decision"})
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "score_application",
+                        "args": {"application_id": 42},
+                        "id": "c1",
+                    }
+                ],
+            ),
+            ToolMessage(
+                content=json.dumps({"status": "recorded", "outcome": "deny"}),
+                tool_call_id="c1",
+                name="score_application",
+            ),
+        ]
+    )
+    call = reply.tool_calls[0]
+    assert call["name"] == "get_decision_record"
+    assert call["args"] == {"application_id": 42}
+
+
+def test_get_decision_record_args_are_also_pinned_to_the_officers_application_id():
+    model, _ = _model('{"action": "tool", "tool": "get_decision_record", "input": {}}')
+    reply = model.invoke(
+        [HumanMessage(content=json.dumps({"application_id": 9, "task": "explain"}))]
+    )
+    call = reply.tool_calls[0]
+    assert call["name"] == "get_decision_record"
+    assert call["args"] == {"application_id": 9}
+
+
+def test_officer_request_missing_application_id_is_refused():
+    model, _ = _model()
+    with pytest.raises(LLMError):
+        model.invoke([HumanMessage(content=json.dumps({"task": "decision"}))])
+
+
 # --- refusals: a path that cannot do the job must not report success ---------------
 
 

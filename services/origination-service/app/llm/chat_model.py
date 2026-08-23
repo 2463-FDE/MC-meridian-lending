@@ -38,6 +38,19 @@ schemas and no tool-use content blocks, so binding tools would accept them and s
 request that constrains nothing — a path reporting success for work it never did. It
 raises instead. Native tool calling is a change to `CompletionRequest`, `build_request`
 and the history redaction rule; it is its own slice, with its own gate.
+
+A third rule closes the gap `assistant.py::run` guards and this seam's translation
+alone does not: that hand-rolled loop never trusts the model's echoed `application_id`
+for a tool call, redirects `score_application` to a read when `task == "explain"`, and
+serves a cached result on a repeat score request so the regulated credit pull happens
+at most once per run. A framework tool executor dispatches whatever `AIMessage.tool_calls`
+this seam emits, so `_to_message` enforces the same three invariants before a tool call
+ever leaves this class: the application id always comes from the officer's own request
+(`_officer_context`, parsed from `request_json`, never from the model's `input`), a
+`score_application` request is rewritten to `get_decision_record` when the task is
+`explain` or a prior `ToolMessage` named `score_application` is already in history
+(`_already_scored`), and only `search_policy`'s model-chosen `query` is still forwarded
+from `input`.
 """
 
 from __future__ import annotations
@@ -203,13 +216,68 @@ class MeridianChatModel(BaseChatModel):
     # ---- ClaudeClient -> framework ------------------------------------------------
 
     @staticmethod
-    def _to_message(action: Any) -> AIMessage:
+    def _officer_context(request_json: str) -> tuple[int, str]:
+        """The officer's real application id and task, never the model's.
+
+        `request_json` is always `json.dumps({"application_id": ..., "task": ...})` —
+        the shape `assistant.run` builds and every caller of this seam sends. Parsed
+        here (not trusted from the model's echoed tool `input`) so a tool call can be
+        pinned to the id the officer actually asked about.
+        """
+        try:
+            parsed = json.loads(request_json)
+        except json.JSONDecodeError as exc:
+            raise LLMError(
+                "the officer's request must be a JSON object with application_id "
+                "and task"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise LLMError(
+                "the officer's request must be a JSON object with application_id "
+                "and task"
+            )
+        app_id = parsed.get("application_id")
+        task = parsed.get("task")
+        if not isinstance(app_id, int) or isinstance(app_id, bool):
+            raise LLMError("the officer's request must carry an integer application_id")
+        if not isinstance(task, str) or not task:
+            raise LLMError("the officer's request must carry a non-empty task")
+        return app_id, task
+
+    @staticmethod
+    def _already_scored(messages: list[BaseMessage]) -> bool:
+        """Whether `score_application` already ran earlier in this message list.
+
+        Mirrors `assistant.run`'s `score_result is None` cache: a `ToolMessage` named
+        `score_application` only exists if the framework already dispatched and got a
+        result back, so a repeat request in the same run must not trigger a second
+        regulated credit pull.
+        """
+        return any(
+            isinstance(m, ToolMessage)
+            and getattr(m, "name", None) == "score_application"
+            for m in messages
+        )
+
+    @staticmethod
+    def _to_message(
+        action: Any, application_id: int, task: str, already_scored: bool
+    ) -> AIMessage:
         """Translate one validated `decision_assistant` action into an `AIMessage`.
 
         A tool action becomes a framework tool call so the caller dispatches through the
         framework rather than by re-parsing text. A final action keeps its validated JSON
         object as the content: the loop validates that answer against the persisted
         decision record, and it must receive the same object the schema admitted.
+
+        `score_application` and `get_decision_record` both take only the application id,
+        and it is always `application_id` — the officer's own request — never the
+        model's echoed `input`, the same pinning `assistant.run` does before dispatching
+        either tool. A `score_application` request is rewritten to `get_decision_record`
+        when `task == "explain"` (read-only: never a fresh credit pull) or when
+        `already_scored` (the cached-result branch: never a second regulated event in
+        one run). `search_policy` is the one tool whose `input` is model-authored
+        (the query) and is forwarded as-is.
         """
         if not isinstance(action, dict):
             raise LLMError(
@@ -220,13 +288,23 @@ class MeridianChatModel(BaseChatModel):
             name = action.get("tool")
             if not isinstance(name, str) or not name:
                 raise LLMError("a tool action must name a tool")
-            raw_input = action.get("input")
+            if name == QUERY_TOOL:
+                raw_input = action.get("input")
+                args: dict[str, Any] = raw_input if isinstance(raw_input, dict) else {}
+            elif name in ("score_application", "get_decision_record"):
+                if name == "score_application" and (
+                    task == "explain" or already_scored
+                ):
+                    name = "get_decision_record"
+                args = {"application_id": application_id}
+            else:
+                raise LLMError(f"decision_assistant requested unknown tool {name!r}")
             return AIMessage(
                 content="",
                 tool_calls=[
                     {
                         "name": name,
-                        "args": raw_input if isinstance(raw_input, dict) else {},
+                        "args": args,
                         "id": f"call_{uuid.uuid4().hex}",
                     }
                 ],
@@ -248,14 +326,15 @@ class MeridianChatModel(BaseChatModel):
         if stop:
             raise LLMError("stop sequences are not supported on this seam")
         request_json, history = self._split(messages)
+        application_id, task = self._officer_context(request_json)
+        already_scored = self._already_scored(messages)
         action = self.client.complete(
             _PROMPT_NAME,
             history=history,
             **{_REQUEST_VAR: request_json},
         )
-        return ChatResult(
-            generations=[ChatGeneration(message=self._to_message(action))]
-        )
+        message = self._to_message(action, application_id, task, already_scored)
+        return ChatResult(generations=[ChatGeneration(message=message)])
 
     def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
         raise NotImplementedError(
