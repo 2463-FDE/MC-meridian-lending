@@ -1,6 +1,8 @@
 # ADR 0018: Interim Handling of a Double-Charged Borrower
 
-- **Status:** **Proposed** — not built. This ADR records the decision and states today's
+- **Status:** **Proposed** — partly built as of 2026-08-23. Decision 1 (prevention at capture)
+  has its schema rung on `main` via PR #63; the capture path that claims the key is not merged,
+  and nothing else in this ADR is built. This ADR records the decision and states today's
   evidence boundary. One question is open with the client and is named in Sign-off status.
 - **Date:** 2026-08-20
 - **Author:** Claude Code
@@ -38,7 +40,7 @@ Stated plainly, because the demo must not imply more than this. Each row is veri
 
 | Question the client asked | What exists today | Evidence |
 |---|---|---|
-| Is a repeated capture prevented? | **No.** Every `POST /payments` inserts a row. No idempotency key, no unique charge reference. | `services/payment-service/app/payments.py:168`; `db/init/001_schema.sql:139` |
+| Is a repeated capture prevented? | **Not yet — half of it is in.** `payments` carries `idempotency_key` under a partial unique index (PR #63), but `POST /payments` still inserts without claiming it, so every retry still inserts a row. | `services/payment-service/app/payments.py:168`; `db/init/001_schema.sql:142`, `:220-221` |
 | Is the borrower notified? | **No, and no channel exists to notify them through.** `applicants.email` and `applicants.phone` are unverified columns, and no outbound sender of any kind exists in any service. | `db/init/001_schema.sql:24-25`; no `smtplib`, `sendgrid`, or `twilio` anywhere under `services/` |
 | Is a refund submitted? | **No.** The payment service has no refund, void, or reversal path, and the processor client exposes none. | `services/payment-service/app/payments.py` |
 | Where does refund status show? | **Nowhere.** No status field, no borrower screen, no officer screen. | — |

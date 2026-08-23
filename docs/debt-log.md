@@ -198,14 +198,14 @@ logged here as pre-existing debt; not fixed, out of scope for "parts we touched"
 | Field | Value |
 |---|---|
 | **ID** | D19 |
-| **Finding** | The `payments` table has no idempotency key / unique charge reference, and `charge()` inserts a row then calls `apply_payment` with no dedupe. A retried/double-submitted `POST /payments` inserts a second row and debits the balance twice. |
-| **Location** | `db/init/001_schema.sql` payments DDL ("no idempotency_key, no unique(charge_ref)"); `payment-service/app/payments.py` L74–79 and `servicing-service/app/payments.py` L74–77; call site `main.py` L68. |
+| **Finding** | `charge()` inserts a row then calls `apply_payment` with no dedupe, so a retried/double-submitted `POST /payments` inserts a second row and debits the balance twice. The `payments` table now carries `idempotency_key` under a partial unique index (PR #63), but no write path claims it, so the constraint cannot fire. |
+| **Location** | `payment-service/app/payments.py` L168 (the unclaimed INSERT) and `servicing-service/app/payments.py`; call site `main.py`. The DDL half is in place: `db/init/001_schema.sql` L142–143 and L220–221, mirrored by `db/migrations/0018_payments_idempotency.sql`. |
 | **Trigger** | Client timeout + retry, or double-click, on a card charge → two `payments` rows, balance debited twice, no key to collapse them. |
 | **Risk** | **High.** Duplicate customer charges; compounded by D2 (no ledger to reconstruct). |
 | **Attribution** | **Pre-existing** (baseline `60d1c37` servicing/payments). Not touched by our features. |
 | **Measured** | **2026-08-02, Week 5, `scripts/repro_double_charge.py`.** Two sequential POSTs of one $100.00 intent: 2 rows, $200.00 captured. Eight concurrent POSTs of the same intent: 8 rows, $800.00 captured, all returning `200`. The client's "customers are just confused" reading does not survive the reproduction. |
 | **Mitigation Path** | Client-minted `Idempotency-Key`, a **partial unique index** on `payments.idempotency_key`, and an insert-first write (`ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`) that claims the key *before* the processor is contacted. The constraint rather than application code is the enforcement point, because two handlers write this table (see D23). Full design: `docs/spec-payments-week5.md` D1–D2; decided in **ADR 0013**. |
-| **Status** | Open. **Fix specified (ADR 0013, Week 5); not built** — spec-only week. |
+| **Status** | Open, partly built. **Merged 2026-08-23 (PR #63):** the `idempotency_key` / `idempotency_expires_at` columns, the partial unique index, and the DB-readiness rung — that rung is held by the blocking `db-readiness-gate`. **Still open:** no write path claims the key, so a retry still double-charges; `test_payments_idempotency_ddl.py` runs only in the `backend` matrix under `|| true`, so the DDL parity it asserts can regress on a green build; and the capture-path fix sits on `feat/payment-idempotency-capture` with no PR open. Not Mitigated — the control does not ship until a write path claims the key and something blocking holds it. |
 
 ### D20: `audit_logs` is mutable + seeded with a plaintext PAN
 

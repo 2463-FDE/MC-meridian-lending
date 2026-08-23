@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# check_rag_eval_import.sh — prove the rag_eval import seam INSIDE the built image (card G2a).
+# check_rag_eval_import.sh — prove the rag_eval import seam INSIDE the built image (cards G2a, G2b).
 #
 # `services/origination-service/tests/test_rag_eval_seam.py` pins the three file edits that
 # close the seam; only this script proves the thing those edits exist for — that
 # `import rag_eval` resolves in the container that actually ships. Run from the repo root or
 # anywhere; needs docker. CI runs it as the blocking `rag-eval-import-gate` job.
 #
-# The retrieval TOOL (`search_policy` on the assistant loop) is card G2b and is not built, so
-# there is no route to smoke yet. This is the seam, not the feature.
+# The retrieval TOOL (`search_policy` on the assistant loop) is card G2b, built and merged onto
+# `main` in PR #64 (ADR 0019). So this script now covers both halves: the seam first, then the
+# retrieval route itself against the corpus compose bind-mounts.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

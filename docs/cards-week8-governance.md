@@ -85,9 +85,11 @@ never sit on the causal path** — codes come from real attributions, the model 
 **Depends on.**
 - **G1.** Drafted wording with no channel to carry it goes nowhere. Ordering this before G1 builds
   a sentence nothing sends.
-- Policy retrieval that actually answers. `rag_eval/` is an offline evaluation harness; no
-  retrieval tool is wired into the assistant — there is no `search_policy` anywhere under
-  `services/`, and `assistant.py`'s `_TOOLS` does not carry one. That gap is its own work.
+- Policy retrieval that actually answers. **BUILT (PR #64, ADR 0019).** When this card was
+  written `rag_eval/` was an offline evaluation harness with no retrieval tool wired into the
+  assistant — no `search_policy` anywhere under `services/`, and `assistant.py`'s `_TOOLS` did
+  not carry one. That gap was its own work, split into G2a/G2b below and now closed:
+  `services/origination-service/app/policy_retrieval.py` plus a third `_TOOLS` entry.
 - A compliance review queue, so a human approves wording before send — Path B in the plan, also
   unbuilt.
 
