@@ -1,9 +1,11 @@
 # ADR 0018: Interim Handling of a Double-Charged Borrower
 
 - **Status:** **Proposed** — partly built as of 2026-08-23. Decision 1 (prevention at capture)
-  has its schema rung on `main` via PR #63; the capture path that claims the key is not merged,
-  and nothing else in this ADR is built. This ADR records the decision and states today's
-  evidence boundary. One question is open with the client and is named in Sign-off status.
+  is built: the schema rung landed on `main` via PR #63 and the capture path that claims the
+  key merged via PR #65, held by the blocking `payment-idempotency-gate`. Nothing else in
+  this ADR — borrower notification, refund submission, refund status — is built. This ADR
+  records the decision and states today's evidence boundary. One question is open with the
+  client and is named in Sign-off status.
 - **Date:** 2026-08-20
 - **Author:** Claude Code
 - **Related:** ADR 0013 (payment idempotency and tokenization — designs the prevention this
@@ -40,7 +42,7 @@ Stated plainly, because the demo must not imply more than this. Each row is veri
 
 | Question the client asked | What exists today | Evidence |
 |---|---|---|
-| Is a repeated capture prevented? | **Not yet — half of it is in.** `payments` carries `idempotency_key` under a partial unique index (PR #63), but `POST /payments` still inserts without claiming it, so every retry still inserts a row. | `services/payment-service/app/payments.py:168`; `db/init/001_schema.sql:142`, `:220-221` |
+| Is a repeated capture prevented? | **Yes, for the exact-retry case.** `payments` carries `idempotency_key` under a partial unique index (PR #63), and both charge handlers claim it insert-first via `claim_or_branch()` before the processor is contacted (PR #65), held by the blocking `payment-idempotency-gate`. A processor-side duplicate or a break older than the fix is still only caught by reconciliation, not prevented. | `services/payment-service/app/payments.py:175-183,293`; `db/init/001_schema.sql:142`, `:220-221` |
 | Is the borrower notified? | **No, and no channel exists to notify them through.** `applicants.email` and `applicants.phone` are unverified columns, and no outbound sender of any kind exists in any service. | `db/init/001_schema.sql:24-25`; no `smtplib`, `sendgrid`, or `twilio` anywhere under `services/` |
 | Is a refund submitted? | **No.** The payment service has no refund, void, or reversal path, and the processor client exposes none. | `services/payment-service/app/payments.py` |
 | Where does refund status show? | **Nowhere.** No status field, no borrower screen, no officer screen. | — |

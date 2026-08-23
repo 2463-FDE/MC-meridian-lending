@@ -198,7 +198,7 @@ logged here as pre-existing debt; not fixed, out of scope for "parts we touched"
 | Field | Value |
 |---|---|
 | **ID** | D19 |
-| **Finding** | `charge()` inserts a row then calls `apply_payment` with no dedupe, so a retried/double-submitted `POST /payments` inserts a second row and debits the balance twice. The `payments` table now carries `idempotency_key` under a partial unique index (PR #63), but no write path claims it, so the constraint cannot fire. |
+| **Finding** | `charge()` used to insert a row then call `apply_payment` with no dedupe, so a retried/double-submitted `POST /payments` inserted a second row and debited the balance twice. Fixed at capture: `payments.idempotency_key` sits under a partial unique index (PR #63) and both charge handlers now claim it insert-first via `claim_or_branch()` before the processor is contacted (PR #65), so a retry under the same key returns the original outcome instead of a second row. |
 | **Location** | `payment-service/app/payments.py` L168 (the unclaimed INSERT) and `servicing-service/app/payments.py`; call site `main.py`. The DDL half is in place: `db/init/001_schema.sql` L142–143 and L220–221, mirrored by `db/migrations/0018_payments_idempotency.sql`. |
 | **Trigger** | Client timeout + retry, or double-click, on a card charge → two `payments` rows, balance debited twice, no key to collapse them. |
 | **Risk** | **High.** Duplicate customer charges; compounded by D2 (no ledger to reconstruct). |

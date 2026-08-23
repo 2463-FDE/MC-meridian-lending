@@ -393,13 +393,13 @@ jobs:
 
   reconciliation-gate:
     # Settlement reconciliation is the only thing that compares what the processor captured
-    # against what a loan was credited (ADR 0015). It is how a double charge and a payment
-    # that never reached a ledger are found at all -- there is still no prevention at capture:
-    # payments carries an idempotency_key under a partial unique index as of #63, but no
-    # write path claims it, so every POST still inserts a row
-    # (services/payment-service/app/payments.py:168). Detection is therefore the whole of the
-    # control today, and a regression in it is silent by construction: the report still runs,
-    # still exits 0, and still looks clean.
+    # against what a loan was credited (ADR 0015). D19 now prevents the exact-retry case at
+    # capture: payments.idempotency_key sits under a partial unique index (#63) and both
+    # charge handlers claim it insert-first via claim_or_branch() before the processor is
+    # contacted (#65), held by the payment-idempotency-gate below. Reconciliation is still
+    # how everything else is found: a processor-side duplicate, a break that predates D19,
+    # or a payment that never reached a ledger. A regression in reconciliation is silent by
+    # construction: the report still runs, still exits 0, and still looks clean.
     #
     # Its 1,499-line test_reconciliation.py and the four files beside it ran ONLY in the
     # `backend` matrix job, which is `continue-on-error: true` with `python -m pytest -q
