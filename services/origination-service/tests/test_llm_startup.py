@@ -9,6 +9,9 @@ TestClient used as a context manager runs the app lifespan, so entering the
 context is what triggers — or fails — startup validation.
 """
 
+import re
+from pathlib import Path
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -110,3 +113,65 @@ def test_get_llm_client_503_when_disabled(monkeypatch):
         with pytest.raises(HTTPException) as exc_info:
             get_llm_client(_Req(app))
         assert exc_info.value.status_code == 503
+
+
+# --- the gate has to be reachable from where operators actually set it -------------
+#
+# LLM_ENABLED decides whether any LLM route serves at all, and every other variable the
+# feature needs -- CLAUDE_API_KEY, CLAUDE_PROVIDER, AWS_*, LANGSMITH_* -- is interpolated
+# from the host environment in docker-compose.yml, because the documented rule is that
+# credentials live in the shell and never in the committed .env. The gate itself was not:
+# it reached the container only through `env_file: .env`, so the documented workflow could
+# supply the credential and still leave the feature off, with no error to explain why. The
+# only way in was hand-editing .env, which is not a reproducible demo step.
+#
+# The stanza reader is deliberately narrow rather than a copy of test_rag_eval_seam.py's
+# fuller `_compose_service_block`: this asserts one line's shape, and a second copy of that
+# helper is the kind of duplication `redactor-drift` exists to police.
+
+# tests/ -> origination-service/ -> services/ -> repo root
+REPO = Path(__file__).resolve().parents[3]
+
+
+def _origination_environment_block() -> str:
+    """origination-service's `environment:` mapping in the BASE compose file.
+
+    Asserts the stanza exists: a check that silently finds nothing must not report success
+    over a file it never read.
+    """
+    lines = (REPO / "docker-compose.yml").read_text().splitlines()
+    starts = [i for i, line in enumerate(lines) if line == "  origination-service:"]
+    assert starts, "no `  origination-service:` stanza in docker-compose.yml"
+    block = []
+    for line in lines[starts[0] + 1 :]:
+        if re.match(r"^  \S", line):  # next service key, same indent
+            break
+        block.append(line)
+    assert block, "origination-service stanza in docker-compose.yml is empty"
+    return "\n".join(block)
+
+
+def test_compose_lets_the_host_env_set_the_llm_feature_gate():
+    block = _origination_environment_block()
+    assert re.search(r"^\s+LLM_ENABLED:\s*\$\{LLM_ENABLED:-.*\}\s*$", block, re.M), (
+        "docker-compose.yml must interpolate LLM_ENABLED for origination-service, or "
+        "`export LLM_ENABLED=true` before `compose up` is silently ignored and the only "
+        "way to enable the feature is editing the committed .env"
+    )
+
+
+def test_compose_leaves_the_llm_feature_gate_off_by_default():
+    """The interpolation default must be empty, so absence of the variable means off.
+
+    A default of "true" here would enable the feature for every `compose up`, and an
+    enabled feature with no credential aborts origination's startup (load_llm_config
+    raises in lifespan) rather than degrading -- so a wrong default breaks the whole
+    stack, not just the LLM routes.
+    """
+    block = _origination_environment_block()
+    match = re.search(
+        r"^\s+LLM_ENABLED:\s*\$\{LLM_ENABLED:-(?P<default>.*)\}\s*$", block, re.M
+    )
+    assert match, "LLM_ENABLED is not interpolated with a default"
+    default = match.group("default").strip().strip('"').strip("'")
+    assert default == "", f"LLM_ENABLED must default to empty (off), not {default!r}"
