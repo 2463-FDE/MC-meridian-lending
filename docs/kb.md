@@ -29,7 +29,7 @@ Compact map over work done so far. Detail lives in the linked files — this pag
 | Full status of every feature (branch, spec, ADRs, test/teeth results, PR round) | the canonical tracker, which lives outside the repo — path in *Branch layout* above. The tracked feature-status-tracker.md in this tree is the 3-row decoy; do not read it for status. |
 | What weeks 1–4 owe, the trainer scoreboard (score lives in that doc, not here), the merge sequence and the standing metrics | docs/goal-weeks1-4-closure.md (local-only) — living doc, `.html` twin + artifact `5c9ed224` |
 | What merges when, in what order, and the nine-item feedback scoreboard | docs/goal-weeks1-4-closure.md (local-only) |
-| Known security/compliance/arch debt (D1–D25) + mitigation paths | `docs/debt-log.md` |
+| Known security/compliance/arch debt (D1–D29) + mitigation paths | `docs/debt-log.md` |
 | How LOS ↔ decision/servicing services talk (the seam) | `docs/los-lss-seam.md` |
 | A design decision + its rationale | `adr/` (index below) |
 | The spec a feature was built against (source of truth) | `docs/spec-ai-assistant-week1.md`, `docs/spec-rag-week2.md`, `docs/spec-decision-assistant-week3.md`, `docs/spec-disclosure-week4.md`, `docs/spec-payments-week5.md` |
