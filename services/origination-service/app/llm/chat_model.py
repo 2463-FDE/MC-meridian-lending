@@ -262,5 +262,5 @@ class MeridianChatModel(BaseChatModel):
             "CompletionRequest carries no tool schemas and no tool-use content blocks, "
             "so binding tools here would send a request that constrains nothing. Native "
             "tool calling is a change to CompletionRequest, build_request and the "
-            "history redaction rule — see docs/plan-freeze-agentic-week10.md."
+            "history redaction rule, and it is its own slice."
         )
