@@ -71,6 +71,21 @@ _SAFE_CATEGORICAL = {
     "action": {"tool", "final"},
     "tool": {"score_application", "get_decision_record", "search_policy"},
     "task": {"decision", "explain"},
+    # The officer's policy topic (ADR 0019). A closed vocabulary, kept in step with
+    # `policy_retrieval.POLICY_TOPICS` by a parity test — duplicated rather than
+    # imported because this package depends on nothing in the app domain. Free text in
+    # this position would be masked, which is exactly why the officer's channel is a
+    # code and not a question.
+    "policy_topic": {
+        "fee_schedule",
+        "apr_finance_charge",
+        "interest_rate",
+        "eligibility_rules",
+        "credit_decisioning",
+        "adverse_action",
+        "debt_to_income",
+        "records_retention",
+    },
     "outcome": {"approve", "refer", "deny", "counteroffer"},
     "policy_band": {"approve", "refer", "deny"},
     # policy_hit / policy_abstain are the search_policy tool's whole model-visible

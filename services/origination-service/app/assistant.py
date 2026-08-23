@@ -414,6 +414,7 @@ def run(
     client,
     task: str = "decision",
     request_id: str | None = None,
+    policy_topic: str | None = None,
 ) -> dict:
     """Run the agent for one officer request and return the record-backed result.
 
@@ -437,6 +438,19 @@ def run(
     request_id = request_id or uuid.uuid4().hex
     history = []
     request = {"application_id": application_id, "task": task}
+    # The officer's policy topic, and the only thing in this request the officer chooses.
+    # Without it the model has no reason to call search_policy at all: the request said
+    # nothing but "explain application N", and a typed question cannot be plumbed here
+    # because the boundary masks free text (`_SAFE_CATEGORICAL`) -- an officer's sentence
+    # would arrive as a redaction placeholder. So the channel is a CODE.
+    #
+    # Re-validated here rather than trusted from the route: this function has a second
+    # caller in the tests, and an unlisted code would reach the model as that same
+    # placeholder instead of being refused.
+    if policy_topic is not None:
+        if policy_topic not in policy_retrieval.POLICY_TOPICS:
+            raise AssistantError(f"unknown policy topic {policy_topic!r}")
+        request["policy_topic"] = policy_topic
     score_result = None  # the regulated decision happens AT MOST ONCE per run
     citations = []  # policy excerpts to quote to the OFFICER (never back to the model)
     searches = []  # every search_policy attempt, hit or abstain (B1: makes an
@@ -457,6 +471,12 @@ def run(
         metadata={
             "task": task,
             "max_steps": _MAX_STEPS,
+            # An enum code from a closed vocabulary, so it satisfies the CONTENT RULE
+            # above on the same footing as `task`: it records what the officer asked
+            # about without carrying anything they typed, because there is nothing to
+            # type. Absent from the span when the officer asked no policy question,
+            # rather than present as a null -- the span says what happened.
+            **({"policy_topic": policy_topic} if policy_topic else {}),
         },
     ) as root:
         for step in range(_MAX_STEPS):

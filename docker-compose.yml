@@ -62,6 +62,13 @@ services:
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-2463-FDE}
+      # The policy-retrieval abstain threshold. Interpolated like its siblings so
+      # `export POLICY_RETRIEVAL_MIN_SCORE=...` before `compose up` works: it was
+      # reachable only through env_file .env, so a stack whose .env predates the
+      # feature had retrieval silently disabled with no way to turn it on from the
+      # host -- the same gap LLM_ENABLED had. Empty default keeps the fail-closed
+      # behaviour (every query abstains); the calibrated value is in .env.example.
+      POLICY_RETRIEVAL_MIN_SCORE: ${POLICY_RETRIEVAL_MIN_SCORE:-}
       # Adds prompt/response CONTENT to the traces above. Non-production only —
       # the prompt keeps loan amount, income, employment tenure and purpose by
       # design. Default "false", and only the exact string "true" enables it.
