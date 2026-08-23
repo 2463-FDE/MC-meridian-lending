@@ -8,6 +8,7 @@ compatibility of history turns.
 
 import json
 
+import httpx
 import pytest
 
 from app import assistant
@@ -438,6 +439,70 @@ def test_explain_never_decisioned_raises_not_found(monkeypatch):
     client, _ = _client(record_call, final)
     with pytest.raises(assistant.ApplicationNotFound):
         assistant.run(7, client, task="explain")
+
+
+def _error_response(app_id, request_id=None):
+    """A real httpx.Response so raise_for_status() produces httpx's own message --
+    which embeds the request URL -- the same way it would against a live
+    decision-service."""
+    path = f"/decisions/{app_id}/record"
+    if request_id:
+        path += f"?request_id={request_id}"
+    return httpx.Response(
+        500, request=httpx.Request("GET", f"http://decision-service{path}")
+    )
+
+
+def test_score_application_not_found_message_is_identifier_free(monkeypatch):
+    # B1 follow-up: this raises through the tool/step/root trace spans, and
+    # langsmith's trace() attaches str(exception) to the span's `error` field on
+    # exit -- so app_id in the message would leak to LangSmith the same way the
+    # root metadata dict did before B1's fix.
+    monkeypatch.setattr(assistant, "decision_request_payload", lambda app_id: None)
+    with pytest.raises(assistant.ApplicationNotFound) as exc_info:
+        assistant._score_application(918273)
+    assert "918273" not in str(exc_info.value)
+
+
+def test_explain_never_decisioned_message_is_identifier_free(monkeypatch):
+    monkeypatch.setattr(
+        assistant.clients, "get", lambda base, path: _NotFoundResponse()
+    )
+    with pytest.raises(assistant.ApplicationNotFound) as exc_info:
+        assistant._validated_final({}, 918273, "explain")
+    assert "918273" not in str(exc_info.value)
+
+
+def test_get_decision_record_error_scrubs_identifier_and_chain(monkeypatch):
+    # httpx.HTTPStatusError's own message embeds the request URL
+    # (/decisions/918273/record), so the wrapping AssistantError must not chain
+    # to it either -- `from exc` (or no `from` at all) would leave the original
+    # exception on __context__/__cause__, and traceback.format_exception (which
+    # langsmith's trace() calls on error) prints the whole chain.
+    monkeypatch.setattr(
+        assistant.clients, "get", lambda base, path: _error_response(918273)
+    )
+    with pytest.raises(assistant.AssistantError) as exc_info:
+        assistant._get_decision_record(918273)
+    exc = exc_info.value
+    assert "918273" not in str(exc)
+    assert exc.__cause__ is None
+    assert exc.__suppress_context__ is True
+
+
+def test_validated_final_record_fetch_error_scrubs_identifier_and_chain(monkeypatch):
+    monkeypatch.setattr(
+        assistant.clients,
+        "get",
+        lambda base, path: _error_response(918273, request_id="req-abc123"),
+    )
+    with pytest.raises(assistant.AssistantError) as exc_info:
+        assistant._validated_final({}, 918273, "decision", "req-abc123")
+    exc = exc_info.value
+    assert "918273" not in str(exc)
+    assert "req-abc123" not in str(exc)
+    assert exc.__cause__ is None
+    assert exc.__suppress_context__ is True
 
 
 def test_request_id_forwarded_to_decision_service(monkeypatch):
