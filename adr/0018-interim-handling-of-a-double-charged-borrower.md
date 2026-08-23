@@ -11,8 +11,9 @@
 - **Related:** ADR 0013 (payment idempotency and tokenization — designs the prevention this
   ADR sequences first, and is itself Proposed). ADR 0015 (settlement reconciliation as a
   control — the detection this ADR builds on). Debt D19 (`docs/debt-log.md` — the
-  double-charge entry, Open, pre-existing). The client's answer of 2026-08-14 on loan 4471,
-  which scopes the operator half.
+  double-charge entry, **Mitigated** for exact-retry prevention; borrower notification,
+  refund submission, and refund status remain open). The client's answer of 2026-08-14 on
+  loan 4471, which scopes the operator half.
 - **Source:** Week-8 client-demo feedback, improvement priority 2: the interim offer to a
   double-charged borrower is undecided and unevidenced beyond detection.
 
@@ -206,8 +207,10 @@ borrowers already charged twice are unaffected. Mitigated by stating the boundar
 runbook, in the demo, and in this table rather than only here.
 
 **Prevention slips again and this ADR becomes the record of a decision nobody acted on.**
-Mitigated by the gate: the week-9 slice carries a proven-red test, and D19 stays Open in the
-debt log with this ADR named, so the entry cannot read as closed.
+Retired for exact-retry prevention: the week-9 slice landed with a proven-red test behind
+the blocking `payment-idempotency-gate`, and D19 now reads **Mitigated** in the debt log with
+this ADR named. The risk re-opens only if a future change to the claim path or the gate ships
+without that same discipline.
 
 **The open question is answered with something the platform cannot do.** If she asks for a
 borrower notification, the delivery channel is the blocker and it is not ours to close.
