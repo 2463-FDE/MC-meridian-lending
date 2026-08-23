@@ -6,12 +6,18 @@ unauthenticated or failing auth at first query. Covers the passwordless DSN
 (meridian:@postgres) the secret purge left behind and the shipped placeholder.
 """
 
+from fastapi import Response
 import threading
 import time
 
 import pytest
 
 from app import config
+
+# D19: the Idempotency-Key is required and client-minted (ADR 0013 Decision 1), so every
+# call into the charge path has to carry one. A fixed valid UUID keeps these cases
+# deterministic; the idempotency behaviour itself is covered by the R-vector suite.
+_IDEM_KEY = "11111111-1111-4111-8111-111111111111"
 
 
 @pytest.fixture(autouse=True)
@@ -383,7 +389,12 @@ def test_payments_503_without_processor_key(monkeypatch):
     from app.main import PaymentIn, post_payment
 
     with pytest.raises(HTTPException) as exc_info:
-        post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
+        post_payment(
+            PaymentIn(loan_id=1, amount=100.0),
+            Response(),
+            x_user_role="csr",
+            idempotency_key=_IDEM_KEY,
+        )
     assert exc_info.value.status_code == 503
 
 
@@ -398,7 +409,12 @@ def test_payments_allowed_with_processor_key(monkeypatch):
     )
     from app.main import PaymentIn, post_payment
 
-    out = post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
+    out = post_payment(
+        PaymentIn(loan_id=1, amount=100.0),
+        Response(),
+        x_user_role="csr",
+        idempotency_key=_IDEM_KEY,
+    )
     assert out["balance"] == 900.0
 
 

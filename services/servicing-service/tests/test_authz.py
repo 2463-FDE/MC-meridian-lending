@@ -18,6 +18,11 @@ from fastapi.testclient import TestClient
 from app import authz, config, reconciliation
 from app.main import app
 
+# D19: the Idempotency-Key is required and client-minted (ADR 0013 Decision 1), so every
+# call into the charge path has to carry one. A fixed valid UUID keeps these cases
+# deterministic; the idempotency behaviour itself is covered by the R-vector suite.
+_IDEM_KEY = "11111111-1111-4111-8111-111111111111"
+
 
 # --- require_money_role --------------------------------------------------------
 
@@ -432,7 +437,11 @@ def test_post_payment_denied_for_non_owner_borrower(monkeypatch):
     resp = TestClient(app).post(
         "/payments",
         json={"loan_id": 1, "amount": 50.0},
-        headers={"X-User-Role": "borrower", "X-User-Id": "5"},
+        headers={
+            "Idempotency-Key": _IDEM_KEY,
+            "X-User-Role": "borrower",
+            "X-User-Id": "5",
+        },
     )
     assert resp.status_code == 404
 
@@ -458,7 +467,7 @@ def test_post_payment_allowed_for_owner(monkeypatch):
     monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
     monkeypatch.setattr(
         "app.payments.charge",
-        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None: {
+        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None, **kw: {
             "loan_id": loan_id,
             "amount": amount,
             "balance": 0.0,
@@ -467,7 +476,11 @@ def test_post_payment_allowed_for_owner(monkeypatch):
     resp = TestClient(app).post(
         "/payments",
         json={"loan_id": 1, "amount": 50.0},
-        headers={"X-User-Role": "borrower", "X-User-Id": "5"},
+        headers={
+            "Idempotency-Key": _IDEM_KEY,
+            "X-User-Role": "borrower",
+            "X-User-Id": "5",
+        },
     )
     assert resp.status_code == 200
 
@@ -495,7 +508,11 @@ def test_post_payment_denied_for_underwriter_on_arbitrary_loan(monkeypatch):
     resp = TestClient(app).post(
         "/payments",
         json={"loan_id": 1, "amount": 500.0},
-        headers={"X-User-Role": "underwriter", "X-User-Id": "12"},
+        headers={
+            "Idempotency-Key": _IDEM_KEY,
+            "X-User-Role": "underwriter",
+            "X-User-Id": "12",
+        },
     )
     assert resp.status_code == 404
 
@@ -510,7 +527,7 @@ def test_post_payment_allowed_for_money_role_without_db(monkeypatch):
     monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
     monkeypatch.setattr(
         "app.payments.charge",
-        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None: {
+        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None, **kw: {
             "loan_id": loan_id,
             "amount": amount,
             "balance": 0.0,
@@ -519,7 +536,7 @@ def test_post_payment_allowed_for_money_role_without_db(monkeypatch):
     resp = TestClient(app).post(
         "/payments",
         json={"loan_id": 1, "amount": 50.0},
-        headers={"X-User-Role": "csr"},
+        headers={"Idempotency-Key": _IDEM_KEY, "X-User-Role": "csr"},
     )
     assert resp.status_code == 200
 
