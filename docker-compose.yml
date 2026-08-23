@@ -43,6 +43,12 @@ services:
       # app fails loud (load_llm_config raises LLMConfigError) when the LLM
       # feature is enabled. Never add CLAUDE_API_KEY (or AWS Bedrock creds) to
       # the committed .env — put them in your shell or an untracked .env.local.
+      # The feature gate for every LLM route (app/main.py::_llm_enabled). Interpolated
+      # like its siblings below so `export LLM_ENABLED=true` before `compose up` works:
+      # it was reachable only through env_file .env, so the documented host-env workflow
+      # could supply the credential and still not turn the feature on. Empty default keeps
+      # it off, and enabling it with no credential aborts startup rather than degrading.
+      LLM_ENABLED: ${LLM_ENABLED:-}
       CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
       # provider=bedrock routes through Amazon Bedrock instead; AWS creds only
       # (same host-env-only rule — never write these into the committed .env).
