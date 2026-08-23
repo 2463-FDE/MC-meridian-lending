@@ -116,6 +116,104 @@ def database_reachable(timeout: float = 2.0) -> tuple[bool, str | None]:
         return result
 
 
+# Schema rung for D19 (migration 0018). This service's charge path claims the
+# idempotency key with an INSERT ... ON CONFLICT against a PARTIAL unique index, so a
+# volume that has the payments table but not migration 0018 would raise "no unique or
+# exclusion constraint matching the ON CONFLICT specification" on the first charge —
+# the double-charge control failing at the moment it is first needed, while /health
+# otherwise read fine. Migrations here are hand-applied and lag the init DDL, so the
+# gap has to be named at readiness rather than discovered by a borrower.
+#
+# The NAME of an index proves nothing: CREATE UNIQUE INDEX IF NOT EXISTS matches on
+# name alone, so a same-named index that is non-unique, on the wrong column, or missing
+# the partial predicate would leave the control disabled while reporting ready. Assert
+# the definition — indisunique, the table, the covered column, and the predicate — and
+# assert the column TYPE too, since ADD COLUMN IF NOT EXISTS swallows a same-named
+# column of any type and a TEXT stand-in for BIGINT hands every reader a string.
+#
+# Kept byte-identical to servicing-service's copy: both services write this table
+# (debt D23) and both claim the key, so a rung that drifts between them would let one
+# service report ready over a schema the other refuses.
+_IDEMPOTENCY_COLUMNS = (
+    ("idempotency_key", "text"),
+    ("idempotency_expires_at", "timestamp with time zone"),
+    ("request_fingerprint", "text"),
+    ("status", "text"),
+    ("processor_idempotency_key", "text"),
+    ("processor_ref", "text"),
+    ("amount_minor", "bigint"),
+    ("updated_at", "timestamp with time zone"),
+)
+_IDEMPOTENCY_INDEXES = (
+    ("payments_idempotency_key_uniq", "idempotency_key"),
+    ("payments_processor_idempotency_key_uniq", "processor_idempotency_key"),
+)
+
+
+def _payments_idempotency_ready(cur) -> tuple[bool, str | None]:
+    """Assert migration 0018 is actually applied, by definition and not by name."""
+    for column, want_type in _IDEMPOTENCY_COLUMNS:
+        cur.execute(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_name = 'payments' AND column_name = %s",
+            (column,),
+        )
+        row = cur.fetchone()
+        if row is None or row[0] != want_type:
+            return False, f"schema_not_ready:payments.{column}"
+    # data_type alone does not prove the NOT NULL DEFAULT 'captured' contract migration
+    # 0018 sets: ADD COLUMN IF NOT EXISTS no-ops on an existing status column, including
+    # its NOT NULL DEFAULT clause, so a volume where status was already TEXT but nullable
+    # or undefaulted would pass the loop above and then take a NULL/wrong-status row from
+    # either insert path, which omits status.
+    cur.execute(
+        "SELECT is_nullable, column_default FROM information_schema.columns "
+        "WHERE table_name = 'payments' AND column_name = 'status'"
+    )
+    row = cur.fetchone()
+    if row is None:
+        return False, "schema_not_ready:payments.status"
+    status_nullable, status_default = row
+    # column_default is the quoted+cast expression ('captured'::text). An unanchored
+    # substring match ('captured' in status_default) would also pass a wrong default
+    # like 'recaptured' or 'uncaptured' -- exactly the class of loose match this rung
+    # exists to refuse. Compare the FULL expression, since status's data_type is
+    # already asserted 'text' above and so is its rendering.
+    if status_nullable != "NO" or status_default != "'captured'::text":
+        return False, "schema_not_ready:payments.status"
+    for index, column in _IDEMPOTENCY_INDEXES:
+        cur.execute(
+            "SELECT x.indisunique, c.relname, "
+            "       pg_get_expr(x.indpred, x.indrelid), "
+            "       (SELECT string_agg(a.attname, ',' ORDER BY k.ord) "
+            "          FROM unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) "
+            "          JOIN pg_attribute a "
+            "            ON a.attrelid = x.indrelid AND a.attnum = k.attnum) "
+            "  FROM pg_index x "
+            "  JOIN pg_class i ON i.oid = x.indexrelid "
+            "  JOIN pg_class c ON c.oid = x.indrelid "
+            " WHERE i.relname = %s",
+            (index,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return False, f"schema_not_ready:{index}"
+        is_unique, table, predicate, columns = row
+        if not is_unique or table != "payments" or columns != column:
+            return False, f"schema_not_ready:{index}"
+        # The predicate is what makes the arbiter inferable by the shipped
+        # ON CONFLICT ... WHERE clause; a non-partial index of the same name would
+        # make that insert raise. Compare EXACTLY to pg_get_expr's stable
+        # "(col IS NOT NULL)" rendering, same as migration 0018's own assertion -- a
+        # regex/substring match, even column-bound, would also pass a narrower,
+        # compound predicate like "col IS NOT NULL AND amount_minor > 0", which is a
+        # DIFFERENT (smaller) index than the arbiter the shipped ON CONFLICT names and
+        # cannot be inferred for every claimed row.
+        if predicate != f"({column} IS NOT NULL)":
+            return False, f"schema_not_ready:{index}"
+    return True, None
+
+
 def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
     if not DATABASE_URL:
         return False, "DATABASE_URL not set"
@@ -129,6 +227,9 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
+            ok, reason = _payments_idempotency_ready(cur)
+            if not ok:
+                return False, reason
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__

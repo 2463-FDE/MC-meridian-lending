@@ -127,16 +127,31 @@ CREATE TABLE IF NOT EXISTS balances (
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Payments: stores full PAN + CVV. No idempotency key. No unique charge reference.
+-- Payments: stores full PAN + CVV (D13, still open). Carries an idempotency key as of
+-- migration 0018 (D19 / ADR 0013 Decision 1) — a retried POST no longer charges twice.
 CREATE TABLE IF NOT EXISTS payments (
     id          SERIAL PRIMARY KEY,
     loan_id     INTEGER REFERENCES loans(id),
     pan         TEXT,                 -- full PAN stored
     cvv         TEXT,                 -- CVV stored (SAD — flat PCI prohibition)
-    amount      DOUBLE PRECISION NOT NULL,  -- money as float
+    amount      DOUBLE PRECISION NOT NULL,  -- money as float (D2, left alone here)
     method      TEXT DEFAULT 'card',
-    created_at  TIMESTAMPTZ DEFAULT now()
-    -- no idempotency_key, no unique(charge_ref)
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    -- D19 (migration 0018). Kept in step with db/migrations/0018_payments_idempotency.sql;
+    -- test_payments_idempotency_ddl_parity compares the two declarations.
+    idempotency_key           TEXT,        -- client-minted, retired to NULL past its window
+    idempotency_expires_at    TIMESTAMPTZ, -- stamped at insert; the window is a column, not
+                                           -- an index predicate (now() is not immutable)
+    request_fingerprint       TEXT,        -- distinguishes a genuine replay from a reused
+                                           -- key carrying a different payload (422)
+    status      TEXT NOT NULL DEFAULT 'captured',  -- 'captured' is what every pre-0018 row
+                                           -- factually is; only a terminal row releases its key
+    processor_idempotency_key TEXT,        -- per-ROW, deliberately NOT the client's key: the
+                                           -- two retention windows must not couple
+    processor_ref             TEXT,
+    amount_minor              BIGINT,      -- integer minor units for what this design adds
+                                           -- (ADR 0012 precedent); `amount` above stays float
+    updated_at                TIMESTAMPTZ
 );
 
 -- "audit" log: an ordinary, mutable table. Rows can be UPDATE/DELETE-d. Not append-only.
@@ -184,10 +199,28 @@ CREATE TRIGGER trg_decision_events_no_truncate
     BEFORE TRUNCATE ON decision_events
     FOR EACH STATEMENT EXECUTE FUNCTION decision_events_append_only();
 
--- A few indexes added over time for the servicing dashboard. (No idempotency index on
--- payments — there is no idempotency key to index. No reason/driver columns on decisions.)
+-- A few indexes added over time for the servicing dashboard. (No reason/driver columns
+-- on decisions.)
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
 CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
+
+-- D19 / ADR 0013 Decision 1. The double-charge guarantee lives HERE, not in a service:
+-- two handlers write payments (payment-service and servicing-service, debt D23) and a
+-- support engineer with psql is a third, so a check in application code protects one
+-- writer and not the others.
+--
+-- Both indexes are PARTIAL. That is load-bearing twice over: pre-migration rows carry a
+-- NULL key and must stay valid, and retiring an expired key (setting it back to NULL on a
+-- terminal row) drops that row out of the index so the value can be claimed again.
+--
+-- Every insert against these must spell the predicate in its conflict target —
+-- `ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL` — or Postgres cannot
+-- infer the arbiter and raises at runtime, disabling the control on first use. Vector
+-- R-DDL runs the shipped SQL string against a real Postgres for exactly this reason.
+CREATE UNIQUE INDEX IF NOT EXISTS payments_idempotency_key_uniq
+  ON payments (idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS payments_processor_idempotency_key_uniq
+  ON payments (processor_idempotency_key) WHERE processor_idempotency_key IS NOT NULL;
 
 -- One current offer per application: makes offer generation idempotent so a double-click /
 -- timeout-retry / concurrent POST cannot persist duplicate regulated TILA/Reg-Z disclosures
