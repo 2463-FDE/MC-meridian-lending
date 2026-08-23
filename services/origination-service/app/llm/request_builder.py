@@ -16,6 +16,7 @@ rather than overshoot. Swap in a real tokenizer later without changing callers.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 from ..prompts import PromptTemplate
@@ -433,6 +434,240 @@ def _redact_json_var(name: str, value: str) -> str:
     return redact_json(value)
 
 
+def _turn_role(turn: dict) -> str:
+    """The validated role of a history turn.
+
+    The role is copied straight onto the provider message and is NOT redacted, so
+    an unrecognized role (e.g. {"role": "Jane Smith"}) would ship a raw,
+    identity-bearing string across the trust boundary before the provider rejects
+    it. Normalize a missing role to "user"; fail closed on any value other than the
+    two roles the chat API accepts.
+    """
+    role = turn.get("role", "user")
+    if role not in ("user", "assistant"):
+        raise LLMError(
+            "history turn 'role' must be 'user' or 'assistant'; refusing to send "
+            "an unrecognized role to the provider (it is not redacted and may "
+            "carry identity)"
+        )
+    return role
+
+
+# Characters a provider tool-use id may contain. The id is opaque to us and is
+# echoed straight back on the following turn, so it is never redacted — which makes
+# it the one unvalidated string in a tool block. Constrained to the shape the
+# provider actually issues (`toolu_01A...`) so a caller cannot ride identity through
+# on a field the redactor is not asked to look at.
+_TOOL_USE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+# Content-block types this boundary carries, by the role allowed to send them.
+# Anthropic's shape: the assistant asks (`tool_use`), the user answers
+# (`tool_result`). Enforcing the pairing catches a mis-assembled message list here
+# rather than as a provider 400 with a redacted body nobody can read.
+_BLOCK_TYPE_BY_ROLE = {"assistant": "tool_use", "user": "tool_result"}
+
+# Keys each block may carry. A strict allowlist, not a minimum: an unlisted key is
+# unvalidated and unredacted content, and `cache_control`-style provider extras are
+# not something this boundary needs to forward.
+_BLOCK_KEYS = {
+    "tool_use": {"type", "id", "name", "input"},
+    "tool_result": {"type", "tool_use_id", "content", "is_error"},
+}
+
+
+def _redacted_tool_use(block: dict) -> dict:
+    """Validate and redact one `tool_use` block.
+
+    `name` must be a bare identifier token: it selects which in-process tool runs,
+    so anything else is data in a dispatch position. `input` must be an OBJECT and
+    goes through `_redact_node` with its real keys, which is what makes the label
+    gate work — `search_policy`'s model-authored `query` is not in
+    `_SAFE_CATEGORICAL`, so it leaves as a free-text mask exactly as it does on the
+    JSON-protocol path today. The rule is not loosened to let it through.
+    """
+    block_id = block.get("id")
+    if not isinstance(block_id, str) or not _TOOL_USE_ID.match(block_id):
+        raise LLMError(
+            "tool_use block 'id' must be a provider id ([A-Za-z0-9_-], 1-128 chars); "
+            "it is echoed to the provider unredacted, so an arbitrary string is refused"
+        )
+    name = block.get("name")
+    if not isinstance(name, str) or not _is_field_name(name):
+        raise LLMError(
+            "tool_use block 'name' must be a bare identifier token naming a tool; it "
+            "selects which in-process tool runs and is not redacted"
+        )
+    raw_input = block.get("input", {})
+    if not isinstance(raw_input, dict):
+        raise LLMError(
+            "tool_use block 'input' must be a JSON object so label-only identifiers "
+            "(name/DOB/address/employer) can be masked structurally; got "
+            f"{type(raw_input).__name__}"
+        )
+    return {
+        "type": "tool_use",
+        "id": block_id,
+        "name": name,
+        "input": _redact_node(raw_input),
+    }
+
+
+def _redacted_tool_result(block: dict) -> dict:
+    """Validate and redact one `tool_result` block.
+
+    Same fail-closed rule as a history turn's string content, for the same reason:
+    `content` must be a JSON OBJECT (as a dict, or as its JSON string — the
+    framework stringifies tool returns), because an object is the only shape in
+    which a label-only identifier can be masked. Prose, a bare scalar, or an array
+    is refused rather than redacted weakly, even though our own tools return codes:
+    the rule has to hold for whatever a tool returns next, not for what they return
+    today.
+    """
+    tool_use_id = block.get("tool_use_id")
+    if not isinstance(tool_use_id, str) or not _TOOL_USE_ID.match(tool_use_id):
+        raise LLMError(
+            "tool_result block 'tool_use_id' must be a provider id ([A-Za-z0-9_-], "
+            "1-128 chars); it is echoed to the provider unredacted"
+        )
+    content = block.get("content")
+    if isinstance(content, str):
+        if _require_json_object(content) in (None, False):
+            raise LLMError(
+                "tool_result 'content' must be a JSON object so applicant identity "
+                "can be masked before it reaches the provider; prose (or a bare JSON "
+                "scalar/array, which is just prose in quotes) is refused because "
+                "label-only identifiers cannot be reliably scrubbed from prose"
+            )
+        content = json.loads(content)
+    if not isinstance(content, dict):
+        raise LLMError(
+            "tool_result 'content' must be a JSON object (or its JSON string); got "
+            f"{type(content).__name__}"
+        )
+    out = {
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": json.dumps(_redact_node(content), ensure_ascii=False),
+    }
+    # `is_error` is a provider flag, not content. Carried only when present and only
+    # as a real bool — a truthy string would be forwarded verbatim.
+    if "is_error" in block:
+        is_error = block["is_error"]
+        if not isinstance(is_error, bool):
+            raise LLMError("tool_result 'is_error' must be a bool when present")
+        out["is_error"] = is_error
+    return out
+
+
+_BLOCK_REDACTORS = {
+    "tool_use": _redacted_tool_use,
+    "tool_result": _redacted_tool_result,
+}
+
+
+def _redacted_blocks(role: str, blocks: list) -> list[dict]:
+    """Validate and redact a native-tool-calling turn's content blocks.
+
+    Every block in one turn must be the single type that role is allowed to send
+    (see `_BLOCK_TYPE_BY_ROLE`). `text` blocks are refused along with everything
+    else unlisted: prose cannot be masked, which is the whole reason history fails
+    closed on non-object content, and the framework seam already drops the model's
+    prose rather than carrying it (see `chat_model.MeridianChatModel`). An empty
+    block list is refused too — it is a turn that says nothing, and the provider
+    would reject it after the redaction boundary had already passed it.
+    """
+    expected = _BLOCK_TYPE_BY_ROLE[role]
+    if not blocks:
+        raise LLMError("a content-block turn must carry at least one block")
+    out = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            raise LLMError(
+                f"content block must be an object; got {type(block).__name__}"
+            )
+        block_type = block.get("type")
+        if block_type != expected:
+            raise LLMError(
+                f"a {role!r} turn carries {expected!r} blocks; got {block_type!r}. "
+                f"Prose and other block types are refused: only tool_use and "
+                f"tool_result content can be masked structurally"
+            )
+        unknown = set(block) - _BLOCK_KEYS[expected]
+        if unknown:
+            raise LLMError(
+                f"{expected} block carries unsupported key(s) "
+                f"{sorted(unknown)!r}; an unlisted key is neither validated nor "
+                f"redacted, so it is refused rather than forwarded"
+            )
+        out.append(_BLOCK_REDACTORS[expected](block))
+    return out
+
+
+def _content_tokens(content) -> int:
+    """Token estimate for a turn's content, string or content-block list.
+
+    A block list is measured over its JSON serialization — the shape that actually
+    goes on the wire. Without this the budget arithmetic in `build_request` would
+    call `len()` on a list and undercount every tool-calling turn to a handful of
+    tokens, so history would never trim and the provider would reject the request
+    on context length instead.
+    """
+    if isinstance(content, str):
+        return estimate_tokens(content)
+    return estimate_tokens(json.dumps(content, ensure_ascii=False))
+
+
+def _validated_tools(tools) -> list[dict]:
+    """Validate authored tool schemas. Shape only — no redaction.
+
+    Tool schemas stand where `system` and the few-shot examples stand: authored by
+    us, carrying no customer data, so they are not redacted. That standing is only
+    true while a caller cannot smuggle a document through the parameter, so the
+    shape is a strict allowlist — three keys, a bare-identifier name, a JSON-object
+    `input_schema` — and anything else is refused before the network. An oversized
+    schema is bounded by the token budget, which counts these as non-trimmable.
+    """
+    if tools is None:
+        return []
+    if not isinstance(tools, list):
+        raise LLMError(f"tools must be a list; got {type(tools).__name__}")
+    out: list[dict] = []
+    seen: set[str] = set()
+    for tool in tools:
+        if not isinstance(tool, dict):
+            raise LLMError(f"each tool must be an object; got {type(tool).__name__}")
+        unknown = set(tool) - {"name", "description", "input_schema"}
+        if unknown:
+            raise LLMError(
+                f"tool schema carries unsupported key(s) {sorted(unknown)!r}; tool "
+                f"schemas are not redacted, so only the three authored keys are sent"
+            )
+        name = tool.get("name")
+        if not isinstance(name, str) or not _is_field_name(name):
+            raise LLMError("each tool needs a 'name' that is a bare identifier token")
+        if name in seen:
+            raise LLMError(
+                f"duplicate tool name {name!r}: the provider would bind one schema "
+                f"and the loop would dispatch on the other"
+            )
+        seen.add(name)
+        description = tool.get("description")
+        if not isinstance(description, str) or not description.strip():
+            raise LLMError(f"tool {name!r} needs a non-empty string 'description'")
+        input_schema = tool.get("input_schema")
+        if not isinstance(input_schema, dict):
+            raise LLMError(f"tool {name!r} needs an 'input_schema' object")
+        if input_schema.get("type") != "object":
+            raise LLMError(
+                f"tool {name!r} 'input_schema' must be a JSON Schema of type "
+                f"'object' — the provider sends tool input as an object"
+            )
+        out.append(
+            {"name": name, "description": description, "input_schema": input_schema}
+        )
+    return out
+
+
 def _redacted_turn(turn: dict) -> dict:
     """Validate a caller-supplied history turn and redact its content.
 
@@ -454,8 +689,19 @@ def _redacted_turn(turn: dict) -> dict:
     if not isinstance(turn, dict) or "content" not in turn:
         raise LLMError("history turn must be a dict with a 'content' key")
     content = turn["content"]
+    # Native tool calling carries content as a list of blocks rather than a JSON
+    # string. Both shapes fail closed; see `_redacted_blocks` for the block rule.
+    # The role is validated FIRST on this branch because it decides which block
+    # type the turn may carry, where the string branch below keeps its original
+    # order (content, then role) so its errors are unchanged.
+    if isinstance(content, list):
+        role = _turn_role(turn)
+        return {"role": role, "content": _redacted_blocks(role, content)}
     if not isinstance(content, str):
-        raise LLMError("history turn 'content' must be a string")
+        raise LLMError(
+            "history turn 'content' must be a string, or a list of tool_use / "
+            "tool_result content blocks"
+        )
     if _require_json_object(content) in (None, False):
         raise LLMError(
             "history turn 'content' must be a JSON object so applicant identity "
@@ -464,19 +710,7 @@ def _redacted_turn(turn: dict) -> dict:
             "because label-only identifiers (name/DOB/address/employer) cannot "
             "be reliably scrubbed from prose. Pass the prior turn as a JSON object."
         )
-    # Validate the role too: it is copied straight onto the provider message and
-    # is NOT redacted, so an unrecognized role (e.g. {"role": "Jane Smith"}) would
-    # ship a raw, identity-bearing string across the trust boundary before the
-    # provider rejects it. Normalize a missing role to "user"; fail closed on any
-    # value other than the two roles the chat API accepts.
-    role = turn.get("role", "user")
-    if role not in ("user", "assistant"):
-        raise LLMError(
-            "history turn 'role' must be 'user' or 'assistant'; refusing to send "
-            "an unrecognized role to the provider (it is not redacted and may "
-            "carry identity)"
-        )
-    return {"role": role, "content": redact_json(content)}
+    return {"role": _turn_role(turn), "content": redact_json(content)}
 
 
 def estimate_tokens(text: str) -> int:
@@ -514,6 +748,7 @@ def build_request(
     token_budget: int,
     history: list[dict] | None = None,
     idempotency_key: str = "",
+    tools: list[dict] | None = None,
     **variables,
 ) -> BuiltRequest:
     """Assemble a `CompletionRequest` within the token budget.
@@ -529,13 +764,20 @@ def build_request(
     via a malformed payload or free-form prose. System and few-shot examples are
     authored by us and carry no customer PII.
 
+    `tools` carries authored tool schemas for native tool calling. They are
+    validated for shape (`_validated_tools`) and, like the system prompt, not
+    redacted — they are ours, not caller data. They are also NOT trimmable: a
+    request whose schemas do not fit raises rather than sending a bound tool set
+    the model was never shown in full.
+
     Raises `TokenBudgetExceeded` if the non-trimmable parts plus the reserved
     answer room do not fit in `token_budget`. Raises `LLMError` on a malformed
-    history turn, a history turn that is not valid JSON, or a declared JSON
-    variable that is not valid JSON.
+    history turn, a history turn that is not valid JSON, a malformed tool schema,
+    or a declared JSON variable that is not valid JSON.
     """
     # Redact caller-supplied content before it is measured or sent.
     history = [_redacted_turn(t) for t in (history or [])]
+    tool_schemas = _validated_tools(tools)
     system = template.system
     # JSON-aware redaction for any variable the template declares as a JSON
     # document. This runs in the GENERIC path so every caller of complete()
@@ -566,30 +808,34 @@ def build_request(
 
     # Reserve room for the answer so prompt + response stays under budget.
     reserved = max_tokens
+    # Tool schemas are counted with the other non-trimmable parts: they are sent on
+    # every turn of a tool-calling loop, and leaving them out of the arithmetic
+    # would admit a request the provider then rejects on context length.
     fixed_tokens = (
         estimate_tokens(system)
         + sum(estimate_tokens(m["content"]) for m in example_msgs)
         + estimate_tokens(user_msg["content"])
+        + sum(_content_tokens(t) for t in tool_schemas)
     )
 
     if fixed_tokens + reserved > token_budget:
         raise TokenBudgetExceeded(
             f"Request needs ~{fixed_tokens} input + {reserved} reserved answer "
             f"tokens, over the {token_budget} budget, before adding history. "
-            f"Shorten the input or raise CLAUDE_TOKEN_BUDGET."
+            f"Shorten the input, drop a tool schema, or raise CLAUDE_TOKEN_BUDGET."
         )
 
     # Trim oldest history turns until everything fits.
     trimmed = 0
     while history:
-        hist_tokens = sum(estimate_tokens(m["content"]) for m in history)
+        hist_tokens = sum(_content_tokens(m["content"]) for m in history)
         if fixed_tokens + hist_tokens + reserved <= token_budget:
             break
         history.pop(0)  # drop oldest
         trimmed += 1
 
     messages = example_msgs + history + [user_msg]
-    input_tokens = fixed_tokens + sum(estimate_tokens(m["content"]) for m in history)
+    input_tokens = fixed_tokens + sum(_content_tokens(m["content"]) for m in history)
 
     req = CompletionRequest(
         system=system,
@@ -600,6 +846,7 @@ def build_request(
         timeout=timeout,
         idempotency_key=idempotency_key,
         metadata={"prompt": template.name, "prompt_version": template.version},
+        tools=tool_schemas,
     )
     return BuiltRequest(
         request=req,
