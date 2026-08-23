@@ -172,7 +172,7 @@ or that only alerts on `1`, turns "could not check" into silence.
 
 | Class | Meaning | What to do |
 |---|---|---|
-| `MISSING_IN_LEDGER` | Settled capture with no `payments` row — money taken, never credited | Customer-affecting. Trace the `processor_ref`, credit the loan through the normal apply path |
+| `MISSING_IN_LEDGER` | Settled capture with no `payments` row — money taken, never credited | Customer-affecting. **Finance Ops owns these** (see **Ownership** below). Trace the `processor_ref`, credit the loan through the normal apply path |
 | `MISSING_IN_SETTLEMENT` | `payments` row with no settled capture — credited, never captured | Check whether the capture failed after the row was written; the balance may be understated |
 | `REFUND_UNREPRESENTED` | Settlement refund the `payments` table cannot hold (no direction column) | Expected today; a schema limitation, not a lost payment. Note it and move on |
 | `AMOUNT_MISMATCH` | Same loan and window, different amount | Compare the two figures in the report's `detail`; usually a partial capture |
@@ -189,6 +189,33 @@ with the matching tolerance:
 
 Quoting only the net is what produced "month-end is a little noisy": on the sample data it
 reads −88882 against a per-loan absolute of 175318, so netting hides roughly half the error.
+
+**Ownership.** **Finance Ops owns `MISSING_IN_LEDGER` breaks** — the client's decision of
+2026-08-14, given when asked who owned the $500 on loan 4471: treat it as an open exception, not
+a write-off, put both processor references in the first exception report, and mark them for
+Finance Ops review.
+
+Two limits of that decision, stated so nobody reads more into the report than it carries:
+
+- **Marking is what this report does. It is not a workflow.** The client ruled out anything
+  larger — no owner column, no status field, no ticket integration, no remediation path. A break
+  appears in the report with its `processor_ref`; a human reads it. There is nothing here that
+  tracks whether they did.
+- **Not a write-off means the money stays visible.** The alert keeps firing on an unresolved
+  break every run, by design. Loan 4471 alone is 50000 minor against a 500 threshold, so it will
+  fire until the underlying exception is actually worked. Do not raise the threshold to quiet it.
+
+**No recipient is configured.** The cron example above mails `ops@example.com`, which is a
+placeholder, not an address anyone reads. Who receives the alert, at what time, through what
+channel was asked on 2026-08-12 and has not been answered — the reply that came back on 08-14
+settled the threshold and the cut-off, and that question was bundled in the same row as the
+cut-off, so it is easy to read as answered. **Until a real recipient is set, this control detects
+and reports to nobody.** Substitute a distribution list before wiring the cron, and do not
+present the alert as covered until then.
+
+`DUPLICATE_SUSPECT` has no equivalent owner. The client's 08-14 answer was about
+`MISSING_IN_LEDGER`; what a double-charged borrower is told, whether a refund is submitted, and
+who owns that refund is an open question and not a gap in this runbook.
 
 ## Known operational pain (unresolved)
 
@@ -230,12 +257,57 @@ reads −88882 against a per-loan absolute of 175318, so netting hides roughly h
   who adjusts a balance until it "looks right" changes nothing this job reads. Detecting
   that needs the actor/before/after record the week-6 ledger work specifies. The two
   controls are complementary; neither substitutes for the other.
-- **Logs contain card + SSN data.** `payment-service` logs full PAN/CVV/SSN at INFO to
-  `logs/payment-service.log` (and origination still logs full PII at intake). Do not ship
-  these logs to a third-party aggregator until redaction is added.
-- **Secrets are in the repo.** `.env` is committed and the services' `config.py` hardcode
-  fallbacks — including Experian/core-banking keys in `decision-service` and the processor
-  key in `payment-service`. Rotate before any real go-live. (Long-standing TODO.)
+- **Redaction ships; the log files written before it do not.** New log lines are redacted:
+  `PiiRedactor` (ADR 0006) merged in PR #2 (`1f89ac1`) and runs in all 7 services, held
+  identical by the blocking `redactor-drift` job and covered by the blocking
+  `redaction-tests` job, and origination's intake logs an allowlist of fields rather than
+  the payload, so the redactor is a backstop there rather than the only control. What is
+  still unsafe is history: any `logs/payment-service.log` or `logs/origination-service.log`
+  written before that merge still holds plaintext PAN/CVV/SSN, and nothing has audited or
+  deleted them. Do not ship pre-redaction log files to a third-party aggregator, and do not
+  assume rotation has trimmed them — no rotating handler is configured, so D5's
+  retention/audit rows are still open.
+- **Secrets are purged from the tree, not rotated.** The committed `.env` and the hardcoded
+  `config.py` fallbacks are gone from `main` — PR #4 (`ed2cb35`, 2026-07-10) — and the
+  blocking `secret-scan` job fails on the literals and on a tracked `.env`; every key now
+  reads `os.getenv(..., "")` with no committed default. **The keys themselves are still live
+  and still owed a rotation:** the Experian and core-banking keys and the `payment-service`
+  processor key remain in git history and wherever they were already used, so a purge
+  removed them from the tree and nothing more. Rotate before any real go-live (D1, open).
+
+## Backup and recovery
+
+**There is no backup or recovery procedure. This section exists to say so, not to describe one.**
+Week-8 client-demo feedback recorded this as a baseline to capture; the honest baseline is that no
+value exists to report. Nothing below is a target, an RPO, or an RTO — none has been agreed.
+
+**What exists.** One Docker named volume, `pgdata`, mounted at `/var/lib/postgresql/data`
+(`docker-compose.yml:13`, declared at `:227`). `make seed` re-applies `db/init/002_seed.sql`, which
+restores *demo* rows and nothing a borrower ever touched. That is the whole of it.
+
+**What does not exist**, verified by search rather than assumed — the repo contains no `pg_dump`,
+`pg_basebackup`, or `pgbackrest` invocation in any script, Makefile target, or compose file, and no
+file whose name mentions backup or restore:
+
+- No scheduled dump, no WAL archiving, no replica.
+- No restore procedure and no restore drill, so recovery time is unmeasured, not merely unstated.
+- No retention or destruction policy for whatever backups the client already holds.
+- No encryption-at-rest statement for backup media.
+
+**Why this is a control question and not only an operations one.** `docs/debt-log.md` D13 records
+that WAL segments, replicas, and any backup taken before a card-data rewrite still contain
+cardholder data, and that historical card tokens are not recoverable — re-tokenizing the back book
+is its own migration. D5's mitigation path carries an explicit "audit all existing backups;
+re-encrypt or delete any containing plaintext PII" row, and **that row is open**: the redactor
+stops new plaintext PAN/CVV/SSN reaching logs, but it does nothing to files written before it
+merged, or to a database backup where the PAN is a stored column rather than a log line. So a
+restore is currently also a re-introduction of the exact data two blocking CI jobs exist to keep
+out.
+
+**Open, and owned by the client.** Who takes backups of the production database today, on what
+schedule, where they are stored, and whether any predate the card-data work. Until Lending Ops
+answers, this platform can state only what it does itself, which is nothing. Do not present a
+backup posture in a demo — say this section's first line instead.
 
 ## Tests
 

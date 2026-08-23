@@ -69,6 +69,10 @@ def _translate_anthropic_error(exc: Exception) -> LLMHTTPError | LLMTimeoutError
     Shared by `ClaudeAdapter` and `BedrockAdapter` — both go through the same
     `anthropic` SDK exception types (`AnthropicBedrock` raises the same
     `anthropic.*Error` hierarchy as `Anthropic`), just over a different transport.
+
+    The returned error carries the STATUS CODE and nothing else from the provider.
+    Both call sites raise it with `from None` — see the comment there for why the
+    cause chain cannot be kept.
     """
     import anthropic
 
@@ -109,7 +113,22 @@ class _AnthropicSDKAdapter(ModelAdapter):
                 timeout=req.timeout,
             )
         except Exception as exc:
-            raise _translate_anthropic_error(exc) from exc
+            # `from None`, not `from exc`. Both `complete` and `call_with_retry` are
+            # @traceable, and LangSmith records the exception that leaves a traced
+            # function as a formatted traceback on the span. A chained cause puts the
+            # provider's own exception repr in that traceback — for a rejected key
+            # that is `anthropic.BadRequestError ... Error code: 400 - {'message': ...}`,
+            # i.e. a raw provider error exported to a third-party telemetry vendor.
+            # `process_outputs` cannot prevent it: that hook shapes SUCCESSFUL outputs
+            # only, so the error path had no control on it at all, and unlike
+            # LLM_TRACE_CONTENT it was not even flag-gated.
+            #
+            # What is lost: the provider's message body in a local stack dump. Nothing
+            # reads it today — `client.complete` logs the exception CLASS, and
+            # `main.py::_run_assistant` maps the error to a 503 — and the body is
+            # available on the provider's own console. The status code, which is what
+            # decides retryable vs terminal, is preserved in our message.
+            raise _translate_anthropic_error(exc) from None
 
         text = "".join(
             block.text for block in resp.content if getattr(block, "type", "") == "text"
@@ -136,7 +155,8 @@ class _AnthropicSDKAdapter(ModelAdapter):
                 for chunk in stream.text_stream:
                     yield chunk
         except Exception as exc:
-            raise _translate_anthropic_error(exc) from exc
+            # Same export boundary as `complete` above, same reason.
+            raise _translate_anthropic_error(exc) from None
 
 
 class ClaudeAdapter(_AnthropicSDKAdapter):

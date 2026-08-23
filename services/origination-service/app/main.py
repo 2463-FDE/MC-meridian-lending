@@ -10,7 +10,7 @@ import os
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -22,6 +22,7 @@ from . import (
     disclosure_coordinator,
     intake,
     kyc_gate,
+    policy_retrieval,
 )
 from .llm import ClaudeClient, load_llm_config
 from .llm.errors import LLMError
@@ -139,6 +140,7 @@ def assistant_decide(
 @app.get("/assistant/decisions/{app_id}")
 def assistant_explain(
     app_id: int,
+    policy_topic: str | None = Query(default=None),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
     client: ClaudeClient = Depends(get_llm_client),
 ):
@@ -147,9 +149,28 @@ def assistant_explain(
     Read-only: never scores, so asking about an application cannot trigger a fresh
     credit pull. Legacy outcomes (pre-record, e.g. #6012) are answered honestly as
     unrecoverable, distinct from 404 never-decisioned.
+
+    `policy_topic` is optional and is the officer's only channel into policy retrieval
+    (ADR 0019). A CODE from a closed vocabulary, never a question: the redaction boundary
+    masks free text, so a typed question reaches the model as a placeholder and changes
+    nothing. Absent means no policy lookup, which is the read this route has always
+    served -- adding the parameter takes nothing away from a caller that omits it.
+
+    An unlisted code is refused HERE with the vocabulary in the message, rather than
+    passed down to be masked at the boundary: a masked topic produces a run that looks
+    like a policy question nobody could match, which is indistinguishable from a genuine
+    abstention. The officer is told their topic does not exist instead.
     """
     authz.require_officer(x_user_role)
-    return _run_assistant(app_id, client, "explain")
+    if policy_topic is not None and policy_topic not in policy_retrieval.POLICY_TOPICS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "unknown policy_topic; choose one of: "
+                + ", ".join(policy_retrieval.POLICY_TOPICS)
+            ),
+        )
+    return _run_assistant(app_id, client, "explain", policy_topic=policy_topic)
 
 
 @app.get("/applications/{app_id}/summary")
@@ -413,10 +434,14 @@ def _detail(resp: httpx.Response):
 
 
 def _run_assistant(
-    app_id: int, client: ClaudeClient, task: str, request_id: str | None = None
+    app_id: int,
+    client: ClaudeClient,
+    task: str,
+    request_id: str | None = None,
+    policy_topic: str | None = None,
 ):
     try:
-        return assistant.run(app_id, client, task, request_id)
+        return assistant.run(app_id, client, task, request_id, policy_topic)
     except assistant.ApplicationNotFound:
         raise HTTPException(status_code=404, detail="application not found")
     except assistant.AssistantError as exc:

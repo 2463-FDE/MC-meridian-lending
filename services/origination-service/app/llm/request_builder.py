@@ -69,11 +69,35 @@ _SAFE_CATEGORICAL = {
     # (plus numbers, which pass structurally). System-defined codes, not caller
     # data — none can collide with a plausible bare name.
     "action": {"tool", "final"},
-    "tool": {"score_application", "get_decision_record"},
+    "tool": {"score_application", "get_decision_record", "search_policy"},
     "task": {"decision", "explain"},
+    # The officer's policy topic (ADR 0019). A closed vocabulary, kept in step with
+    # `policy_retrieval.POLICY_TOPICS` by a parity test — duplicated rather than
+    # imported because this package depends on nothing in the app domain. Free text in
+    # this position would be masked, which is exactly why the officer's channel is a
+    # code and not a question.
+    "policy_topic": {
+        "fee_schedule",
+        "apr_finance_charge",
+        "interest_rate",
+        "eligibility_rules",
+        "credit_decisioning",
+        "adverse_action",
+        "debt_to_income",
+        "records_retention",
+    },
     "outcome": {"approve", "refer", "deny", "counteroffer"},
     "policy_band": {"approve", "refer", "deny"},
-    "status": {"recorded", "no_record_legacy", "not_found"},
+    # policy_hit / policy_abstain are the search_policy tool's whole model-visible
+    # vocabulary (ADR 0019): the retrieved passage itself is rendered to the OFFICER by
+    # code and never enters a turn, so nothing here admits corpus prose.
+    "status": {
+        "recorded",
+        "no_record_legacy",
+        "not_found",
+        "policy_hit",
+        "policy_abstain",
+    },
     "reason_codes": {"r01", "r02", "r03", "r04"},
 }
 

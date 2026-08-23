@@ -7,6 +7,7 @@ but the charge log is built in app.payments — so the construction-boundary fix
 live here too, not only in payment-service. These tests exercise the real
 charge() path with the DB and balance apply mocked.
 """
+
 import json
 import logging
 import os
@@ -14,6 +15,11 @@ import tempfile
 from pathlib import Path
 
 import pytest
+
+# D19: the Idempotency-Key is required and client-minted (ADR 0013 Decision 1), so every
+# call into the charge path has to carry one. A fixed valid UUID keeps these cases
+# deterministic; the idempotency behaviour itself is covered by the R-vector suite.
+_IDEM_KEY = "11111111-1111-4111-8111-111111111111"
 
 
 @pytest.fixture
@@ -30,14 +36,17 @@ def temp_log_dir():
             os.environ.pop("LOG_DIR", None)
 
 
-@pytest.mark.parametrize("name", [
-    "Apt 12 4111x1111x1111x1111",     # reviewer repro: leading digits defeat whole-value Luhn
-    "4111x1111x1111x1111",            # bare smuggled card, letter separators
-    "Unit 5 4111,1111,1111,1111",     # apartment digits + comma-separated card
-    "order 99 4111 1111 1111 1111",   # order digits + spaced card
-    "4111====1111====1111====1111",   # long separator runs
-    "Jane Doe",                       # ordinary name — nothing to leak
-])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Apt 12 4111x1111x1111x1111",  # reviewer repro: leading digits defeat whole-value Luhn
+        "4111x1111x1111x1111",  # bare smuggled card, letter separators
+        "Unit 5 4111,1111,1111,1111",  # apartment digits + comma-separated card
+        "order 99 4111 1111 1111 1111",  # order digits + spaced card
+        "4111====1111====1111====1111",  # long separator runs
+        "Jane Doe",  # ordinary name — nothing to leak
+    ],
+)
 def test_charge_log_never_contains_name(temp_log_dir, monkeypatch, name):
     """A PAN smuggled into the free-text `name` — including with LEADING ordinary
     digits (`Apt 12 ...`) that break a whole-value Luhn scrub, the specific bypass
@@ -52,16 +61,24 @@ def test_charge_log_never_contains_name(temp_log_dir, monkeypatch, name):
     monkeypatch.setattr(payments.db, "query", lambda *a, **k: [{"id": 1}])
     monkeypatch.setattr(payments.balance, "apply_payment", lambda *a, **k: 0.0)
 
-    payments.charge(loan_id=7, pan="4111111111111111", cvv="123",
-                    amount=250.0, ssn="412-55-9981", name=name)
+    payments.charge(
+        loan_id=7,
+        pan="4111111111111111",
+        cvv="123",
+        amount=250.0,
+        ssn="412-55-9981",
+        name=name,
+        idempotency_key=_IDEM_KEY,
+    )
 
     content = (Path(temp_log_dir) / "servicing-service.log").read_text()
     # The card the client submitted (pan field) is masked to its last 4.
     assert "411111111111" not in content, f"12-digit PAN leaked for name={name!r}"
     # name is not logged at all, so nothing smuggled into it can appear.
     assert '"name"' not in content, "name field should not be logged"
-    assert "Apt" not in content and "Unit" not in content and "Jane" not in content, \
+    assert "Apt" not in content and "Unit" not in content and "Jane" not in content, (
         f"raw name reached the log for {name!r}"
+    )
 
 
 def test_charge_log_defeats_quote_delimiter_injection():
@@ -95,8 +112,14 @@ def test_charge_log_masks_pan_cvv_ssn(temp_log_dir, monkeypatch):
     monkeypatch.setattr(payments.db, "query", lambda *a, **k: [{"id": 1}])
     monkeypatch.setattr(payments.balance, "apply_payment", lambda *a, **k: 0.0)
 
-    payments.charge(loan_id=7, pan="4111-1111-1111-1111", cvv="123",
-                    amount=250.0, ssn="412-55-9981")
+    payments.charge(
+        loan_id=7,
+        pan="4111-1111-1111-1111",
+        cvv="123",
+        amount=250.0,
+        ssn="412-55-9981",
+        idempotency_key=_IDEM_KEY,
+    )
 
     content = (Path(temp_log_dir) / "servicing-service.log").read_text()
     assert "411111111111" not in content, "full PAN should be masked"

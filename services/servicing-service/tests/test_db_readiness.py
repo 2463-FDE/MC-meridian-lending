@@ -6,12 +6,18 @@ unauthenticated or failing auth at first query. Covers the passwordless DSN
 (meridian:@postgres) the secret purge left behind and the shipped placeholder.
 """
 
+from fastapi import Response
 import threading
 import time
 
 import pytest
 
 from app import config
+
+# D19: the Idempotency-Key is required and client-minted (ADR 0013 Decision 1), so every
+# call into the charge path has to carry one. A fixed valid UUID keeps these cases
+# deterministic; the idempotency behaviour itself is covered by the R-vector suite.
+_IDEM_KEY = "11111111-1111-4111-8111-111111111111"
 
 
 @pytest.fixture(autouse=True)
@@ -107,26 +113,77 @@ def test_url_encoded_reserved_char_password_is_ok(monkeypatch):
 # so no real database is required.
 
 
+# The D19 readiness rung (config._payments_idempotency_ready) asks the catalog real
+# questions: the data_type of each migration-0018 column, and for each partial unique
+# index its indisunique / table / covered column / predicate. A cursor that answered
+# every query with a blanket (1,) would make the probe pass without any of those
+# questions being answered -- a fake that reports success for what it never checked.
+# So this one dispatches on the SQL and models a database that HAS 0018 applied.
+_PAYMENTS_COLUMN_TYPES = {
+    "idempotency_key": "text",
+    "idempotency_expires_at": "timestamp with time zone",
+    "request_fingerprint": "text",
+    "status": "text",
+    "processor_idempotency_key": "text",
+    "processor_ref": "text",
+    "amount_minor": "bigint",
+    "updated_at": "timestamp with time zone",
+}
+_PAYMENTS_INDEX_COLUMNS = {
+    "payments_idempotency_key_uniq": "idempotency_key",
+    "payments_processor_idempotency_key_uniq": "processor_idempotency_key",
+}
+
+
 class _FakeCursor:
+    """Cursor over a correctly-migrated database.
+
+    `overrides` maps a column or index name to the row the catalog should return
+    instead, which is how the not-ready tests below drive one failure mode at a time.
+    """
+
+    def __init__(self, overrides=None):
+        self.overrides = overrides or {}
+        self._result = None
+
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
         return False
 
-    def execute(self, *a, **k):
-        pass
+    def execute(self, sql, params=None):
+        self._result = self._answer(sql, params)
+
+    def _answer(self, sql, params):
+        name = params[0] if params else None
+        if "pg_index" in sql:
+            if name in self.overrides:
+                return self.overrides[name]
+            column = _PAYMENTS_INDEX_COLUMNS[name]
+            return (True, "payments", f"({column} IS NOT NULL)", column)
+        if "is_nullable" in sql:
+            # status NOT NULL DEFAULT 'captured' contract query -- unparameterized
+            # (column_name is a literal in the SQL), so it is not keyed by `name`.
+            return self.overrides.get("status_contract", ("NO", "'captured'::text"))
+        if "information_schema.columns" in sql and "'payments'" in sql:
+            if name in self.overrides:
+                return self.overrides[name]
+            return (_PAYMENTS_COLUMN_TYPES[name],)
+        # loans.note_rate rung (servicing only) and the plain SELECT 1.
+        return self.overrides.get("loans.note_rate", (1,))
 
     def fetchone(self):
-        return (1,)
+        return self._result
 
 
 class _FakeConn:
-    def __init__(self):
+    def __init__(self, overrides=None):
         self.closed_flag = False
+        self.overrides = overrides
 
     def cursor(self):
-        return _FakeCursor()
+        return _FakeCursor(self.overrides)
 
     def close(self):
         self.closed_flag = True
@@ -244,26 +301,24 @@ def test_probe_single_flight_under_concurrent_misses(monkeypatch):
 # otherwise read fine. The probe asserts the column with the right type; absent -> unready.
 
 
-class _SchemaAwareCursor:
-    """SELECT 1 is truthy; the information_schema probe answers by a flag."""
+class _SchemaAwareCursor(_FakeCursor):
+    """SELECT 1 is truthy; the loans.note_rate probe answers by a flag.
+
+    Everything else -- the migration-0018 payments columns and both partial unique
+    indexes -- is delegated to _FakeCursor, which models a correctly-migrated volume.
+    Answering those with a blanket (1,) here would make this fixture report ready over
+    a schema the D19 rung would in fact refuse, so the note_rate cases would pass for
+    the wrong reason.
+    """
 
     def __init__(self, note_rate_present):
+        super().__init__()
         self._note_rate_present = note_rate_present
-        self._last = ""
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def execute(self, sql, *a, **k):
-        self._last = sql
-
-    def fetchone(self):
-        if "information_schema.columns" in self._last:
+    def _answer(self, sql, params):
+        if "information_schema.columns" in sql and "'loans'" in sql:
             return (1,) if self._note_rate_present else None
-        return (1,)
+        return super()._answer(sql, params)
 
 
 class _SchemaAwareConn:
@@ -310,6 +365,36 @@ def test_probe_ready_when_note_rate_column_present(monkeypatch):
     assert err is None
 
 
+def test_note_rate_probe_is_schema_qualified(monkeypatch):
+    """Same defect class as the payments.status probe: information_schema.columns
+    spans every schema, and this probe filtered only on table_name/column_name -- a
+    same-named loans.note_rate column in another schema would be reachable by it."""
+    seen = {}
+
+    class _RecordingCursor(_SchemaAwareCursor):
+        def execute(self, sql, params=None):
+            if "'loans'" in sql:
+                seen["sql"] = sql
+            super().execute(sql, params)
+
+    class _RecordingConn(_SchemaAwareConn):
+        def cursor(self):
+            return _RecordingCursor(self._present)
+
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2,
+        "connect",
+        lambda *a, **k: _RecordingConn(note_rate_present=True),
+    )
+    config.database_reachable()
+
+    assert "sql" in seen, "note_rate probe never ran"
+    assert "table_schema = current_schema()" in seen["sql"]
+
+
 # --- Processor-key readiness + fail-closed capture -------------------------
 # The direct /payments path inserts a payment AND mutates the balance. After the
 # secret purge PROCESSOR_API_KEY has no committed fallback, so without it the
@@ -334,7 +419,12 @@ def test_payments_503_without_processor_key(monkeypatch):
     from app.main import PaymentIn, post_payment
 
     with pytest.raises(HTTPException) as exc_info:
-        post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
+        post_payment(
+            PaymentIn(loan_id=1, amount=100.0),
+            Response(),
+            x_user_role="csr",
+            idempotency_key=_IDEM_KEY,
+        )
     assert exc_info.value.status_code == 503
 
 
@@ -349,7 +439,12 @@ def test_payments_allowed_with_processor_key(monkeypatch):
     )
     from app.main import PaymentIn, post_payment
 
-    out = post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
+    out = post_payment(
+        PaymentIn(loan_id=1, amount=100.0),
+        Response(),
+        x_user_role="csr",
+        idempotency_key=_IDEM_KEY,
+    )
     assert out["balance"] == 900.0
 
 
@@ -386,3 +481,254 @@ def test_duplicate_window_ceiling_matches_reconciliations_own_abort(monkeypatch)
     assert "DUPLICATE_SUSPECT_WINDOW_SECONDS" in config.missing_required_secrets()
     with pytest.raises(reconciliation.ReconciliationAbort):
         reconciliation._duplicate_suspect_window_seconds()
+
+
+# --- D19 schema rung (migration 0018) ---------------------------------------------
+#
+# The charge path claims the idempotency key with INSERT ... ON CONFLICT against a
+# PARTIAL unique index. On a volume missing 0018 that insert raises "no unique or
+# exclusion constraint matching the ON CONFLICT specification" -- the double-charge
+# control failing on first use, while /health otherwise reads fine. Migrations here are
+# hand-applied and lag the init DDL, so the rung has to name the gap at readiness.
+#
+# Each case below breaks exactly ONE catalog fact. They exist because CREATE UNIQUE
+# INDEX IF NOT EXISTS and ADD COLUMN IF NOT EXISTS both match on NAME alone: an index
+# that is non-unique, on the wrong column, or missing its predicate, and a column of the
+# wrong type, all survive those statements and would report ready under a rung that
+# checked names.
+
+
+def _probe_with(monkeypatch, overrides):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _FakeConn(overrides)
+    )
+    return config.database_reachable()
+
+
+def test_rung_not_ready_when_an_idempotency_column_is_absent(monkeypatch):
+    ok, err = _probe_with(monkeypatch, {"idempotency_key": None})
+    assert ok is False
+    assert err == "schema_not_ready:payments.idempotency_key"
+
+
+def test_rung_not_ready_when_amount_minor_has_the_wrong_type(monkeypatch):
+    """ADD COLUMN IF NOT EXISTS swallows a same-named column of any type.
+
+    A TEXT stand-in for BIGINT reports ready under a name-only check and then hands
+    every reader a string where minor units are expected.
+    """
+    ok, err = _probe_with(monkeypatch, {"amount_minor": ("text",)})
+    assert ok is False
+    assert err == "schema_not_ready:payments.amount_minor"
+
+
+def test_rung_not_ready_when_processor_ref_is_absent(monkeypatch):
+    """The rung must prove ALL of migration 0018's columns, not a subset -- a volume
+    missing processor_ref (present in the migration and init DDL) previously read
+    ready anyway."""
+    ok, err = _probe_with(monkeypatch, {"processor_ref": None})
+    assert ok is False
+    assert err == "schema_not_ready:payments.processor_ref"
+
+
+def test_rung_not_ready_when_updated_at_has_the_wrong_type(monkeypatch):
+    ok, err = _probe_with(monkeypatch, {"updated_at": ("text",)})
+    assert ok is False
+    assert err == "schema_not_ready:payments.updated_at"
+
+
+def test_rung_not_ready_when_status_is_nullable(monkeypatch):
+    """data_type alone does not prove the NOT NULL DEFAULT contract: ADD COLUMN IF NOT
+    EXISTS no-ops on an existing nullable status column of the right type."""
+    ok, err = _probe_with(monkeypatch, {"status_contract": ("YES", "'captured'::text")})
+    assert ok is False
+    assert err == "schema_not_ready:payments.status"
+
+
+def test_rung_not_ready_when_status_default_is_not_captured(monkeypatch):
+    ok, err = _probe_with(monkeypatch, {"status_contract": ("NO", "'pending'::text")})
+    assert ok is False
+    assert err == "schema_not_ready:payments.status"
+
+
+def test_rung_not_ready_when_status_has_no_default(monkeypatch):
+    ok, err = _probe_with(monkeypatch, {"status_contract": ("NO", None)})
+    assert ok is False
+    assert err == "schema_not_ready:payments.status"
+
+
+def test_rung_not_ready_when_status_default_merely_contains_captured(monkeypatch):
+    """An unanchored substring match ('captured' in default) would pass 'recaptured' or
+    'uncaptured' -- a wrong default that happens to share the substring. The rung must
+    compare the full rendered expression, not just contain the right word."""
+    ok, err = _probe_with(
+        monkeypatch, {"status_contract": ("NO", "'recaptured'::text")}
+    )
+    assert ok is False
+    assert err == "schema_not_ready:payments.status"
+
+
+def test_status_contract_probe_is_schema_qualified(monkeypatch):
+    """M1: the idempotency-column loop and the index probe both filter on
+    table_schema = current_schema() (information_schema.columns and pg_class span
+    every schema, so an unqualified lookup can validate a different `payments`).
+    The status NOT NULL/DEFAULT contract probe sits between those two and must
+    carry the same qualifier -- a same-named payments.status column in another
+    schema (a decoy, a restored snapshot, a per-tenant schema) would otherwise be
+    reachable by this query."""
+    seen = {}
+
+    class _RecordingCursor(_FakeCursor):
+        def execute(self, sql, params=None):
+            if "is_nullable" in sql:
+                seen["sql"] = sql
+            super().execute(sql, params)
+
+    class _RecordingConn(_FakeConn):
+        def cursor(self):
+            return _RecordingCursor(self.overrides)
+
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: _RecordingConn())
+    config.database_reachable()
+
+    assert "sql" in seen, "status contract probe never ran"
+    assert "table_schema = current_schema()" in seen["sql"], (
+        "status probe must be schema-qualified like its sibling column and index probes"
+    )
+
+
+def test_rung_not_ready_when_the_index_predicate_is_on_the_wrong_column(monkeypatch):
+    """A predicate containing "IS NOT NULL" anywhere is not enough -- it must be on the
+    column this index is supposed to be partial on, or a drifted index (e.g. a stray
+    loan_id predicate on what is otherwise the idempotency_key index) reads as ready."""
+    ok, err = _probe_with(
+        monkeypatch,
+        {
+            "payments_idempotency_key_uniq": (
+                True,
+                "payments",
+                "(loan_id IS NOT NULL)",
+                "idempotency_key",
+            )
+        },
+    )
+    assert ok is False
+    assert err == "schema_not_ready:payments_idempotency_key_uniq"
+
+
+def test_rung_not_ready_when_indexed_column_is_null_and_another_is_not_null(
+    monkeypatch,
+):
+    """A loose ".*IS NOT NULL" gap would pass a compound predicate where the INDEXED
+    column is checked IS NULL and an unrelated column is IS NOT NULL later in the same
+    expression -- the column name and "IS NOT NULL" must be adjacent, not just both
+    present somewhere in the predicate."""
+    ok, err = _probe_with(
+        monkeypatch,
+        {
+            "payments_idempotency_key_uniq": (
+                True,
+                "payments",
+                "(idempotency_key IS NULL) OR (processor_ref IS NOT NULL)",
+                "idempotency_key",
+            )
+        },
+    )
+    assert ok is False
+    assert err == "schema_not_ready:payments_idempotency_key_uniq"
+
+
+def test_rung_not_ready_when_the_predicate_is_narrower_than_the_arbiter(monkeypatch):
+    """A compound predicate like "col IS NOT NULL AND amount_minor > 0" contains the
+    column immediately followed by IS NOT NULL, so a substring/regex check -- even
+    column-bound -- would pass it. It is a DIFFERENT, smaller index than the arbiter
+    the shipped ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL names,
+    so Postgres cannot infer it for every claimed row. Only an exact match on the full
+    predicate is correct."""
+    ok, err = _probe_with(
+        monkeypatch,
+        {
+            "payments_idempotency_key_uniq": (
+                True,
+                "payments",
+                "(idempotency_key IS NOT NULL AND amount_minor > 0)",
+                "idempotency_key",
+            )
+        },
+    )
+    assert ok is False
+    assert err == "schema_not_ready:payments_idempotency_key_uniq"
+
+
+def test_rung_not_ready_when_the_index_is_absent(monkeypatch):
+    ok, err = _probe_with(monkeypatch, {"payments_idempotency_key_uniq": None})
+    assert ok is False
+    assert err == "schema_not_ready:payments_idempotency_key_uniq"
+
+
+def test_rung_not_ready_when_the_index_exists_but_is_not_unique(monkeypatch):
+    """A non-unique index of the right name cannot arbitrate ON CONFLICT."""
+    ok, err = _probe_with(
+        monkeypatch,
+        {
+            "payments_idempotency_key_uniq": (
+                False,
+                "payments",
+                "(idempotency_key IS NOT NULL)",
+                "idempotency_key",
+            )
+        },
+    )
+    assert ok is False
+    assert err == "schema_not_ready:payments_idempotency_key_uniq"
+
+
+def test_rung_not_ready_when_the_index_is_not_partial(monkeypatch):
+    """No predicate means the shipped ON CONFLICT ... WHERE cannot infer the arbiter --
+
+    Postgres cannot pick an arbiter for a partial-predicate ON CONFLICT clause without a
+    matching partial index, regardless of whether the underlying index would otherwise
+    behave correctly (it never collides pre-0018 NULL rows either way; Postgres treats
+    every NULL as distinct in a unique index).
+    """
+    ok, err = _probe_with(
+        monkeypatch,
+        {
+            "payments_idempotency_key_uniq": (
+                True,
+                "payments",
+                None,
+                "idempotency_key",
+            )
+        },
+    )
+    assert ok is False
+    assert err == "schema_not_ready:payments_idempotency_key_uniq"
+
+
+def test_rung_not_ready_when_the_index_covers_the_wrong_column(monkeypatch):
+    ok, err = _probe_with(
+        monkeypatch,
+        {
+            "payments_processor_idempotency_key_uniq": (
+                True,
+                "payments",
+                "(loan_id IS NOT NULL)",
+                "loan_id",
+            )
+        },
+    )
+    assert ok is False
+    assert err == "schema_not_ready:payments_processor_idempotency_key_uniq"
+
+
+def test_rung_ready_on_a_correctly_migrated_volume(monkeypatch):
+    ok, err = _probe_with(monkeypatch, {})
+    assert ok is True
+    assert err is None

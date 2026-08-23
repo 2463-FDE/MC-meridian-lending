@@ -245,6 +245,20 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_proxy_methods.py -q
 
+  compose-hardening-gate-tests:
+    # BLOCKING, like doc-path-lint-tests / spec-diff-gate-tests. Hermetic — each
+    # case writes a throwaway compose fixture in $TMPDIR — so it asserts the
+    # LLM_TRACE_CONTENT check's own logic, never the state of the real compose
+    # files. The load-bearing case is `interpolation defaulting to true fails`:
+    # the check this replaces accepted ANY `${...}` form regardless of its
+    # default, so that exact line passed CI while exporting prompts and raw
+    # provider responses to LangSmith for anyone who ran the file.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check_compose_trace_flag.sh tests
+        run: ./scripts/test_check_compose_trace_flag.sh
+
   compose-hardening-gate:
     # The resume-cookie flow (ADR 0010 Phase B, PR #7) depends on two gateway settings that
     # must follow the DEPLOYMENT, not be pinned to local-dev literals in the BASE compose file:
@@ -269,6 +283,22 @@ jobs:
             exit 1
           fi
           echo "OK: resume-cookie CORS/Secure config is deployment-overridable in base compose."
+      - name: no committed compose file enables LLM_TRACE_CONTENT
+        # LLM_TRACE_CONTENT=true puts the prompt (system, messages), the raw provider
+        # response (text) and the validated body (result) on the LangSmith spans. The
+        # freeze trace requirement forbids retaining prompts and responses outright, and
+        # ADR 0005's boundary is what keeps applicant data off a third-party sink -- so
+        # the flag is a deliberate, non-production debugging act by whoever exports it in
+        # their own shell, never a property of a file anyone can inherit. Today the base
+        # file interpolates it (${LLM_TRACE_CONTENT:-false}), .env.example keeps the line
+        # commented, and the demo override sets none of the LLM keys. This asserts that,
+        # in EVERY committed compose file including the demo override -- the base-file-only
+        # scope of the step above is wrong for this key, because the demo override is
+        # exactly where a "make the trace readable on stage" edit would land. Only a
+        # literal false or an interpolation whose OWN default is false is safe -- an
+        # interpolation defaulting to true or to nothing must fail too, see
+        # scripts/check_compose_trace_flag.sh.
+        run: ./scripts/check_compose_trace_flag.sh
 
   kyc-enforcement-gate:
     # ADR 0011 is a compliance control: a regulated decision, an offer, and loan boarding
@@ -278,12 +308,8 @@ jobs:
     # reopened gap would stay green. This job MUST block -- no continue-on-error, no
     # `|| true`.
     #
-    # The gate only holds if kyc-service actually persists a kyc_checks row for every
-    # successful KYC response: test_kyc_persistence.py proves /kyc/check fails closed (503)
-    # when the insert fails instead of reporting a pass with no row, and that a partial /
-    # entity request (no dob/ssn) persists a pass/fail row rather than 422-ing into a
-    # phantom "KYC unavailable". Runs under the continue-on-error backend job too, so it
-    # blocks here.
+    # The other half of the control -- that kyc-service actually persists a kyc_checks row --
+    # is kyc-persistence-gate below, deliberately its own job rather than a second step here.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -295,11 +321,76 @@ jobs:
           cd services/origination-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_kyc_gate.py -q
+
+  kyc-persistence-gate:
+    # The kyc-enforcement-gate above only holds if kyc-service actually persists a kyc_checks
+    # row for every successful KYC response: test_kyc_persistence.py proves /kyc/check fails
+    # closed (503) when the insert fails instead of reporting a pass with no row, and that a
+    # partial / entity request (no dob/ssn) persists a pass/fail row rather than 422-ing into
+    # a phantom "KYC unavailable". Runs under the continue-on-error backend job too, so it
+    # blocks here. No continue-on-error, no `|| true`.
+    #
+    # Its OWN job, not a second step on kyc-enforcement-gate, because steps in one job share a
+    # Python environment: as a trailing step it ran after origination-service's requirements
+    # were installed, and test_kyc_persistence.py's five `TestClient` uses need httpx, which
+    # kyc-service did not pin. The step passed on a dependency no manifest in its own service
+    # declared -- a gate green for a reason unrelated to what it asserts. A separate runner
+    # installs services/kyc-service/requirements.txt and nothing else, so the pin is
+    # load-bearing and CI itself is the regression test for it: drop the pin and this job
+    # errors at collection.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: kyc-service persistence + boundary-contract tests
         run: |
           cd services/kyc-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_kyc_persistence.py -q
+
+  payment-idempotency-gate:
+    # D19: a retried POST /payments used to insert a second payments row and charge the
+    # card again (measured 2026-08-02: one $100 intent sent eight ways captured $800.00).
+    # The control is a PARTIAL unique index plus an insert-first claim against it, and it
+    # is exactly the class of money-math test the `backend` matrix runs under
+    # continue-on-error + `|| true` -- which is how the 4.5pp APR defect survived. So it
+    # blocks here. No continue-on-error, no `|| true`.
+    #
+    # Three suites, one runner:
+    #   test_idempotency_vectors.py  the D1 behaviour table (R1/R2/R3/R3b/R6/R6c/R7) plus
+    #                                the 2026-08-02 reproduction inverted. R3c is
+    #                                xfail(strict) and MUST stay red -- it goes green only
+    #                                when D4b adds bank_token, and strict makes an
+    #                                unexpected pass a failure rather than a silent win.
+    #   test_payments_idempotency_ddl.py  the init DDL and migration 0018 declare the same
+    #                                columns and indexes, so a fresh volume and an upgraded
+    #                                one cannot end up with different schemas.
+    #   test_idempotency_parity.py   the claim block has not drifted between the two charge
+    #                                handlers (debt D23), same duty redactor-drift carries.
+    #
+    # test_idempotency_ddl_live.py (R-DDL/R-DDL2) is NOT run here: it needs a real Postgres
+    # and SKIPS without one, and a gate whose vectors skip is a gate reporting success for
+    # a path it verified nothing on. Run it against a live database before merge; the
+    # services job below has no Postgres attached.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: payment-service idempotency vectors + DDL parity
+        run: |
+          cd services/payment-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_idempotency_vectors.py \
+                           tests/test_payments_idempotency_ddl.py -q
+      - name: servicing-service second-handler parity
+        run: |
+          cd services/servicing-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_idempotency_parity.py -q
 
   tila-vectors-gate:
     # The disclosed APR is a regulated number with a Reg Z TOLERANCE: exceeding it is a
@@ -329,6 +420,58 @@ jobs:
           cd services/disclosure-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_tila_vectors.py tests/test_apr.py tests/test_rules.py -q
+
+  reconciliation-gate:
+    # Settlement reconciliation is the only thing that compares what the processor captured
+    # against what a loan was credited (ADR 0015). It is how a double charge and a payment
+    # that never reached a ledger are found at all -- there is no prevention at capture:
+    # payment-service has no idempotency key and every POST inserts a row
+    # (services/payment-service/app/payments.py:168). Detection is therefore the whole of the
+    # control today, and a regression in it is silent by construction: the report still runs,
+    # still exits 0, and still looks clean.
+    #
+    # Its 1,499-line test_reconciliation.py and the four files beside it ran ONLY in the
+    # `backend` matrix job, which is `continue-on-error: true` with `python -m pytest -q
+    # || true` (this file, the Tests step above) -- so a broken break-classifier shipped on a
+    # green build. Fourteen other control areas each hold a dedicated blocking job; this was
+    # the largest suite in the repo without one.
+    #
+    # Exactly the failure mode tila-vectors-gate exists to close, and the reason to state it
+    # twice: compute_apr was 4.5pp wrong on every loan for weeks because the money test that
+    # would have caught it inherited `|| true`. A money-math gate that inherits `|| true` is
+    # not a gate. This job MUST block -- no continue-on-error, no `|| true`.
+    #
+    # Why all five files and not just the big one:
+    #   test_reconciliation.py       the matcher, break classes, per-loan absolute vs net
+    #                                variance, and the duplicate pair found across a window
+    #                                edge -- the arithmetic a client reads off a slide.
+    #   test_reconciliation_alert.py the alert fires on the configured threshold, and ABORTS
+    #                                when the threshold is unset rather than reporting a
+    #                                clean close. Fail-closed is the control, not the alert.
+    #   test_reconcile_cli.py        exit 0 / 1 / 2 stay distinct (clean, breaks found, could
+    #                                not run) and stdout carries no report on an abort. A
+    #                                dashboard must never receive a well-formed zero from a
+    #                                run that could not read its own inputs.
+    #   test_reconciliation_utc.py   the cut-off is pinned to UTC (#47). A local-time cut-off
+    #                                silently reclassifies every row near a window boundary.
+    #   test_runbook_reconciliation.py  the documented invocation and exit codes still match
+    #                                the code, so docs/runbook.md cannot drift from the job
+    #                                an operator actually runs on their cron.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: servicing-service settlement reconciliation, alert fail-closed, and exit codes
+        run: |
+          cd services/servicing-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_reconciliation.py \
+                           tests/test_reconciliation_alert.py \
+                           tests/test_reconcile_cli.py \
+                           tests/test_reconciliation_utc.py \
+                           tests/test_runbook_reconciliation.py -q
 
   db-readiness-gate:
     # DB readiness is a security control: a passwordless / placeholder / stale
@@ -441,6 +584,22 @@ jobs:
           python -m pytest rag_eval/tests -q
       - name: rag_eval real-corpus smoke (refusal + no raw PII in report/cache)
         run: ./scripts/smoke_rag_eval.sh
+
+  rag-eval-import-gate:
+    # Card G2a: origination builds from the REPO ROOT so the image carries the repo-root
+    # rag_eval/ package — `import rag_eval` did not resolve in the container before that,
+    # and G2b's search_policy tool, on `main` since PR #64, is built on top of this holding
+    # and is smoked by the same script. The file assertions in
+    # test_rag_eval_seam.py also run in the `backend` job under continue-on-error/|| true,
+    # so a reverted build context would stay green there. This job MUST block — no
+    # continue-on-error, no `|| true` — and it proves the import in the built image, not in
+    # the Dockerfile text: a gate that checks only the spelling verifies nothing about the
+    # artifact that ships.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: rag_eval imports inside the origination image
+        run: ./scripts/check_rag_eval_import.sh
 
   frontend:
     runs-on: ubuntu-latest
@@ -606,4 +765,9 @@ jobs:
         run: ./scripts/check_doc_claims.sh
 
   # GAP: no dependency audit, no SAST, no container image scan.
-  # GAP: backend tests are continue-on-error, so failing money-math tests are green.
+  # GAP: backend tests are continue-on-error, so failing money-math tests are green --
+  # EXCEPT where a dedicated blocking job runs the same file outside the matrix. The money
+  # paths carved out so far: the disclosure compute path (tila-vectors-gate) and settlement
+  # reconciliation (reconciliation-gate). Still inside the suppression, and therefore still
+  # able to regress on a green build: the apply-payment and balance write paths, including
+  # the red lost-update test (D3, week 9).

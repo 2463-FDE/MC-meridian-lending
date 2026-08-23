@@ -29,7 +29,13 @@ services:
       retries: 10
 
   origination-service:
-    build: ./services/origination-service
+    # Repo-root context, unlike its six siblings: this service is the only consumer of the
+    # repo-root rag_eval/ package, and a service-directory context put that package outside
+    # the build context entirely (card G2a). The root .dockerignore keeps .env and the
+    # embedding cache out of it.
+    build:
+      context: .
+      dockerfile: services/origination-service/Dockerfile
     env_file: .env
     environment:
       # LLM credential is injected from the HOST shell at `compose up` time and
@@ -37,6 +43,12 @@ services:
       # app fails loud (load_llm_config raises LLMConfigError) when the LLM
       # feature is enabled. Never add CLAUDE_API_KEY (or AWS Bedrock creds) to
       # the committed .env — put them in your shell or an untracked .env.local.
+      # The feature gate for every LLM route (app/main.py::_llm_enabled). Interpolated
+      # like its siblings below so `export LLM_ENABLED=true` before `compose up` works:
+      # it was reachable only through env_file .env, so the documented host-env workflow
+      # could supply the credential and still not turn the feature on. Empty default keeps
+      # it off, and enabling it with no credential aborts startup rather than degrading.
+      LLM_ENABLED: ${LLM_ENABLED:-}
       CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
       # provider=bedrock routes through Amazon Bedrock instead; AWS creds only
       # (same host-env-only rule — never write these into the committed .env).
@@ -50,6 +62,13 @@ services:
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-2463-FDE}
+      # The policy-retrieval abstain threshold. Interpolated like its siblings so
+      # `export POLICY_RETRIEVAL_MIN_SCORE=...` before `compose up` works: it was
+      # reachable only through env_file .env, so a stack whose .env predates the
+      # feature had retrieval silently disabled with no way to turn it on from the
+      # host -- the same gap LLM_ENABLED had. Empty default keeps the fail-closed
+      # behaviour (every query abstains); the calibrated value is in .env.example.
+      POLICY_RETRIEVAL_MIN_SCORE: ${POLICY_RETRIEVAL_MIN_SCORE:-}
       # Adds prompt/response CONTENT to the traces above. Non-production only —
       # the prompt keeps loan amount, income, employment tenure and purpose by
       # design. Default "false", and only the exact string "true" enables it.
