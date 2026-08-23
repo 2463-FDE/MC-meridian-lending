@@ -566,6 +566,28 @@ def test_rung_not_ready_when_indexed_column_is_null_and_another_is_not_null(
     assert err == "schema_not_ready:payments_idempotency_key_uniq"
 
 
+def test_rung_not_ready_when_the_predicate_is_narrower_than_the_arbiter(monkeypatch):
+    """A compound predicate like "col IS NOT NULL AND amount_minor > 0" contains the
+    column immediately followed by IS NOT NULL, so a substring/regex check -- even
+    column-bound -- would pass it. It is a DIFFERENT, smaller index than the arbiter
+    the shipped ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL names,
+    so Postgres cannot infer it for every claimed row. Only an exact match on the full
+    predicate is correct."""
+    ok, err = _probe_with(
+        monkeypatch,
+        {
+            "payments_idempotency_key_uniq": (
+                True,
+                "payments",
+                "(idempotency_key IS NOT NULL AND amount_minor > 0)",
+                "idempotency_key",
+            )
+        },
+    )
+    assert ok is False
+    assert err == "schema_not_ready:payments_idempotency_key_uniq"
+
+
 def test_rung_not_ready_when_the_index_is_absent(monkeypatch):
     ok, err = _probe_with(monkeypatch, {"payments_idempotency_key_uniq": None})
     assert ok is False

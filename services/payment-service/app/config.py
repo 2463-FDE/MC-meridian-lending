@@ -1,5 +1,4 @@
 import os
-import re
 import threading
 import time
 from urllib.parse import unquote, urlparse
@@ -204,16 +203,13 @@ def _payments_idempotency_ready(cur) -> tuple[bool, str | None]:
             return False, f"schema_not_ready:{index}"
         # The predicate is what makes the arbiter inferable by the shipped
         # ON CONFLICT ... WHERE clause; a non-partial index of the same name would
-        # make that insert raise. Require the column IMMEDIATELY (only whitespace
-        # between) followed by IS NOT NULL, not just present somewhere before it -- a
-        # loose ".*" gap would also pass a predicate where this column is checked IS
-        # NULL and an unrelated column is IS NOT NULL later in the same expression, or
-        # a predicate on a different column entirely (e.g. "loan_id IS NOT NULL" on an
-        # index that otherwise covers idempotency_key). Matches pg_get_expr's stable
-        # "(col IS NOT NULL)" rendering, same as migration 0018's own assertion.
-        if predicate is None or not re.search(
-            rf"\b{re.escape(column)}\s+IS\s+NOT\s+NULL\b", predicate
-        ):
+        # make that insert raise. Compare EXACTLY to pg_get_expr's stable
+        # "(col IS NOT NULL)" rendering, same as migration 0018's own assertion -- a
+        # regex/substring match, even column-bound, would also pass a narrower,
+        # compound predicate like "col IS NOT NULL AND amount_minor > 0", which is a
+        # DIFFERENT (smaller) index than the arbiter the shipped ON CONFLICT names and
+        # cannot be inferred for every claimed row.
+        if predicate != f"({column} IS NOT NULL)":
             return False, f"schema_not_ready:{index}"
     return True, None
 

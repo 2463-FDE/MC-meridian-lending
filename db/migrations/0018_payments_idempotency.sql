@@ -175,12 +175,13 @@ BEGIN
         -- spell the SAME predicate in its ON CONFLICT target or Postgres cannot infer
         -- the arbiter. A missing or different predicate here means the shipped insert
         -- raises "no unique or exclusion constraint matching the ON CONFLICT
-        -- specification" on first use. Require the column IMMEDIATELY (only whitespace
-        -- between) followed by IS NOT NULL, not just present somewhere before it -- a
-        -- wildcard gap ('%col%IS NOT NULL%') would also pass a predicate where col is
-        -- checked IS NULL and an unrelated column is IS NOT NULL later in the same
-        -- expression, matching pg_get_expr's stable "(col IS NOT NULL)" rendering.
-        IF pred IS NULL OR pred NOT LIKE '%' || col || ' IS NOT NULL%' THEN
+        -- specification" on first use. Compare EXACTLY to pg_get_expr's stable
+        -- "(col IS NOT NULL)" rendering -- a trailing wildcard ('%col IS NOT NULL%')
+        -- would also pass a narrower, compound predicate like
+        -- "col IS NOT NULL AND amount_minor > 0", which is a DIFFERENT (smaller) index
+        -- than the arbiter the shipped ON CONFLICT names, so it cannot be inferred for
+        -- every claimed row even though this LIKE check reports the index ready.
+        IF pred IS DISTINCT FROM ('(' || col || ' IS NOT NULL)') THEN
             RAISE EXCEPTION
                 'index % has predicate %, expected a partial index on (% IS NOT NULL)',
                 idx, coalesce(pred, '<none>'), col;
