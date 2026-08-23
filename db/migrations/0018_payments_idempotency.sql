@@ -89,7 +89,8 @@ BEGIN
     BEGIN
         SELECT is_nullable, column_default INTO status_nullable, status_default
           FROM information_schema.columns
-         WHERE table_name = 'payments' AND column_name = 'status';
+         WHERE table_schema = current_schema()
+           AND table_name = 'payments' AND column_name = 'status';
         IF status_nullable <> 'NO' THEN
             RAISE EXCEPTION
                 'payments.status is nullable, expected NOT NULL -- both insert paths '

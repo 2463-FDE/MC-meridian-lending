@@ -171,7 +171,8 @@ def _payments_idempotency_ready(cur) -> tuple[bool, str | None]:
     # either insert path, which omits status.
     cur.execute(
         "SELECT is_nullable, column_default FROM information_schema.columns "
-        "WHERE table_name = 'payments' AND column_name = 'status'"
+        "WHERE table_schema = current_schema() "
+        "AND table_name = 'payments' AND column_name = 'status'"
     )
     row = cur.fetchone()
     if row is None:

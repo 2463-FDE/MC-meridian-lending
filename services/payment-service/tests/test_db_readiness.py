@@ -19,7 +19,6 @@ from app import config
 _IDEM_KEY = "11111111-1111-4111-8111-111111111111"
 
 
-
 @pytest.fixture(autouse=True)
 def _reset_probe_cache():
     # database_reachable caches its result; reset around every test so the probe
@@ -347,11 +346,11 @@ def test_payments_allowed_with_processor_key(monkeypatch):
     from app.schemas import PaymentIn
 
     out = post_payment(
-            PaymentIn(loan_id=1, amount=100.0),
-            Response(),
-            x_user_role="csr",
-            idempotency_key=_IDEM_KEY,
-        )
+        PaymentIn(loan_id=1, amount=100.0),
+        Response(),
+        x_user_role="csr",
+        idempotency_key=_IDEM_KEY,
+    )
     assert out["status"] == "captured"
 
 
@@ -498,6 +497,38 @@ def test_rung_not_ready_when_status_default_merely_contains_captured(monkeypatch
     )
     assert ok is False
     assert err == "schema_not_ready:payments.status"
+
+
+def test_status_contract_probe_is_schema_qualified(monkeypatch):
+    """M1: the idempotency-column loop and the index probe both filter on
+    table_schema = current_schema() (information_schema.columns and pg_class span
+    every schema, so an unqualified lookup can validate a different `payments`).
+    The status NOT NULL/DEFAULT contract probe sits between those two and must
+    carry the same qualifier -- a same-named payments.status column in another
+    schema (a decoy, a restored snapshot, a per-tenant schema) would otherwise be
+    reachable by this query."""
+    seen = {}
+
+    class _RecordingCursor(_FakeCursor):
+        def execute(self, sql, params=None):
+            if "is_nullable" in sql:
+                seen["sql"] = sql
+            super().execute(sql, params)
+
+    class _RecordingConn(_FakeConn):
+        def cursor(self):
+            return _RecordingCursor(self.overrides)
+
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(config.psycopg2, "connect", lambda *a, **k: _RecordingConn())
+    config.database_reachable()
+
+    assert "sql" in seen, "status contract probe never ran"
+    assert "table_schema = current_schema()" in seen["sql"], (
+        "status probe must be schema-qualified like its sibling column and index probes"
+    )
 
 
 def test_rung_not_ready_when_the_index_predicate_is_on_the_wrong_column(monkeypatch):

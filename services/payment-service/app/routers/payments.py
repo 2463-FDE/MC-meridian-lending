@@ -69,11 +69,12 @@ def post_payment(
             detail="Idempotency-Key header is required (ADR 0013 Decision 1).",
         )
     try:
-        uuid.UUID(idempotency_key)
+        # Canonicalize (lowercase, hyphenated): uuid.UUID() accepts hyphenless and
+        # uppercase spellings as the same UUID, but the key is stored as raw TEXT, so
+        # two spellings of one UUID would claim two distinct rows and dedupe nothing.
+        idempotency_key = str(uuid.UUID(idempotency_key))
     except (ValueError, AttributeError, TypeError):
-        raise HTTPException(
-            status_code=400, detail="Idempotency-Key must be a UUID."
-        )
+        raise HTTPException(status_code=400, detail="Idempotency-Key must be a UUID.")
     # X-Request-Id enters the span here: charge() uses a caller-supplied id
     # verbatim and mints one otherwise, so the charge line, the apply call and
     # servicing's own line all come back under a single id (spec D1(a)).

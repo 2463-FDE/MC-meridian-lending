@@ -6,6 +6,8 @@ caller could capture a real charge against any loan id and ride the internal-
 service token past servicing's gate as a confused deputy (Codex review, PR 32).
 """
 
+import uuid
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -17,7 +19,6 @@ from app.main import app
 # call into the charge path has to carry one. A fixed valid UUID keeps these cases
 # deterministic; the idempotency behaviour itself is covered by the R-vector suite.
 _IDEM_KEY = "11111111-1111-4111-8111-111111111111"
-
 
 
 # --- require_money_role_or_owner -------------------------------------------------
@@ -104,7 +105,11 @@ def test_post_payment_denied_for_non_owner_borrower(monkeypatch):
     resp = TestClient(app).post(
         "/payments",
         json={"loan_id": 1, "amount": 500.0},
-        headers={"Idempotency-Key": _IDEM_KEY, "X-User-Role": "borrower", "X-User-Id": "5"},
+        headers={
+            "Idempotency-Key": _IDEM_KEY,
+            "X-User-Role": "borrower",
+            "X-User-Id": "5",
+        },
     )
     assert resp.status_code == 404
 
@@ -126,7 +131,11 @@ def test_post_payment_denied_for_underwriter_on_arbitrary_loan(monkeypatch):
     resp = TestClient(app).post(
         "/payments",
         json={"loan_id": 1, "amount": 500.0},
-        headers={"Idempotency-Key": _IDEM_KEY, "X-User-Role": "underwriter", "X-User-Id": "12"},
+        headers={
+            "Idempotency-Key": _IDEM_KEY,
+            "X-User-Role": "underwriter",
+            "X-User-Id": "12",
+        },
     )
     assert resp.status_code == 404
 
@@ -154,7 +163,11 @@ def test_post_payment_allowed_for_owner(monkeypatch):
     resp = TestClient(app).post(
         "/payments",
         json={"loan_id": 1, "amount": 50.0},
-        headers={"Idempotency-Key": _IDEM_KEY, "X-User-Role": "borrower", "X-User-Id": "5"},
+        headers={
+            "Idempotency-Key": _IDEM_KEY,
+            "X-User-Role": "borrower",
+            "X-User-Id": "5",
+        },
     )
     assert resp.status_code == 200
 
@@ -219,7 +232,11 @@ def test_post_payment_424_when_captured_unapplied(monkeypatch):
     resp = TestClient(app).post(
         "/payments",
         json={"loan_id": 1, "amount": 50.0},
-        headers={"Idempotency-Key": _IDEM_KEY, "X-User-Role": "borrower", "X-User-Id": "5"},
+        headers={
+            "Idempotency-Key": _IDEM_KEY,
+            "X-User-Role": "borrower",
+            "X-User-Id": "5",
+        },
     )
     assert resp.status_code == 424
     assert resp.status_code not in (502, 503, 504), (
@@ -228,3 +245,44 @@ def test_post_payment_424_when_captured_unapplied(monkeypatch):
     body = resp.json()
     assert "42" in body["detail"]
     assert "not retry" in body["detail"].lower()
+
+
+# --- m1: the stored key is the canonical UUID spelling -----------------------------
+#
+# The route validates the header with uuid.UUID(), which accepts hyphenless and
+# uppercase spellings as the same UUID -- but the key is stored as raw TEXT, so two
+# spellings of one UUID would claim two distinct rows and dedupe nothing.
+
+
+def test_hyphenless_and_uppercase_idempotency_keys_canonicalize_the_same(monkeypatch):
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    monkeypatch.setattr(authz, "require_money_role_or_owner", lambda *a, **k: None)
+
+    seen = []
+
+    def fake_charge(*a, idempotency_key=None, **kw):
+        seen.append(idempotency_key)
+        return {
+            "payment_id": 1,
+            "loan_id": 1,
+            "status": "captured",
+            "applied_amount": 50.0,
+        }
+
+    monkeypatch.setattr("app.payments.charge", fake_charge)
+
+    canonical = uuid.UUID(_IDEM_KEY)
+    spellings = [str(canonical), canonical.hex, canonical.hex.upper()]
+    for spelling in spellings:
+        resp = TestClient(app).post(
+            "/payments",
+            json={"loan_id": 1, "amount": 50.0},
+            headers={"Idempotency-Key": spelling, "X-User-Role": "csr"},
+        )
+        assert resp.status_code == 200, resp.text
+
+    assert len(set(seen)) == 1, (
+        f"every spelling of the same UUID must canonicalize to one stored key: {seen}"
+    )
+    assert seen[0] == str(canonical)

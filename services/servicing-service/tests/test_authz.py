@@ -9,6 +9,7 @@ admit staff or the owning borrower, denied as 404 so a serial id cannot be probe
 existence.
 """
 
+import uuid
 from datetime import date
 
 import pytest
@@ -539,6 +540,41 @@ def test_post_payment_allowed_for_money_role_without_db(monkeypatch):
         headers={"Idempotency-Key": _IDEM_KEY, "X-User-Role": "csr"},
     )
     assert resp.status_code == 200
+
+
+# --- m1: the stored key is the canonical UUID spelling -----------------------------
+#
+# This route is a second front door onto the same payments table (D19). Same
+# reasoning as payment-service's /payments: uuid.UUID() accepts hyphenless and
+# uppercase spellings as the same UUID, but the key is stored as raw TEXT, so two
+# spellings of one UUID would claim two distinct rows and dedupe nothing.
+
+
+def test_hyphenless_and_uppercase_idempotency_keys_canonicalize_the_same(monkeypatch):
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
+
+    seen = []
+
+    def fake_charge(*a, idempotency_key=None, **kw):
+        seen.append(idempotency_key)
+        return {"loan_id": 1, "amount": 50.0, "balance": 0.0}
+
+    monkeypatch.setattr("app.payments.charge", fake_charge)
+
+    canonical = uuid.UUID(_IDEM_KEY)
+    spellings = [str(canonical), canonical.hex, canonical.hex.upper()]
+    for spelling in spellings:
+        resp = TestClient(app).post(
+            "/payments",
+            json={"loan_id": 1, "amount": 50.0},
+            headers={"Idempotency-Key": spelling, "X-User-Role": "csr"},
+        )
+        assert resp.status_code == 200, resp.text
+
+    assert len(set(seen)) == 1, (
+        f"every spelling of the same UUID must canonicalize to one stored key: {seen}"
+    )
+    assert seen[0] == str(canonical)
 
 
 # --- GET /loans/mine (borrower self-service lookup) -----------------------------

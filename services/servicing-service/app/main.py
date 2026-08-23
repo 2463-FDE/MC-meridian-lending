@@ -12,7 +12,6 @@ deferred to the next cycle by the client, with the design fixed in that ADR — 
 record of the movement, which is the ledger ADR 0014 Decision 3 specifies.
 """
 
-
 import uuid
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
@@ -104,7 +103,10 @@ def post_payment(
             detail="Idempotency-Key header is required (ADR 0013 Decision 1).",
         )
     try:
-        uuid.UUID(idempotency_key)
+        # Canonicalize (lowercase, hyphenated): uuid.UUID() accepts hyphenless and
+        # uppercase spellings as the same UUID, but the key is stored as raw TEXT, so
+        # two spellings of one UUID would claim two distinct rows and dedupe nothing.
+        idempotency_key = str(uuid.UUID(idempotency_key))
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=400, detail="Idempotency-Key must be a UUID.")
     # X-Request-Id enters the span here too -- this route is a second front

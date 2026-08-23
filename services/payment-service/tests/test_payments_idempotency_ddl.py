@@ -103,3 +103,18 @@ def test_status_default_matches_what_pre_migration_rows_factually_are():
     table_ddl = _payments_table_ddl()
     assert "status      TEXT NOT NULL DEFAULT 'captured'" in table_ddl
     assert "status                    TEXT NOT NULL DEFAULT 'captured'" in MIGRATION_SQL
+
+
+def test_status_contract_probe_is_schema_qualified():
+    """M1: information_schema.columns spans every schema, so the status NOT NULL/
+    DEFAULT contract probe (the SELECT just above the RAISE EXCEPTIONs it guards)
+    must filter on table_schema = current_schema(), same as the column-type loop
+    a few lines above it and the index probe a few lines below -- otherwise a
+    same-named payments.status column in another schema (a decoy, a restored
+    snapshot, a per-tenant schema) is reachable by this exact query."""
+    start = MIGRATION_SQL.index(
+        "SELECT is_nullable, column_default INTO status_nullable, status_default"
+    )
+    end = MIGRATION_SQL.index(";", start)
+    probe = MIGRATION_SQL[start:end]
+    assert "table_schema = current_schema()" in probe
