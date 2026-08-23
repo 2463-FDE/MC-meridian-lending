@@ -107,26 +107,71 @@ def test_url_encoded_reserved_char_password_is_ok(monkeypatch):
 # so no real database is required.
 
 
+# The D19 readiness rung (config._payments_idempotency_ready) asks the catalog real
+# questions: the data_type of each migration-0018 column, and for each partial unique
+# index its indisunique / table / covered column / predicate. A cursor that answered
+# every query with a blanket (1,) would make the probe pass without any of those
+# questions being answered -- a fake that reports success for what it never checked.
+# So this one dispatches on the SQL and models a database that HAS 0018 applied.
+_PAYMENTS_COLUMN_TYPES = {
+    "idempotency_key": "text",
+    "idempotency_expires_at": "timestamp with time zone",
+    "request_fingerprint": "text",
+    "status": "text",
+    "processor_idempotency_key": "text",
+    "amount_minor": "bigint",
+}
+_PAYMENTS_INDEX_COLUMNS = {
+    "payments_idempotency_key_uniq": "idempotency_key",
+    "payments_processor_idempotency_key_uniq": "processor_idempotency_key",
+}
+
+
 class _FakeCursor:
+    """Cursor over a correctly-migrated database.
+
+    `overrides` maps a column or index name to the row the catalog should return
+    instead, which is how the not-ready tests below drive one failure mode at a time.
+    """
+
+    def __init__(self, overrides=None):
+        self.overrides = overrides or {}
+        self._result = None
+
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
         return False
 
-    def execute(self, *a, **k):
-        pass
+    def execute(self, sql, params=None):
+        self._result = self._answer(sql, params)
+
+    def _answer(self, sql, params):
+        name = params[0] if params else None
+        if "pg_index" in sql:
+            if name in self.overrides:
+                return self.overrides[name]
+            column = _PAYMENTS_INDEX_COLUMNS[name]
+            return (True, "payments", f"({column} IS NOT NULL)", column)
+        if "information_schema.columns" in sql and "'payments'" in sql:
+            if name in self.overrides:
+                return self.overrides[name]
+            return (_PAYMENTS_COLUMN_TYPES[name],)
+        # loans.note_rate rung (servicing only) and the plain SELECT 1.
+        return self.overrides.get("loans.note_rate", (1,))
 
     def fetchone(self):
-        return (1,)
+        return self._result
 
 
 class _FakeConn:
-    def __init__(self):
+    def __init__(self, overrides=None):
         self.closed_flag = False
+        self.overrides = overrides
 
     def cursor(self):
-        return _FakeCursor()
+        return _FakeCursor(self.overrides)
 
     def close(self):
         self.closed_flag = True
@@ -333,3 +378,111 @@ def test_payments_503_with_non_ascii_internal_service_token(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         post_payment(PaymentIn(loan_id=1, amount=100.0), x_user_role="csr")
     assert exc_info.value.status_code == 503
+
+
+# --- D19 schema rung (migration 0018) ---------------------------------------------
+#
+# The charge path claims the idempotency key with INSERT ... ON CONFLICT against a
+# PARTIAL unique index. On a volume missing 0018 that insert raises "no unique or
+# exclusion constraint matching the ON CONFLICT specification" -- the double-charge
+# control failing on first use, while /health otherwise reads fine. Migrations here are
+# hand-applied and lag the init DDL, so the rung has to name the gap at readiness.
+#
+# Each case below breaks exactly ONE catalog fact. They exist because CREATE UNIQUE
+# INDEX IF NOT EXISTS and ADD COLUMN IF NOT EXISTS both match on NAME alone: an index
+# that is non-unique, on the wrong column, or missing its predicate, and a column of the
+# wrong type, all survive those statements and would report ready under a rung that
+# checked names.
+
+
+def _probe_with(monkeypatch, overrides):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _FakeConn(overrides)
+    )
+    return config.database_reachable()
+
+
+def test_rung_not_ready_when_an_idempotency_column_is_absent(monkeypatch):
+    ok, err = _probe_with(monkeypatch, {"idempotency_key": None})
+    assert ok is False
+    assert err == "schema_not_ready:payments.idempotency_key"
+
+
+def test_rung_not_ready_when_amount_minor_has_the_wrong_type(monkeypatch):
+    """ADD COLUMN IF NOT EXISTS swallows a same-named column of any type.
+
+    A TEXT stand-in for BIGINT reports ready under a name-only check and then hands
+    every reader a string where minor units are expected.
+    """
+    ok, err = _probe_with(monkeypatch, {"amount_minor": ("text",)})
+    assert ok is False
+    assert err == "schema_not_ready:payments.amount_minor"
+
+
+def test_rung_not_ready_when_the_index_is_absent(monkeypatch):
+    ok, err = _probe_with(monkeypatch, {"payments_idempotency_key_uniq": None})
+    assert ok is False
+    assert err == "schema_not_ready:payments_idempotency_key_uniq"
+
+
+def test_rung_not_ready_when_the_index_exists_but_is_not_unique(monkeypatch):
+    """A non-unique index of the right name cannot arbitrate ON CONFLICT."""
+    ok, err = _probe_with(
+        monkeypatch,
+        {
+            "payments_idempotency_key_uniq": (
+                False,
+                "payments",
+                "(idempotency_key IS NOT NULL)",
+                "idempotency_key",
+            )
+        },
+    )
+    assert ok is False
+    assert err == "schema_not_ready:payments_idempotency_key_uniq"
+
+
+def test_rung_not_ready_when_the_index_is_not_partial(monkeypatch):
+    """No predicate means the shipped ON CONFLICT ... WHERE cannot infer the arbiter.
+
+    It also means pre-0018 rows, whose key is NULL, collide with each other, and that a
+    retired key can never be freed for reuse.
+    """
+    ok, err = _probe_with(
+        monkeypatch,
+        {
+            "payments_idempotency_key_uniq": (
+                True,
+                "payments",
+                None,
+                "idempotency_key",
+            )
+        },
+    )
+    assert ok is False
+    assert err == "schema_not_ready:payments_idempotency_key_uniq"
+
+
+def test_rung_not_ready_when_the_index_covers_the_wrong_column(monkeypatch):
+    ok, err = _probe_with(
+        monkeypatch,
+        {
+            "payments_processor_idempotency_key_uniq": (
+                True,
+                "payments",
+                "(loan_id IS NOT NULL)",
+                "loan_id",
+            )
+        },
+    )
+    assert ok is False
+    assert err == "schema_not_ready:payments_processor_idempotency_key_uniq"
+
+
+def test_rung_ready_on_a_correctly_migrated_volume(monkeypatch):
+    ok, err = _probe_with(monkeypatch, {})
+    assert ok is True
+    assert err is None

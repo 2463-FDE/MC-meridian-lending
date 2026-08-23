@@ -1,0 +1,141 @@
+-- D19 (docs/debt-log.md): POST /payments has no idempotency key, so a retried or
+-- double-clicked request inserts a second payments row and charges the card again.
+-- Measured 2026-08-02: one $100 intent sent eight ways captured $800.00.
+--
+-- ADR 0013 Decision 1 and docs/spec-payments-week5.md D2 put the guarantee in the
+-- SCHEMA rather than in a service, because two handlers write this table
+-- (payment-service and servicing-service, debt D23) and a support engineer with psql
+-- is a third. A control implemented in one handler silently does not apply to the other.
+--
+-- payments is created only in db/init/001_schema.sql -- no migration has ever held its
+-- CREATE TABLE -- so the usual three-edit rule (init DDL + the original migration's
+-- byte-identical CREATE TABLE + this file) collapses to two edits here. There is no
+-- second CREATE TABLE to keep in step; test_payments_idempotency_ddl_parity asserts
+-- this file and the init DDL still declare the same columns and indexes.
+
+ALTER TABLE payments
+  ADD COLUMN IF NOT EXISTS idempotency_key           TEXT,
+  ADD COLUMN IF NOT EXISTS idempotency_expires_at    TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS request_fingerprint       TEXT,
+  ADD COLUMN IF NOT EXISTS status                    TEXT NOT NULL DEFAULT 'captured',
+  ADD COLUMN IF NOT EXISTS processor_idempotency_key TEXT,
+  ADD COLUMN IF NOT EXISTS processor_ref             TEXT,
+  ADD COLUMN IF NOT EXISTS amount_minor              BIGINT,
+  ADD COLUMN IF NOT EXISTS updated_at                TIMESTAMPTZ;
+
+-- ADD COLUMN IF NOT EXISTS swallows a same-named column of ANY type: on a volume where
+-- an operator or an earlier hand-applied attempt created `amount_minor` as TEXT, the
+-- ALTER above reports success and every reader is handed a string. Assert each type and
+-- RAISE EXCEPTION on a mismatch -- never a NOTICE, which would let the migration report
+-- success over a column the service cannot use.
+DO $$
+DECLARE
+    expected CONSTANT text[][] := ARRAY[
+        ['idempotency_key',           'text'],
+        ['idempotency_expires_at',    'timestamp with time zone'],
+        ['request_fingerprint',       'text'],
+        ['status',                    'text'],
+        ['processor_idempotency_key', 'text'],
+        ['processor_ref',             'text'],
+        ['amount_minor',              'bigint'],
+        ['updated_at',                'timestamp with time zone']
+    ];
+    col  text;
+    want text;
+    got  text;
+BEGIN
+    FOR i IN 1 .. array_length(expected, 1) LOOP
+        col  := expected[i][1];
+        want := expected[i][2];
+        SELECT data_type INTO got
+          FROM information_schema.columns
+         WHERE table_name = 'payments' AND column_name = col;
+        IF got IS NULL THEN
+            RAISE EXCEPTION
+                'payments.% is missing after ADD COLUMN IF NOT EXISTS', col;
+        END IF;
+        IF got <> want THEN
+            RAISE EXCEPTION
+                'payments.% has data_type %, expected % -- a same-named column of the '
+                'wrong type was already present and ADD COLUMN IF NOT EXISTS swallowed it',
+                col, got, want;
+        END IF;
+    END LOOP;
+END $$;
+
+-- The Meridian key's arbiter. PARTIAL (WHERE idempotency_key IS NOT NULL) so the
+-- pre-migration rows, whose key is NULL, stay valid and non-conflicting -- and so a
+-- retired key (set back to NULL once its window passes on a terminal row) drops out of
+-- the index and frees the value for reuse. The index cannot be time-scoped: now() is
+-- not immutable and cannot appear in a predicate, which is why the window is the
+-- idempotency_expires_at column plus a retirement transition, not an index property.
+CREATE UNIQUE INDEX IF NOT EXISTS payments_idempotency_key_uniq
+  ON payments (idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+-- The processor key carries its OWN partial unique index, on the same principle: the
+-- processor enforces uniqueness on its side, but money invariants live in the schema
+-- here BECAUSE there are multiple writers. A drifted generator or a manual INSERT could
+-- otherwise stamp one processor key onto two Meridian rows; the processor would collapse
+-- the second charge as a replay while Meridian holds a second row it still applies.
+-- This index makes that collision a refused write, before any processor call.
+CREATE UNIQUE INDEX IF NOT EXISTS payments_processor_idempotency_key_uniq
+  ON payments (processor_idempotency_key) WHERE processor_idempotency_key IS NOT NULL;
+
+-- CREATE UNIQUE INDEX IF NOT EXISTS matches on NAME alone: a same-named index that is
+-- non-unique, sits on the wrong column, or carries no predicate (or a different one)
+-- makes the statement above a no-op that reports success, leaving the double-charge
+-- control disabled while the migration says it shipped. Compare the DEFINITION.
+DO $$
+DECLARE
+    expected CONSTANT text[][] := ARRAY[
+        ['payments_idempotency_key_uniq',           'idempotency_key'],
+        ['payments_processor_idempotency_key_uniq', 'processor_idempotency_key']
+    ];
+    idx      text;
+    col      text;
+    is_uniq  boolean;
+    tbl      text;
+    cols     text;
+    pred     text;
+BEGIN
+    FOR i IN 1 .. array_length(expected, 1) LOOP
+        idx := expected[i][1];
+        col := expected[i][2];
+        SELECT x.indisunique,
+               c.relname,
+               pg_get_expr(x.indpred, x.indrelid),
+               (SELECT string_agg(a.attname, ',' ORDER BY k.ord)
+                  FROM unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord)
+                  JOIN pg_attribute a
+                    ON a.attrelid = x.indrelid AND a.attnum = k.attnum)
+          INTO is_uniq, tbl, pred, cols
+          FROM pg_index x
+          JOIN pg_class i ON i.oid = x.indexrelid
+          JOIN pg_class c ON c.oid = x.indrelid
+         WHERE i.relname = idx;
+
+        IF is_uniq IS NULL THEN
+            RAISE EXCEPTION 'index % is missing after CREATE UNIQUE INDEX IF NOT EXISTS', idx;
+        END IF;
+        IF NOT is_uniq THEN
+            RAISE EXCEPTION 'index % exists but is NOT unique -- it cannot arbitrate '
+                            'ON CONFLICT and the double-charge control is disabled', idx;
+        END IF;
+        IF tbl <> 'payments' THEN
+            RAISE EXCEPTION 'index % is on table %, expected payments', idx, tbl;
+        END IF;
+        IF cols IS DISTINCT FROM col THEN
+            RAISE EXCEPTION 'index % covers column(s) %, expected %', idx, cols, col;
+        END IF;
+        -- The predicate is what makes the index partial, and the claim insert must
+        -- spell the SAME predicate in its ON CONFLICT target or Postgres cannot infer
+        -- the arbiter. A missing or different predicate here means the shipped insert
+        -- raises "no unique or exclusion constraint matching the ON CONFLICT
+        -- specification" on first use.
+        IF pred IS NULL OR pred NOT LIKE '%' || col || '%IS NOT NULL%' THEN
+            RAISE EXCEPTION
+                'index % has predicate %, expected a partial index on (% IS NOT NULL)',
+                idx, coalesce(pred, '<none>'), col;
+        END IF;
+    END LOOP;
+END $$;

@@ -117,6 +117,76 @@ def database_reachable(timeout: float = 2.0) -> tuple[bool, str | None]:
         return result
 
 
+# Schema rung for D19 (migration 0018). This service carries the SECOND charge handler
+# (ADR 0004 copied it out of here into payment-service and left both routed, debt D23),
+# so it claims the idempotency key with the same INSERT ... ON CONFLICT against a
+# PARTIAL unique index. A volume without migration 0018 would raise "no unique or
+# exclusion constraint matching the ON CONFLICT specification" on the first charge
+# through this route — the double-charge control failing where it is first needed.
+#
+# The NAME of an index proves nothing: CREATE UNIQUE INDEX IF NOT EXISTS matches on
+# name alone, so a same-named index that is non-unique, on the wrong column, or missing
+# the partial predicate would leave the control disabled while reporting ready. Assert
+# the definition — indisunique, the table, the covered column, and the predicate — and
+# assert the column TYPE too, since ADD COLUMN IF NOT EXISTS swallows a same-named
+# column of any type and a TEXT stand-in for BIGINT hands every reader a string.
+#
+# Kept byte-identical to payment-service's copy: both services write this table and both
+# claim the key, so a rung that drifts between them would let one service report ready
+# over a schema the other refuses.
+_IDEMPOTENCY_COLUMNS = (
+    ("idempotency_key", "text"),
+    ("idempotency_expires_at", "timestamp with time zone"),
+    ("request_fingerprint", "text"),
+    ("status", "text"),
+    ("processor_idempotency_key", "text"),
+    ("amount_minor", "bigint"),
+)
+_IDEMPOTENCY_INDEXES = (
+    ("payments_idempotency_key_uniq", "idempotency_key"),
+    ("payments_processor_idempotency_key_uniq", "processor_idempotency_key"),
+)
+
+
+def _payments_idempotency_ready(cur) -> tuple[bool, str | None]:
+    """Assert migration 0018 is actually applied, by definition and not by name."""
+    for column, want_type in _IDEMPOTENCY_COLUMNS:
+        cur.execute(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_name = 'payments' AND column_name = %s",
+            (column,),
+        )
+        row = cur.fetchone()
+        if row is None or row[0] != want_type:
+            return False, f"schema_not_ready:payments.{column}"
+    for index, column in _IDEMPOTENCY_INDEXES:
+        cur.execute(
+            "SELECT x.indisunique, c.relname, "
+            "       pg_get_expr(x.indpred, x.indrelid), "
+            "       (SELECT string_agg(a.attname, ',' ORDER BY k.ord) "
+            "          FROM unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) "
+            "          JOIN pg_attribute a "
+            "            ON a.attrelid = x.indrelid AND a.attnum = k.attnum) "
+            "  FROM pg_index x "
+            "  JOIN pg_class i ON i.oid = x.indexrelid "
+            "  JOIN pg_class c ON c.oid = x.indrelid "
+            " WHERE i.relname = %s",
+            (index,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return False, f"schema_not_ready:{index}"
+        is_unique, table, predicate, columns = row
+        if not is_unique or table != "payments" or columns != column:
+            return False, f"schema_not_ready:{index}"
+        # The predicate is what makes the arbiter inferable by the shipped
+        # ON CONFLICT ... WHERE clause; a non-partial index of the same name would
+        # make that insert raise.
+        if predicate is None or "IS NOT NULL" not in predicate:
+            return False, f"schema_not_ready:{index}"
+    return True, None
+
+
 def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
     if not DATABASE_URL:
         return False, "DATABASE_URL not set"
@@ -146,6 +216,9 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             )
             if cur.fetchone() is None:
                 return False, "schema_not_ready:loans.note_rate"
+            ok, reason = _payments_idempotency_ready(cur)
+            if not ok:
+                return False, reason
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__
