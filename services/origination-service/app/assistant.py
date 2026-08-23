@@ -22,6 +22,7 @@ import uuid
 from contextlib import contextmanager
 from urllib.parse import quote
 
+import httpx
 from langsmith.run_helpers import trace
 
 from . import clients, kyc_gate, policy_retrieval
@@ -121,7 +122,13 @@ def _score_application(app_id: int, request_id: str | None = None) -> dict:
     second regulated event (PR #7 review)."""
     payload = decision_request_payload(app_id)
     if payload is None:
-        raise ApplicationNotFound(f"application {app_id} not found")
+        # Identifier-free on purpose: this raises through the tool/step/root trace
+        # spans, and langsmith's trace() attaches str(exception) as that span's
+        # `error` field, so an app_id in the message would ship to LangSmith
+        # through the error channel even after B1 closed the metadata channel.
+        # No caller reads this message either -- main.py maps the TYPE to a fixed
+        # 404 detail.
+        raise ApplicationNotFound("application not found")
     # ADR 0011 parity: the manual officer route (run_decision) is KYC-gated, so the
     # assistant's score tool must be too -- otherwise "use the assistant" is a KYC bypass
     # for the same regulated credit pull. Fails closed on a declined/absent check.
@@ -143,7 +150,17 @@ def _get_decision_record(app_id: int) -> dict:
     resp = clients.get(clients.DECISION_URL, f"/decisions/{app_id}/record")
     if resp.status_code == 404:
         return {"status": "not_found"}
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        # httpx's own message embeds the request URL (`/decisions/{app_id}/record`),
+        # so re-raise with the app_id stripped and `from None` -- otherwise the
+        # traceback trace() ships to LangSmith on error still carries the chained
+        # original exception's URL.
+        raise AssistantError(
+            f"decision-service returned {exc.response.status_code} reading the "
+            "decision record"
+        ) from None
     body = resp.json()
     return {
         "status": body.get("status"),
@@ -285,12 +302,24 @@ def _validated_final(
     record_resp = clients.get(clients.DECISION_URL, path)
     if record_resp.status_code == 404:
         if task == "explain":
-            raise ApplicationNotFound(f"application {app_id} was never decisioned")
+            # Identifier-free (B1 follow-up): this raises through the root trace
+            # span, and a raw app_id here would ship to LangSmith via trace()'s
+            # `error` field even though the metadata dict never carried it.
+            raise ApplicationNotFound("application was never decisioned")
         raise AssistantError(
             "assistant returned a final answer but no decision record exists — "
             "refusing an unrecorded decision"
         )
-    record_resp.raise_for_status()
+    try:
+        record_resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        # `path` embeds app_id and request_id; httpx's own error message embeds
+        # `path`. Re-raise scrubbed, `from None` so the chained original (with the
+        # raw URL) doesn't reappear in the traceback trace() ships on error.
+        raise AssistantError(
+            f"decision-service returned {exc.response.status_code} validating the "
+            "decision record"
+        ) from None
     record = record_resp.json()
     if record.get("status") != "recorded" and task == "decision":
         raise AssistantError(
