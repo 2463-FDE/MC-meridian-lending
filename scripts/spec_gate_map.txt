@@ -146,10 +146,13 @@ services/origination-service/app/policy_retrieval.py => adr/0019-policy-retrieva
 services/servicing-service/app/reconciliation.py => adr/0018-interim-handling-of-a-double-charged-borrower.md
 
 # --- Week 9: the atomic payment application (D3) ----------------------------
-# ADR 0020 decides that the record of an application and the movement of the
-# balance are one statement, and that the amount and the loan come out of the
-# payments row rather than from the caller. balance.py holds that statement, so
-# the pairing names the file rather than the service directory -- a directory
+# ADR 0020 is Proposed, not built -- same footing as 0014/0016/0017 above: the
+# code area (balance.py) is live today, so deleting it must fail this gate even
+# though the fix the ADR decides has not shipped yet. ADR 0020 decides that the
+# record of an application and the movement of the balance will be one
+# statement, and that the amount and the loan will come out of the payments row
+# rather than from the caller. balance.py will hold that statement, so the
+# pairing names the file rather than the service directory -- a directory
 # survives deletion of the one file the ADR is about.
 #
 # db/migrations/0019_payment_applications.sql is deliberately NOT mapped. This
