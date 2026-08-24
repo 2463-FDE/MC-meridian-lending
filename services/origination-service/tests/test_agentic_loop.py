@@ -17,8 +17,11 @@ import json
 
 import pytest
 
+from tests.test_native_script import native_adapter
+
 from app import assistant
 from app.llm import ClaudeClient, FakeAdapter, LLMConfig
+from app.llm.errors import LLMError
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -32,7 +35,7 @@ def _client(*responses):
     cfg = LLMConfig(
         api_key="test-key", max_retries=0, token_budget=40_000, max_tokens=256
     )
-    adapter = FakeAdapter(responses=list(responses))
+    adapter = native_adapter(*responses)
     return ClaudeClient(cfg, adapter=adapter), adapter
 
 
@@ -296,3 +299,123 @@ def test_startup_hardens_the_trace_client():
         client_ls = get_cached_client()
     assert client_ls._hide_inputs is True
     assert client_ls._hide_outputs is True
+
+
+# --- PR #76 round 1: the invocation is native, and text tool calls are refused -------
+
+
+def _provider_turns(*turns):
+    """Hand-built provider responses: ("tool", name, input) or ("text", body)."""
+    from app.llm.adapter import Completion, FakeAdapter
+
+    scripted = list(turns)
+    issued = {"n": 0}
+
+    def _on_complete(req):
+        kind, *rest = scripted.pop(0)
+        if kind == "tool":
+            issued["n"] += 1
+            name, tool_input = rest
+            return Completion(
+                text="",
+                tool_calls=[
+                    {
+                        "id": f"toolu_{issued['n']:024d}",
+                        "name": name,
+                        "input": tool_input,
+                    }
+                ],
+                model=req.model,
+                stop_reason="tool_use",
+            )
+        return Completion(text=rest[0], model=req.model, stop_reason="end_turn")
+
+    return FakeAdapter(on_complete=_on_complete)
+
+
+def _client_from(adapter):
+    cfg = LLMConfig(
+        api_key="test-key", max_retries=0, token_budget=40_000, max_tokens=256
+    )
+    return ClaudeClient(cfg, adapter=adapter), adapter
+
+
+def test_a_provider_tool_use_block_drives_the_loop(dispatched):
+    """The invocation is NATIVE, proven on the wire rather than inferred.
+
+    Everything else in this file scripts the protocol and lets `native_adapter`
+    translate; this one hand-builds the provider turn and then reads the NEXT outbound
+    request, which must carry the provider's own `tool_use` id paired with a
+    `tool_result` that echoes it. Nothing about that round-trip is reachable through a
+    text response, so this is the test that says the loop really called a tool.
+    """
+    client, adapter = _client_from(
+        _provider_turns(("tool", "get_decision_record", {}), ("text", FINAL))
+    )
+    result = assistant.run(42, client, task="explain")
+
+    assert [name for name, _ in dispatched] == ["get_decision_record"]
+    assert result["outcome"] == "deny"
+    # Two provider calls, and the SECOND one carries the round-trip.
+    assert len(adapter.calls) == 2
+    turns = adapter.calls[-1].messages
+    blocks = [b for m in turns if isinstance(m["content"], list) for b in m["content"]]
+    uses = [b for b in blocks if b["type"] == "tool_use"]
+    results = [b for b in blocks if b["type"] == "tool_result"]
+    assert len(uses) == 1 and len(results) == 1, blocks
+    assert uses[0]["name"] == "get_decision_record"
+    # The id is the PROVIDER's, and the result is paired to it. A minted id would be
+    # one the provider never issued, and the pairing is what the API validates.
+    assert uses[0]["id"] == "toolu_" + "0" * 23 + "1"
+    assert results[0]["tool_use_id"] == uses[0]["id"]
+
+
+def test_a_tool_call_written_as_text_is_refused(dispatched):
+    """B-TEXT-TOOL-FALLBACK. Tools are bound on every run, so a text tool action is a
+    prompt-to-text call wearing a framework's clothes: it would be turned into a
+    framework tool call and report success for an invocation the provider never made
+    under a schema."""
+    client, _ = _client_from(_provider_turns(("text", SCORE), ("text", FINAL)))
+    with pytest.raises(LLMError, match="tool call as text"):
+        assistant.run(42, client)
+    assert not dispatched, f"a text tool action still dispatched: {dispatched}"
+
+
+def test_the_query_bound_is_enforced_on_a_native_turn(dispatched, monkeypatch):
+    """M-QUERY-LIMIT-BYPASS. `validate_structured` enforced the prompt's 200-char cap on
+    the JSON path; a native turn never reaches it, so the bound has to be on the tool's
+    own argument schema."""
+    reached = []
+    monkeypatch.setitem(
+        assistant._TOOLS,
+        "search_policy",
+        lambda query, task: reached.append(query),
+    )
+    client, _ = _client_from(
+        _provider_turns(
+            ("tool", "search_policy", {"query": "x" * 500}), ("text", FINAL)
+        )
+    )
+    # Refused in two stages, both fail-closed: pydantic rejects the oversized argument,
+    # the framework hands that error back as PROSE, and `_redacted_tool_result` refuses
+    # prose because it cannot be masked. So the run ends in LLMError (503 to the
+    # officer) rather than a silent truncation or an unbounded retrieval.
+    with pytest.raises(LLMError, match="must be a JSON object"):
+        assistant.run(42, client, task="explain")
+    assert not reached, (
+        f"a {len(reached[0]) if reached else 0}-char model-authored query reached "
+        f"retrieval past a 200-char bound"
+    )
+
+
+def test_the_query_bound_matches_the_prompt_schema():
+    """One bound, two places that must agree: the prompt still advertises `maxLength`
+    to the model, and the tool schema is what actually holds. Read, not duplicated —
+    this fails if the lookup ever stops finding it."""
+    from app.prompts import get_prompt
+
+    schema = get_prompt("decision_assistant").output_schema
+    advertised = schema["properties"]["input"]["properties"]["query"]["maxLength"]
+    assert assistant._QUERY_MAX_LENGTH == advertised == 200
+    bound = assistant._PolicyQuery.model_json_schema()["properties"]["query"]
+    assert bound["maxLength"] == advertised

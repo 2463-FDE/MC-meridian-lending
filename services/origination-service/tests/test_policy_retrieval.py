@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_native_script import native_adapter
+
 from app import assistant, config, policy_retrieval
 from app.llm import ClaudeClient, FakeAdapter, LLMConfig
 from app.llm.request_builder import redact_json
@@ -234,7 +236,7 @@ def _client(*responses):
     cfg = LLMConfig(
         api_key="test-key", max_retries=0, token_budget=20_000, max_tokens=256
     )
-    adapter = FakeAdapter(responses=list(responses))
+    adapter = native_adapter(*responses)
     return ClaudeClient(cfg, adapter=adapter), adapter
 
 

@@ -423,7 +423,10 @@ def _declared_tools():
 def test_bind_tools_sends_real_schemas_to_the_provider():
     """The outbound request must CARRY the schemas — binding that constrains nothing is
     the failure this replaced."""
-    model, adapter = _model()
+    # FINAL_ACTION, not a tool action: a tool call arriving as text is refused on a
+    # tool-bound request now (`client._is_text_tool_action`). This test is about what
+    # goes OUT, so it drives the turn that is still legal in text.
+    model, adapter = _model(FINAL_ACTION)
     bound = model.bind_tools(_declared_tools())
     bound.invoke([HumanMessage(content=json.dumps(APPLICANT))])
     sent = _sent(adapter)

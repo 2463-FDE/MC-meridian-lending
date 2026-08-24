@@ -15,6 +15,8 @@ import json
 
 import pytest
 
+from tests.test_native_script import native_adapter
+
 from app import assistant, policy_retrieval
 from app.llm import ClaudeClient, FakeAdapter, LLMConfig
 
@@ -81,7 +83,7 @@ def _client(*responses):
     cfg = LLMConfig(
         api_key="test-key", max_retries=0, token_budget=20_000, max_tokens=256
     )
-    return ClaudeClient(cfg, adapter=FakeAdapter(responses=list(responses)))
+    return ClaudeClient(cfg, adapter=native_adapter(*responses))
 
 
 TOOL_CALL = json.dumps(

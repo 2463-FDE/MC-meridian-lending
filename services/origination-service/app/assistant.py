@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 from . import clients, kyc_gate, policy_retrieval
 from .llm.chat_model import MeridianChatModel
 from .logging_config import get_logger
+from .prompts import get_prompt
 from .routers.applications import decision_request_payload
 
 log = get_logger("assistant")
@@ -334,6 +335,22 @@ class _NoArgs(BaseModel):
     """
 
 
+# The query bound, taken FROM the prompt's own output schema rather than restated.
+# Under the JSON-action protocol `validate_structured` enforced it; a native tool turn
+# never reaches that validator, so without this a provider `tool_use` could push an
+# arbitrarily long model-authored string into retrieval while the prompt still advertised
+# a 200-character limit. Read rather than duplicated because two copies of a bound drift,
+# and `test_policy_query_bound_matches_the_prompt_schema` fails if this lookup ever stops
+# finding it.
+_QUERY_MAX_LENGTH = (
+    ((get_prompt("decision_assistant").output_schema or {}).get("properties") or {})
+    .get("input", {})
+    .get("properties", {})
+    .get("query", {})
+    .get("maxLength")
+)
+
+
 class _PolicyQuery(BaseModel):
     """`search_policy`'s only argument, and the only model-authored input in the system.
 
@@ -345,7 +362,9 @@ class _PolicyQuery(BaseModel):
     """
 
     query: str = Field(
-        default="", description="A question about written lending policy."
+        default="",
+        max_length=_QUERY_MAX_LENGTH,
+        description="A question about written lending policy.",
     )
 
 

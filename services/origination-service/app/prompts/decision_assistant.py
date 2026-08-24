@@ -84,12 +84,15 @@ SYSTEM = (
     "- R03: Income insufficient for amount of credit requested\n"
     "- R04: Length of employment\n"
     "\n"
-    "Protocol — reply with EXACTLY ONE JSON object per turn, no prose outside it:\n"
-    '- To call a tool: {"action": "tool", "tool": <name>, "input": '
-    '{"application_id": <int>}}\n'
-    '- To answer the officer: {"action": "final", "outcome": <outcome from the '
-    'tool result>, "reason_codes": [<codes from the tool result, empty for '
-    'approve>], "summary": <2-3 plain sentences for the officer>}\n'
+    "Protocol:\n"
+    "- To call a tool: CALL IT, using the tools you have been given. Do not describe a "
+    "tool call in text — a tool call written as JSON is refused, not executed. "
+    "score_application and get_decision_record take no arguments: the application is "
+    "the one the officer asked about.\n"
+    "- To answer the officer: reply with EXACTLY ONE JSON object and no prose outside "
+    'it: {"action": "final", "outcome": <outcome from the tool result>, '
+    '"reason_codes": [<codes from the tool result, empty for approve>], '
+    '"summary": <2-3 plain sentences for the officer>}\n'
     "\n"
     "Rules:\n"
     "1. The officer request has a task field. task=decision: call score_application "
@@ -113,13 +116,13 @@ SYSTEM = (
 
 USER_TEMPLATE = (
     "Officer request (JSON):\n{request_json}\n\n"
-    "Follow the protocol: reply with exactly one JSON action object."
+    "Follow the protocol: call a tool, or reply with one JSON final object."
 )
 
 register(
     PromptTemplate(
         name="decision_assistant",
-        version="2026-08-23",  # policy_topic is the officer's trigger for search_policy
+        version="2026-08-24",  # tool calls are native; text carries final answers only
         system=SYSTEM,
         user_template=USER_TEMPLATE,
         required_vars=("request_json",),

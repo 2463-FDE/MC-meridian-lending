@@ -16,6 +16,7 @@ through the service's redacting formatter as defense in depth.
 
 from __future__ import annotations
 
+import json
 import uuid
 from time import perf_counter
 from typing import Any, Iterator
@@ -92,6 +93,23 @@ def _execution_mode(adapter: ModelAdapter) -> str:
     serves one — that is a property of the call, not of the adapter.
     """
     return "real" if isinstance(adapter, (ClaudeAdapter, BedrockAdapter)) else "fixture"
+
+
+def _is_text_tool_action(text: str) -> bool:
+    """Whether a completion's TEXT is a tool call written as prose JSON.
+
+    Deliberately shallow: any object claiming `action == "tool"` counts, whether or not
+    it would pass `validate_structured`. A malformed text tool call is refused for the
+    same reason a well-formed one is, and a caller must not be able to slip one through
+    by getting the shape slightly wrong.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(parsed, dict) and parsed.get("action") == "tool"
 
 
 def _tool_action(calls: list[dict], sent_tools: list[dict]) -> dict:
@@ -272,6 +290,22 @@ class ClaudeClient:
                 retries["n"],
             )
             return action
+
+        # Tools bound and no tool_use block: the model wrote a tool call as TEXT. Refused,
+        # because accepting it is the fail condition this slice exists to close — a text
+        # `{"action": "tool"}` that the seam turns into a framework tool call is a direct
+        # prompt-to-text call wearing a framework's clothes, and it would report success
+        # for an invocation the provider never made under a schema. Tools bound means tool
+        # calls arrive as `tool_use` blocks; text carries final answers only.
+        #
+        # Checked before validation so the refusal does not depend on the text being
+        # schema-valid, and the model's own text is never quoted into the error.
+        if built.request.tools and _is_text_tool_action(completion.text):
+            raise LLMError(
+                "the model wrote a tool call as text on a tool-bound request; a tool "
+                "call must arrive as a provider tool_use block. Text carries final "
+                "answers only"
+            )
 
         # Concern 6: validate + guard. Never pass malformed output forward.
         try:
