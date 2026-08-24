@@ -23,7 +23,6 @@ class Payment(Base):
     pan: Mapped[str | None] = mapped_column(
         String, nullable=True
     )  # full PAN stored (debt)
-    cvv: Mapped[str | None] = mapped_column(String, nullable=True)  # CVV stored (debt)
     amount: Mapped[float] = mapped_column(Float)  # money as float (debt)
     method: Mapped[str | None] = mapped_column(String, default="card")
     created_at: Mapped[str | None] = mapped_column(

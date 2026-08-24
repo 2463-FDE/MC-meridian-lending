@@ -81,7 +81,6 @@ def post_payment(
     result = payments.charge(
         body.loan_id,
         body.pan,
-        body.cvv,
         body.amount,
         body.ssn,
         body.name,

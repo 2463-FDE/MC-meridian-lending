@@ -51,7 +51,6 @@ class FakePayments:
         (
             loan_id,
             pan,
-            cvv,
             amount,
             amount_minor,
             method,
@@ -72,7 +71,6 @@ class FakePayments:
                 "id": self._next_id,
                 "loan_id": loan_id,
                 "pan": pan,
-                "cvv": cvv,
                 "amount": amount,
                 "amount_minor": amount_minor,
                 "method": method,
@@ -147,7 +145,6 @@ def _charge(key, *, loan_id=4471, amount=250.00, pan="4111111111111111", method=
     return payments.charge(
         loan_id=loan_id,
         pan=pan,
-        cvv="123",
         amount=amount,
         method=method,
         idempotency_key=key,
@@ -381,4 +378,4 @@ def test_amount_minor_does_not_lose_a_cent_to_float(fake_db):
 def test_a_charge_without_a_key_is_a_programming_error(fake_db):
     """The route refuses a keyless request; reaching charge() without one is a bug."""
     with pytest.raises(ValueError):
-        payments.charge(loan_id=1, pan="4111111111111111", cvv="123", amount=1.0)
+        payments.charge(loan_id=1, pan="4111111111111111", amount=1.0)

@@ -127,13 +127,16 @@ CREATE TABLE IF NOT EXISTS balances (
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Payments: stores full PAN + CVV (D13, still open). Carries an idempotency key as of
--- migration 0018 (D19 / ADR 0013 Decision 1) — a retried POST no longer charges twice.
+-- Payments: stores the full PAN (D13b, still open). The CVV column was deleted by
+-- migration 0020 (D13a / ADR 0013 Decision 2) — retaining sensitive authentication data
+-- after authorization is a flat PCI-DSS 3.2.1 prohibition, so the remediation was a
+-- deletion of the values and the column, not merely ceasing to write it. Do not
+-- reintroduce it. Carries an idempotency key as of migration 0018 (D19 / ADR 0013
+-- Decision 1) — a retried POST no longer charges twice.
 CREATE TABLE IF NOT EXISTS payments (
     id          SERIAL PRIMARY KEY,
     loan_id     INTEGER REFERENCES loans(id),
-    pan         TEXT,                 -- full PAN stored
-    cvv         TEXT,                 -- CVV stored (SAD — flat PCI prohibition)
+    pan         TEXT,                 -- full PAN stored (D13b)
     amount      DOUBLE PRECISION NOT NULL,  -- money as float (D2, left alone here)
     method      TEXT DEFAULT 'card',
     created_at  TIMESTAMPTZ DEFAULT now(),

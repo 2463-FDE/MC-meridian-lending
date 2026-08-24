@@ -113,7 +113,7 @@ def _mask_ssn(ssn):
     return "•" * len(str(ssn))
 
 
-def _redacted_charge_req(pan, cvv, ssn, amount, loan_id) -> dict:
+def _redacted_charge_req(pan, ssn, amount, loan_id) -> dict:
     """Charge-request fields for the log — an ALLOWLIST of operational values,
     with card/SSN masked at the VALUE level BEFORE anything is interpolated.
 
@@ -134,7 +134,6 @@ def _redacted_charge_req(pan, cvv, ssn, amount, loan_id) -> dict:
     """
     return {
         "pan": PiiRedactor._mask_pan_value(pan) if pan else pan,
-        "cvv": "••••" if cvv else cvv,
         "ssn": _mask_ssn(ssn),
         "amount": amount,
         "loan_id": loan_id,
@@ -176,10 +175,10 @@ IN_FLIGHT = "in_flight"  # same key, prior intent not finished -> 409
 # work. Two concurrent identical requests both reach this statement and exactly one gets
 # a row, which is the property no amount of application-level checking provides.
 _CLAIM_SQL = (
-    "INSERT INTO payments (loan_id, pan, cvv, amount, amount_minor, method, status, "
+    "INSERT INTO payments (loan_id, pan, amount, amount_minor, method, status, "
     "idempotency_key, idempotency_expires_at, request_fingerprint, "
     "processor_idempotency_key, updated_at) "
-    "VALUES (%s, %s, %s, %s, %s, %s, 'processing', %s, now() + %s * INTERVAL '1 hour', "
+    "VALUES (%s, %s, %s, %s, %s, 'processing', %s, now() + %s * INTERVAL '1 hour', "
     "%s, %s, now()) "
     "ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING "
     "RETURNING id"
@@ -249,9 +248,10 @@ def request_fingerprint(loan_id, amount_minor, method, pan) -> str:
 
     The instrument is a sha256 of the PAN, never the PAN itself. The specified
     fingerprint covers `card_token`/`bank_token`, and NEITHER COLUMN EXISTS -- they
-    arrive with tokenization (ADR 0013 Decision 2, debt D13), which is a much larger
-    change than this one. Two consequences, both deliberate and both recorded in the
-    debt log rather than papered over:
+    arrive with tokenization (ADR 0013 Decision 2, debt D13b), which needs a provider
+    and a card entry surface this codebase does not have. D13a deleted the CVV column;
+    it did not create the token columns. Two consequences, both deliberate and both
+    recorded in the debt log rather than papered over:
 
     - This stores a card-derived value beside the PAN that ADR 0013 wants deleted. It is
       a one-way hash, not a second copy of the card, and it disappears when D13 replaces
@@ -275,13 +275,12 @@ def _read_by_key(key: str):
     return rows[0] if rows else None
 
 
-def _claim(key, loan_id, pan, cvv, amount, amount_minor, method, fingerprint):
+def _claim(key, loan_id, pan, amount, amount_minor, method, fingerprint):
     rows = db.query(
         _CLAIM_SQL,
         (
             loan_id,
             pan,
-            cvv,
             float(amount),
             amount_minor,
             method,
@@ -302,13 +301,13 @@ def _claim(key, loan_id, pan, cvv, amount, amount_minor, method, fingerprint):
     return rows[0]["id"] if rows else None
 
 
-def claim_or_branch(key, loan_id, pan, cvv, amount, amount_minor, method, fingerprint):
+def claim_or_branch(key, loan_id, pan, amount, amount_minor, method, fingerprint):
     """Claim the key, or report which of D1's answers this caller gets.
 
     Returns (outcome, payment_id, existing_row). At most TWO claim attempts are ever
     made, so no request can loop.
     """
-    args = (key, loan_id, pan, cvv, amount, amount_minor, method, fingerprint)
+    args = (key, loan_id, pan, amount, amount_minor, method, fingerprint)
     payment_id = _claim(*args)
     if payment_id is not None:
         return CLAIMED, payment_id, None
@@ -352,7 +351,6 @@ def claim_or_branch(key, loan_id, pan, cvv, amount, amount_minor, method, finger
 def charge(
     loan_id: int,
     pan: str,
-    cvv: str,
     amount: float,
     ssn: str = None,
     name: str = None,
@@ -376,7 +374,7 @@ def charge(
     # and could still fail (spec D1(d), criterion 3). The real outcome is logged
     # once, at the end, when it is known.
     #
-    # PII (PAN/CVV/SSN) is masked at the value level before it reaches the log
+    # PII (PAN/SSN) is masked at the value level before it reaches the log
     # string; see _redacted_charge_req for why the old formatter-only approach
     # was bypassable. `name` is client-controlled free text (a PAN can be
     # smuggled into it) and is deliberately not logged. json.dumps escapes any
@@ -387,9 +385,7 @@ def charge(
         loan_id,
         "-",
         "started",
-        json.dumps(
-            _redacted_charge_req(pan, cvv, ssn, amount, loan_id), ensure_ascii=False
-        ),
+        json.dumps(_redacted_charge_req(pan, ssn, amount, loan_id), ensure_ascii=False),
     )
     # Claim the key BEFORE any capture work (D19). The partial unique index is the
     # enforcement point; this is the claim against it plus D1's branching for a caller
@@ -400,7 +396,6 @@ def charge(
         idempotency_key,
         loan_id,
         pan,
-        cvv,
         amount,
         amount_minor,
         method,

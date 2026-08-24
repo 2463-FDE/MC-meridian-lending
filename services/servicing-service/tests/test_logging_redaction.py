@@ -64,7 +64,6 @@ def test_charge_log_never_contains_name(temp_log_dir, monkeypatch, name):
     payments.charge(
         loan_id=7,
         pan="4111111111111111",
-        cvv="123",
         amount=250.0,
         ssn="412-55-9981",
         name=name,
@@ -91,7 +90,7 @@ def test_charge_log_defeats_quote_delimiter_injection():
 
     evil = '4111","x":"111111111111'
     line = "POST /payments charge req=%s -> ok" % json.dumps(
-        payments._redacted_charge_req(evil, "123", "412-55-9981", 250.0, 7),
+        payments._redacted_charge_req(evil, "412-55-9981", 250.0, 7),
         ensure_ascii=False,
     )
     assert "411111111111" not in line, f"12-digit PAN chunk leaked: {line}"
@@ -115,7 +114,6 @@ def test_charge_log_masks_pan_cvv_ssn(temp_log_dir, monkeypatch):
     payments.charge(
         loan_id=7,
         pan="4111-1111-1111-1111",
-        cvv="123",
         amount=250.0,
         ssn="412-55-9981",
         idempotency_key=_IDEM_KEY,

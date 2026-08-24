@@ -8,7 +8,6 @@ from pydantic import BaseModel
 class PaymentIn(BaseModel):
     loan_id: int
     pan: Optional[str] = None
-    cvv: Optional[str] = None
     amount: float
     ssn: Optional[str] = None
     name: Optional[str] = None

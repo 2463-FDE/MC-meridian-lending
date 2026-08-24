@@ -109,6 +109,47 @@ term, monthly_debt, employment_years, or SSN) returns **409** rather than a stal
   - Rotating it invalidates in-flight fingerprints, so a retry mid-rotation may 409 (fails
     safe — never a stale decision).
 
+### Purging the stored CVV (migration 0020, D13a)
+
+Retaining sensitive authentication data after authorization is a flat PCI-DSS 3.2.1
+prohibition, so this migration deletes the values and the column rather than stopping the
+writes. Both charge handlers stopped writing it in the same change, and **both services
+refuse to serve while the column is still present**: their readiness probe reports
+`schema_not_ready:payments.cvv_present`, `/health` is unhealthy and a charge returns 503.
+That is deliberate — the alternative is serving over a schema holding prohibited data.
+
+```bash
+docker compose exec -T postgres psql -U meridian -d meridian \
+  -f - < db/migrations/0020_payments_drop_cvv.sql
+```
+
+Two operational facts before you run it:
+
+- **It takes an ACCESS EXCLUSIVE lock.** The final `VACUUM FULL payments` is what actually
+  destroys the old row versions; while it runs, `payments` is unreadable and unwritable,
+  so charges fail for the duration. Run it in a maintenance window, or use
+  `pg_repack -t payments` instead of that statement, which reaches the same place online.
+- **Do not wrap the file in a transaction.** `VACUUM` cannot run inside a transaction
+  block, so `psql -1` or a surrounding `BEGIN` makes it fail.
+
+Verify, in this order — the column being gone does not prove the values are:
+
+```bash
+# 1. the column is gone (this is what the readiness rung checks)
+docker compose exec -T postgres psql -U meridian -d meridian -c \
+  "SELECT column_name FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'payments' AND column_name = 'cvv';"   # expect 0 rows
+
+# 2. both services came back healthy
+curl -s localhost:8006/health; curl -s localhost:8002/health
+```
+
+**What this does not purge, and who owns it:** WAL segments, replicas, and any backup
+taken before the rewrite still contain the CVV values. That is a retention action on the
+operator side, not a schema change — `docs/debt-log.md` D13 tracks it under "Not covered".
+The PAN column is untouched and stays open as D13b.
+
 ### Month-end reconciliation
 
 Compares the `payments` table (the capture side) against the processor settlement file

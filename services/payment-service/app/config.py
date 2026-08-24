@@ -285,6 +285,36 @@ def _payment_applications_ready(cur) -> tuple[bool, str | None]:
     return True, None
 
 
+# Schema rung for D13a (migration 0020). Retaining sensitive authentication data after
+# authorization is a flat PCI-DSS 3.2.1 prohibition, so the remediation is the deletion
+# of the column and its values -- not merely ceasing to write it. This service stopped
+# writing it in the same change, but migrations here are hand-applied and lag the init
+# DDL: on a volume still carrying the column, every CVV ever stored is still there and
+# still readable, and nothing else in the platform would say so.
+#
+# So this rung refuses. A volume that still has payments.cvv reports unhealthy and the
+# charge route 503s rather than serving over a schema that holds prohibited data --
+# the same fail-closed shape as the origination fee's missing rule config. The operator
+# runs migration 0020 (or pg_repack, see the file) to clear it.
+#
+# Inverted relative to the other rungs: they assert an object EXISTS, this one asserts
+# an object is GONE. The schema qualifier matters for the same reason it does there --
+# information_schema.columns spans every schema a connection can see, so an unqualified
+# lookup could clear this volume on the strength of another schema's payments table.
+#
+# Kept byte-identical to the other service's copy, same as the two rungs above.
+def _no_stored_sad_ready(cur) -> tuple[bool, str | None]:
+    """Assert migration 0020 is actually applied: payments.cvv must not exist."""
+    cur.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = current_schema() "
+        "AND table_name = 'payments' AND column_name = 'cvv'"
+    )
+    if cur.fetchone() is not None:
+        return False, "schema_not_ready:payments.cvv_present"
+    return True, None
+
+
 def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
     if not DATABASE_URL:
         return False, "DATABASE_URL not set"
@@ -302,6 +332,9 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             if not ok:
                 return False, reason
             ok, reason = _payment_applications_ready(cur)
+            if not ok:
+                return False, reason
+            ok, reason = _no_stored_sad_ready(cur)
             if not ok:
                 return False, reason
         return True, None

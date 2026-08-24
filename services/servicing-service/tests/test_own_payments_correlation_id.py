@@ -67,7 +67,6 @@ def test_no_line_claims_success_before_the_insert(monkeypatch):
         payments.charge(
             loan_id=1,
             pan="4111111111111111",
-            cvv="123",
             amount=50.0,
             idempotency_key=_IDEM_KEY,
         )
@@ -93,7 +92,6 @@ def test_generated_request_id_is_one_id_shared_by_entry_and_outcome(monkeypatch)
     result = payments.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         idempotency_key=_IDEM_KEY,
     )
@@ -115,7 +113,6 @@ def test_supplied_request_id_used_verbatim(monkeypatch):
     payments.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         request_id="abc123",
         idempotency_key=_IDEM_KEY,
@@ -131,9 +128,7 @@ def test_route_forwards_the_x_request_id_header_to_charge(monkeypatch):
 
     seen = {}
 
-    def fake_charge(
-        loan_id, pan, cvv, amount, ssn, name, method, request_id=None, **kwargs
-    ):
+    def fake_charge(loan_id, pan, amount, ssn, name, method, request_id=None, **kwargs):
         seen["request_id"] = request_id
         return {"loan_id": loan_id, "amount": amount, "balance": 0.0}
 
@@ -170,7 +165,6 @@ def test_pii_shaped_request_id_reaches_no_log_line(monkeypatch):
         payments.charge(
             loan_id=1,
             pan="4111111111111111",
-            cvv="123",
             amount=50.0,
             request_id=hostile,
             idempotency_key=_IDEM_KEY,
@@ -213,7 +207,6 @@ def test_balance_apply_payment_own_log_line_carries_the_span(monkeypatch):
     result = payments.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         request_id="abc123",
         idempotency_key=_IDEM_KEY,
@@ -254,7 +247,6 @@ def test_replay_of_a_row_captured_unapplied_by_the_other_writer_reports_zero(
     result = payments.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=250.0,
         idempotency_key=_IDEM_KEY,
     )

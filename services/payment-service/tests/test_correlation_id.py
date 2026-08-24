@@ -84,7 +84,6 @@ def test_supplied_request_id_used_verbatim_on_every_line(monkeypatch):
     payments.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         request_id="abc123",
         idempotency_key=_IDEM_KEY,
@@ -104,7 +103,9 @@ def test_generated_request_id_is_one_id_shared_by_the_whole_span(monkeypatch):
     captured = _stub_charge_path(monkeypatch)
     lines = _capture_log(monkeypatch)
 
-    payments.charge(loan_id=1, pan="4111111111111111", cvv="123", amount=50.0, idempotency_key=_IDEM_KEY)
+    payments.charge(
+        loan_id=1, pan="4111111111111111", amount=50.0, idempotency_key=_IDEM_KEY
+    )
 
     ids = {p["request_id"] for p in _fields(lines)}
     assert len(ids) == 1, f"the span must share one id, got {ids}: {lines}"
@@ -130,7 +131,6 @@ def test_unreachable_failure_line_carries_the_same_id(monkeypatch):
     out = payments.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         request_id="abc123",
         idempotency_key=_IDEM_KEY,
@@ -164,7 +164,6 @@ def test_no_line_claims_success_before_the_insert(monkeypatch):
         payments.charge(
             loan_id=1,
             pan="4111111111111111",
-            cvv="123",
             amount=50.0,
             request_id="abc123",
             idempotency_key=_IDEM_KEY,
@@ -191,7 +190,6 @@ def test_every_payment_path_line_carries_the_four_named_fields(monkeypatch):
     payments.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         request_id="abc123",
         idempotency_key=_IDEM_KEY,
@@ -218,9 +216,7 @@ def test_route_forwards_the_x_request_id_header_to_charge(monkeypatch):
 
     seen = {}
 
-    def fake_charge(
-        loan_id, pan, cvv, amount, ssn, name, method, request_id=None, **kwargs
-    ):
+    def fake_charge(loan_id, pan, amount, ssn, name, method, request_id=None, **kwargs):
         seen["request_id"] = request_id
         return {
             "payment_id": 1,
@@ -234,7 +230,8 @@ def test_route_forwards_the_x_request_id_header_to_charge(monkeypatch):
     resp = TestClient(app).post(
         "/payments",
         json={"loan_id": 1, "amount": 50.0},
-        headers={"Idempotency-Key": _IDEM_KEY, 
+        headers={
+            "Idempotency-Key": _IDEM_KEY,
             "X-User-Role": "csr",
             "X-Request-Id": "abc123",
         },
@@ -256,7 +253,6 @@ def test_hostile_request_id_is_not_logged_verbatim(monkeypatch):
     payments.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         request_id="abc\nINFO 2026-08-13 forged line 4111111111111111",
         idempotency_key=_IDEM_KEY,
@@ -297,7 +293,6 @@ def test_pii_shaped_request_id_reaches_neither_the_log_nor_servicing(monkeypatch
         payments.charge(
             loan_id=1,
             pan="4111111111111111",
-            cvv="123",
             amount=50.0,
             request_id=hostile,
             idempotency_key=_IDEM_KEY,
@@ -338,7 +333,6 @@ def test_replaced_request_id_is_returned_to_the_caller(monkeypatch):
     result = payments.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         request_id=hostile,
         idempotency_key=_IDEM_KEY,

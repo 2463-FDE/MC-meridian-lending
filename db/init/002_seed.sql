@@ -64,15 +64,17 @@ INSERT INTO balances (loan_id, balance, past_due) VALUES
   (6011, 13135.64, 0),
   (6014, 49000.0, 0);
 
--- Payments: full PAN + CVV stored. 5582 has TWO rows for one retried charge (double-charge).
-INSERT INTO payments (loan_id, pan, cvv, amount, method, created_at) VALUES
-  (4471, '4111111111111111', '123', 250.00, 'card', '2026-06-01 09:14:11'),
-  (5582, '5500005555555559', '887', 410.50, 'card', '2026-06-01 09:31:04'),
-  (5582, '5500005555555559', '887', 410.50, 'card', '2026-06-01 09:31:06'),  -- duplicate
-  (4471, '340000000000009',  '4021', 99.99, 'card', '2026-06-01 11:18:45'),
-  (6011, NULL, NULL, 432.18, 'ach', '2026-06-02 08:00:00'),
-  (4471, '4111111111111111', '123', 250.00, 'card', '2026-06-03 09:00:00'),
-  (6011, NULL, NULL, 432.18, 'ach', '2026-06-03 08:00:00');
+-- Payments: full PAN stored (D13b). No CVV — migration 0020 deleted that column, and
+-- seeding SAD into a demo volume would put back exactly what the migration purges.
+-- 5582 has TWO rows for one retried charge (double-charge).
+INSERT INTO payments (loan_id, pan, amount, method, created_at) VALUES
+  (4471, '4111111111111111', 250.00, 'card', '2026-06-01 09:14:11'),
+  (5582, '5500005555555559', 410.50, 'card', '2026-06-01 09:31:04'),
+  (5582, '5500005555555559', 410.50, 'card', '2026-06-01 09:31:06'),  -- duplicate
+  (4471, '340000000000009',  99.99, 'card', '2026-06-01 11:18:45'),
+  (6011, NULL, 432.18, 'ach', '2026-06-02 08:00:00'),
+  (4471, '4111111111111111', 250.00, 'card', '2026-06-03 09:00:00'),
+  (6011, NULL, 432.18, 'ach', '2026-06-03 08:00:00');
 
 -- "audit" entries that are really app logging, not an actor->action->time control trail.
 INSERT INTO audit_logs (actor, action, detail) VALUES
