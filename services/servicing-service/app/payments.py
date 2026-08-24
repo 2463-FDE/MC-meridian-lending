@@ -153,11 +153,20 @@ _CLAIM_SQL = (
 # test_expired_captured_unapplied_never_retires_or_double_charges) until the D3d
 # resolution path (payment_applications) or an operator resolves it; it does not
 # silently age into a fresh charge attempt like a genuine "failed" or "returned".
+#
+# The `captured` arm additionally requires a payment_applications row (D3 / ADR 0020).
+# charge() now finalizes the row to `captured` BEFORE calling servicing, so a process that
+# dies in that window leaves a `captured` row whose balance never moved -- retiring its key
+# would let a later retry mint a second real charge, which is the hole D19 closed via
+# captured_unapplied and which the reordering would otherwise reopen. Applied-ness is a
+# fact of the record, not of the status string, so the record is what this asks.
 _RETIRE_SQL = (
     "UPDATE payments SET idempotency_key = NULL, updated_at = now() "
     "WHERE idempotency_key = %s "
     "AND idempotency_expires_at <= now() "
     "AND status IN ('captured', 'failed', 'settled', 'returned') "
+    "AND (status <> 'captured' OR EXISTS ("
+    "    SELECT 1 FROM payment_applications pa WHERE pa.payment_id = payments.id)) "
     "RETURNING id"
 )
 
@@ -366,16 +375,37 @@ def charge(
             "request_id": request_id,
             "idempotency": outcome,
         }
-    new_balance = balance.apply_payment(
-        loan_id,
-        amount,
-        request_id=request_id,
-        payment_id=payment_id,
-        outcome="captured",
-    )
     # Off `processing` to a terminal status: a row left processing would hold its key
     # forever, so every later retry of a finished payment would 409 instead of replay.
+    #
+    # Finalized BEFORE the apply, which inverts the D19 order (D3 / ADR 0020).
+    # balance.apply_payment credits only a payments row whose status already says the card
+    # was captured, so applying first and finalizing after would make the predicate refuse
+    # every live payment. The window this opens — captured written, process dies, no
+    # application row — is exactly what `payment_applications` now makes visible, and
+    # _RETIRE_SQL refuses to retire a captured row that has no application row, so the
+    # window cannot age into a second real charge.
     db.query(_FINALIZE_SQL, ("captured", payment_id))
+    try:
+        new_balance, _moved = balance.apply_payment(
+            loan_id, payment_id, request_id=request_id
+        )
+        status = "captured"
+    except balance.PaymentNotApplicable as exc:
+        # The card was captured and the balance did not move. Say so in the row and in the
+        # response rather than reporting a normal success — the same contract
+        # payment-service's handler already answers 424 on (D19 B1).
+        db.query(_FINALIZE_SQL, ("captured_unapplied", payment_id))
+        status = "captured_unapplied"
+        new_balance = None
+        log.error(
+            "POST /payments captured but not applied " + _SPAN_FIELDS + " reason=%s",
+            request_id,
+            loan_id,
+            payment_id if payment_id is not None else "-",
+            status,
+            exc.reason,
+        )
     # The OUTCOME line: after the INSERT and the balance mutation, carrying
     # what actually happened, keyed by the same id as the entry line.
     log.info(
@@ -383,13 +413,16 @@ def charge(
         request_id,
         loan_id,
         payment_id if payment_id is not None else "-",
-        "captured",
+        status,
     )
     return {
         "loan_id": loan_id,
-        "amount": amount,
+        # `amount` is what the balance absorbed, not what the card captured — the same
+        # rule the replay branch above applies. An unapplied capture reports 0.0.
+        "amount": amount if status == "captured" else 0.0,
         "balance": new_balance,
         "payment_id": payment_id,
         "request_id": request_id,
         "idempotency": CLAIMED,
+        "status": status,
     }

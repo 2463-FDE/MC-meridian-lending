@@ -219,7 +219,7 @@ def test_apply_payment_denied_without_internal_token(monkeypatch):
 
 def test_apply_payment_allowed_with_internal_token(monkeypatch):
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
-    monkeypatch.setattr("app.balance.apply_payment", lambda *a, **k: 50.0)
+    monkeypatch.setattr("app.balance.apply_payment", lambda *a, **k: (50.0, True))
     resp = TestClient(app).post(
         "/accounts/1/apply-payment",
         json={"amount": 50.0, "payment_id": 1},

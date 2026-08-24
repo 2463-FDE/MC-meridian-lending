@@ -47,7 +47,9 @@ def _fields(lines):
 
 def _stub_charge_path(monkeypatch, insert_id=7):
     monkeypatch.setattr(payments.db, "query", lambda *a, **k: [{"id": insert_id}])
-    monkeypatch.setattr(payments.balance, "apply_payment", lambda *a, **k: 450.0)
+    monkeypatch.setattr(
+        payments.balance, "apply_payment", lambda *a, **k: (450.0, True)
+    )
 
 
 def test_no_line_claims_success_before_the_insert(monkeypatch):
@@ -194,6 +196,9 @@ def test_balance_apply_payment_own_log_line_carries_the_span(monkeypatch):
     def fake_query(sql, params=None):
         if sql.strip().startswith("INSERT INTO payments"):
             return [{"id": insert_id}]
+        # The D3 apply is one statement that answers with the row it wrote.
+        if "payment_applications" in sql and sql.strip().startswith("WITH"):
+            return [{"loan_id": 1, "balance": 450.0, "amount_minor": 5000}]
         if sql.strip().startswith("SELECT balance"):
             return [{"balance": 500.0}]
         return []
@@ -219,7 +224,11 @@ def test_balance_apply_payment_own_log_line_carries_the_span(monkeypatch):
     assert parsed[0]["request_id"] == "abc123"
     assert parsed[0]["loan_id"] == "1"
     assert parsed[0]["payment_id"] == str(insert_id) == str(result["payment_id"])
-    assert parsed[0]["outcome"] == "captured"
+    # `applied`, not `captured`, since D3: the outcome on the mutation's own line is
+    # now derived from what the statement did (applied / already_applied) rather than
+    # passed in by the caller, which is the point of the record being the source of
+    # truth. The caller's own entry/outcome lines still say captured.
+    assert parsed[0]["outcome"] == "applied"
 
 
 def test_replay_of_a_row_captured_unapplied_by_the_other_writer_reports_zero(

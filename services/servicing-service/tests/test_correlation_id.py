@@ -44,8 +44,14 @@ def _capture_log(monkeypatch):
 
 def _stub_db_query(sql, params=None):
     """Stand in for app.db.query over a one-row balances table, so the real
-    balance.apply_payment runs (not a mock that would hide its own logging)."""
+    balance.apply_payment runs (not a mock that would hide its own logging).
+
+    Since D3 the apply is one statement (WITH ... UPDATE ... RETURNING) that answers
+    with the row it wrote, so the stub answers in that shape: an eligible $50 payment
+    against an opening $500."""
     upper = sql.upper()
+    if "PAYMENT_APPLICATIONS" in upper and upper.strip().startswith("WITH"):
+        return [{"loan_id": 1, "balance": 450.0, "amount_minor": 5000}]
     if upper.strip().startswith("SELECT"):
         return [{"balance": 500.0}]
     return []
@@ -57,7 +63,7 @@ def _apply(monkeypatch, headers):
     lines = _capture_log(monkeypatch)
     resp = TestClient(app).post(
         "/accounts/1/apply-payment",
-        json={"amount": 50.0, "payment_id": 7},
+        json={"payment_id": 7},
         headers={"X-Internal-Service": "sekret", **headers},
     )
     assert resp.status_code == 200
@@ -157,6 +163,8 @@ def test_balance_apply_payment_own_log_line_carries_the_span(monkeypatch):
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
 
     def fake_query(sql, params=None):
+        if "payment_applications" in sql and sql.strip().startswith("WITH"):
+            return [{"loan_id": 1, "balance": 450.0, "amount_minor": 5000}]
         if sql.strip().startswith("SELECT balance"):
             return [{"balance": 500.0}]
         return []
@@ -169,7 +177,7 @@ def test_balance_apply_payment_own_log_line_carries_the_span(monkeypatch):
 
     resp = TestClient(app).post(
         "/accounts/1/apply-payment",
-        json={"amount": 50.0, "payment_id": 7},
+        json={"payment_id": 7},
         headers={"X-Internal-Service": "sekret", "X-Request-Id": "abc123"},
     )
     assert resp.status_code == 200

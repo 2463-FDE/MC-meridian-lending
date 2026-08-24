@@ -154,6 +154,22 @@ CREATE TABLE IF NOT EXISTS payments (
     updated_at                TIMESTAMPTZ
 );
 
+-- D3 (migration 0019 / ADR 0020). The append-only record of which payment moved which
+-- balance. `balances.balance` is a single mutable column with no history, so before this
+-- table there was no fact anywhere saying a given payment had been applied — the apply was
+-- inferred from an HTTP status. UNIQUE (payment_id) is what makes a replay a no-op instead
+-- of a second credit, and the row commits in the SAME transaction as the balance UPDATE.
+-- Kept byte-identical to db/migrations/0019_payment_applications.sql;
+-- test_payment_applications_ddl_parity compares the two declarations.
+CREATE TABLE IF NOT EXISTS payment_applications (
+    id           SERIAL PRIMARY KEY,
+    loan_id      INTEGER NOT NULL REFERENCES loans(id),
+    payment_id   INTEGER NOT NULL UNIQUE REFERENCES payments(id),
+    amount_minor BIGINT NOT NULL,        -- integer minor units, the amount of record
+                                         -- (ADR 0012); balances.balance stays float (D2)
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- "audit" log: an ordinary, mutable table. Rows can be UPDATE/DELETE-d. Not append-only.
 CREATE TABLE IF NOT EXISTS audit_logs (
     id          SERIAL PRIMARY KEY,

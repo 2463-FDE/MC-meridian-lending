@@ -59,7 +59,7 @@ def test_charge_log_never_contains_name(temp_log_dir, monkeypatch, name):
     logging.getLogger("payment").handlers.clear()
     monkeypatch.setattr(payments, "log", get_logger("payment"))
     monkeypatch.setattr(payments.db, "query", lambda *a, **k: [{"id": 1}])
-    monkeypatch.setattr(payments.balance, "apply_payment", lambda *a, **k: 0.0)
+    monkeypatch.setattr(payments.balance, "apply_payment", lambda *a, **k: (0.0, True))
 
     payments.charge(
         loan_id=7,
@@ -110,7 +110,7 @@ def test_charge_log_masks_pan_cvv_ssn(temp_log_dir, monkeypatch):
     logging.getLogger("payment").handlers.clear()
     monkeypatch.setattr(payments, "log", get_logger("payment"))
     monkeypatch.setattr(payments.db, "query", lambda *a, **k: [{"id": 1}])
-    monkeypatch.setattr(payments.balance, "apply_payment", lambda *a, **k: 0.0)
+    monkeypatch.setattr(payments.balance, "apply_payment", lambda *a, **k: (0.0, True))
 
     payments.charge(
         loan_id=7,
