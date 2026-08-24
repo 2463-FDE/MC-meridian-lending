@@ -65,7 +65,7 @@ had no entry in this log. It has one now, with a measurement.)*
 | **Risk** | **High.** Money is captured and not credited: the borrower is charged and still owes the amount. `reconciliation.py:14` sums the `payments` table so the aggregate gap is arithmetically visible, but with no ledger (D2) nothing can attribute it to a customer afterwards — part of why the "charged twice" tickets were dismissible as confusion. |
 | **Attribution** | **Pre-existing** (baseline servicing). Named in the `balance.py` docstring since the baseline; never entered in this log and never measured until Week 5. |
 | **Mitigation Path** | Make the mutation a single atomic statement — `UPDATE balances SET balance = balance - :amount WHERE loan_id = :id` — committed in the same transaction as an append-only `payment_applications` row unique on `payment_id`. Specified as **D3d** in `docs/spec-payments-week5.md`; decided in **ADR 0013**. Distinct from the idempotency key: the key collapses duplicate *intents*, but two genuinely distinct concurrent payments still race. |
-| **Status** | Open. **Fix specified (ADR 0013, Week 5); not built** — spec-only week. |
+| **Status** | **Fixed 2026-08-23 (ADR 0020, Week 9).** `balance.apply_payment` is one statement: an `INSERT ... SELECT` into `payment_applications` (migration 0019, `UNIQUE (payment_id)`) and an `UPDATE balances SET balance = b.balance - (ins.amount_minor / 100.0)` that computes from the stored value inside the statement, so concurrent applies serialize on the row lock. The amount and the loan come out of the `payments` row — `amount` is removed from the apply request body. `test_lost_update.py` flips from red to green and is now blocking outside the `|| true` matrix as `atomic-apply-gate`. **Not** fixed by this: the float column (D2), the waterfall (D14), and `adjust_balance`/`waive_fee`, which keep the same unlocked shape — see D32. |
 
 **Bookkeeping note:** the D-numbers used in service code and the ones defined in this log
 have drifted. Code cites `D3`, `D4`, `D7`, `D11`, `D12`, and `D14`; this log defines `D14`
@@ -452,6 +452,23 @@ until now. Same bookkeeping gap D3 had; this drains one of the collisions the D3
 | **Attribution** | **Ours.** Each migration was written by this program (0011, 0013, 0014), and each copied the same unqualified query shape — the same shape D19's own migration 0018 shipped with and a 2026-08-23 review round on `feat/payment-idempotency-capture` (finding M1) then found and fixed there, plus a fourth sibling in `servicing-service/app/config.py`'s `loans.note_rate` readiness probe (same review round). Found while widening context for that fix; not fixed here because migrations 0011/0013/0014 are unrelated features (applicant DOB readability, disclosure document storage, servicing note-rate) and touching them is out of scope for a payments-idempotency PR. |
 | **Mitigation Path** | Add `table_schema = current_schema()` (or the `pg_class`/`nspname` equivalent for 0011's `relname` join) to each of the three queries, following the exact fix already applied to migration 0018 and both services' `_payments_idempotency_ready`/`database_reachable` probes. Small, mechanical, one migration file at a time — each is independent and does not need to land together. |
 | **Status** | Open; documented 2026-08-23; not fixed. |
+
+---
+
+## Atomic-apply round 2026-08-23 (ADR 0020) — new entry
+
+### D32: `adjust_balance` and `waive_fee` keep the unlocked read-modify-write D3 removed
+
+| Field | Value |
+|---|---|
+| **ID** | D32 |
+| **Finding** | ADR 0020 converted `balance.apply_payment` to a single atomic statement, but the two sibling mutations in the same module were left as they were: each reads the column, computes in Python, and writes an absolute value back, on the same shared autocommit connection with no lock and no transaction. Two concurrent calls to either one read the same opening figure and the last writer wins — the same defect as D3, one and two columns over. |
+| **Location** | `services/servicing-service/app/balance.py` — `adjust_balance` (writes `balances.balance`) and `waive_fee` (writes `balances.past_due`). Reached through `POST /accounts/{loan_id}/adjust-balance` and `/waive-fee` in `app/main.py`. |
+| **Trigger** | Two concurrent adjustments to one loan, or an adjustment concurrent with a waiver. Note the client brief's own example — a payment concurrent with a fee waiver — is NOT this: `apply_payment` and `waive_fee` write different columns and do not collide. The collision is two calls to the same one. |
+| **Risk** | **Medium**, below D3. No measurement: unlike D3 there is no live reproduction, and neither path is on the borrower-facing payment flow. Both are servicer-initiated corrections, so the concurrency that produced D3's $200 (eight retries of one automated intent) is not the shape here — two operators adjusting one loan in the same second is possible, not routine. `adjust_balance` is also destructive by design (it overwrites the figure and the prior value is not recorded anywhere), which is its own gap and is what makes a lost update here hard to notice afterwards. |
+| **Attribution** | **Pre-existing** (baseline servicing), same as D3. Scoped out of ADR 0020 deliberately, not missed: the ADR fixes the path where money was measurably lost, and widening it to the correction paths would have grown a breaking cross-service change with no defect behind it. |
+| **Mitigation Path** | `waive_fee` takes the same treatment as D3 and is the smaller of the two: `UPDATE balances SET past_due = past_due - :amount` computes from the stored value inside the statement. `adjust_balance` is not the same fix — it sets an absolute figure, so serializing it is a lock, not an in-statement decrement, and the real question is whether an absolute set should exist at all once `payment_applications` establishes the ledger seam (D2). Do `waive_fee` first; take `adjust_balance` with the ledger. |
+| **Status** | Open; documented 2026-08-23; not fixed. Pinned by `test_the_other_mutations_are_still_a_separate_unlocked_read_then_write` so it stays a decision rather than drifting into an oversight. |
 
 ---
 

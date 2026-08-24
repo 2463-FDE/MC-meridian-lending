@@ -144,3 +144,18 @@ services/origination-service/app/policy_retrieval.py => adr/0019-policy-retrieva
 # own build (prevention at capture, ADR 0013) is deferred to week 9, while the
 # detection it decides to keep and attribute exists on main right now.
 services/servicing-service/app/reconciliation.py => adr/0018-interim-handling-of-a-double-charged-borrower.md
+
+# --- Week 9: the atomic payment application (D3) ----------------------------
+# ADR 0020 decides that the record of an application and the movement of the
+# balance are one statement, and that the amount and the loan come out of the
+# payments row rather than from the caller. balance.py holds that statement, so
+# the pairing names the file rather than the service directory -- a directory
+# survives deletion of the one file the ADR is about.
+#
+# db/migrations/0019_payment_applications.sql is deliberately NOT mapped. This
+# gate requires a mapped path to EXIST, and the migration ships in the
+# implementation PR while this ADR ships in its own -- mapping it here would make
+# the two merge in one order only. Deleting the migration without deleting
+# balance.py is caught at runtime instead, by the readiness rung both services
+# run against the table's definition.
+services/servicing-service/app/balance.py => adr/0020-atomic-payment-application.md
