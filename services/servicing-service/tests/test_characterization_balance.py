@@ -11,7 +11,12 @@ What is pinned:
   - apply_payment reduces balance only, never past_due
   - assess_late_fee adds a flat $35 to past_due and does not touch updated_at
   - the x_user_role header on adjust-balance / waive-fee is accepted and IGNORED
-  - no money path writes any audit or ledger row
+  - no money path writes any audit or ledger row, EXCEPT apply_payment, which since
+    D3 (ADR 0020) writes payment_applications in the same statement as the movement
+
+ADR 0020 landed and changed three of these deliberately, which is the signal this
+file exists to produce: apply_payment is now one atomic statement, it now records the
+movement, and adjust_balance/waive_fee are the two that keep the unlocked shape.
 
 Money here is float because the code is float (D2); the assertions use pytest.approx
 so they pin behaviour rather than re-testing float representation.
@@ -36,10 +41,45 @@ def db_spy(monkeypatch):
         def __init__(self):
             self.row = {"balance": 500.0, "past_due": 75.0, "updated_at": "t0"}
             self.statements = []
+            # One eligible captured payment (loan 1, $100.00) and an empty
+            # payment_applications, so the D3 apply has something real to act on.
+            self.payments = {
+                7: {"loan_id": 1, "amount_minor": 10000, "status": "captured"}
+            }
+            self.applications = {}
 
         def query(self, sql, params=None):
             self.statements.append((" ".join(sql.split()), params))
             upper = sql.upper()
+            # The D3 apply: one statement that records the application and moves the
+            # balance together. Modelled by outcome rather than by parsing the SQL --
+            # eligible and unapplied moves the money, anything else returns no rows.
+            if "PAYMENT_APPLICATIONS" in upper and upper.strip().startswith("WITH"):
+                payment = self.payments.get(params["payment_id"])
+                if (
+                    payment is None
+                    or payment["loan_id"] != params["loan_id"]
+                    or payment["amount_minor"] is None
+                    or payment["status"] not in ("captured", "settled")
+                    or params["payment_id"] in self.applications
+                ):
+                    return []
+                self.applications[params["payment_id"]] = {
+                    "loan_id": payment["loan_id"],
+                    "amount_minor": payment["amount_minor"],
+                }
+                self.row["balance"] -= payment["amount_minor"] / 100.0
+                self.row["updated_at"] = "t1"
+                return [
+                    {
+                        "loan_id": payment["loan_id"],
+                        "balance": self.row["balance"],
+                        "amount_minor": payment["amount_minor"],
+                    }
+                ]
+            if "PAYMENT_APPLICATIONS" in upper and upper.strip().startswith("SELECT"):
+                prior = self.applications.get(params[0])
+                return [prior] if prior else []
             if upper.strip().startswith("SELECT"):
                 # Match the select LIST, not the whole statement: "FROM balances"
                 # contains the substring BALANCE and would swallow every SELECT.
@@ -72,8 +112,9 @@ def db_spy(monkeypatch):
 
 
 def test_apply_payment_subtracts_from_balance_and_leaves_past_due(db_spy):
-    new_balance = balance.apply_payment(1, 100.0)
+    new_balance, moved = balance.apply_payment(1, 7)
 
+    assert moved is True
     assert new_balance == pytest.approx(400.0)
     assert db_spy.row["balance"] == pytest.approx(400.0)
     assert db_spy.row["past_due"] == pytest.approx(75.0), (
@@ -163,10 +204,11 @@ def test_late_fee_route_takes_no_caller_identity_at_all():
 # --- nothing records the movement -----------------------------------------
 
 
+# apply_payment is deliberately absent: since D3 it DOES write a ledger row, which is
+# the next test. The three below still record nothing anywhere.
 @pytest.mark.parametrize(
     "move",
     [
-        pytest.param(lambda: balance.apply_payment(1, 10.0), id="apply_payment"),
         pytest.param(lambda: balance.adjust_balance(1, 10.0), id="adjust_balance"),
         pytest.param(lambda: balance.waive_fee(1, 10.0), id="waive_fee"),
         pytest.param(lambda: delinquency.assess_late_fee(1), id="late_fee"),
@@ -186,15 +228,41 @@ def test_no_money_path_writes_an_audit_or_ledger_row(db_spy, move):
     assert "INSERT" not in sql, f"unexpected INSERT: {db_spy.statements}"
 
 
-def test_every_mutation_is_a_separate_unlocked_read_then_write(db_spy):
-    # The shape behind D3: two statements, no transaction, no row lock. If a fix
-    # makes this one atomic statement, this test is what says so out loud.
-    balance.apply_payment(1, 100.0)
+def test_apply_payment_now_records_the_movement(db_spy):
+    # The one money path that stopped being unrecorded (D3 / ADR 0020). This is the
+    # ledger seam: the application row is the event, and it is written by the same
+    # statement that moves the balance.
+    balance.apply_payment(1, 7)
 
     sql = db_spy.sql_text().upper()
-    assert len(db_spy.statements) == 2, db_spy.statements
+    assert "INSERT INTO PAYMENT_APPLICATIONS" in sql, db_spy.statements
+    assert db_spy.applications[7] == {"loan_id": 1, "amount_minor": 10000}
+
+
+def test_apply_payment_is_one_atomic_statement(db_spy):
+    # The inverse of what this file pinned before D3: the read-modify-write is gone,
+    # the decrement computes from the stored value inside the UPDATE, and the record
+    # and the movement are the same statement.
+    balance.apply_payment(1, 7)
+
+    sql = db_spy.sql_text().upper()
+    assert len(db_spy.statements) == 1, db_spy.statements
+    assert "SET BALANCE = B.BALANCE -" in sql, (
+        "the decrement must compute from the stored value inside the statement"
+    )
+
+
+def test_the_other_mutations_are_still_a_separate_unlocked_read_then_write(db_spy):
+    # adjust_balance and waive_fee keep the shape D3 removed from apply_payment: two
+    # statements, no transaction, no row lock. A different defect on a different
+    # column, carded in docs/debt-log.md rather than fixed by ADR 0020.
+    balance.adjust_balance(1, 100.0)
+    balance.waive_fee(1, 10.0)
+
+    sql = db_spy.sql_text().upper()
+    assert len(db_spy.statements) == 4, db_spy.statements
     assert "FOR UPDATE" not in sql
     assert "BEGIN" not in sql
-    assert "SET BALANCE = BALANCE" not in sql, (
+    assert "SET PAST_DUE = PAST_DUE" not in sql, (
         "an atomic decrement would not read first"
     )

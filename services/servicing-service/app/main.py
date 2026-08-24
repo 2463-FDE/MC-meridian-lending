@@ -142,7 +142,10 @@ def post_payment(
 
 
 class ApplyPaymentIn(BaseModel):
-    amount: float
+    # `amount` is deliberately absent (D3 / ADR 0020, spec D3(d) property 3). The amount
+    # credited comes out of the `payments` row this id names; a caller-supplied figure was
+    # a way to credit an amount that was never captured. Removing it is a breaking change
+    # to the one caller (payment-service), which moves in the same PR.
     payment_id: int
 
 
@@ -200,17 +203,30 @@ def apply_payment(
     # reachable through the gateway on session auth alone, so without this gate a caller
     # could credit any balance with no card and no payments row — money creation, which
     # is a different problem from the authorization model (debt D8 split (a), ADR 0013).
-    # The unlocked read-modify-write (D3) and the missing waterfall (D14) are unchanged
-    # here: this commit gates the route, it does not fix the mutation.
+    # The mutation is atomic as of D3 (ADR 0020): the application record and the balance
+    # movement commit together, and the amount comes from the payments row rather than
+    # from this body. The missing waterfall (D14) is still unchanged here.
     authz.require_internal_caller(x_internal_service)
     effective_request_id = _span_request_id(x_request_id)
-    new_balance = balance.apply_payment(
-        loan_id,
-        body.amount,
-        request_id=effective_request_id,
-        payment_id=body.payment_id,
-        outcome="applied",
-    )
+    try:
+        new_balance, moved = balance.apply_payment(
+            loan_id,
+            body.payment_id,
+            request_id=effective_request_id,
+        )
+    except balance.PaymentNotApplicable as exc:
+        # 422, not 404 or 500: the request is well-formed and the caller is authorized,
+        # but this payment does not credit this loan and NOTHING was written. The one
+        # caller reads any non-2xx as "not applied" and finalizes the row
+        # captured_unapplied, which is the honest state — card charged, balance unmoved.
+        log.warning(
+            "apply-payment refused request_id=%s loan_id=%s payment_id=%s outcome=%s",
+            effective_request_id,
+            loan_id,
+            body.payment_id,
+            exc.reason,
+        )
+        raise HTTPException(status_code=422, detail=exc.reason)
     # The LSS half of the payment span. This handler logged NOTHING before, so a
     # payment crossing the seam left one line in payment-service and no
     # counterpart here at all. Logged AFTER the balance actually moves, never
@@ -221,12 +237,15 @@ def apply_payment(
         effective_request_id,
         loan_id,
         body.payment_id,
-        "applied",
+        "applied" if moved else "already_applied",
         new_balance,
     )
     return {
         "loan_id": loan_id,
-        "applied_amount": body.amount,
+        # Whether THIS call moved the balance. A replay is a 200 with moved=false: the
+        # money is on the loan, so the caller has succeeded, but it credited nothing now.
+        # The caller must not add this to a running total.
+        "moved": moved,
         "new_balance": new_balance,
     }
 

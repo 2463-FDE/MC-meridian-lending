@@ -54,7 +54,10 @@ def test_apply_via_servicing_sends_internal_service_header(monkeypatch):
         "X-Internal-Service": "sekret",
         "X-Request-Id": "abc123",
     }
-    assert captured["json"] == {"amount": 50.0, "payment_id": 7}
+    # `amount` is GONE from the body (D3 / ADR 0020): servicing reads the amount
+    # and the loan off the payments row this id names, so a caller-supplied
+    # figure can no longer credit an amount that was never captured.
+    assert captured["json"] == {"payment_id": 7}
 
 
 def test_apply_via_servicing_rejected_reports_not_applied(monkeypatch):

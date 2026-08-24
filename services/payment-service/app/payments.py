@@ -201,11 +201,20 @@ _CLAIM_SQL = (
 # test_expired_captured_unapplied_never_retires_or_double_charges) until the D3d
 # resolution path (payment_applications) or an operator resolves it; it does not
 # silently age into a fresh charge attempt like a genuine "failed" or "returned".
+#
+# The `captured` arm additionally requires a payment_applications row (D3 / ADR 0020).
+# charge() now finalizes the row to `captured` BEFORE calling servicing, so a process that
+# dies in that window leaves a `captured` row whose balance never moved -- retiring its key
+# would let a later retry mint a second real charge, which is the hole D19 closed via
+# captured_unapplied and which the reordering would otherwise reopen. Applied-ness is a
+# fact of the record, not of the status string, so the record is what this asks.
 _RETIRE_SQL = (
     "UPDATE payments SET idempotency_key = NULL, updated_at = now() "
     "WHERE idempotency_key = %s "
     "AND idempotency_expires_at <= now() "
     "AND status IN ('captured', 'failed', 'settled', 'returned') "
+    "AND (status <> 'captured' OR EXISTS ("
+    "    SELECT 1 FROM payment_applications pa WHERE pa.payment_id = payments.id)) "
     "RETURNING id"
 )
 
@@ -426,18 +435,27 @@ def charge(
     # failure to apply -- rejected, redirected, or servicing unreachable --
     # means the balance was definitely not updated, and the response must say
     # so rather than report a normal "captured" success (Codex review, PR 32).
+    #
+    # Finalized to `captured` BEFORE the apply call, which inverts the D19 order
+    # (D3 / ADR 0020). servicing's apply credits only a payments row whose status already
+    # says the card was captured, so applying first and finalizing after would make its
+    # predicate refuse every live payment. The window this opens -- captured written,
+    # process dies, no application row -- cannot age into a second real charge: _RETIRE_SQL
+    # above refuses to retire a `captured` row that has no payment_applications row.
+    db.query(_FINALIZE_SQL, ("captured", payment_id))
     applied = _apply_via_servicing(loan_id, amount, payment_id, request_id)
     status = "captured" if applied else "captured_unapplied"
-    # Move the row off `processing` to a TERMINAL status either way. The card was
-    # captured in both branches -- unapplied describes the balance, not the capture --
-    # and a row left `processing` would hold its key forever, so every later retry of a
-    # finished payment would answer 409 instead of replaying.
+    # Move the row to its FINAL terminal status. The card was captured in both branches --
+    # unapplied describes the balance, not the capture -- and a row left `processing` would
+    # hold its key forever, so every later retry of a finished payment would answer 409
+    # instead of replaying.
     #
     # Persist the COMPUTED status, not a hardcoded "captured": a replay reconstructs
     # its response from this row (see the REPLAY branch above), so writing "captured"
     # unconditionally here made a replay of a request that first returned 424 come
     # back 200 with the full amount, silently losing the unapplied signal.
-    db.query(_FINALIZE_SQL, (status, payment_id))
+    if not applied:
+        db.query(_FINALIZE_SQL, (status, payment_id))
     # The OUTCOME line: after the INSERT and after the apply attempt, carrying
     # what actually happened. Same id as the entry line and as servicing's own
     # line, so both halves of the span come back from one field query.
@@ -484,11 +502,12 @@ def _apply_via_servicing(
     try:
         resp = httpx.post(
             url,
-            # The id travels as a HEADER. The body is NOT changed -- it stays
-            # {"amount", "payment_id"}, which week-5 D3(d) owns (it removes
-            # `amount` from it), and a second writer on the same body collides
-            # with that work. Spec D1(b).
-            json={"amount": amount, "payment_id": payment_id},
+            # The id travels as a HEADER. `amount` is GONE from the body as of D3
+            # (ADR 0020, spec D3(d) property 3): servicing reads the amount and the
+            # loan out of the payments row this id names, so a caller-supplied figure
+            # can no longer credit an amount that was never captured. `amount` is
+            # still a parameter here because the success log line reports it.
+            json={"payment_id": payment_id},
             headers={
                 "X-Internal-Service": INTERNAL_SERVICE_TOKEN,
                 "X-Request-Id": request_id,

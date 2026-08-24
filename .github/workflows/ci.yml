@@ -531,6 +531,63 @@ jobs:
                            tests/test_native_script.py \
                            tests/test_tool_schemas.py -q
 
+  atomic-apply-gate:
+    # D3 / ADR 0020. Crediting a captured payment to a loan exactly once is the money
+    # movement this platform exists to get right, and it was wrong: the 2026-08-02 live
+    # repro captured $800.00 and credited $600.00, all eight responses 200. The fix is
+    # one statement whose UPDATE computes from the stored value, plus payment_applications
+    # with UNIQUE (payment_id).
+    #
+    # These suites ran ONLY in the `backend` matrix job, which is continue-on-error with
+    # `python -m pytest -q || true` -- CLAUDE.md names this path explicitly as able to
+    # regress on a green build. A money-math gate that inherits `|| true` is not a gate.
+    # Same precedent as tila-vectors-gate and reconciliation-gate. This job MUST block --
+    # no continue-on-error, no `|| true`.
+    #
+    # Why these files:
+    #   test_lost_update.py          the before-number. Its fixture models BOTH statement
+    #                                shapes, so reverting to the read-modify-write turns it
+    #                                red rather than making it error on an unexpected call.
+    #   test_atomic_apply.py         the amount and the loan come off the payments row, a
+    #                                replay moves nothing, and every ineligible status
+    #                                (processing, ACH submitted, NULL amount_minor, another
+    #                                loan's payment) writes nothing at all.
+    #   test_payment_applications_ddl.py  the init DDL and migration 0019 declare one table,
+    #                                byte-for-byte, and the migration RAISE EXCEPTIONs on a
+    #                                shape it did not create.
+    #   test_characterization_balance.py  pins that adjust_balance and waive_fee still hold
+    #                                the unlocked shape -- a decision, not an oversight.
+    #   payment-service tests/test_apply_via_servicing.py  the caller sends payment_id only.
+    #                                An amount back in that body is a money-creation path.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: servicing-service atomic apply, replay, and the DDL both volumes get
+        run: |
+          cd services/servicing-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_lost_update.py \
+                           tests/test_atomic_apply.py \
+                           tests/test_payment_applications_ddl.py -q
+      # Selected, not the whole file: test_characterization_balance.py also pins the
+      # ADR 0014 authorization gaps, which are still open and still red on purpose. Only
+      # the four D3 assertions belong in a blocking gate -- the apply's shape, its record,
+      # and the two mutations that deliberately keep the old shape.
+      - name: servicing-service characterization of what D3 changed and what it did not
+        run: |
+          cd services/servicing-service
+          python -m pytest tests/test_characterization_balance.py -q \
+            -k "(apply_payment or other_mutations) and not route_takes_no_caller_identity"
+      - name: payment-service sends payment_id only, and cannot retire an unapplied capture
+        run: |
+          cd services/payment-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_apply_via_servicing.py \
+                           tests/test_idempotency_vectors.py -q
+
   db-readiness-gate:
     # DB readiness is a security control: a passwordless / placeholder / stale
     # DATABASE_URL must report unhealthy, not connect unauthenticated or fail
