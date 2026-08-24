@@ -989,7 +989,8 @@ jobs:
   # GAP: no dependency audit, no SAST, no container image scan.
   # GAP: backend tests are continue-on-error, so failing money-math tests are green --
   # EXCEPT where a dedicated blocking job runs the same file outside the matrix. The money
-  # paths carved out so far: the disclosure compute path (tila-vectors-gate) and settlement
-  # reconciliation (reconciliation-gate). Still inside the suppression, and therefore still
-  # able to regress on a green build: the apply-payment and balance write paths, including
-  # the red lost-update test (D3, week 9).
+  # paths carved out so far: the disclosure compute path (tila-vectors-gate), settlement
+  # reconciliation (reconciliation-gate), and the apply-payment path (atomic-apply-gate,
+  # which runs test_lost_update.py -- green since D3's fix, PR #77). Still inside the
+  # suppression, and therefore still able to regress on a green build: the remaining
+  # balance.py write paths, adjust_balance and waive_fee (D32).
