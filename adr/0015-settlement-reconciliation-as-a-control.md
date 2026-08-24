@@ -54,7 +54,8 @@ service's log and no counterpart anywhere, and the caller still returns `capture
 
 Reconciliation is out of scope in `docs/spec-payments-week5.md` by that spec's own statement, so
 this decision does not overlap the payments work. It depends on it in one direction only: the
-exact matching key arrives with migration `0017_payments_idempotency`, which is not built.
+exact matching key is a schema column, `processor_ref`, added by migration
+`0018_payments_idempotency.sql` — but no capture code populates it, so it is not yet usable.
 
 ---
 
@@ -70,7 +71,7 @@ that a count differs and does not decide which row is the orphan.
 | Option | Rejected because |
 |---|---|
 | A. Compare totals, as today | This is the current state and the reason finance adjusts to the bank. It cannot answer "why", which is the entire ask. |
-| B. Match exactly on a shared reference | There is no shared reference. `payments` carries no processor reference, and no processor integration exists — `PROCESSOR_BASE_URL` is referenced by no code path. The column arrives with migration `0017`. This is the intended successor, not an option available now. |
+| B. Match exactly on a shared reference | There is no populated shared reference. `payments.processor_ref` exists as a column (migration `0018_payments_idempotency.sql`) but no capture code writes it, and no processor integration exists — `PROCESSOR_BASE_URL` is defined but called by no code path. An empty column is not an option available now. |
 | C. Match heuristically and pick a winner when counts differ | A one-to-one matcher that guesses which of two identical rows is the orphan states a fact it does not have. The report would be precise and sometimes wrong, which is worse for a control than being coarse and always right. |
 | **D. Chosen: heuristic tuple, one-to-one, abstain on ambiguity** | Answers "why" with the data that exists, and its failure mode is a break the operator must read rather than a wrong attribution the operator cannot see. |
 
@@ -221,13 +222,19 @@ table.
 
 - **Matching is inexact and we say so.** Loans with repeating equal instalments are the common
   case in an installment portfolio, so ambiguous tuples will be routine. The report abstains
-  rather than guessing, which means some breaks require manual review until migration `0017`
-  supplies the exact key.
+  rather than guessing; migration `0018_payments_idempotency.sql` added a `processor_ref` column,
+  but no capture code populates it, so exact matching stays unavailable and ambiguous tuples
+  still require manual review.
 - **The gross break value is partly an artifact.** Labelled, but a reader who ignores the label
   can still misread it.
-- **Detection without prevention.** The report finds double charges every day until ADR 0013's
-  idempotency key ships. Communicated to the client explicitly; the risk is that "we can see it"
-  is heard as "it is fixed".
+- **Detection without prevention, for everything but the exact retry.** ADR 0013 Decision 1's
+  idempotency key (schema in PR #63, capture path in PR #65, held by the blocking
+  `payment-idempotency-gate`) stops the same client-minted key from being claimed twice, so an
+  exact retry no longer produces a duplicate charge. The report still finds every double charge
+  it did before that fix — a processor-side duplicate, a break that predates the fix, and D3's
+  lost update all stay detection-only, caught here and nowhere else. Communicated to the client
+  explicitly; the risk is that "we can see it" is heard as "it is fixed" for cases this fix does
+  not cover.
 - **No schedule.** "Daily" is an operational convention plus the operator's existing cron. If
   nobody runs it, the control is a script.
 - **The report is an artifact, not a record.** Two runs a month apart cannot be compared by the
@@ -319,7 +326,7 @@ path only.
 
 | Risk | Mitigation |
 |---|---|
-| Ambiguous tuples are common in an installment portfolio, so many breaks need manual review | The report abstains rather than guessing; migration `0017`'s `processor_ref` is the named successor, and Decision 1 is written to be replaced |
+| Ambiguous tuples are common in an installment portfolio, so many breaks need manual review | The report abstains rather than guessing; migration `0018`'s `processor_ref` column is the named successor once a capture path populates it, and Decision 1 is written to be replaced |
 | A reader treats gross break value as a stable measurement | Labelled in the report itself, not only in this ADR |
 | The client hears detection as prevention | Stated in docs/client-asks-2026-08-12-observability.md (local-only, un-backticked — see **Source** above) and repeated in the runbook. **Still the live risk:** week-8 client-demo feedback names prevention at capture, user notification and refund status as unevidenced, and today's honest answer is detection only |
 | Nobody runs the job, so the control exists on paper | Exit codes make it CI-runnable; the runbook names the invocation. A scheduler is deferred, not assumed |
@@ -358,5 +365,5 @@ per close, required, no default, so a missing value fails closed. The cut-off co
 pinned at the session and at the `load_ledger` row boundary.
 
 One decision is deliberately unchanged by those answers: matching stays heuristic, keyed on loan,
-amount and a one-day settlement tolerance, until migration `0017_payments_idempotency` supplies an
-exact key.
+amount and a one-day settlement tolerance. Migration `0018_payments_idempotency.sql` added the
+`processor_ref` column that would supply an exact key, but no capture code populates it yet.
