@@ -1,6 +1,9 @@
 # ADR 0013: Payment Idempotency, Cardholder-Data Tokenization, and Self-Serve Access
 
-- **Status:** **Proposed** — spec week. Implementation is scoped, not built.
+- **Status:** **Proposed** — partly built. Decision 1 (idempotency enforced by a
+  database constraint) shipped across PR #63 (schema) and PR #65 (claim path), held by
+  the blocking `payment-idempotency-gate`. Decision 2 (PAN tokenization, CVV deletion)
+  and Decision 3 (self-serve access) are not built.
 - **Date:** 2026-08-02
 - **Author:** Claude Code
 - **Supersedes:** **ADR 0003** (store full card data on the payment record). Its stated
@@ -24,10 +27,13 @@ The tickets are not confusion. `scripts/repro_double_charge.py` drives the real
 credits only **$600.00** to the loan. Two defects produce that result and they have separate
 causes:
 
-- **No idempotency.** Nothing in the request identifies the customer's intent as distinct
-  from the HTTP attempt. `payment-service/app/payments.py:74` states the position outright:
-  *"No idempotency check. No unique charge reference. Every POST inserts a row."* The DDL
-  agrees (`db/init/001_schema.sql:121`).
+- **No idempotency (pre-fix measurement; closed by Decision 1 below, see D19).** At the
+  time this ADR was written, nothing in the request identified the customer's intent as
+  distinct from the HTTP attempt. `payment-service/app/payments.py:74` stated the
+  position outright: *"No idempotency check. No unique charge reference. Every POST
+  inserts a row."* The DDL agreed (`db/init/001_schema.sql:121`, pre-migration). Decision
+  1 below has since shipped a partial unique index plus an insert-first claim (PR #63,
+  PR #65); this bullet documents the defect the fix addresses, not current behavior.
 - **Lost updates.** `balance.apply_payment` performs an unlocked read-modify-write
   (`servicing-service/app/main.py:80-85`). Concurrent applies read the same opening balance
   and overwrite one another, so captured money never reaches the loan. With no ledger (D2),
@@ -253,16 +259,21 @@ populated pre-migration volume — neither is observable from a repository check
 
 ## Implementation plan
 
-1. Migration `0016` — idempotency columns and the partial unique index. Backward compatible;
-   legacy rows keep a `NULL` key.
-2. Migration `0017` — `payment_applications` plus its append-only trigger. Atomic apply and
+Numbers below were claimed at write time; `0016` and `0017` were taken in the interim by
+unrelated provenance/applications work, and idempotency itself landed as `0018`
+(`db/migrations/0018_payments_idempotency.sql`). Remaining steps are renumbered from the
+next free slot so none of them claims `0018` again.
+
+1. Migration `0018` — idempotency columns and the partial unique index. Backward compatible;
+   legacy rows keep a `NULL` key. **Built** (PR #63 schema, PR #65 claim path).
+2. Migration `0019` — `payment_applications` plus its append-only trigger. Atomic apply and
    the `X-Internal-Service` gate land with it.
 3. Idempotency contract in `payment-service`, and the same enforcement path in
    `servicing-service`'s copy until it is retired.
-4. Migration `0018` — purge, drop `pan` and `cvv`, add the token columns, rewrite the table.
+4. Migration `0020` — purge, drop `pan` and `cvv`, add the token columns, rewrite the table.
    Seed scrub and docstring corrections in the same change.
 5. `no-sad-gate` in CI, blocking, before the form is written.
-6. Migration `0019` and the capability token — phase 2 only, gated on the delivery channel.
+6. Migration `0021` and the capability token — phase 2 only, gated on the delivery channel.
 7. Frontend: processor-hosted fields, then the payment form.
 
 Steps 1–5 deliver phase 1 (staff-assisted) and fix both measured defects. Step 6 onward is
@@ -322,10 +333,12 @@ every outstanding link dies.
 
 ## Sign-off status
 
-**Proposed.** Engineering position recorded here; product and compliance review outstanding.
-Eight client questions are open in `docs/scoping-payments-week5.md` §6, with assumptions
-recorded so a different answer costs a configuration change. Only Q7 (delivery channel)
-affects sequencing, and phase 1 is deliberately independent of it.
+**Proposed, partly built.** Decision 1 shipped (PR #63, PR #65), held by the blocking
+`payment-idempotency-gate`; Decisions 2 and 3 remain engineering position only, with
+product and compliance review outstanding. Eight client questions are open in
+`docs/scoping-payments-week5.md` §6, with assumptions recorded so a different answer
+costs a configuration change. Only Q7 (delivery channel) affects sequencing, and phase 1
+is deliberately independent of it.
 
 Decision 2 carries a remediation obligation that does not wait for this ADR to be accepted:
 the CVV is being retained today, for every payment since go-live.

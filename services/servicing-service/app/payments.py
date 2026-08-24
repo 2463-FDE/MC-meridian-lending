@@ -3,9 +3,10 @@
 Stores the FULL PAN and the CVV on the payments row (PCI storage debt, D5 — not
 addressed here). The charge LOG is now redacted at the construction boundary:
 PAN/CVV/SSN are masked at the value level before interpolation and `name` free
-text is not logged (mirrors payment-service). There is NO idempotency key — a
-retried POST inserts a second payments row and applies the amount twice
-(double-charge). (D2, D5, #4, #7)
+text is not logged (mirrors payment-service). Idempotency is enforced by a
+partial unique index on payments.idempotency_key with an insert-first claim
+(claim_or_branch, D19, ADR 0013 Decision 1) — a retried POST under the same key
+returns the original outcome instead of a second row. (D2, D5, #4, #7)
 """
 
 import hashlib

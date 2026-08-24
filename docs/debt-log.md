@@ -198,9 +198,9 @@ logged here as pre-existing debt; not fixed, out of scope for "parts we touched"
 | Field | Value |
 |---|---|
 | **ID** | D19 |
-| **Finding** | The `payments` table has no idempotency key / unique charge reference, and `charge()` inserts a row then calls `apply_payment` with no dedupe. A retried/double-submitted `POST /payments` inserts a second row and debits the balance twice. |
-| **Location** | `db/init/001_schema.sql` payments DDL ("no idempotency_key, no unique(charge_ref)"); `payment-service/app/payments.py` L74–79 and `servicing-service/app/payments.py` L74–77; call site `main.py` L68. |
-| **Trigger** | Client timeout + retry, or double-click, on a card charge → two `payments` rows, balance debited twice, no key to collapse them. |
+| **Finding** | `charge()` used to insert a row then call `apply_payment` with no dedupe, so a retried/double-submitted `POST /payments` inserted a second row and debited the balance twice. Fixed at capture: `payments.idempotency_key` sits under a partial unique index (PR #63) and both charge handlers now claim it insert-first via `claim_or_branch()` before the processor is contacted (PR #65), so a retry under the same key returns the original outcome instead of a second row. |
+| **Location** | Claim path: `payment-service/app/payments.py` `_CLAIM_SQL` (L175–183) and `claim_or_branch()` (L293); mirrored in `servicing-service/app/payments.py`. The DDL half is in place: `db/init/001_schema.sql` L142–143 and L220–221, mirrored by `db/migrations/0018_payments_idempotency.sql`. |
+| **Trigger** | Historical/measured failure (pre-fix): client timeout + retry, or double-click, on a card charge → two `payments` rows, balance debited twice, no key to collapse them. Residual trigger today: a processor-side duplicate or any break older than PR #65 — an exact retry under one key no longer collapses into two rows. |
 | **Risk** | **High.** Duplicate customer charges; compounded by D2 (no ledger to reconstruct). |
 | **Attribution** | **Pre-existing** (baseline `60d1c37` servicing/payments). Not touched by our features. |
 | **Measured** | **2026-08-02, Week 5, `scripts/repro_double_charge.py`.** Two sequential POSTs of one $100.00 intent: 2 rows, $200.00 captured. Eight concurrent POSTs of the same intent: 8 rows, $800.00 captured, all returning `200`. The client's "customers are just confused" reading does not survive the reproduction. |
