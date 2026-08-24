@@ -200,7 +200,7 @@ table.
 
 | Option | Rejected because |
 |---|---|
-| A. Correct balances the report finds wrong | Unauthorized money movement. Servicing enforces no authorization (D8), there is no maker-checker, and the write would land on the unlocked read-modify-write that is D3 — so an automated correction races the same defect that produced the discrepancy. |
+| A. Correct balances the report finds wrong | Unauthorized money movement. Servicing enforces no authorization (D8), there is no maker-checker, and a balance correction goes through `adjust_balance`, which keeps the unlocked read-modify-write shape D3's fix removed from `apply_payment` (D32) — so an automated correction races the same class of defect that produced the discrepancy. |
 | B. Write a suggested correction for an operator to approve | Requires a table, a migration, and a review workflow. The migration would take a number from the payments sequence, which was just renumbered to `0017`–`0020`. Out of proportion to a first control. |
 | **C. Chosen: read-only, remediation stays a business action** | The $500 on loan 4471 needs a human decision about two customers, not an automated `UPDATE`. |
 
@@ -352,7 +352,7 @@ that would supply it. The payments spec assumes a processor call in its ordering
 no such call exists in any code path. Recorded here because that spec does not say it.
 
 **"Reconciliation should correct what it finds."** Rejected. The correction is customer
-remediation, and the write would race D3.
+remediation, and the write would go through `adjust_balance`, which still races (D32).
 
 ---
 
