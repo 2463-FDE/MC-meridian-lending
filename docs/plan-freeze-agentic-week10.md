@@ -84,6 +84,52 @@ nothing shows the request happening. That absence is this plan's subject.
 8. **Wire the demo into `docker-compose.demo.yml`.** Reproducible demo steps cannot rest on a
    manual `.env` edit.
 
+9. **Retain no identifiers on a span, not even internal surrogate keys.** The requirement
+   bans retaining identifiers, and the question is whether "identifiers" means client
+   identity or anything that points at a record. We take the literal reading: a span
+   carries enum codes, integers, booleans, retrieval scores and chunk ids, and nothing
+   else — the CONTENT RULE at `app/assistant.py:44`. Neither `application_id` nor
+   `request_id` goes to LangSmith.
+
+   The reason is consistency with a call this codebase already made. `app/llm/client.py`
+   and `app/llm/transport.py` strip the caller-supplied `idempotency_key` from their
+   spans, and chose omission over hashing because there is no service-owned secret to
+   key an HMAC. LangSmith is a third-party sink outside the client boundary, and an
+   application id is a stable pointer to a customer record: with vendor access alone,
+   someone could enumerate which applications were decisioned, when, and to what outcome,
+   with none of the database's authz in front of it. Leaving the root span as the single
+   exception made the rule one-span-special, and a bright line survives review where a
+   case-by-case exception is re-litigated every round.
+
+   **Rejected alternative, and why it is not unreasonable:** keep both keys on the
+   grounds that they are our own surrogates, carry no applicant attribute, and are
+   meaningless outside this database — and that dropping them makes the trace unjoinable
+   to the record it describes. That is a real cost, and it was weighed. It loses because
+   the audit trail was never the trace: `decision_events` is the regulated record, append
+   only, authz'd, inside the boundary. The trace is a debugging aid, and a debugging aid
+   is the wrong thing to accept vendor-side customer linkability for.
+
+   **What replaces the join**, so the cost is paid rather than ignored: slice 6 returns
+   the LangSmith run id in the assistant response, and the officer screen links to it.
+   The direction is what matters — our record points at the trace, the trace never points
+   at the customer. Someone with vendor access alone learns nothing about which
+   application anything belonged to; an officer already authorised for that application
+   gets one click. No new secret, no pseudonym, and the bright line holds.
+
+   Two residual costs, stated rather than smoothed over. Correlating a trace to a run now
+   goes through the local log, which still carries `app_id` (`app/assistant.py`, the
+   narration-contradiction warning) inside the client boundary and through the redacting
+   formatter — unambiguous for one officer, ambiguous under concurrent runs until slice 6
+   lands. And `d049f51` also stripped `app_id` from `ApplicationNotFound` and from httpx
+   errors whose URL embedded it, so an officer-facing 404 no longer names the application;
+   that buys nothing once the span is clean, because an HTTP response body never reaches
+   LangSmith, and it is worth revisiting on its own.
+
+   Verified on 2026-08-23 by reading every span of a real Bedrock run back from the live
+   project: assistant spans carry no `inputs` and no `outputs` at all, and metadata is
+   enum codes (`task`, `policy_topic`, `outcome`, `policy_band`, `record_status`,
+   `status`, `reason_codes`), counters, booleans, and retrieval's own score and chunk id.
+
 ## 4. What the migration does not change, and the four interlocks it does
 
 The regulated output is deterministic today, and it is established below and after the loop
@@ -114,7 +160,7 @@ Each slice is one pull request, at or under 800 changed lines, with at most two 
 |---|---|---|---|
 | 1 | Demo runtime and document truth | 1 | `LLM_ENABLED`, `POLICY_RETRIEVAL_MIN_SCORE` and `LANGSMITH_TRACING` into the demo override, credentials host-shell-only; the missing `LLM_ENABLED` block in `.env.example`; the stale `search_policy` "not built" claims corrected in `scripts/check_rag_eval_import.sh`, `.github/workflows/ci.yml` and `docs/cards-week8-governance.md` (which also still credited an unmerged branch). The threshold in `.env.example` was checked against a fresh `python3 -m rag_eval.run` and is correct at 0.1609 — the disagreeing 0.1806 was a stale generated report, not a repository inconsistency |
 | 2 | `MeridianChatModel` | 1–2 | A `BaseChatModel` over `ClaudeClient`, plus the three strict tool schemas, and no loop change. This slice exists to prove the redaction boundary survives the framework calling into it |
-| 3 | The root trace | 2–4 | Entry, per-step, per-tool, retrieval, validation and outcome spans on the existing loop, carrying the week-7 `request_id`. Reuses the `@traceable` mechanism at `app/llm/client.py:114` |
+| 3 | The root trace | 2–4 | Entry, per-step, per-tool, retrieval, validation and outcome spans on the existing loop. Reuses the `@traceable` mechanism at `app/llm/client.py:114`. **Merged as #68 WITHOUT the `request_id` this row originally promised** — its review round stripped both identifiers from the span (`0cc9575`, `d049f51`), which is decision 9 above; the run-to-record join moves to slice 6's trace run id |
 | 4 | The loop swap | 5–6 | `run()` becomes a framework agent, preserving the four interlocks and the request-scoped record fetch. Re-anchors the per-step and per-tool spans |
 | 5 | Blocking gate and injection resistance | 6–7 | A blocking `agentic-loop-gate` covering the assistant, retrieval, prompt-contract and trace suites plus one test per interlock; an injection suite against the only model-authored input in the system; and the still-missing test asserting which provider and region are actually selected |
 | 6 | The trace surface | 7 | The officer assistant card renders `policy_citations` and `policy_searches` as a list with chunk ids, the tool steps taken, and the trace run id |
@@ -134,7 +180,22 @@ Each slice is one pull request, at or under 800 changed lines, with at most two 
 - The week-3 alternatives round recommended a self-hosted trace backend on data-residency
   grounds, and this platform sends spans to LangSmith. The mitigation is the payload
   allowlisting at `app/llm/client.py:39-75` and `app/llm/transport.py:61-140`, which limits
-  what leaves the boundary to enumerations, counts and hashes.
+  what leaves the boundary to enumerations, counts, hashes, retrieval scores and chunk
+  ids — no identifier of any kind, per decision 9. Two exceptions to state plainly rather than imply, both found by reading a
+  live run back on 2026-08-23:
+  - `LLM_TRACE_CONTENT=true` adds the prompt (`system`, `messages`), the raw provider
+    response (`text`) and the validated body (`result`) to the spans. It defaults to
+    false and **must be false for the graded run** — with it on, the trace retains
+    prompts and responses, which the requirement forbids outright.
+  - The allowlists shape SUCCESSFUL payloads only, so they never covered the error path.
+    A provider 400 put a 1606-character traceback carrying the provider's own
+    `{'message': ...}` body on the `llm.complete` span. Fixed by raising with
+    `from None` at both translation sites in `app/llm/adapter.py`, with
+    `tests/test_trace_error_boundary.py` asserting the rendered traceback.
+- The trace root opens inside `assistant.run()`, so "entry" means entry to the assistant,
+  not the officer's HTTP request. The route wrapper (`app/main.py::_run_assistant`) and the
+  gateway hop are not spans, so a 404/422/503 refused before the loop starts produces no
+  trace at all.
 - The model is Claude Haiku 4.5, not an Opus- or Sonnet-tier model.
 
 ## 7. Verification

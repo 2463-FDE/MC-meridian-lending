@@ -245,6 +245,20 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_proxy_methods.py -q
 
+  compose-hardening-gate-tests:
+    # BLOCKING, like doc-path-lint-tests / spec-diff-gate-tests. Hermetic — each
+    # case writes a throwaway compose fixture in $TMPDIR — so it asserts the
+    # LLM_TRACE_CONTENT check's own logic, never the state of the real compose
+    # files. The load-bearing case is `interpolation defaulting to true fails`:
+    # the check this replaces accepted ANY `${...}` form regardless of its
+    # default, so that exact line passed CI while exporting prompts and raw
+    # provider responses to LangSmith for anyone who ran the file.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check_compose_trace_flag.sh tests
+        run: ./scripts/test_check_compose_trace_flag.sh
+
   compose-hardening-gate:
     # The resume-cookie flow (ADR 0010 Phase B, PR #7) depends on two gateway settings that
     # must follow the DEPLOYMENT, not be pinned to local-dev literals in the BASE compose file:
@@ -269,6 +283,22 @@ jobs:
             exit 1
           fi
           echo "OK: resume-cookie CORS/Secure config is deployment-overridable in base compose."
+      - name: no committed compose file enables LLM_TRACE_CONTENT
+        # LLM_TRACE_CONTENT=true puts the prompt (system, messages), the raw provider
+        # response (text) and the validated body (result) on the LangSmith spans. The
+        # freeze trace requirement forbids retaining prompts and responses outright, and
+        # ADR 0005's boundary is what keeps applicant data off a third-party sink -- so
+        # the flag is a deliberate, non-production debugging act by whoever exports it in
+        # their own shell, never a property of a file anyone can inherit. Today the base
+        # file interpolates it (${LLM_TRACE_CONTENT:-false}), .env.example keeps the line
+        # commented, and the demo override sets none of the LLM keys. This asserts that,
+        # in EVERY committed compose file including the demo override -- the base-file-only
+        # scope of the step above is wrong for this key, because the demo override is
+        # exactly where a "make the trace readable on stage" edit would land. Only a
+        # literal false or an interpolation whose OWN default is false is safe -- an
+        # interpolation defaulting to true or to nothing must fail too, see
+        # scripts/check_compose_trace_flag.sh.
+        run: ./scripts/check_compose_trace_flag.sh
 
   kyc-enforcement-gate:
     # ADR 0011 is a compliance control: a regulated decision, an offer, and loan boarding
