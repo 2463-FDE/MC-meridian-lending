@@ -13,6 +13,8 @@ credentials — see `BedrockAdapter`, not `CLAUDE_API_KEY`).
 import os
 from dataclasses import dataclass, field
 
+from langsmith.run_trees import get_cached_client
+
 from .errors import LLMConfigError
 from .logging_setup import get_llm_logger
 
@@ -316,3 +318,54 @@ def load_llm_config() -> LLMConfig:
         token_budget=token_budget,
         aws_region=_aws_region(provider),
     )
+
+
+def harden_trace_client() -> None:
+    """Make this process incapable of posting run inputs/outputs to LangSmith.
+
+    The agent loop runs inside a framework, and a framework tracer exports the state it
+    is handed: measured on this service, a traced two-step run carried the
+    model-authored policy query, the model's prose and its narration onto the spans.
+    `assistant.py`'s CONTENT RULE forbids all three, and the explicit spans were written
+    by hand precisely so a tracer would not decide what travels.
+
+    `LangChainTracer` posts through the LangSmith singleton
+    (`langchain_core.tracers.langchain.get_client -> run_trees.get_cached_client`), and
+    that singleton is built by whoever calls it FIRST, with whatever arguments they
+    pass. So this claims it at startup with content hiding on. `Client._run_transform`
+    -- the one function every ingest path goes through (`create_run`,
+    `multipart_ingest`, `batch_ingest_runs`) -- then blanks `inputs` and `outputs` while
+    leaving `extra.metadata` alone, which is where our own spans keep all their signal.
+
+    Two things this deliberately does NOT do:
+
+    - It does not hide metadata. `LANGSMITH_HIDE_METADATA=true` would blank the outcome,
+      the policy-band and the retrieval scores our spans exist to carry, so the check
+      below refuses that configuration rather than accepting a trace that shows nothing.
+    - It does not hide errors. `_hide_run_error` is passthrough, so a raised exception's
+      message still posts -- which is why the assistant and the adapter scrub identifiers
+      and provider bodies out of their exception text at the source.
+
+    A shell cannot turn this off, which is the difference between this and
+    `LLM_TRACE_CONTENT`: that flag is read from the environment and a compose gate can
+    only police the committed file.
+    """
+    client = get_cached_client(hide_inputs=True, hide_outputs=True)
+    # Private attributes because langsmith exposes no public reader for them; asserting
+    # is the point -- priming SECOND wins nothing, and a silently unhardened singleton
+    # is the failure this function exists to prevent.
+    hidden = bool(getattr(client, "_hide_inputs", False)) and bool(
+        getattr(client, "_hide_outputs", False)
+    )
+    if not hidden:
+        raise LLMConfigError(
+            "the LangSmith client was built before tracing was hardened, so run "
+            "inputs and outputs would be exported: framework spans carry the model's "
+            "prose and the model-authored policy query"
+        )
+    if getattr(client, "_hide_metadata", False):
+        raise LLMConfigError(
+            "LANGSMITH_HIDE_METADATA is set, which blanks the enum codes, retrieval "
+            "scores and outcomes the assistant spans carry — a trace that shows "
+            "nothing is not a privacy-safe trace"
+        )

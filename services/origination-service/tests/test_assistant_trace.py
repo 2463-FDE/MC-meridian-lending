@@ -151,8 +151,14 @@ def tools(monkeypatch):
 # --- the tree ---------------------------------------------------------------------
 
 
-def test_one_root_per_request_spanning_step_tool_and_validation(spans, tools):
-    """The requirement is ONE root covering entry, agent steps, tools and validation."""
+def test_one_root_per_request_spanning_tool_and_validation(spans, tools):
+    """The requirement is ONE root covering entry, tools and validation.
+
+    There is no `assistant.step` span since the loop swap: the framework owns the loop,
+    so its own node runs are the steps, and a hand-emitted span beside them would be a
+    second name for one thing. What this service still owns hangs off the root directly
+    — the tool dispatch and the record validation — in the order they ran.
+    """
     assistant.run(42, _client(TOOL_CALL, FINAL_DENY))
 
     assert len(spans) == 1, (
@@ -160,14 +166,13 @@ def test_one_root_per_request_spanning_step_tool_and_validation(spans, tools):
     )
     root = spans[0]
     assert root.name == "assistant.request"
-
-    steps = [c for c in root.children if c.name == "assistant.step"]
-    assert len(steps) == 2, "one step span per loop turn"
-
-    # The tool span is a CHILD of the step that dispatched it, not a sibling: a flat tree
-    # cannot show which turn ran which tool.
-    assert [c.name for c in steps[0].children] == ["tool.score_application"]
-    assert [c.name for c in steps[1].children] == ["assistant.validate"]
+    assert [c.name for c in root.children] == [
+        "tool.score_application",
+        "assistant.validate",
+    ]
+    assert not _named(spans, "assistant.step"), (
+        "assistant.step was reintroduced beside the framework's own node runs"
+    )
 
 
 def test_the_tool_span_is_named_for_the_tool(spans, tools):
@@ -224,7 +229,16 @@ def test_step_exhaustion_still_produces_a_root(spans, tools):
     with pytest.raises(assistant.AssistantError):
         assistant.run(42, _client(*([TOOL_CALL] * assistant._MAX_STEPS)))
     assert len(spans) == 1
-    assert len(_named(spans, "assistant.step")) == assistant._MAX_STEPS
+    # Bounded spend and one regulated decision — the two properties the budget exists
+    # for. NOT an exact dispatch count: `create_react_agent` reserves a step for its
+    # own soft stop, so a run that makes `_MAX_STEPS` model calls dispatches one tool
+    # fewer, and pinning that number would pin the framework's step accounting rather
+    # than our contract. The spans are also not all `score_application` — the seam
+    # rewrites every repeat score request to `get_decision_record` (interlock 1), so
+    # the trace shows one regulated decision and reads after it.
+    tool_spans = [c for c in spans[0].children if c.name.startswith("tool.")]
+    assert 1 <= len(tool_spans) <= assistant._MAX_STEPS, [c.name for c in tool_spans]
+    assert len(_named(spans, "tool.score_application")) == 1
     # No outcome was reached, so none is claimed.
     assert "outcome" not in spans[0].metadata
 

@@ -23,15 +23,45 @@ from contextlib import contextmanager
 from urllib.parse import quote
 
 import httpx
+from langchain_core.messages import HumanMessage
+from langchain_core.tools import StructuredTool
+from langgraph.errors import GraphRecursionError
+from langgraph.prebuilt import create_react_agent
 from langsmith.run_helpers import trace
+from pydantic import BaseModel, Field
 
 from . import clients, kyc_gate, policy_retrieval
+from .llm.chat_model import MeridianChatModel
 from .logging_config import get_logger
 from .routers.applications import decision_request_payload
 
 log = get_logger("assistant")
 
 _MAX_STEPS = 6  # tool round-trips before we refuse (2 is the expected path)
+
+# What `_MAX_STEPS` becomes once the framework owns the loop. langgraph counts NODE
+# executions, not model calls, and one round-trip is two nodes (the model, then the
+# tool): measured at recursion_limit=6, the graph made 3 provider calls before
+# stopping. So 2x is the exact translation — `_MAX_STEPS` model calls and no more.
+# NOT `2x + 1`: that buys one extra model call past the budget, which is a paid call
+# the refusal was supposed to prevent.
+#
+# Exhaustion has TWO shapes on langgraph 1.2.10 and both were measured here, which is
+# why neither one alone is trusted:
+#
+#   * the SOFT stop -- `create_react_agent` tracks `remaining_steps` and, when the
+#     model node is the one that runs out, appends
+#     `AIMessage("Sorry, need more steps to process this request.")` and returns
+#     NORMALLY. A caller reading the return value would hand framework prose to an
+#     officer as an answer.
+#   * the HARD stop -- when the tool node hits the wall instead, langgraph raises
+#     `GraphRecursionError`.
+#
+# Which one fires depends on where the node count lands, so `run()` handles both: it
+# catches `GraphRecursionError` and it checks the terminal message. Do not simplify
+# this to one branch by picking a limit whose parity favours one shape -- that is
+# fitting to an implementation detail of the framework's step accounting.
+_RECURSION_LIMIT = 2 * _MAX_STEPS
 
 # --- root trace ------------------------------------------------------------------
 #
@@ -99,9 +129,15 @@ def _tool_span(name: str):
 
     Yields a recorder rather than the run: a caller holding the run could attach anything
     to it, and the point of these spans is that what they carry is decided in one place.
+
+    `marks` are extra keys the CALL SITE knows and the result does not — whether a score
+    request was served from the cache, whether it was substituted on the explain path.
+    Booleans and enum codes only, same CONTENT RULE as everything else on these spans.
     """
     with trace(name=f"tool.{name}", run_type="tool") as run:
-        yield lambda result: run.add_metadata(_result_metadata(result))
+        yield lambda result, **marks: run.add_metadata(
+            {**_result_metadata(result), **marks}
+        )
 
 
 class AssistantError(RuntimeError):
@@ -280,6 +316,182 @@ def _policy_section(citations: list) -> str:
     return "\n\n".join(blocks)
 
 
+# --- the framework's tool set ------------------------------------------------------
+#
+# `create_agent` binds tools ONCE, so the three invariants the hand-rolled loop applied
+# at dispatch time have to live inside the closures instead. That is a strengthening,
+# not a port: these closures take no application id at all, so the officer's id is not
+# "preferred over" the model's -- the model has no way to name one.
+
+
+class _NoArgs(BaseModel):
+    """No arguments.
+
+    The application is the officer's, taken from their own request, so there is nothing
+    for the model to supply. Pydantic ignores unknown fields by default, which is what
+    makes this the pinning: a tool call carrying `{"application_id": 99}` validates to
+    `{}` and the closure runs against the officer's application regardless.
+    """
+
+
+class _PolicyQuery(BaseModel):
+    """`search_policy`'s only argument, and the only model-authored input in the system.
+
+    Optional rather than required: an omitted query would otherwise raise inside the
+    framework's tool executor, which returns the error to the model as prose -- and
+    prose has no block shape the redaction boundary carries, so a recoverable model
+    mistake would become a refused turn. `policy_retrieval.search` already abstains on
+    an empty query, which is the honest answer to one.
+    """
+
+    query: str = Field(
+        default="", description="A question about written lending policy."
+    )
+
+
+def _framework_tools(application_id: int, request_id: str, task: str):
+    """The three tools, closed over this request, plus the state the answer needs.
+
+    Returns `(tools, state)`. `state` collects what the officer-facing answer is built
+    from -- the citations, every search attempt, and whether the regulated decision
+    ran -- because the framework owns the message list and none of that can be read
+    back out of it.
+    """
+    state: dict = {"score": None, "citations": [], "searches": []}
+
+    def _call(name: str, *args):
+        """Run a tool from `_TOOLS`, resolved at CALL time.
+
+        Resolved late on purpose: a swap that snapshots the table at import time would
+        silently ignore a test's monkeypatch, and the whole tool surface is tested that
+        way.
+        """
+        tool = _TOOLS.get(name)
+        if tool is None:  # pragma: no cover - the table is module-owned
+            raise AssistantError(f"assistant requested unknown tool {name!r}")
+        return tool(*args)
+
+    def _score() -> str:
+        # One span per REQUEST, named for the tool the model asked for — not per
+        # dispatch. A model that asks to score six times and is served the cache five
+        # times is a trace worth reading, and a span only where work happened would
+        # show one call and hide the interlock doing its job.
+        #
+        # Interlock 2 (explain never scores): a score request on a read-only task is a
+        # billable credit pull the officer did not ask for, so it is served from the
+        # record instead. Interlock 1 (one regulated decision per run): the second
+        # request in a run gets the first result, so the model cannot compound bureau
+        # pulls or decision_events.
+        with _tool_span("score_application") as record:
+            if task == "explain":
+                result = _call("get_decision_record", application_id)
+                record(result, substituted_on_explain=True)
+                return json.dumps(result)
+            cached = state["score"] is not None
+            if not cached:
+                state["score"] = _call("score_application", application_id, request_id)
+            record(state["score"], served_from_cache=cached)
+            return json.dumps(state["score"])
+
+    def _record() -> str:
+        with _tool_span("get_decision_record") as record:
+            result = _call("get_decision_record", application_id)
+            record(result)
+            return json.dumps(result)
+
+    def _policy(query: str = "") -> str:
+        # Interlock 5 (PT-001): search_policy is honoured AT MOST ONCE per run, the same
+        # cap as the regulated score, so the model cannot compound retrieval calls or
+        # citations within one run. A repeat request is served the first answer -- and
+        # gets its own span, marked, for the same reason a repeat score does: the trace
+        # should show the model asking twice and the cap holding.
+        with _tool_span("search_policy") as record:
+            if state["searches"]:
+                answer = state["searches"][-1]
+                record(answer.tool_result(), served_from_cache=True)
+                return json.dumps(answer.tool_result())
+            answer = _call("search_policy", query, task)
+            record(answer.tool_result(), served_from_cache=False)
+        state["searches"].append(answer)
+        if answer.is_hit and all(
+            c.chunk_id != answer.chunk_id for c in state["citations"]
+        ):
+            state["citations"].append(answer)
+        # Only the allowlisted status + score go back to the model; the chunk text
+        # stays on the officer's side of the boundary (ADR 0019 decision 3).
+        return json.dumps(answer.tool_result())
+
+    tools = [
+        StructuredTool.from_function(
+            func=_score,
+            name="score_application",
+            description=(
+                "Score the application under review and persist its decision record. "
+                "Takes no arguments: the application is the one the officer asked "
+                "about."
+            ),
+            args_schema=_NoArgs,
+        ),
+        StructuredTool.from_function(
+            func=_record,
+            name="get_decision_record",
+            description=(
+                "Read the persisted decision record for the application under review. "
+                "Takes no arguments."
+            ),
+            args_schema=_NoArgs,
+        ),
+        StructuredTool.from_function(
+            func=_policy,
+            name="search_policy",
+            description=(
+                "Look up one passage of Meridian's written lending policy. Read-only, "
+                "and refused while producing a decision."
+            ),
+            args_schema=_PolicyQuery,
+        ),
+    ]
+    return tools, state
+
+
+def _build_agent(client, tools):
+    """The framework agent that owns the loop.
+
+    Kept as a named module-level function so a test can assert what the request path
+    actually runs on, rather than inferring it from an import.
+
+    `create_react_agent` calls `bind_tools` on the model, which is where the schemas
+    become a real provider `tools` field, and it is reached from the existing
+    `langgraph` pin -- `langchain.agents.create_agent` would require moving
+    `langchain-core` and `langgraph` under the disclosure pipeline's own StateGraph.
+    """
+    return create_react_agent(MeridianChatModel(client=client), tools=tools)
+
+
+def _terminal_action(messages: list) -> dict:
+    """The final action the graph ended on, or a refusal.
+
+    This is interlock 4's soft half. langgraph's recursion limit does not always
+    raise: when the model node is the one that runs out, `create_react_agent` appends
+    its own `AIMessage("Sorry, need more steps to process this request.")` and returns,
+    so a run that never answered comes back looking like a run that did. The hard half
+    -- `GraphRecursionError` -- is caught in `run()`.
+
+    The framework's sentence is never quoted into the error. It is not an officer-facing
+    answer and `main.py` maps the TYPE, not the message.
+    """
+    last = messages[-1] if messages else None
+    content = getattr(last, "content", None)
+    if isinstance(content, str) and content.strip():
+        try:
+            action = json.loads(content)
+        except json.JSONDecodeError:
+            action = None
+        if isinstance(action, dict) and action.get("action") == "final":
+            return action
+    raise AssistantError(f"assistant gave no final answer within {_MAX_STEPS} steps")
+
+
 def _validated_final(
     action: dict,
     app_id: int,
@@ -436,7 +648,6 @@ def run(
     # event its score tool created (PR #7 review). A fresh key means no replay of a prior
     # event, so an assistant retry without an officer key stays an explicit re-decision.
     request_id = request_id or uuid.uuid4().hex
-    history = []
     request = {"application_id": application_id, "task": task}
     # The officer's policy topic, and the only thing in this request the officer chooses.
     # Without it the model has no reason to call search_policy at all: the request said
@@ -451,23 +662,28 @@ def run(
         if policy_topic not in policy_retrieval.POLICY_TOPICS:
             raise AssistantError(f"unknown policy topic {policy_topic!r}")
         request["policy_topic"] = policy_topic
-    score_result = None  # the regulated decision happens AT MOST ONCE per run
-    citations = []  # policy excerpts to quote to the OFFICER (never back to the model)
-    searches = []  # every search_policy attempt, hit or abstain (B1: makes an
-    # abstention visible instead of indistinguishable from a run that never searched)
-    searched = False  # search_policy is honored AT MOST ONCE per run, same cap
-    # pattern as score_result — otherwise the model could compound retrieval calls
-    # (and citations) within one run with no code enforcing a single search (PT-001)
+    # The per-run caps that were loop-local before the swap now live in the tool
+    # closures, which is where a framework can still see them: `create_agent` binds
+    # tools once, so a check in the loop body would have nowhere to run.
+    tools, state = _framework_tools(application_id, request_id, task)
+    agent = _build_agent(client, tools)
     # Root of the trace. `request_id` is the decision idempotency key forwarded to
     # decision-service, so it still ties this run to the exact decision_events row
-    # it created or replayed -- but that tie is internal (threaded to the score
-    # tool call below), not exported here. `application_id` and `request_id` are
+    # it created or replayed -- but that tie is internal (threaded into the score
+    # closure above), not exported here. `application_id` and `request_id` are
     # caller/applicant-linked identifiers, same exposure class as the idempotency_key
     # `app/llm/client.py` and `app/llm/transport.py` strip before tracing: shipping
     # either to LangSmith would make traces linkable to a specific customer record
     # with no service-owned secret to key an HMAC instead (same omit-vs-hash call as
     # those two spans). Neither is an enum code, integer, boolean, or retrieval score
     # -- the CONTENT RULE above -- so neither belongs on this span at all.
+    #
+    # There is no `assistant.step` span any more, and that is the swap: the framework
+    # owns the loop, so its own node runs ARE the steps, and a hand-emitted span beside
+    # them would be a second name for one thing. Everything below the root that this
+    # service owns is unchanged -- `llm.complete`/`llm.transport` per model call,
+    # `tool.*` per dispatch, `policy.retrieval` under the policy tool, and
+    # `assistant.validate` over the record check.
     with trace(
         name=_SPAN_REQUEST,
         run_type="chain",
@@ -482,135 +698,72 @@ def run(
             **({"policy_topic": policy_topic} if policy_topic else {}),
         },
     ) as root:
-        for step in range(_MAX_STEPS):
-            with trace(name=_SPAN_STEP, run_type="chain", metadata={"step": step + 1}):
-                action = client.complete(
-                    "decision_assistant",
-                    history=history,
-                    request_json=json.dumps(request),
-                )
-                kind = action.get("action")
-                if kind == "tool":
-                    name = action.get("tool") or ""
-                    tool = _TOOLS.get(name)
-                    if tool is None:
-                        raise AssistantError(
-                            f"assistant requested unknown tool {name!r}"
-                        )
-                    with _tool_span(name) as record:
-                        # The model's only accepted input is the application id — and we
-                        # use the ID FROM THE OFFICER'S REQUEST, not the model's echo, so
-                        # the agent can never wander to another applicant's file.
-                        if name == "score_application":
-                            if task == "explain":
-                                # Read-only task: a scoring request would be a fresh
-                                # credit pull the officer never asked for. Serve the
-                                # record instead.
-                                result = _TOOLS["get_decision_record"](application_id)
-                            elif score_result is None:
-                                score_result = tool(application_id, request_id)
-                                result = score_result
-                            else:
-                                # Repeat request returns the cached result — the model
-                                # cannot compound bureau pulls or decision events within
-                                # one request.
-                                result = score_result
-                        elif name == "search_policy":
-                            if searched:
-                                # Repeat request returns the cached result — search_policy
-                                # is capped at one call per run, same pattern as
-                                # score_application, so the model cannot compound retrieval
-                                # calls (or citations) within one run (PT-001).
-                                result = searches[-1].tool_result()
-                            else:
-                                # The one tool whose input is NOT the application id: the
-                                # model chooses a query. That query is used here and nowhere
-                                # else — it is not echoed into history (see the action
-                                # rewrite below) and not logged, because it is model-authored
-                                # free text whose contents we do not control.
-                                answer = tool(
-                                    str((action.get("input") or {}).get("query") or ""),
-                                    task,
-                                )
-                                searches.append(answer)
-                                searched = True
-                                if answer.is_hit and all(
-                                    c.chunk_id != answer.chunk_id for c in citations
-                                ):
-                                    citations.append(answer)
-                                # Only the allowlisted status + score go back to the model;
-                                # the chunk text stays on the officer's side of the boundary
-                                # (ADR 0019 decision 3).
-                                result = answer.tool_result()
-                        else:
-                            result = tool(application_id)
-                        record(result)
-                    if name == "search_policy":
-                        # Strip the query before the action is replayed as history. The
-                        # redaction contract would mask it anyway
-                        # (request_builder._redact_scalar), but a boundary that holds only
-                        # because the redactor catches it is one bad allowlist entry from
-                        # leaking; drop it at the source instead.
-                        action = {k: v for k, v in action.items() if k != "input"}
-                    history.append({"role": "assistant", "content": json.dumps(action)})
-                    history.append(
-                        {
-                            "role": "user",
-                            "content": json.dumps({"tool": name, "result": result}),
-                        }
-                    )
-                    continue
-                if kind == "final":
-                    if policy_topic is not None and task == "explain" and not searched:
-                        # The officer asked a policy question (policy_topic set) — a final
-                        # answer that never called search_policy would reach the officer
-                        # with an empty policy_searches/no citation, indistinguishable from
-                        # a run that genuinely searched and found nothing (PT-001). Enforce
-                        # in code, not the prompt: refuse the final outright.
-                        raise AssistantError(
-                            "assistant returned a final answer without calling "
-                            "search_policy for the requested policy_topic — refusing an "
-                            "unsearched policy answer"
-                        )
-                    with trace(name=_SPAN_VALIDATE, run_type="chain") as validation:
-                        final = _validated_final(
-                            action,
-                            application_id,
-                            task,
-                            request_id,
-                            citations,
-                            searches,
-                        )
-                        # `narration_validated` is the audit signal on the model's
-                        # structured claim; the officer-facing summary is record-derived
-                        # either way. Recording it is the point of the span: a trace that
-                        # cannot show a narration diverging from the record cannot show
-                        # the control working.
-                        validation.add_metadata(
-                            {
-                                "narration_validated": final.get("narration_validated"),
-                                "record_status": final.get("record_status"),
-                                "outcome": final.get("outcome"),
-                                "policy_band": final.get("policy_band"),
-                            }
-                        )
-                    # The business outcome, on the root. Not its own span: a span with no
-                    # duration and no children is a metadata bag, and this metadata
-                    # describes the request the root already represents.
-                    root.add_metadata(
-                        {
-                            "outcome": final.get("outcome"),
-                            "record_status": final.get("record_status"),
-                            "policy_band": final.get("policy_band"),
-                            "narration_validated": final.get("narration_validated"),
-                            "steps_used": step + 1,
-                            "policy_citations": len(citations),
-                            "policy_searches": len(searches),
-                            "scored": score_result is not None,
-                        }
-                    )
-                    return final
-                raise AssistantError(f"assistant returned unknown action {kind!r}")
-        raise AssistantError(
-            f"assistant gave no final answer within {_MAX_STEPS} steps"
+        try:
+            result = agent.invoke(
+                {"messages": [HumanMessage(content=json.dumps(request))]},
+                config={"recursion_limit": _RECURSION_LIMIT},
+            )
+        except GraphRecursionError as exc:
+            # The hard half of interlock 4. Translated, not propagated: `main.py` maps
+            # AssistantError to the officer-facing refusal, and an unmapped framework
+            # exception is a 500 where a refusal was intended. The framework's message
+            # is not quoted -- it names its own config key, which is not an answer.
+            raise AssistantError(
+                f"assistant gave no final answer within {_MAX_STEPS} steps"
+            ) from exc
+        messages = result.get("messages") or []
+        action = _terminal_action(messages)
+        if policy_topic is not None and task == "explain" and not state["searches"]:
+            # The officer asked a policy question (policy_topic set) — a final answer
+            # that never called search_policy would reach the officer with an empty
+            # policy_searches/no citation, indistinguishable from a run that genuinely
+            # searched and found nothing (PT-001). Enforce in code, not the prompt:
+            # refuse the final outright. Checked against `state["searches"]` rather
+            # than a loop-local flag, because the framework owns the loop now — an
+            # abstention still counts as a search, which is why the list is the test
+            # and not the citations.
+            raise AssistantError(
+                "assistant returned a final answer without calling "
+                "search_policy for the requested policy_topic — refusing an "
+                "unsearched policy answer"
+            )
+        with trace(name=_SPAN_VALIDATE, run_type="chain") as validation:
+            final = _validated_final(
+                action,
+                application_id,
+                task,
+                request_id,
+                state["citations"],
+                state["searches"],
+            )
+            # `narration_validated` is the audit signal on the model's structured
+            # claim; the officer-facing summary is record-derived either way.
+            # Recording it is the point of the span: a trace that cannot show a
+            # narration diverging from the record cannot show the control working.
+            validation.add_metadata(
+                {
+                    "narration_validated": final.get("narration_validated"),
+                    "record_status": final.get("record_status"),
+                    "outcome": final.get("outcome"),
+                    "policy_band": final.get("policy_band"),
+                }
+            )
+        # The business outcome, on the root. Not its own span: a span with no duration
+        # and no children is a metadata bag, and this metadata describes the request
+        # the root already represents. `steps_used` is counted from the message list
+        # the framework returned, since the loop is no longer ours to count.
+        root.add_metadata(
+            {
+                "outcome": final.get("outcome"),
+                "record_status": final.get("record_status"),
+                "policy_band": final.get("policy_band"),
+                "narration_validated": final.get("narration_validated"),
+                "steps_used": sum(
+                    1 for m in messages if getattr(m, "type", "") == "ai"
+                ),
+                "policy_citations": len(state["citations"]),
+                "policy_searches": len(state["searches"]),
+                "scored": state["score"] is not None,
+            }
         )
+        return final

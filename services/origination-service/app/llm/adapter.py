@@ -153,7 +153,23 @@ class _AnthropicSDKAdapter(ModelAdapter):
         # `tools` is omitted, not passed empty: the SDK rejects `tools=[]`, and an
         # omitted key is also the honest description of a request that constrains
         # nothing. Every other field is unconditional because every request has one.
-        extra = {"tools": req.tools} if req.tools else {}
+        #
+        # `tool_choice` rides with it, and only with it. "auto" is the default and is
+        # stated rather than assumed; `disable_parallel_tool_use` is the load-bearing
+        # half. The assistant protocol carries ONE action per turn, so two tool_use
+        # blocks in one response would have the framework execute the second while the
+        # history the model then reasons over records only the first. Asking the
+        # provider not to do that is cheaper than reconciling it afterwards — and
+        # `client._tool_action` still refuses a multi-call turn, because a request
+        # parameter is a request, not a guarantee.
+        extra = (
+            {
+                "tools": req.tools,
+                "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+            }
+            if req.tools
+            else {}
+        )
         try:
             resp = client.messages.create(
                 model=req.model,

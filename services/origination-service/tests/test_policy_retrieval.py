@@ -265,7 +265,11 @@ def test_policy_query_never_reaches_the_provider(threshold, record_seam):
     threshold("0.05")
     client, adapter = _client(SEARCH_CALL, FINAL_EXPLAIN)
     assistant.run(42, client, task="explain")
-    sent = " ".join(m["content"] for m in adapter.calls[-1].messages)
+    # Serialized, not joined: under native tool calling a turn's content is a list of
+    # tool_use / tool_result blocks, and a join over `str` would raise on the shape
+    # rather than read it. This reads the whole outbound request either way, which is
+    # also strictly more than the string content the earlier form saw.
+    sent = json.dumps(adapter.calls[-1].messages)
     assert ELIGIBILITY_QUERY not in sent
     assert "policy_hit" in sent  # the status code did go back, unmasked
 
@@ -286,7 +290,7 @@ def test_retrieval_is_refused_on_the_decision_task(threshold, record_seam, monke
     result = assistant.run(42, client, task="decision")
 
     assert result["policy_citations"] == []
-    sent = " ".join(m["content"] for m in adapter.calls[-1].messages)
+    sent = json.dumps(adapter.calls[-1].messages)
     assert "policy_abstain" in sent  # the model is told plainly that it got nothing
 
 

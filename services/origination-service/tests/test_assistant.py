@@ -208,14 +208,29 @@ def test_tool_uses_officer_app_id_not_model_echo(tools, monkeypatch):
     assert seen == [42]  # the model cannot wander to another applicant's file
 
 
+def _turn_text(content) -> str:
+    """Every string a built turn actually carries, whatever shape it carries it in."""
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in content or []:
+        if not isinstance(block, dict):
+            continue
+        body = block.get("content")
+        parts.append(body if isinstance(body, str) else json.dumps(block.get("input")))
+    return " ".join(parts)
+
+
 def test_history_turns_survive_redaction_intact(tools):
     client, adapter = _client(TOOL_CALL, FINAL_DENY)
     assistant.run(42, client)
     # Second model call carries the tool round-trip as history; the enum vocabulary
     # must pass the fail-closed redactor unmasked or the agent would go blind.
     final_req = adapter.calls[-1]
-    history_contents = [m["content"] for m in final_req.messages[:-1]]
-    joined = " ".join(history_contents)
+    # Shape-agnostic: a turn's content is a JSON string on the JSON-action path and a
+    # list of tool_use / tool_result blocks under native tool calling. Read the payload
+    # out of either, rather than assuming the one that happens to be live.
+    joined = " ".join(_turn_text(m["content"]) for m in final_req.messages[:-1])
     assert '"deny"' in joined and '"R02"' in joined and "518" in joined
     assert "•" not in joined  # nothing in the tool round-trip was masked
 

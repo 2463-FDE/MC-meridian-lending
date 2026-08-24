@@ -63,6 +63,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
+from ..prompts import get_prompt
 from .errors import LLMError
 
 # The registered prompt this seam speaks. Fixed rather than a constructor argument:
@@ -91,6 +92,47 @@ ROLE_BY_MESSAGE_TYPE = {"ai": "assistant", "tool": "user", "human": "user"}
 QUERY_TOOL = "search_policy"
 
 
+def _declared_tool_names() -> list[str]:
+    """The tool names `decision_assistant`'s output schema admits.
+
+    Read from the registered template rather than restated here: the prompt text, the
+    output schema and the bound schemas have to agree, and a second copy of the list
+    is a third thing to drift.
+    """
+    schema = get_prompt(_PROMPT_NAME).output_schema or {}
+    return list(((schema.get("properties") or {}).get("tool") or {}).get("enum") or [])
+
+
+def _tool_schema(tool: Any) -> dict:
+    """One framework tool as an Anthropic tool schema.
+
+    `tool_call_schema.model_json_schema()` is the framework's own rendering of the
+    tool's arguments, so the schema the provider is bound to is the same object the
+    framework will validate the call against — deriving it from anything else invites
+    the two to disagree. Refused, not coerced, when a tool cannot produce one: a tool
+    bound with no usable schema constrains nothing.
+    """
+    name = getattr(tool, "name", None)
+    description = getattr(tool, "description", None)
+    schema_model = getattr(tool, "tool_call_schema", None)
+    if not isinstance(name, str) or not name:
+        raise LLMError("a bound tool must carry a non-empty string name")
+    if not isinstance(description, str) or not description.strip():
+        raise LLMError(f"bound tool {name!r} needs a non-empty description")
+    if schema_model is None or not hasattr(schema_model, "model_json_schema"):
+        raise LLMError(
+            f"bound tool {name!r} exposes no argument schema; a tool bound with no "
+            f"schema constrains nothing"
+        )
+    input_schema = schema_model.model_json_schema()
+    if not isinstance(input_schema, dict) or input_schema.get("type") != "object":
+        raise LLMError(
+            f"bound tool {name!r} renders an argument schema of type "
+            f"{input_schema.get('type')!r}; the provider sends tool input as an object"
+        )
+    return {"name": name, "description": description, "input_schema": input_schema}
+
+
 class MeridianChatModel(BaseChatModel):
     """A framework chat model whose every call goes through `ClaudeClient.complete`.
 
@@ -102,6 +144,17 @@ class MeridianChatModel(BaseChatModel):
     client: Any
     """A `ClaudeClient`. Untyped to keep this module importable without a live config."""
 
+    bound_tools: list[dict] = []
+    """Anthropic tool schemas this model sends, set by `bind_tools`.
+
+    Empty means the JSON-action protocol: the model is told the wire format in the
+    prompt text and its answer is validated after the fact. Non-empty means native
+    tool calling — the schemas go to the provider, the provider answers with
+    `tool_use` blocks, and history carries `tool_use`/`tool_result` content blocks
+    rather than JSON strings. Both paths run the same redaction boundary; which one
+    is live decides only which branch of `_redacted_turn` does the work.
+    """
+
     model_config = {"arbitrary_types_allowed": True}
 
     @property
@@ -110,8 +163,7 @@ class MeridianChatModel(BaseChatModel):
 
     # ---- framework -> ClaudeClient ------------------------------------------------
 
-    @classmethod
-    def _turn_content(cls, message: BaseMessage) -> str:
+    def _turn_content(self, message: BaseMessage) -> Any:
         """One history turn, in the protocol shape the hand-rolled loop emits.
 
         An assistant tool call becomes `{"action": "tool", "tool": ..., "input": ...}`;
@@ -126,11 +178,30 @@ class MeridianChatModel(BaseChatModel):
         the model sees.
         """
         if isinstance(message, ToolMessage):
+            result = self._tool_result(message.content)
+            if self.bound_tools:
+                # Native: the provider requires the tool_result block that answers a
+                # tool_use to carry that block's own id. `tool_call_id` is the id the
+                # provider issued, threaded through `_to_message` — never one we mint,
+                # which the provider would reject as an id it never saw.
+                tool_use_id = getattr(message, "tool_call_id", None)
+                if not isinstance(tool_use_id, str) or not tool_use_id:
+                    raise LLMError(
+                        "a tool result carries no tool_call_id; native tool calling "
+                        "cannot pair it with the tool_use block it answers"
+                    )
+                return [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": json.dumps(result, ensure_ascii=False),
+                    }
+                ]
             payload: dict[str, Any] = {}
             name = getattr(message, "name", None)
             if isinstance(name, str) and name:
                 payload["tool"] = name
-            payload["result"] = cls._tool_result(message.content)
+            payload["result"] = result
             return json.dumps(payload)
 
         tool_calls = getattr(message, "tool_calls", None)
@@ -150,12 +221,46 @@ class MeridianChatModel(BaseChatModel):
             name = call.get("name")
             if not isinstance(name, str) or not name:
                 raise LLMError("a tool call must carry a non-empty string name")
-            action: dict[str, Any] = {"action": "tool", "tool": name}
             args = call.get("args")
+            if self.bound_tools:
+                call_id = call.get("id")
+                if not isinstance(call_id, str) or not call_id:
+                    raise LLMError(
+                        "a tool call carries no id; native tool calling cannot pair it "
+                        "with the tool_result block that answers it"
+                    )
+                # The model-authored query is dropped here exactly as it is on the
+                # JSON path. `_redacted_tool_use` would mask it anyway, but a boundary
+                # that holds only because the redactor catches it is one allowlist
+                # entry from leaking. The provider pairs turns by id, not by input, so
+                # sending the block with no input is well-formed.
+                block_input = (
+                    args if name != QUERY_TOOL and isinstance(args, dict) else {}
+                )
+                return [
+                    {
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": name,
+                        "input": block_input,
+                    }
+                ]
+            action: dict[str, Any] = {"action": "tool", "tool": name}
             if name != QUERY_TOOL and isinstance(args, dict):
                 action["input"] = args
             return json.dumps(action)
 
+        if self.bound_tools:
+            # A prose-only assistant turn has no block shape this boundary carries
+            # (`_redacted_blocks` refuses `text` blocks, because prose cannot be
+            # masked). It also cannot be dropped silently: the provider would then see
+            # a tool_result with no tool_use before it. The seam never produces one —
+            # `_to_message` emits either a tool call or a final answer — so this is a
+            # fail-closed guard on a path only a framework change could reach.
+            raise LLMError(
+                "a history turn carries neither a tool call nor a tool result; native "
+                "tool calling has no block shape for prose"
+            )
         return json.dumps({})
 
     @staticmethod
@@ -179,8 +284,7 @@ class MeridianChatModel(BaseChatModel):
             return parsed
         return content
 
-    @classmethod
-    def _split(cls, messages: list[BaseMessage]) -> tuple[str, list[dict]]:
+    def _split(self, messages: list[BaseMessage]) -> tuple[str, list[dict]]:
         """Split a framework message list into (`request_json`, history turns).
 
         The first human message is the officer's request and becomes the template
@@ -210,7 +314,7 @@ class MeridianChatModel(BaseChatModel):
             role = ROLE_BY_MESSAGE_TYPE.get(message.type)
             if role is None:
                 raise LLMError(f"unsupported message type {message.type!r} in history")
-            history.append({"role": role, "content": cls._turn_content(message)})
+            history.append({"role": role, "content": self._turn_content(message)})
         return request_json, history
 
     # ---- ClaudeClient -> framework ------------------------------------------------
@@ -299,13 +403,21 @@ class MeridianChatModel(BaseChatModel):
                 args = {"application_id": application_id}
             else:
                 raise LLMError(f"decision_assistant requested unknown tool {name!r}")
+            # The provider's own tool_use id when this was a native tool turn
+            # (`client._tool_action` carries it through), so the tool_result block on
+            # the next turn can echo the id the provider issued. The minted fallback
+            # serves the JSON-action path, where no provider id exists because the
+            # provider was never told a tool existed.
+            tool_use_id = action.get("tool_use_id")
+            if not isinstance(tool_use_id, str) or not tool_use_id:
+                tool_use_id = f"call_{uuid.uuid4().hex}"
             return AIMessage(
                 content="",
                 tool_calls=[
                     {
                         "name": name,
                         "args": args,
-                        "id": f"call_{uuid.uuid4().hex}",
+                        "id": tool_use_id,
                     }
                 ],
             )
@@ -331,15 +443,47 @@ class MeridianChatModel(BaseChatModel):
         action = self.client.complete(
             _PROMPT_NAME,
             history=history,
+            tools=self.bound_tools or None,
             **{_REQUEST_VAR: request_json},
         )
         message = self._to_message(action, application_id, task, already_scored)
         return ChatResult(generations=[ChatGeneration(message=message)])
 
     def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError(
-            "CompletionRequest carries no tool schemas and no tool-use content blocks, "
-            "so binding tools here would send a request that constrains nothing. Native "
-            "tool calling is a change to CompletionRequest, build_request and the "
-            "history redaction rule, and it is its own slice."
-        )
+        """Bind the framework's tools as real provider tool schemas.
+
+        Returns a copy carrying the schemas; `_generate` sends them, so the provider
+        decides tool calls under a schema rather than being asked in prose to emit a
+        JSON object. `build_request._validated_tools` re-validates the shape at the
+        boundary — this method's job is the translation and the agreement check.
+
+        The agreement check is the point of failing here rather than at the provider.
+        Three lists have to name the same tools: what the framework hands us, what
+        `decision_assistant`'s output schema admits, and (checked in
+        `assistant._build_agent`) what `_TOOLS` can dispatch. A tool added to one and
+        not the others is a runtime 400 or a silent no-op; here it is an LLMError with
+        the difference in it.
+
+        `kwargs` is refused rather than ignored: `tool_choice` is decided in the
+        adapter (`disable_parallel_tool_use`, because the protocol carries one action
+        per turn), and a caller believing it had set one here would be wrong about the
+        request that went out.
+        """
+        if kwargs:
+            raise LLMError(
+                f"bind_tools takes no options here; got {sorted(kwargs)!r}. tool_choice "
+                "is set in the adapter for every tool-bearing request"
+            )
+        schemas = [_tool_schema(tool) for tool in tools or []]
+        if not schemas:
+            raise LLMError("bind_tools was given no tools")
+        bound = sorted(schema["name"] for schema in schemas)
+        declared = sorted(_declared_tool_names())
+        if bound != declared:
+            raise LLMError(
+                f"the framework's tool set {bound!r} does not match the tools "
+                f"decision_assistant declares {declared!r}; the model would be bound "
+                f"to a tool its output schema cannot name, or told about one it cannot "
+                f"call"
+            )
+        return self.model_copy(update={"bound_tools": schemas})
