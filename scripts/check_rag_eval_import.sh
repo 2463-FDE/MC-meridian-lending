@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check_rag_eval_import.sh — prove the rag_eval import seam INSIDE the built image (card G2a).
+# check_rag_eval_import.sh — prove the rag_eval import seam INSIDE the built image (cards G2a, G2b).
 #
 # `services/origination-service/tests/test_rag_eval_seam.py` pins the three file edits that
 # close the seam; only this script proves the thing those edits exist for — that

@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Iterator
 
-from .errors import LLMHTTPError, LLMTimeoutError
+from .errors import LLMError, LLMHTTPError, LLMTimeoutError
 
 
 @dataclass
@@ -31,6 +31,13 @@ class Completion:
     output_tokens: int = 0
     model: str = ""
     stop_reason: str = ""
+    # Tool calls the model asked for, as [{"id", "name", "input"}]. Empty on every
+    # request that carried no `tools`. Surfaced here rather than left in the raw
+    # response because a request that sends tool schemas and then reads only `text`
+    # gets an empty string back on the exact turn the model chose a tool — a path
+    # reporting success for work it never did (the objection MeridianChatModel.
+    # bind_tools raises today). Request side and response side ship together.
+    tool_calls: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -38,13 +45,21 @@ class CompletionRequest:
     """Provider-neutral request. The request builder produces this."""
 
     system: str
-    messages: list[dict]  # [{"role": "user"|"assistant", "content": str}]
+    # [{"role": "user"|"assistant", "content": str}] for the JSON-protocol path, or
+    # `content` as a list of tool_use / tool_result blocks for native tool calling.
+    # Both shapes are validated and redacted by request_builder._redacted_turn.
+    messages: list[dict]
     model: str
     max_tokens: int
     temperature: float
     timeout: float
     idempotency_key: str = ""
     metadata: dict = field(default_factory=dict)
+    # Tool schemas, as [{"name", "description", "input_schema"}]. Authored by us and
+    # validated for shape by request_builder._validated_tools; never caller data, so
+    # not redacted (same standing as `system` and the few-shot examples). Empty means
+    # the request is omitted from the provider call entirely, not sent as `tools=[]`.
+    tools: list[dict] = field(default_factory=list)
 
 
 class ModelAdapter(ABC):
@@ -92,6 +107,38 @@ def _translate_anthropic_error(exc: Exception) -> LLMHTTPError | LLMTimeoutError
     )
 
 
+def _tool_calls(resp) -> list[dict]:
+    """Tool calls from a provider response, as [{"id", "name", "input"}].
+
+    Reads the `tool_use` blocks and nothing else. A block whose id or name is not a
+    string, or whose input is not an object, is REFUSED rather than coerced: the id
+    is echoed back to the provider on the next turn and the name selects which
+    in-process tool runs, so a wrong-typed value would either break the turn or pick
+    a dispatch target from data we never validated. `input` defaults to `{}` only
+    when the key is absent, which is what a no-argument tool call looks like.
+    """
+    calls = []
+    for block in getattr(resp, "content", None) or []:
+        if getattr(block, "type", "") != "tool_use":
+            continue
+        block_id = getattr(block, "id", None)
+        name = getattr(block, "name", None)
+        raw_input = getattr(block, "input", None)
+        if raw_input is None:
+            raw_input = {}
+        if not isinstance(block_id, str) or not block_id:
+            raise LLMError("provider returned a tool_use block with no string id")
+        if not isinstance(name, str) or not name:
+            raise LLMError("provider returned a tool_use block with no string name")
+        if not isinstance(raw_input, dict):
+            raise LLMError(
+                f"provider returned tool_use {name!r} whose input is "
+                f"{type(raw_input).__name__}, not an object"
+            )
+        calls.append({"id": block_id, "name": name, "input": raw_input})
+    return calls
+
+
 class _AnthropicSDKAdapter(ModelAdapter):
     """Shared `complete`/`stream` for any adapter backed by the `anthropic` SDK's
     `messages.create`/`messages.stream` (same shape for `Anthropic` and
@@ -103,6 +150,10 @@ class _AnthropicSDKAdapter(ModelAdapter):
 
     def complete(self, req: CompletionRequest) -> Completion:
         client = self._sdk_client()
+        # `tools` is omitted, not passed empty: the SDK rejects `tools=[]`, and an
+        # omitted key is also the honest description of a request that constrains
+        # nothing. Every other field is unconditional because every request has one.
+        extra = {"tools": req.tools} if req.tools else {}
         try:
             resp = client.messages.create(
                 model=req.model,
@@ -111,6 +162,7 @@ class _AnthropicSDKAdapter(ModelAdapter):
                 max_tokens=req.max_tokens,
                 temperature=req.temperature,
                 timeout=req.timeout,
+                **extra,
             )
         except Exception as exc:
             # `from None`, not `from exc`. Both `complete` and `call_with_retry` are
@@ -135,6 +187,7 @@ class _AnthropicSDKAdapter(ModelAdapter):
         )
         return Completion(
             text=text,
+            tool_calls=_tool_calls(resp),
             input_tokens=getattr(resp.usage, "input_tokens", 0),
             output_tokens=getattr(resp.usage, "output_tokens", 0),
             model=getattr(resp, "model", req.model),
@@ -142,6 +195,17 @@ class _AnthropicSDKAdapter(ModelAdapter):
         )
 
     def stream(self, req: CompletionRequest) -> Iterator[str]:
+        # Refused rather than ignored. `text_stream` yields text deltas only, so a
+        # streamed turn on which the model chose a tool would come back as an empty
+        # string and the tool call would be dropped with no error — the caller would
+        # read a successful, silent no-op. Streaming with tools needs the event
+        # stream, and nothing in the product streams the agent loop (concern 5 is
+        # still gated), so this fails closed instead of growing an unused path.
+        if req.tools:
+            raise LLMError(
+                "stream() cannot carry tool schemas: the text stream drops tool_use "
+                "blocks, so a tool call would be silently lost. Use complete()."
+            )
         client = self._sdk_client()
         try:
             with client.messages.stream(

@@ -1,14 +1,19 @@
 # ADR 0018: Interim Handling of a Double-Charged Borrower
 
-- **Status:** **Proposed** — not built. This ADR records the decision and states today's
-  evidence boundary. One question is open with the client and is named in Sign-off status.
+- **Status:** **Proposed** — partly built as of 2026-08-23. Decision 1 (prevention at capture)
+  is built: the schema rung landed on `main` via PR #63 and the capture path that claims the
+  key merged via PR #65, held by the blocking `payment-idempotency-gate`. Nothing else in
+  this ADR — borrower notification, refund submission, refund status — is built. This ADR
+  records the decision and states today's evidence boundary. One question is open with the
+  client and is named in Sign-off status.
 - **Date:** 2026-08-20
 - **Author:** Claude Code
 - **Related:** ADR 0013 (payment idempotency and tokenization — designs the prevention this
   ADR sequences first, and is itself Proposed). ADR 0015 (settlement reconciliation as a
   control — the detection this ADR builds on). Debt D19 (`docs/debt-log.md` — the
-  double-charge entry, Open, pre-existing). The client's answer of 2026-08-14 on loan 4471,
-  which scopes the operator half.
+  double-charge entry, **Mitigated** for exact-retry prevention; borrower notification,
+  refund submission, and refund status remain open). The client's answer of 2026-08-14 on
+  loan 4471, which scopes the operator half.
 - **Source:** Week-8 client-demo feedback, improvement priority 2: the interim offer to a
   double-charged borrower is undecided and unevidenced beyond detection.
 
@@ -38,7 +43,7 @@ Stated plainly, because the demo must not imply more than this. Each row is veri
 
 | Question the client asked | What exists today | Evidence |
 |---|---|---|
-| Is a repeated capture prevented? | **No.** Every `POST /payments` inserts a row. No idempotency key, no unique charge reference. | `services/payment-service/app/payments.py:168`; `db/init/001_schema.sql:139` |
+| Is a repeated capture prevented? | **Yes, for the exact-retry case.** `payments` carries `idempotency_key` under a partial unique index (PR #63), and both charge handlers claim it insert-first via `claim_or_branch()` before the processor is contacted (PR #65), held by the blocking `payment-idempotency-gate`. A processor-side duplicate or a break older than the fix is still only caught by reconciliation, not prevented. | `services/payment-service/app/payments.py:175-183,293`; `db/init/001_schema.sql:142`, `:220-221` |
 | Is the borrower notified? | **No, and no channel exists to notify them through.** `applicants.email` and `applicants.phone` are unverified columns, and no outbound sender of any kind exists in any service. | `db/init/001_schema.sql:24-25`; no `smtplib`, `sendgrid`, or `twilio` anywhere under `services/` |
 | Is a refund submitted? | **No.** The payment service has no refund, void, or reversal path, and the processor client exposes none. | `services/payment-service/app/payments.py` |
 | Where does refund status show? | **Nowhere.** No status field, no borrower screen, no officer screen. | — |
@@ -202,8 +207,10 @@ borrowers already charged twice are unaffected. Mitigated by stating the boundar
 runbook, in the demo, and in this table rather than only here.
 
 **Prevention slips again and this ADR becomes the record of a decision nobody acted on.**
-Mitigated by the gate: the week-9 slice carries a proven-red test, and D19 stays Open in the
-debt log with this ADR named, so the entry cannot read as closed.
+Retired for exact-retry prevention: the week-9 slice landed with a proven-red test behind
+the blocking `payment-idempotency-gate`, and D19 now reads **Mitigated** in the debt log with
+this ADR named. The risk re-opens only if a future change to the claim path or the gate ships
+without that same discipline.
 
 **The open question is answered with something the platform cannot do.** If she asks for a
 borrower notification, the delivery channel is the blocker and it is not ours to close.

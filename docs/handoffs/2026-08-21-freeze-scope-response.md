@@ -35,11 +35,11 @@ Checked against `main` today, not recalled.
 
 **1. The policy retrieval tool refuses on the decision path, by design.** `_search_policy` on
 `feat/policy-retrieval` (PR #57) returns `policy_retrieval.abstain(DECISION_TASK)` when
-`task == "decision"` — ADR 0018 decision 5, because the corpus carries Reg B adverse-action guidance
+`task == "decision"` — ADR 0019 decision 5, because the corpus carries Reg B adverse-action guidance
 and reason codes are produced deterministically by `decision-service`. So on the decision flow the
 model invokes the tool and always gets an abstain: **real invocation, no retrieval.** Against their
 failure list (*"preloaded retrieval… agent label without real tool invocation"*) that reads badly
-even though it is the correct compliance posture. Either the demo runs `task="explain"`, or ADR 0018
+even though it is the correct compliance posture. Either the demo runs `task="explain"`, or ADR 0019
 decision 5 changes — and that is a control, so it is their call in writing, not ours.
 
 **2. The single-root-trace requirement collides with an existing control, if they mean the

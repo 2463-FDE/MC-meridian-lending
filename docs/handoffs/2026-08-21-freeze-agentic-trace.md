@@ -52,7 +52,7 @@ a disconnected framework, a mock-only path, or an agent label without real tool 
 ## Three gaps that are not in the email
 
 1. **The policy tool refuses on the decision path, by design.** `_search_policy` returns
-   `policy_retrieval.abstain(DECISION_TASK)` when `task == "decision"` (ADR 0018 decision 5 — the
+   `policy_retrieval.abstain(DECISION_TASK)` when `task == "decision"` (ADR 0019 decision 5 — the
    corpus carries Reg B adverse-action guidance and reason codes are deterministic). So on the
    decision flow the model invokes the tool and always gets an abstain: real invocation, **no
    retrieval**. **Demo `task="explain"`** (`GET /assistant/decisions/{app_id}`) so retrieval is real.

@@ -238,10 +238,13 @@ who owns that refund is an open question and not a gap in this runbook.
   ```
 
   See `docs/debt-log.md` D24.
-- **Payment retries.** The processor occasionally times out; clients retry. `payment-service`
-  has no idempotency key, so retried payments insert a second row and apply twice (the second
-  `apply-payment` call posts again). We field "double charge" support tickets a few times a
-  month. (No fix yet — moved with the code into `payment-service`.)
+- **Payment retries.** The processor occasionally times out; clients retry. An exact retry
+  under the same `Idempotency-Key` is now prevented at capture — `payment-service` and
+  `servicing-service` both claim the key insert-first against a partial unique index before
+  the processor is contacted (D19, PR #63 schema + PR #65 claim path), held by the blocking
+  `payment-idempotency-gate`. Still not prevented: a processor-side duplicate, or any break
+  from before the fix — reconciliation is what catches those, not this control. See
+  `docs/debt-log.md` D19.
 - **Decision/disclosure/KYC stalls block applicants.** Origination calls these over
   synchronous HTTP with no timeout or retry. If `decision-service`'s credit pull hangs, the
   applicant-facing origination request hangs with it. Watch `decision-service` latency when
