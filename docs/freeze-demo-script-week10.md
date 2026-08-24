@@ -49,7 +49,7 @@ curl -s localhost:8001/health | python3 -m json.tool     # origination-service h
      loud: neither identifier is allowed on a LangSmith span under the no-identifiers CONTENT
      RULE (`services/origination-service/app/assistant.py:44`), so the trace id is the only thing left that opens the run.
 4. Copy the trace id, open it in the LangSmith UI (same project, `LANGSMITH_TRACING=true`
-   from the demo override), and walk the tree live: `assistant.request` → `llm.complete` →
+   from the §1 export block, not the demo override), and walk the tree live: `assistant.request` → `llm.complete` →
    `llm.transport` → `tool.search_policy` → `policy.retrieval` → the next step's `llm.complete`
    → `tool.get_decision_record` → `assistant.validate`. Reference shape (real Bedrock run,
    2026-08-23, `docs/handoffs/2026-08-23-freeze-slices-4b-7.md`):
@@ -108,6 +108,7 @@ call and its output should be captured, not re-run per rehearsal.
 ```bash
 cd services/origination-service
 git status --short                     # must be clean — the receipt cites a SHA
+export CLAUDE_PROVIDER=bedrock         # script refuses without it, even if §1 already set it
 export AWS_BEARER_TOKEN_BEDROCK=...    # host shell only; a bare `AWS_BEARER_TOKEN_BEDROCK=...`
                                         # assignment with no `export` is invisible to the child
                                         # process the script launches — this is the mistake the
