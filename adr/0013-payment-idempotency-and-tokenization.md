@@ -1,6 +1,9 @@
 # ADR 0013: Payment Idempotency, Cardholder-Data Tokenization, and Self-Serve Access
 
-- **Status:** **Proposed** — spec week. Implementation is scoped, not built.
+- **Status:** **Proposed** — partly built. Decision 1 (idempotency enforced by a
+  database constraint) shipped across PR #63 (schema) and PR #65 (claim path), held by
+  the blocking `payment-idempotency-gate`. Decision 2 (PAN tokenization, CVV deletion)
+  and Decision 3 (self-serve access) are not built.
 - **Date:** 2026-08-02
 - **Author:** Claude Code
 - **Supersedes:** **ADR 0003** (store full card data on the payment record). Its stated
@@ -24,10 +27,13 @@ The tickets are not confusion. `scripts/repro_double_charge.py` drives the real
 credits only **$600.00** to the loan. Two defects produce that result and they have separate
 causes:
 
-- **No idempotency.** Nothing in the request identifies the customer's intent as distinct
-  from the HTTP attempt. `payment-service/app/payments.py:74` states the position outright:
-  *"No idempotency check. No unique charge reference. Every POST inserts a row."* The DDL
-  agrees (`db/init/001_schema.sql:121`).
+- **No idempotency (pre-fix measurement; closed by Decision 1 below, see D19).** At the
+  time this ADR was written, nothing in the request identified the customer's intent as
+  distinct from the HTTP attempt. `payment-service/app/payments.py:74` stated the
+  position outright: *"No idempotency check. No unique charge reference. Every POST
+  inserts a row."* The DDL agreed (`db/init/001_schema.sql:121`, pre-migration). Decision
+  1 below has since shipped a partial unique index plus an insert-first claim (PR #63,
+  PR #65); this bullet documents the defect the fix addresses, not current behavior.
 - **Lost updates.** `balance.apply_payment` performs an unlocked read-modify-write
   (`servicing-service/app/main.py:80-85`). Concurrent applies read the same opening balance
   and overwrite one another, so captured money never reaches the loan. With no ledger (D2),
@@ -322,10 +328,12 @@ every outstanding link dies.
 
 ## Sign-off status
 
-**Proposed.** Engineering position recorded here; product and compliance review outstanding.
-Eight client questions are open in `docs/scoping-payments-week5.md` §6, with assumptions
-recorded so a different answer costs a configuration change. Only Q7 (delivery channel)
-affects sequencing, and phase 1 is deliberately independent of it.
+**Proposed, partly built.** Decision 1 shipped (PR #63, PR #65), held by the blocking
+`payment-idempotency-gate`; Decisions 2 and 3 remain engineering position only, with
+product and compliance review outstanding. Eight client questions are open in
+`docs/scoping-payments-week5.md` §6, with assumptions recorded so a different answer
+costs a configuration change. Only Q7 (delivery channel) affects sequencing, and phase 1
+is deliberately independent of it.
 
 Decision 2 carries a remediation obligation that does not wait for this ADR to be accepted:
 the CVV is being retained today, for every payment since go-live.
