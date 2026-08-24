@@ -18,10 +18,13 @@ inside a transaction block, and a multi-statement simple query is one implicit
 transaction, so submitting the whole file in a single execute() fails on the rewrite for
 a reason that has nothing to do with what is under test.
 
-Skipped, never silently passed, when no database is reachable -- a vector that reports
-success without connecting is the "verifier reporting success for a path it verified
-nothing on" failure these gates exist to prevent. CI runs it against a postgres service
-(no-sad-gate), so the skip is a local-developer path, not the CI path.
+Skipped when no database is reachable -- a local developer without a stack running gets
+no verdict rather than a false one. That skip is exactly what must NOT happen in CI: a
+skipped vector exits 0, and a blocking gate reporting success for a path it never ran is
+the failure these gates exist to prevent. So the CI step sets REQUIRE_LIVE_DB, which turns
+every reason this file could skip -- no DSN, no psycopg2, an unreachable server -- into a
+failure. A typo'd env var or a postgres service that never came up then fails the gate
+instead of passing it silently.
 """
 
 import os
@@ -31,7 +34,26 @@ from pathlib import Path
 
 import pytest
 
-psycopg2 = pytest.importorskip("psycopg2")
+# Set by the CI step that has a postgres service behind it. When it is set, this file has
+# no skip path at all: every skip below becomes a failure.
+REQUIRE_LIVE_DB = bool(os.getenv("REQUIRE_LIVE_DB"))
+
+
+def _unavailable(reason: str):
+    """Skip locally, fail in the gate that promised to run this."""
+    if REQUIRE_LIVE_DB:
+        pytest.fail(
+            f"REQUIRE_LIVE_DB is set but the live vector could not run: {reason}. "
+            "This gate blocks on migration 0020 being re-runnable; it must not pass "
+            "without checking it."
+        )
+    pytest.skip(reason)
+
+
+try:
+    import psycopg2
+except ImportError:  # pragma: no cover - exercised by the requirements install in CI
+    psycopg2 = None
 
 REPO = Path(__file__).resolve().parents[3]
 MIGRATION = REPO / "db" / "migrations" / "0020_payments_drop_cvv.sql"
@@ -41,14 +63,10 @@ DSN = os.getenv("TEST_DATABASE_URL") or os.getenv("DATABASE_URL") or ""
 # A pre-0020 volume, reduced to what this migration touches: the column, a row holding a
 # value, and nothing else. Building the real 001_schema.sql here would drag in every FK
 # in the platform to test one ALTER.
-_LEGACY_PAYMENTS = (
-    "CREATE TABLE payments ("
-    "  id SERIAL PRIMARY KEY,"
-    "  pan TEXT,"
-    "  cvv TEXT,"
-    "  amount DOUBLE PRECISION"
-    ")"
+_PAYMENTS_COLUMNS = (
+    "(id SERIAL PRIMARY KEY, pan TEXT, cvv TEXT, amount DOUBLE PRECISION)"
 )
+_LEGACY_PAYMENTS = f"CREATE TABLE payments {_PAYMENTS_COLUMNS}"
 
 # Postgres closes a dollar-quoted body at the first later occurrence of its OWN tag, so
 # the tag has to be captured and matched, not just detected.
@@ -104,11 +122,14 @@ def _split_statements(sql: str) -> list[str]:
 
 
 def _connect():
+    if psycopg2 is None:
+        _unavailable("psycopg2 is not installed")
     if not DSN:
-        pytest.skip(
-            "no TEST_DATABASE_URL/DATABASE_URL set — R-0020 needs a real Postgres"
-        )
-    return psycopg2.connect(DSN, connect_timeout=5)
+        _unavailable("no TEST_DATABASE_URL/DATABASE_URL set")
+    try:
+        return psycopg2.connect(DSN, connect_timeout=5)
+    except psycopg2.Error as exc:
+        _unavailable(f"could not connect: {exc.__class__.__name__}")
 
 
 def _apply_migration(cur) -> None:
@@ -190,3 +211,34 @@ def test_the_migration_runs_clean_on_a_fresh_schema_that_never_had_the_column(
     _apply_migration(cur)  # must not raise
 
     assert not _has_cvv(cur, schema)
+
+
+def test_the_migration_purges_the_table_search_path_actually_resolves(scratch_schema):
+    """current_schema() is not where `payments` necessarily lives.
+
+    An operator applies this by hand, on whatever search_path their psql session carries.
+    With `SET search_path TO empty_schema, data_schema`, current_schema() is the empty one
+    while every unqualified `payments` in the file resolves to the other. A guard keyed on
+    information_schema + current_schema() then finds no column, skips the purge, passes its
+    own assertion vacuously and still runs the rewrite -- the file reports success over a
+    table holding every CVV. The guard has to resolve the table the DML resolves.
+    """
+    cur, schema = scratch_schema
+    data_schema = f"{schema}_data"
+    cur.execute(f'CREATE SCHEMA "{data_schema}"')
+    cur.execute(f'CREATE TABLE "{data_schema}".payments {_PAYMENTS_COLUMNS}')
+    cur.execute(
+        f'INSERT INTO "{data_schema}".payments (pan, cvv, amount) VALUES (%s, %s, %s)',
+        ("4111111111111111", "123", 250.0),
+    )
+    # current_schema() is the (empty) scratch schema; `payments` resolves to the other one.
+    cur.execute(f'SET search_path TO "{schema}", "{data_schema}"')
+
+    _apply_migration(cur)
+
+    assert not _has_cvv(cur, data_schema), (
+        "the migration reported success while the payments table it actually resolves to "
+        "still carries the CVV column and its values"
+    )
+    cur.execute(f'SELECT count(*) FROM "{data_schema}".payments')
+    assert cur.fetchone()[0] == 1

@@ -57,7 +57,9 @@ MIGRATION = REPO / "db" / "migrations" / "0020_payments_drop_cvv.sql"
 # The column list of an `INSERT INTO payments (...)`. Group 1 is empty when the statement
 # has no column list at all -- a positional insert, which would put a value into whatever
 # column sits at that ordinal and cannot be graded by name.
-_PAYMENTS_INSERT = re.compile(r"INSERT\s+INTO\s+payments\s*(?:\(([^)]*)\))?", re.IGNORECASE)
+_PAYMENTS_INSERT = re.compile(
+    r"INSERT\s+INTO\s+payments\s*(?:\(([^)]*)\))?", re.IGNORECASE
+)
 
 
 def _payments_table_ddl() -> str:
@@ -199,13 +201,15 @@ def test_readiness_passes_once_the_column_is_gone():
     assert _no_stored_sad_ready(_Cursor(None)) == (True, None)
 
 
-def test_the_readiness_lookup_is_qualified_by_schema():
+def test_the_readiness_lookup_resolves_the_table_the_charge_path_writes():
     cur = _Cursor(None)
     _no_stored_sad_ready(cur)
     sql, _ = cur.executed[0]
-    assert "current_schema()" in sql, (
-        "information_schema.columns spans every schema a connection can see, so an "
-        "unqualified lookup can clear this volume on another schema's payments table"
+    assert "to_regclass('payments')" in sql, (
+        "the rung must grade the payments table this connection actually resolves, by "
+        "search_path — an information_schema lookup spans every schema the connection can "
+        "see, and qualifying it by current_schema() grades a table the charge path's "
+        "INSERT may not even be writing to, clearing the volume either way"
     )
 
 

@@ -469,6 +469,10 @@ jobs:
       - name: migration 0020 re-runs clean against a real Postgres
         env:
           TEST_DATABASE_URL: postgresql://postgres:ci_only_not_a_real_secret@localhost:5432/meridian
+          # No skip path in CI. A skipped pytest exits 0, so without this a typo'd DSN, a
+          # postgres service that never came up, or a missing psycopg2 would leave this
+          # BLOCKING gate green having verified nothing about the migration.
+          REQUIRE_LIVE_DB: "1"
         run: |
           cd services/payment-service
           pip install -r requirements.txt pytest

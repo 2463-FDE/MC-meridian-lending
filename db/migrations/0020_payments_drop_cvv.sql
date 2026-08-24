@@ -39,13 +39,22 @@
 --    EXECUTE, not a static statement: PL/pgSQL resolves a static statement's columns the
 --    first time that statement runs, which the IF already prevents, but dynamic SQL makes
 --    the "never resolved when the column is absent" property independent of that.
+--
+--    to_regclass('payments'), NOT information_schema + current_schema(): the guard has to
+--    ask about the SAME table the UPDATE, the ALTER and the VACUUM below will resolve to,
+--    and those resolve by search_path, not by current_schema(). Under a search_path like
+--    `myapp, public` with payments living in public, current_schema() is myapp, an
+--    information_schema lookup finds no column, the guard skips -- and the file then
+--    reports success over a public.payments still holding every CVV. to_regclass applies
+--    exactly the resolution rule the DML applies, so the two cannot disagree.
 DO $mig_purge$
 BEGIN
   IF EXISTS (
-    SELECT 1 FROM information_schema.columns
-     WHERE table_schema = current_schema()
-       AND table_name = 'payments'
-       AND column_name = 'cvv'
+    SELECT 1 FROM pg_attribute
+     WHERE attrelid = to_regclass('payments')
+       AND attname = 'cvv'
+       AND attnum > 0
+       AND NOT attisdropped
   ) THEN
     EXECUTE 'UPDATE payments SET cvv = NULL WHERE cvv IS NOT NULL';
     EXECUTE 'ALTER TABLE payments DROP COLUMN cvv';
@@ -56,13 +65,18 @@ $mig_purge$;
 -- 2. Assert the drop actually happened before the rewrite claims to have purged
 --    anything. RAISE EXCEPTION, never NOTICE: a migration that reports success over a
 --    column it did not remove is the failure this file exists to prevent.
+--
+--    Resolved the same way as the guard above and as the VACUUM below, for the same
+--    reason: an assertion that grades a different table than the one being rewritten
+--    passes vacuously on exactly the volume it exists to catch.
 DO $mig$
 BEGIN
   IF EXISTS (
-    SELECT 1 FROM information_schema.columns
-     WHERE table_schema = current_schema()
-       AND table_name = 'payments'
-       AND column_name = 'cvv'
+    SELECT 1 FROM pg_attribute
+     WHERE attrelid = to_regclass('payments')
+       AND attname = 'cvv'
+       AND attnum > 0
+       AND NOT attisdropped
   ) THEN
     RAISE EXCEPTION
       'migration 0020: payments.cvv still exists after DROP COLUMN -- not purged';

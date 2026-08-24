@@ -298,17 +298,21 @@ def _payment_applications_ready(cur) -> tuple[bool, str | None]:
 # runs migration 0020 (or pg_repack, see the file) to clear it.
 #
 # Inverted relative to the other rungs: they assert an object EXISTS, this one asserts
-# an object is GONE. The schema qualifier matters for the same reason it does there --
-# information_schema.columns spans every schema a connection can see, so an unqualified
-# lookup could clear this volume on the strength of another schema's payments table.
+# an object is GONE, which makes the wrong table the dangerous answer rather than a
+# missing one: an unqualified information_schema lookup spans every schema a connection
+# can see, and a current_schema()-qualified one grades a table this connection's own
+# queries may not even resolve to. to_regclass('payments') applies exactly the search_path
+# resolution the charge path's INSERT applies, so the rung and the money path cannot
+# disagree about which payments table is being graded. Migration 0020 resolves the same
+# way, for the same reason.
 #
 # Kept byte-identical to the other service's copy, same as the two rungs above.
 def _no_stored_sad_ready(cur) -> tuple[bool, str | None]:
     """Assert migration 0020 is actually applied: payments.cvv must not exist."""
     cur.execute(
-        "SELECT column_name FROM information_schema.columns "
-        "WHERE table_schema = current_schema() "
-        "AND table_name = 'payments' AND column_name = 'cvv'"
+        "SELECT attname FROM pg_attribute "
+        "WHERE attrelid = to_regclass('payments') "
+        "AND attname = 'cvv' AND attnum > 0 AND NOT attisdropped"
     )
     if cur.fetchone() is not None:
         return False, "schema_not_ready:payments.cvv_present"
