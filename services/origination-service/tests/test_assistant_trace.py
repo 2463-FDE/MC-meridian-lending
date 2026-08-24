@@ -12,6 +12,7 @@ needing a network.
 """
 
 import json
+import uuid
 
 import pytest
 
@@ -34,6 +35,10 @@ class _Span:
         self.run_type = run_type
         self.metadata = dict(metadata or {})
         self.children = []
+        # Mirrors the real RunTree's `trace_id` field (app/assistant.py reads
+        # `root.trace_id` for the officer-facing trace navigation), populated for every
+        # span the same way LangSmith populates it regardless of run type.
+        self.trace_id = uuid.uuid4()
 
     def add_metadata(self, metadata):
         self.metadata.update(metadata or {})
@@ -203,6 +208,14 @@ def test_the_root_never_carries_caller_linkable_identifiers(spans, tools):
     root = spans[0].metadata
     assert "application_id" not in root
     assert "request_id" not in root
+
+
+def test_the_response_carries_the_root_trace_id_for_officer_navigation(spans, tools):
+    """Slice 6 (freeze week10): with no application_id/request_id left on any span
+    (previous test), the officer's only way to open this run in LangSmith is the
+    trace id itself -- so it must ride on the HTTP response, not just the span."""
+    result = assistant.run(42, _client(TOOL_CALL, FINAL_DENY))
+    assert result["trace_id"] == str(spans[0].trace_id)
 
 
 def test_the_validation_span_records_the_control_working(spans, tools):
