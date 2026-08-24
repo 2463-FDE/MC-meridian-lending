@@ -785,4 +785,12 @@ def run(
                 "scored": state["score"] is not None,
             }
         )
+        # The officer-facing navigation replacement for the identifiers stripped from
+        # every span (CONTENT RULE above): trace_id is LangSmith's own run identifier,
+        # not an application- or applicant-linked value, so it carries none of the
+        # exposure the omitted `application_id`/`request_id` did. `root` is already the
+        # RunTree `trace()` yielded -- populated even when LANGSMITH_TRACING is unset,
+        # since tracing off means "don't ship spans", not "don't build them" -- so no
+        # second lookup via get_current_run_tree() is needed.
+        final["trace_id"] = str(root.trace_id)
         return final
