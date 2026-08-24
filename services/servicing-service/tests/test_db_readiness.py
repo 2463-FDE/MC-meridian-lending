@@ -134,6 +134,18 @@ _PAYMENTS_INDEX_COLUMNS = {
     "payments_processor_idempotency_key_uniq": "processor_idempotency_key",
 }
 
+# The D3 rung (config._payment_applications_ready, migration 0019) asks the same kind of
+# real questions about payment_applications: each column's data_type AND is_nullable, and
+# whether a NON-partial unique index covers exactly payment_id. Modelled the same way, so
+# a rung that stops asking one of them shows up as a test that no longer drives it.
+_APPLICATION_COLUMN_TYPES = {
+    "id": "integer",
+    "loan_id": "integer",
+    "payment_id": "integer",
+    "amount_minor": "bigint",
+    "created_at": "timestamp with time zone",
+}
+
 
 class _FakeCursor:
     """Cursor over a correctly-migrated database.
@@ -157,6 +169,16 @@ class _FakeCursor:
 
     def _answer(self, sql, params):
         name = params[0] if params else None
+        # payment_applications first: its column query selects is_nullable too and its
+        # index query is unparameterized, so both would be caught by the payments
+        # branches below and answered about the wrong table.
+        if "'payment_applications'" in sql:
+            if "pg_index" in sql:
+                return self.overrides.get("payment_applications.payment_id_uniq", (1,))
+            key = f"payment_applications.{name}"
+            if key in self.overrides:
+                return self.overrides[key]
+            return (_APPLICATION_COLUMN_TYPES[name], "NO")
         if "pg_index" in sql:
             if name in self.overrides:
                 return self.overrides[name]

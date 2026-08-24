@@ -221,6 +221,70 @@ def _payments_idempotency_ready(cur) -> tuple[bool, str | None]:
     return True, None
 
 
+# Schema rung for D3 (migration 0019). Both services touch payment_applications: servicing
+# writes it inside the atomic apply, and payment-service's _RETIRE_SQL reads it to decide
+# whether a `captured` key may be retired. A volume without migration 0019 would fail the
+# apply with "relation payment_applications does not exist" — a 500 on the money path
+# instead of a named gap — and would refuse every retirement, so both need the rung and
+# both must agree on what ready means.
+#
+# The NAME of the table proves nothing: CREATE TABLE IF NOT EXISTS matches on name alone,
+# so a same-named table with a nullable amount_minor or no UNIQUE on payment_id would
+# leave the replay guard disabled while reporting ready. Assert the column types, the
+# NOT NULLs, and the unique index's definition — the same assertions migration 0019 makes.
+#
+# Kept byte-identical to the other service's copy, same as _payments_idempotency_ready
+# above: a rung that drifts between them lets one service report ready over a schema the
+# other refuses.
+_APPLICATION_COLUMNS = (
+    ("id", "integer"),
+    ("loan_id", "integer"),
+    ("payment_id", "integer"),
+    ("amount_minor", "bigint"),
+    ("created_at", "timestamp with time zone"),
+)
+
+
+def _payment_applications_ready(cur) -> tuple[bool, str | None]:
+    """Assert migration 0019 is actually applied, by definition and not by name."""
+    for column, want_type in _APPLICATION_COLUMNS:
+        cur.execute(
+            # table_schema is not optional: information_schema.columns spans every
+            # schema, so an unqualified lookup can validate a different table.
+            "SELECT data_type, is_nullable FROM information_schema.columns "
+            "WHERE table_schema = current_schema() "
+            "AND table_name = 'payment_applications' AND column_name = %s",
+            (column,),
+        )
+        row = cur.fetchone()
+        if row is None or row[0] != want_type:
+            return False, f"schema_not_ready:payment_applications.{column}"
+        # A nullable amount_minor or loan_id lets a row record an apply that credited
+        # nothing, which is the state the record exists to make impossible.
+        if row[1] != "NO":
+            return False, f"schema_not_ready:payment_applications.{column}"
+    # UNIQUE (payment_id) is the whole replay guard: without it the same payment applies
+    # twice and credits twice. indpred IS NULL rejects a PARTIAL unique index of the same
+    # shape, which would leave some rows unguarded while answering this probe.
+    cur.execute(
+        "SELECT count(*) FROM pg_index x "
+        "  JOIN pg_class i ON i.oid = x.indexrelid "
+        "  JOIN pg_namespace n ON n.oid = i.relnamespace "
+        "  JOIN pg_class c ON c.oid = x.indrelid "
+        # relname is unique per SCHEMA, not per database: an index of the same name in
+        # another schema would otherwise answer this probe.
+        " WHERE c.relname = 'payment_applications' AND n.nspname = current_schema() "
+        "   AND x.indisunique AND x.indpred IS NULL "
+        "   AND (SELECT string_agg(a.attname, ',' ORDER BY k.ord) "
+        "          FROM unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) "
+        "          JOIN pg_attribute a "
+        "            ON a.attrelid = x.indrelid AND a.attnum = k.attnum) = 'payment_id'"
+    )
+    if (cur.fetchone() or (0,))[0] == 0:
+        return False, "schema_not_ready:payment_applications.payment_id_uniq"
+    return True, None
+
+
 def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
     if not DATABASE_URL:
         return False, "DATABASE_URL not set"
@@ -235,6 +299,9 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             cur.execute("SELECT 1")
             cur.fetchone()
             ok, reason = _payments_idempotency_ready(cur)
+            if not ok:
+                return False, reason
+            ok, reason = _payment_applications_ready(cur)
             if not ok:
                 return False, reason
         return True, None
