@@ -13,6 +13,7 @@ what the seam intended to send.
 import json
 
 import pytest
+from pydantic import BaseModel, Field
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -389,12 +390,81 @@ def test_officer_request_missing_application_id_is_refused():
 # --- refusals: a path that cannot do the job must not report success ---------------
 
 
-def test_bind_tools_refuses_rather_than_dropping_the_schemas():
-    """CompletionRequest carries no tool schemas, so binding them would constrain nothing."""
+def _tool(name: str, args_schema=None):
+    """A framework tool shaped like the ones `assistant._build_agent` builds."""
+    from langchain_core.tools import StructuredTool
+
+    if args_schema is None:
+
+        class _NoArgs(BaseModel):
+            pass
+
+        args_schema = _NoArgs
+    return StructuredTool.from_function(
+        func=lambda **kwargs: "{}",
+        name=name,
+        description=f"{name} for tests",
+        args_schema=args_schema,
+    )
+
+
+class _Query(BaseModel):
+    query: str = Field(description="a policy question")
+
+
+def _declared_tools():
+    return [
+        _tool("score_application"),
+        _tool("get_decision_record"),
+        _tool("search_policy", _Query),
+    ]
+
+
+def test_bind_tools_sends_real_schemas_to_the_provider():
+    """The outbound request must CARRY the schemas — binding that constrains nothing is
+    the failure this replaced."""
+    # FINAL_ACTION, not a tool action: a tool call arriving as text is refused on a
+    # tool-bound request now (`client._is_text_tool_action`). This test is about what
+    # goes OUT, so it drives the turn that is still legal in text.
+    model, adapter = _model(FINAL_ACTION)
+    bound = model.bind_tools(_declared_tools())
+    bound.invoke([HumanMessage(content=json.dumps(APPLICANT))])
+    sent = _sent(adapter)
+    assert sorted(t["name"] for t in sent.tools) == [
+        "get_decision_record",
+        "score_application",
+        "search_policy",
+    ]
+    query_schema = next(t for t in sent.tools if t["name"] == "search_policy")
+    assert query_schema["input_schema"]["type"] == "object"
+    assert "query" in query_schema["input_schema"]["properties"]
+
+
+def test_bind_tools_refuses_a_tool_set_the_prompt_does_not_declare():
     model, _ = _model()
-    with pytest.raises(NotImplementedError) as exc:
+    with pytest.raises(LLMError) as exc:
+        model.bind_tools([_tool("score_application"), _tool("wire_funds")])
+    assert "wire_funds" in str(exc.value)
+
+
+def test_bind_tools_refuses_a_tool_with_no_schema():
+    """A bare dict cannot render an argument schema, so it constrains nothing."""
+    model, _ = _model()
+    with pytest.raises(LLMError):
         model.bind_tools([{"name": "score_application"}])
-    assert "CompletionRequest" in str(exc.value)
+
+
+def test_bind_tools_refuses_options_it_does_not_honour():
+    model, _ = _model()
+    with pytest.raises(LLMError, match="tool_choice"):
+        model.bind_tools(_declared_tools(), tool_choice="any")
+
+
+def test_an_unbound_model_sends_no_tools():
+    """The JSON-action path must stay reachable: `tools` omitted, not empty."""
+    model, adapter = _model()
+    model.invoke([HumanMessage(content=json.dumps(APPLICANT))])
+    assert _sent(adapter).tools == []
 
 
 def test_stop_sequences_are_refused_not_ignored():

@@ -16,6 +16,7 @@ through the service's redacting formatter as defense in depth.
 
 from __future__ import annotations
 
+import json
 import uuid
 from time import perf_counter
 from typing import Any, Iterator
@@ -82,7 +83,7 @@ def _trace_complete_outputs(output: Any) -> dict:
 
 
 def _execution_mode(adapter: ModelAdapter) -> str:
-    """"real" if this adapter reaches a provider, "fixture" otherwise.
+    """ "real" if this adapter reaches a provider, "fixture" otherwise.
 
     The freeze deliverable requires the trace to state which of real/fixture/
     fallback produced an answer. This is an ALLOWLIST of the two adapters that
@@ -92,6 +93,66 @@ def _execution_mode(adapter: ModelAdapter) -> str:
     serves one — that is a property of the call, not of the adapter.
     """
     return "real" if isinstance(adapter, (ClaudeAdapter, BedrockAdapter)) else "fixture"
+
+
+def _is_text_tool_action(text: str) -> bool:
+    """Whether a completion's TEXT is a tool call written as prose JSON.
+
+    Deliberately shallow: any object claiming `action == "tool"` counts, whether or not
+    it would pass `validate_structured`. A malformed text tool call is refused for the
+    same reason a well-formed one is, and a caller must not be able to slip one through
+    by getting the shape slightly wrong.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(parsed, dict) and parsed.get("action") == "tool"
+
+
+def _tool_action(calls: list[dict], sent_tools: list[dict]) -> dict:
+    """One provider `tool_use` block, as the action object the loop already speaks.
+
+    Native tool calling changes what goes on the wire, not the in-process protocol:
+    `assistant.run` and `MeridianChatModel._to_message` both consume
+    `{"action": "tool", "tool": ..., "input": ...}`, so a provider tool call is
+    translated into exactly that shape plus the provider's own `tool_use_id`. The id
+    has to travel because the next turn must echo it back on a matching `tool_result`
+    block, and an id we mint ourselves is one the provider never issued.
+
+    Two refusals, both fail-closed:
+
+    - MORE THAN ONE call in a turn. The protocol carries one action per turn, and the
+      framework would execute the second while the history the model then reasons over
+      showed only the first. `tool_choice.disable_parallel_tool_use` asks the provider
+      not to do this; this refusal is what holds if it does it anyway.
+    - A NAME WE DID NOT SEND. The name selects which in-process tool runs, so it is
+      checked against the schemas this request actually carried — not against the
+      prompt's enum, which describes what the model was told rather than what it was
+      bound to.
+    """
+    if len(calls) > 1:
+        raise LLMError(
+            f"the provider returned {len(calls)} tool calls in one turn; the assistant "
+            "protocol carries one action per turn, so a second call would run with no "
+            "record of it in the history the model reasons over"
+        )
+    call = calls[0]
+    name = call.get("name")
+    bound = [t.get("name") for t in sent_tools]
+    if name not in bound:
+        raise LLMError(
+            f"the provider asked for tool {name!r}, which this request did not bind "
+            f"(bound: {sorted(n for n in bound if n)!r})"
+        )
+    return {
+        "action": "tool",
+        "tool": name,
+        "input": call.get("input") or {},
+        "tool_use_id": call.get("id"),
+    }
 
 
 def _default_adapter(config: LLMConfig) -> ModelAdapter:
@@ -123,6 +184,7 @@ class ClaudeClient:
         history: list[dict] | None = None,
         idempotency_key: str | None = None,
         fallback: Any = _UNSET,
+        tools: list[dict] | None = None,
         **variables,
     ) -> Any:
         """Run a prompt end-to-end and return validated output.
@@ -133,6 +195,14 @@ class ClaudeClient:
         `fallback`: if given, returned instead of raising when the model output
         fails validation/guards (never returns malformed output either way).
         Transport and budget errors always raise — a fallback would mask them.
+
+        `tools`: authored tool schemas for native tool calling. When the provider
+        answers with a tool call instead of text, this returns the action object
+        `{"action": "tool", "tool": ..., "input": ..., "tool_use_id": ...}` and
+        NOTHING is validated against `output_schema` — there is no text to validate.
+        That is why the tool branch is taken before the validator and stamps its own
+        span marker: a turn on which the schema never ran must not read as a turn it
+        passed.
         """
         template = get_prompt(prompt_name)
         request_id = idempotency_key or uuid.uuid4().hex
@@ -158,6 +228,7 @@ class ClaudeClient:
             token_budget=self.config.token_budget,
             history=history,
             idempotency_key=request_id,
+            tools=tools,
             **variables,
         )
 
@@ -191,6 +262,50 @@ class ClaudeClient:
             )
             raise
         latency_ms = (perf_counter() - t0) * 1000
+
+        # A native tool turn carries no text, so there is nothing for concern 6 to
+        # validate — `validate_structured` on an empty string raises ValidationFailed
+        # ("model output is empty") and, with a fallback in play, would stamp
+        # validation_failed/fallback_used on the span for a turn that was never
+        # invalid. Take the tool branch first, and mark it for what it is.
+        if completion.tool_calls:
+            action = _tool_action(completion.tool_calls, built.request.tools)
+            run_tree = get_current_run_tree()
+            if run_tree is not None:
+                # The tool NAME is one of the three authored names (an enum code); the
+                # model-authored `input` — search_policy's query — is not on the span.
+                run_tree.metadata["tool_turn"] = True
+                run_tree.metadata["tool"] = action["tool"]
+            self.log.info(
+                "llm tool_call request_id=%s prompt=%s v=%s model=%s latency_ms=%.0f "
+                "input_tokens=%d output_tokens=%d tool=%s retries=%d",
+                request_id,
+                template.name,
+                template.version,
+                completion.model,
+                latency_ms,
+                completion.input_tokens,
+                completion.output_tokens,
+                action["tool"],
+                retries["n"],
+            )
+            return action
+
+        # Tools bound and no tool_use block: the model wrote a tool call as TEXT. Refused,
+        # because accepting it is the fail condition this slice exists to close — a text
+        # `{"action": "tool"}` that the seam turns into a framework tool call is a direct
+        # prompt-to-text call wearing a framework's clothes, and it would report success
+        # for an invocation the provider never made under a schema. Tools bound means tool
+        # calls arrive as `tool_use` blocks; text carries final answers only.
+        #
+        # Checked before validation so the refusal does not depend on the text being
+        # schema-valid, and the model's own text is never quoted into the error.
+        if built.request.tools and _is_text_tool_action(completion.text):
+            raise LLMError(
+                "the model wrote a tool call as text on a tool-bound request; a tool "
+                "call must arrive as a provider tool_use block. Text carries final "
+                "answers only"
+            )
 
         # Concern 6: validate + guard. Never pass malformed output forward.
         try:

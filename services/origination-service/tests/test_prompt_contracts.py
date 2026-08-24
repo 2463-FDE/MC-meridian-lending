@@ -1,9 +1,11 @@
 """The prompt text must name the keys its output schema requires.
 
-`request_builder` never sends `output_schema` to the model — there is no tool definition
-and no `tool_choice` anywhere in the build path, so the schema is a post-hoc validator, not
-a constraint the provider enforces. The only thing that tells the model which key names to
-emit is the prompt text itself. When the two disagree the model invents plausible key names
+`request_builder` never sends `output_schema` to the model, so the schema is a post-hoc
+validator of the FINAL answer, not a constraint the provider enforces. (Tool calls are a
+different matter since the loop swap: those are bound as real provider tool schemas with
+`tool_choice`, and `client.complete` refuses a tool call that arrives as text. The output
+schema still governs the final answer, which travels as text.) The only thing that tells
+the model which key names to emit is the prompt text itself. When the two disagree the model invents plausible key names
 and `validate_structured` rejects a completion that cost tokens and, for a pipeline stage
 with no fallback, fails the request.
 
@@ -15,8 +17,9 @@ schema". Against a real model (haiku-4-5, 2026-08-01) it answered with `action`,
 coordinator tests could not catch it: they inject the response text, so the prompt template
 is never rendered against a model.
 
-If schema-enforced tool use is ever wired into `build_request`, this invariant stops being
-load-bearing and can be dropped deliberately.
+Schema-enforced tool use is now wired into `build_request`, so this invariant no longer
+covers tool calls. It stays load-bearing for the final answer, which is still text the
+model has to key correctly.
 """
 
 from app.prompts import get_prompt, list_prompts

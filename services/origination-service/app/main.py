@@ -25,6 +25,7 @@ from . import (
     policy_retrieval,
 )
 from .llm import ClaudeClient, load_llm_config
+from .llm.config import harden_trace_client
 from .llm.errors import LLMError
 from .logging_config import get_logger
 from .routers import applications, offers
@@ -40,6 +41,12 @@ def _llm_enabled() -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Claim the LangSmith singleton before anything can trace through it. The agent loop
+    # runs inside langgraph, and a framework tracer exports the graph state it is handed
+    # — which carries the model's prose and the model-authored policy query. Done
+    # unconditionally, and before the client exists: the cost is one object when tracing
+    # is off, and the failure it prevents is a span that cannot be un-posted.
+    harden_trace_client()
     # Validate the LLM config at boot when the feature is enabled, so a deploy that
     # is missing CLAUDE_API_KEY (provider=anthropic) or carries an invalid CLAUDE_*
     # value fails loud at startup — not silently on the first customer summary.
