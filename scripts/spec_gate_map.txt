@@ -146,7 +146,8 @@ services/origination-service/app/policy_retrieval.py => adr/0019-policy-retrieva
 services/servicing-service/app/reconciliation.py => adr/0018-interim-handling-of-a-double-charged-borrower.md
 
 # --- Week 9: the atomic payment application (D3) ----------------------------
-# ADR 0020 is Proposed, not built -- same footing as 0014/0016/0017 above: the
+# ADR 0020 is Proposed -- built in PR #77, not merged to main -- same footing as
+# 0014/0016/0017 above for gate purposes: the
 # code area (balance.py) is live today, so deleting it must fail this gate even
 # though the fix the ADR decides has not shipped yet. ADR 0020 decides that the
 # record of an application and the movement of the balance will be one
