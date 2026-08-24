@@ -474,6 +474,63 @@ jobs:
                            tests/test_reconciliation_utc.py \
                            tests/test_runbook_reconciliation.py -q
 
+  agentic-loop-gate:
+    # The officer assistant's tool-calling loop (search_policy retrieval, decision-record
+    # lookup, native tool_use via create_agent) is the whole agentic surface named in the
+    # week10 freeze (docs/plan-freeze-agentic-week10.md). It ran only in the `backend`
+    # matrix job, which is continue-on-error + `python -m pytest -q || true`, so a regression
+    # in any interlock below ships on a green build -- the same failure mode tila-vectors-gate
+    # and reconciliation-gate exist to close for their own surfaces. This job MUST block --
+    # no continue-on-error, no `|| true`.
+    #
+    # Four interlocks the loop swap (#76) preserved, each with a test in this list:
+    #   single-score cache          two score_application calls in one turn would fire two
+    #                                regulated decision_events
+    #   explain-path substitution   a score on an explain-only turn is a billable credit pull
+    #                                nobody asked for
+    #   query strip                 the model-authored search_policy query must never ride
+    #                                into persisted history -- this failed silently once
+    #                                (a pydantic ModelPrivateAttr masked the comparison) and
+    #                                was caught only because a test asserted the outbound
+    #                                CompletionRequest, not the seam's intent
+    #   step exhaustion as refusal  create_agent's recursion limit must map to a refusal
+    #                                (404/422/502/503), not an unmapped 500
+    #
+    # test_assistant.py            the loop, the four interlocks above
+    # test_assistant_trace.py      the root trace span shape and the no-identifiers content
+    #                               rule (enum codes, integers, booleans, retrieval scores and
+    #                               chunk ids only -- never application_id or request_id)
+    # test_policy_retrieval.py     search_policy retrieval and the fail-closed score threshold
+    # test_policy_topic.py         the closed 8-code policy_topic vocabulary; a free-text
+    #                               question is masked before the model sees it
+    # test_prompt_contracts.py     tool_choice is asserted PRESENT now that create_agent binds
+    #                               tools -- this file used to assert its absence
+    # test_chat_model.py           MeridianChatModel / bind_tools, now wired into the loop
+    # test_agentic_loop.py         create_agent integration: the swapped run() path
+    # test_native_script.py        native tool_use blocks end to end; text-only tool calls
+    #                               are refused
+    # test_tool_schemas.py         CompletionRequest.tools / Completion.tool_calls / the
+    #                               _redacted_turn content-block rule
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: origination-service agentic loop, interlocks, trace content rule, tool schemas
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_assistant.py \
+                           tests/test_assistant_trace.py \
+                           tests/test_policy_retrieval.py \
+                           tests/test_policy_topic.py \
+                           tests/test_prompt_contracts.py \
+                           tests/test_chat_model.py \
+                           tests/test_agentic_loop.py \
+                           tests/test_native_script.py \
+                           tests/test_tool_schemas.py -q
+
   db-readiness-gate:
     # DB readiness is a security control: a passwordless / placeholder / stale
     # DATABASE_URL must report unhealthy, not connect unauthenticated or fail
