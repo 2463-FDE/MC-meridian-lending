@@ -134,6 +134,18 @@ function adverseActionReasons(d: DecisionResult | null): AssistantReason[] {
   return d.adverse_action_reason ? [{ reason: d.adverse_action_reason }] : [];
 }
 
+interface PolicyCitation {
+  chunk_id: string;
+  score: number;
+  text: string;
+}
+
+interface PolicySearch {
+  status: string;
+  score: number;
+  reason: string;
+}
+
 interface AssistantResult {
   application_id: string | number;
   record_status?: string;
@@ -147,7 +159,31 @@ interface AssistantResult {
   decided_at?: string;
   summary?: string;
   narration_validated?: boolean;
+  // Structured twin of the citations already inlined into `summary`'s prose.
+  policy_citations?: PolicyCitation[];
+  // Every search attempt, hit or abstain -- distinguishes "searched, found nothing"
+  // from "never searched" (freeze slice 5/6, PT-001).
+  policy_searches?: PolicySearch[];
+  // LangSmith's run identifier for this request. The officer-facing navigation that
+  // replaced application_id/request_id once those were stripped from every span
+  // (CONTENT RULE, app/assistant.py) -- copy it to open the run in LangSmith.
+  trace_id?: string;
 }
+
+// The closed vocabulary search_policy retrieval accepts (ADR 0019). A typed question
+// cannot reach the model -- the redaction boundary masks free text -- so this select is
+// the officer's only channel into policy retrieval, wired to GET's policy_topic query
+// param (Explain only; POST /assistant/decisions/{id} has no policy_topic parameter).
+const POLICY_TOPICS = [
+  "fee_schedule",
+  "apr_finance_charge",
+  "interest_rate",
+  "eligibility_rules",
+  "credit_decisioning",
+  "adverse_action",
+  "debt_to_income",
+  "records_retention",
+] as const;
 
 // Officer triage summary from the loan-summary LLM prompt (GET /applications/{id}/summary).
 // Advisory only: recommended_next_step is a triage hint, not the record-backed decision.
@@ -198,6 +234,8 @@ export default function UnderwritingDetailPage() {
     null
   );
   const [rejectReason, setRejectReason] = useState(REJECT_REASONS[0].value);
+  // "" = no policy_topic on the Explain request, same read this route has always served.
+  const [policyTopic, setPolicyTopic] = useState("");
 
   // Route generation. Next.js reuses this page component across /underwriting/[appId]
   // navigations, so a request can outlive the application it was fired from. Each handler
@@ -249,6 +287,7 @@ export default function UnderwritingDetailPage() {
     setProvenance(null);
     setDisclosureDoc(null);
     setRejectReason(REJECT_REASONS[0].value);
+    setPolicyTopic("");
     setActionMsg(null);
     setActionErr(null);
     setActionBusy(false);
@@ -534,8 +573,11 @@ export default function UnderwritingDetailPage() {
     setActionErr(null);
     setActionMsg(null);
     try {
+      const query = policyTopic
+        ? `?policy_topic=${encodeURIComponent(policyTopic)}`
+        : "";
       const res = (await apiGet(
-        `/los/assistant/decisions/${appId}`
+        `/los/assistant/decisions/${appId}${query}`
       )) as AssistantResult;
       if (routeGenRef.current !== gen) return;
       if (!isForApplication(res, requestAppId)) {
@@ -888,7 +930,20 @@ export default function UnderwritingDetailPage() {
               the recorded outcome. The LLM never sets the score.
             </p>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <select
+              value={policyTopic}
+              onChange={(e) => setPolicyTopic(e.target.value)}
+              disabled={actionBusy}
+              title="Policy topic for Explain's search_policy retrieval — a typed question cannot reach the model"
+            >
+              <option value="">No policy question</option>
+              {POLICY_TOPICS.map((t) => (
+                <option key={t} value={t}>
+                  {t.replace(/_/g, " ")}
+                </option>
+              ))}
+            </select>
             <button onClick={runAssistant} disabled={actionBusy}>
               {actionBusy ? "Working…" : "Run AI assistant"}
             </button>
@@ -942,6 +997,38 @@ export default function UnderwritingDetailPage() {
                 {assistant.policy_band
                   ? ` · policy band ${assistant.policy_band}`
                   : ""}
+              </p>
+            ) : null}
+            {assistant.policy_citations && assistant.policy_citations.length > 0 ? (
+              <div style={{ marginTop: 10 }}>
+                <div className="hint" style={{ marginBottom: 4 }}>
+                  Policy citations
+                </div>
+                <ul className="hint" style={{ margin: 0 }}>
+                  {assistant.policy_citations.map((c) => (
+                    <li key={c.chunk_id}>
+                      <code>{c.chunk_id}</code> ({c.score.toFixed(4)})
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : assistant.policy_searches && assistant.policy_searches.length > 0 ? (
+              <div style={{ marginTop: 10 }}>
+                <div className="hint" style={{ marginBottom: 4 }}>
+                  Policy search — no citation
+                </div>
+                <ul className="hint" style={{ margin: 0 }}>
+                  {assistant.policy_searches.map((s, i) => (
+                    <li key={i}>
+                      {s.status} ({s.score.toFixed(4)}) — {s.reason}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {assistant.trace_id ? (
+              <p className="hint" style={{ marginTop: 8 }}>
+                Trace run: <code>{assistant.trace_id}</code>
               </p>
             ) : null}
           </div>
