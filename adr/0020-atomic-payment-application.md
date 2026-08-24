@@ -4,16 +4,12 @@ Date: 2026-08-23
 
 ## Status
 
-Proposed — built, not yet merged. This ADR records the decision; migration 0019, the
-`balance.apply_payment` rewrite, both callers, the tests below, and the blocking
-`atomic-apply-gate` are implemented in PR #77 (not stacked on this one), where
-`test_lost_update.py` has flipped from failing to passing, proven by `make prove`. It
+Accepted. Migration 0019, the `balance.apply_payment` rewrite, both callers, the tests
+below, and the blocking `atomic-apply-gate` merged to `main` in PR #77 (`ceda4e2`),
+where `test_lost_update.py` flipped from failing to passing, proven by `make prove`. It
 implements `docs/spec-payments-week5.md` D3(b), D3(d) and D3(e), and supersedes the
 `captured_unapplied` half of ADR 0013 Decision 1 only where noted in Decision 3 below;
-the rest of ADR 0013 stands. On `main`, none of this has landed — `balance.apply_payment`
-is still the read-modify-write described below. Status becomes **Accepted** once PR #77
-merges; update this line then to cite the merge commit and `atomic-apply-gate` rather
-than the PR number (`docs/debt-log.md`'s status vocabulary).
+the rest of ADR 0013 stands.
 
 ## Context
 
@@ -179,15 +175,15 @@ new manual step; an operator resolves such a row by re-driving the apply, which 
 idempotent.
 
 **Testing.** `test_lost_update.py` documented the defect and failed on `main` from the
-day it was written; on PR #77 it flips from failing to passing and keeps its
-before-number, and its fixture models both statement shapes so a revert to the
+day it was written until PR #77 (`ceda4e2`); it now flips from failing to passing and
+keeps its before-number, and its fixture models both statement shapes so a revert to the
 read-modify-write turns it red again — `make prove` has run this on the implementation
-commit and printed PROVEN. On `main`, the apply and balance write paths still run inside
-the `backend` matrix's `|| true` suppression, so a regression there is silent on a green
-build — the same condition that let the add-on-vs-actuarial APR defect survive. PR #77
-closes that: it adds a blocking `atomic-apply-gate` running the D3 suites outside the
-matrix, on the precedent of `tila-vectors-gate` and `reconciliation-gate`, with no
-`continue-on-error`.
+commit and printed PROVEN. Before PR #77, the apply and balance write paths ran inside
+the `backend` matrix's `|| true` suppression, so a regression there would have been
+silent on a green build — the same condition that let the add-on-vs-actuarial APR defect
+survive. PR #77 closes that: it adds the blocking `atomic-apply-gate` running the D3
+suites outside the matrix, on the precedent of `tila-vectors-gate` and
+`reconciliation-gate`, with no `continue-on-error`.
 
 **Cost.** No new infrastructure, no new dependency, one new table.
 

@@ -146,20 +146,17 @@ services/origination-service/app/policy_retrieval.py => adr/0019-policy-retrieva
 services/servicing-service/app/reconciliation.py => adr/0018-interim-handling-of-a-double-charged-borrower.md
 
 # --- Week 9: the atomic payment application (D3) ----------------------------
-# ADR 0020 is Proposed -- built in PR #77, not merged to main -- same footing as
-# 0014/0016/0017 above for gate purposes: the
-# code area (balance.py) is live today, so deleting it must fail this gate even
-# though the fix the ADR decides has not shipped yet. ADR 0020 decides that the
-# record of an application and the movement of the balance will be one
-# statement, and that the amount and the loan will come out of the payments row
-# rather than from the caller. balance.py will hold that statement, so the
-# pairing names the file rather than the service directory -- a directory
-# survives deletion of the one file the ADR is about.
+# ADR 0020 is Accepted -- built and merged to main in PR #77 (ceda4e2). The
+# code area (balance.py) is live today, so deleting it must fail this gate.
+# ADR 0020 decides that the record of an application and the movement of the
+# balance are one statement, and that the amount and the loan come out of the
+# payments row rather than from the caller. balance.py holds that statement,
+# so the pairing names the file rather than the service directory -- a
+# directory survives deletion of the one file the ADR is about.
 #
-# db/migrations/0019_payment_applications.sql is deliberately NOT mapped. This
-# gate requires a mapped path to EXIST, and the migration ships in the
-# implementation PR while this ADR ships in its own -- mapping it here would make
-# the two merge in one order only. Deleting the migration without deleting
-# balance.py is caught at runtime instead, by the readiness rung both services
-# run against the table's definition.
+# db/migrations/0019_payment_applications.sql is deliberately NOT mapped, even
+# though it is on main now too: this gate requires a mapped path to EXIST, and
+# a second mapping would add nothing balance.py doesn't already cover. Deleting
+# the migration without deleting balance.py is caught at runtime instead, by
+# the readiness rung both services run against the table's definition.
 services/servicing-service/app/balance.py => adr/0020-atomic-payment-application.md
