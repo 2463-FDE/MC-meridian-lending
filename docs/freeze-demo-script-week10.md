@@ -13,15 +13,23 @@ told otherwise.
 ```bash
 git checkout main && git pull
 git rev-parse HEAD                 # note this SHA — cite it, not "main", during the talk
-cp .env.example .env                # POSTGRES_PASSWORD has no committed default
-export CLAUDE_API_KEY=...           # or the AWS_BEARER_TOKEN_BEDROCK / key-pair form below —
+cp .env.example .env                # POSTGRES_PASSWORD has no committed default; also gives
+                                     # POLICY_RETRIEVAL_MIN_SCORE its working value (0.1609)
+export LLM_ENABLED=true             # feature gate for every LLM route — host shell only
+export CLAUDE_PROVIDER=bedrock      # §2-§3 are cited as real Bedrock below; without this
+                                     # the demo runs direct-Anthropic instead
+export AWS_BEARER_TOKEN_BEDROCK=... # or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY —
                                      # host shell only, never in a committed file
+export LANGSMITH_TRACING=true       # required for the trace-id walk in §2 step 4
+export LANGSMITH_API_KEY=...        # host shell only, never in a committed file
 docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
 ```
 
-`docker-compose.demo.yml` is what turns on `LLM_ENABLED`, sets a working
-`POLICY_RETRIEVAL_MIN_SCORE`, and wires `LANGSMITH_TRACING` — all three landed in slice 1
-(`docs/plan-freeze-agentic-week10.md` §5 row 1). Confirm before the room fills:
+`docker-compose.demo.yml` supplies internal-service tokens and the
+`ENVIRONMENT=development`/`ALLOW_SYNTHETIC_CREDIT` gates only — it does **not** set
+`LLM_ENABLED`, `LANGSMITH_TRACING`, or `CLAUDE_PROVIDER` (all three interpolate from the host
+shell in `docker-compose.yml`, `${VAR:-}`-style, defaulting to unset/false/anthropic). The
+exports above are what turn them on. Confirm before the room fills:
 
 ```bash
 curl -s localhost:8001/health | python3 -m json.tool     # origination-service healthy
@@ -123,8 +131,9 @@ presentation, keep the JSON output, and cite its SHA and timestamp in the deck.
 State plainly, don't let it be inferred:
 
 - **Real**: the LLM calls in §2–§3 are real Bedrock invocations of **Claude Haiku 4.5** (not a
-  fixture, not a mock) when `LLM_ENABLED=true` and a live credential is present — which the
-  demo override provides.
+  fixture, not a mock) when `LLM_ENABLED=true`, `CLAUDE_PROVIDER=bedrock`, and a live AWS
+  credential are present — which the §1 export block provides (the demo override itself sets
+  none of the three).
 - **Fixture**: the test suite (`FakeAdapter`, `native_adapter` in
   `services/origination-service/tests/test_native_script.py`) never calls a real model; it is there to prove the loop,
   interlocks, and content redaction independent of provider availability or cost.
