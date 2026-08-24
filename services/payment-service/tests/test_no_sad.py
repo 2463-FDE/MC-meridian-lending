@@ -28,20 +28,32 @@ Kept in step with servicing-service's copy — both services write this table (d
 import inspect
 import json
 import logging
+import re
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app import payments
+from app import config, payments
 from app.config import _no_stored_sad_ready
 from app.logging_config import get_logger
 from app.schemas import PaymentIn
+from app.main import app
 
 REPO = Path(__file__).resolve().parents[3]
 INIT_SQL = (REPO / "db" / "init" / "001_schema.sql").read_text()
-SEED_SQL = (REPO / "db" / "init" / "002_seed.sql").read_text()
+# EVERY file docker-entrypoint runs on a fresh volume, not just 002_seed.sql: 003_seed_bulk
+# also inserts into payments, and it named the cvv column -- on a volume built from the
+# 001_schema.sql that no longer declares it, that aborts the whole init at
+# `column "cvv" of relation "payments" does not exist`, so the fresh stack has no bulk seed.
+INIT_FILES = sorted((REPO / "db" / "init").glob("*.sql"))
 MIGRATION = REPO / "db" / "migrations" / "0020_payments_drop_cvv.sql"
+
+# The column list of an `INSERT INTO payments (...)`. Group 1 is empty when the statement
+# has no column list at all -- a positional insert, which would put a value into whatever
+# column sits at that ordinal and cannot be graded by name.
+_PAYMENTS_INSERT = re.compile(r"INSERT\s+INTO\s+payments\s*(?:\(([^)]*)\))?", re.IGNORECASE)
 
 
 def _payments_table_ddl() -> str:
@@ -74,15 +86,20 @@ def test_the_init_ddl_declares_no_cvv_column():
     )
 
 
-def test_the_seed_stores_no_cvv():
-    payments_inserts = [
-        line
-        for line in SEED_SQL.splitlines()
-        if "INSERT INTO payments" in line or "'card'" in line
-    ]
-    assert payments_inserts, "seed no longer inserts payments — update this vector"
-    for line in payments_inserts:
-        assert "cvv" not in line.lower(), f"seed still writes a CVV: {line.strip()}"
+def test_no_init_file_seeds_a_cvv():
+    seen = 0
+    for path in INIT_FILES:
+        for match in _PAYMENTS_INSERT.finditer(path.read_text()):
+            seen += 1
+            columns = match.group(1)
+            assert columns is not None, (
+                f"{path.name} inserts into payments positionally, with no column list — "
+                "this vector grades columns by name and cannot see what that writes"
+            )
+            assert "cvv" not in columns.lower(), (
+                f"{path.name} still seeds a CVV: INSERT INTO payments ({columns.strip()})"
+            )
+    assert seen, "no db/init file inserts payments — update this vector"
 
 
 # --- the migration -------------------------------------------------------------------
@@ -186,6 +203,77 @@ def test_the_readiness_lookup_is_qualified_by_schema():
         "information_schema.columns spans every schema a connection can see, so an "
         "unqualified lookup can clear this volume on another schema's payments table"
     )
+
+
+# --- the money path itself -----------------------------------------------------------
+#
+# The rung above is only reached from /health, and /health is advisory: nothing consults
+# it before a capture. The legacy cvv column is NULLABLE, so a charge that never names it
+# inserts fine on a volume that skipped migration 0020 -- the service reports unhealthy
+# while every capture keeps landing rows in a table still retaining every CVV ever
+# stored. So the charge handler has to refuse for itself, at the route, before capture.
+
+_ROUTE_IDEM_KEY = "22222222-2222-4222-8222-222222222222"
+
+
+def _unmigrated(monkeypatch):
+    """A volume that still carries payments.cvv, as the readiness probe reports it."""
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "proc_test")
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    monkeypatch.setattr(
+        config,
+        "database_reachable",
+        lambda *a, **k: (False, "schema_not_ready:payments.cvv_present"),
+    )
+
+
+def test_the_charge_route_refuses_a_volume_that_still_has_the_column(monkeypatch):
+    _unmigrated(monkeypatch)
+
+    def _boom(*a, **k):
+        raise AssertionError(
+            "a capture ran against a volume that still stores CVV — the guard is not "
+            "on the money path, only on /health"
+        )
+
+    monkeypatch.setattr(payments, "charge", _boom)
+
+    resp = TestClient(app).post(
+        "/payments",
+        json={"loan_id": 1, "amount": 250.0, "method": "card"},
+        headers={"Idempotency-Key": _ROUTE_IDEM_KEY, "X-User-Role": "csr"},
+    )
+
+    assert resp.status_code == 503, resp.text
+    assert "payments.cvv_present" in resp.text, (
+        "the refusal must name the rung that refused, or an operator cannot tell an "
+        "unmigrated volume from an unreachable database"
+    )
+
+
+def test_the_charge_route_serves_once_the_volume_is_migrated(monkeypatch):
+    """The other half: the guard refuses THIS condition, not every charge."""
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "proc_test")
+    monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    monkeypatch.setattr(config, "database_reachable", lambda *a, **k: (True, None))
+    monkeypatch.setattr(
+        payments,
+        "charge",
+        lambda *a, **k: {
+            "payment_id": 1,
+            "loan_id": 1,
+            "status": "captured",
+            "applied_amount": 250.0,
+        },
+    )
+
+    resp = TestClient(app).post(
+        "/payments",
+        json={"loan_id": 1, "amount": 250.0, "method": "card"},
+        headers={"Idempotency-Key": _ROUTE_IDEM_KEY, "X-User-Role": "csr"},
+    )
+
+    assert resp.status_code == 200, resp.text
 
 
 # --- the backstop --------------------------------------------------------------------

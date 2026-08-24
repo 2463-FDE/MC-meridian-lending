@@ -1,8 +1,9 @@
 """Payment handling (moved verbatim from servicing-service's payments.py).
 
-Stores the FULL PAN and the CVV on the payments row (PCI storage debt, D5 — not
-addressed here). The charge LOG is redacted at the construction boundary: PAN/CVV/SSN
-are masked at the value level before interpolation. Idempotency is enforced by a
+Stores the FULL PAN on the payments row (PCI storage debt D13b — not addressed here).
+The CVV is not stored: migration 0020 dropped the column and the values (D13a). The
+charge LOG is redacted at the construction boundary: PAN/CVV/SSN are masked at the
+value level before interpolation. Idempotency is enforced by a
 partial unique index on payments.idempotency_key with an insert-first claim
 (claim_or_branch, D19, ADR 0013 Decision 1) — a retried POST under the same key
 returns the original outcome instead of a second row. (D2, D5, #4, #7)

@@ -1,8 +1,9 @@
 """SQLAlchemy ORM model for the payments table.
 
 Money columns map to Float (DOUBLE PRECISION in Postgres — the float-money debt). The
-`payments` table carries the full PAN + CVV (PCI debt, D5). It also carries an
-idempotency_key column under a partial unique index (D19, ADR 0013 Decision 1); this
+`payments` table carries the full PAN (PCI debt D13b — the CVV column was deleted by
+migration 0020, D13a). It also carries an idempotency_key column under a partial unique
+index (D19, ADR 0013 Decision 1); this
 class does not map it because the claim path writes it via raw SQL (claim_or_branch),
 not through this ORM model.
 """

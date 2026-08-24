@@ -358,6 +358,9 @@ def test_payments_503_without_processor_key(monkeypatch):
 def test_payments_allowed_with_processor_key(monkeypatch):
     monkeypatch.setattr(config, "PROCESSOR_API_KEY", "proc_test")
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    # The route also gates on the schema rungs now (D13a); this case is about the
+    # processor key, and there is no database behind it.
+    monkeypatch.setattr(config, "database_reachable", lambda *a, **k: (True, None))
     from app import payments
 
     monkeypatch.setattr(

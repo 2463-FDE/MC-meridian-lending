@@ -24,13 +24,36 @@
 -- with pg_filedump, a raw file copy, or a restored backup. So: NULL, then DROP, then
 -- rewrite the table.
 
--- 1. Clear the values while there is still a column to clear them through.
-UPDATE payments SET cvv = NULL WHERE cvv IS NOT NULL;
+-- 1. Clear the values while there is still a column to clear them through, then drop
+--    the column -- both guarded on the column actually being there.
+--
+--    The guard is what makes this file re-runnable, and re-runnable is not a nicety
+--    here: the operator applies these by hand. DROP COLUMN was already IF EXISTS, but
+--    an unguarded `UPDATE payments SET cvv = NULL` aborts at "column cvv does not
+--    exist" on any volume where the column is already gone -- a fresh schema built from
+--    db/init/001_schema.sql, which no longer declares it, or a re-run after a partial
+--    or hand-applied attempt. The file would then die at its first statement and never
+--    reach the drop, the assertion, or the heap rewrite below, so the operator's second
+--    attempt reports failure over a volume the rewrite still has to purge.
+--
+--    EXECUTE, not a static statement: PL/pgSQL resolves a static statement's columns the
+--    first time that statement runs, which the IF already prevents, but dynamic SQL makes
+--    the "never resolved when the column is absent" property independent of that.
+DO $mig_purge$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+     WHERE table_schema = current_schema()
+       AND table_name = 'payments'
+       AND column_name = 'cvv'
+  ) THEN
+    EXECUTE 'UPDATE payments SET cvv = NULL WHERE cvv IS NOT NULL';
+    EXECUTE 'ALTER TABLE payments DROP COLUMN cvv';
+  END IF;
+END
+$mig_purge$;
 
--- 2. Drop the column. IF EXISTS so a volume already past this migration re-runs clean.
-ALTER TABLE payments DROP COLUMN IF EXISTS cvv;
-
--- 3. Assert the drop actually happened before the rewrite claims to have purged
+-- 2. Assert the drop actually happened before the rewrite claims to have purged
 --    anything. RAISE EXCEPTION, never NOTICE: a migration that reports success over a
 --    column it did not remove is the failure this file exists to prevent.
 DO $mig$
@@ -47,7 +70,7 @@ BEGIN
 END
 $mig$;
 
--- 4. Rewrite the heap, which is what actually destroys the dead tuples holding the old
+-- 3. Rewrite the heap, which is what actually destroys the dead tuples holding the old
 --    values. VACUUM cannot run inside a transaction block or a DO block, so this is a
 --    bare top-level statement -- do not wrap this file in BEGIN/COMMIT.
 --

@@ -17,7 +17,18 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app import main, payments
+from app import config, main, payments
+
+
+# The charge route now fails closed on an unready schema (D13a: a volume that skipped
+# migration 0020 still holds every stored CVV, and the NULLABLE legacy column lets the
+# capture insert succeed anyway). These cases have no database at all, so the probe would
+# refuse every request and grade nothing but the guard. The guard itself is graded in
+# test_no_sad.py (unmigrated volume) and test_db_readiness.py (the rungs).
+@pytest.fixture(autouse=True)
+def _schema_ready(monkeypatch):
+    monkeypatch.setattr(config, "database_reachable", lambda *a, **k: (True, None))
+
 
 REPO = Path(__file__).resolve().parents[3]
 BLOCK_START = "# --- D19: idempotency ---"
