@@ -1,8 +1,10 @@
 # ADR 0015: Settlement Reconciliation as a Control, and Correlation on the Payment Span
 
 - **Status:** **Accepted** — D1 through D6 are built and merged. The exact matching key still
-  depends on migration `0017_payments_idempotency` (ADR 0013), which is not built, so matching
-  remains heuristic until that migration lands.
+  depends on `db/migrations/0018_payments_idempotency.sql` (ADR 0013 Decision 1), which **is**
+  built — schema in PR #63, capture path in PR #65, held by the blocking
+  `payment-idempotency-gate` — but only prevents the exact-retry case at capture; matching
+  remains heuristic for a processor-side duplicate or a break that predates that fix.
 - **Date:** 2026-08-12
 - **Author:** Claude Code
 - **Related:** ADR 0012 (Decimal / minor units precedent, applied here to the comparison),
