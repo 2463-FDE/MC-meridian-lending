@@ -597,6 +597,12 @@ jobs:
     #                               are refused
     # test_tool_schemas.py         CompletionRequest.tools / Completion.tool_calls / the
     #                               _redacted_turn content-block rule
+    # test_injection_resistance.py  every inbound channel to the model is a projection to
+    #                               enum codes, integers and code lists -- the officer's
+    #                               request, both tool results, a poisoned corpus chunk,
+    #                               the model-authored query and the model's own final.
+    #                               The freeze asks for deterministic injection-resistance
+    #                               tests; this is that file
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -615,7 +621,8 @@ jobs:
                            tests/test_chat_model.py \
                            tests/test_agentic_loop.py \
                            tests/test_native_script.py \
-                           tests/test_tool_schemas.py -q
+                           tests/test_tool_schemas.py \
+                           tests/test_injection_resistance.py -q
 
   atomic-apply-gate:
     # D3 / ADR 0020. Crediting a captured payment to a loan exactly once is the money
