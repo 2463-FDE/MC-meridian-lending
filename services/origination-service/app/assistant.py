@@ -68,9 +68,12 @@ _RECURSION_LIMIT = 2 * _MAX_STEPS
 #
 # Before this, the only spans in the service were `llm.complete` and its
 # `llm.transport` child, so a trace showed that a model call happened and nothing about
-# the agent that made it. These hang above them: one root per officer request, with a
-# child per loop step, per tool dispatch, per retrieval, and one for the deterministic
-# validation that decides what the officer actually reads.
+# the agent that made it. These hang above them: one loop root per officer request, with
+# a child per model call (`llm.complete`, which is where the agent picks its next
+# action), per tool dispatch, per retrieval, and one for the deterministic validation
+# that decides what the officer actually reads. Above THIS root sits `assistant.entry`
+# (`app/main.py`), which exists because the root below opens too late to cover a refusal
+# raised before the loop starts.
 #
 # CONTENT RULE, and it is the whole design constraint: a span carries enum codes,
 # integers, booleans, and the retrieval's own scores and chunk ids. Never an applicant
@@ -91,7 +94,6 @@ _RECURSION_LIMIT = 2 * _MAX_STEPS
 # grounds, not because it is unreachable.
 
 _SPAN_REQUEST = "assistant.request"
-_SPAN_STEP = "assistant.step"
 _SPAN_VALIDATE = "assistant.validate"
 _SPAN_RETRIEVAL = "policy.retrieval"
 

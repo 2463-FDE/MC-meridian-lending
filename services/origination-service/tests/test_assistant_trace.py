@@ -14,12 +14,15 @@ needing a network.
 import json
 import uuid
 
+import httpx
 import pytest
+from fastapi import HTTPException
 
 from tests.test_native_script import native_adapter
 
-from app import assistant, policy_retrieval
+from app import assistant, main, policy_retrieval
 from app.llm import ClaudeClient, FakeAdapter, LLMConfig
+from app.llm.errors import LLMError
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +38,11 @@ class _Span:
         self.run_type = run_type
         self.metadata = dict(metadata or {})
         self.children = []
+        # Real `trace()` attaches `str(exception)` to the span an exception is raised
+        # THROUGH, so a provider message or an app_id-bearing URL can reach LangSmith
+        # without ever being put in `metadata`. Recorded so a test can assert the
+        # entry span exits clean (`app/main.py::_run_assistant`).
+        self.exception = None
         # Mirrors the real RunTree's `trace_id` field (app/assistant.py reads
         # `root.trace_id` for the officer-facing trace navigation), populated for every
         # span the same way LangSmith populates it regardless of run type.
@@ -67,10 +75,21 @@ def spans(monkeypatch):
             return self.span
 
         def __exit__(self, *exc):
+            self.span.exception = exc[0] if exc else None
             stack.pop()
             return False
 
     monkeypatch.setattr(assistant, "trace", _Recorder)
+    # `app/main.py` opens the entry span above the loop root, so both modules' `trace`
+    # are recorded by one stack -- otherwise the parent/child shape the tests below
+    # assert would be invisible.
+    #
+    # `raising=False` so this fixture does not decide the verdict. With it strict, a tree
+    # where `main` has no `trace` at all makes every test below ERROR on the patch itself
+    # -- which is `make prove` reporting red for "the attribute is missing" rather than
+    # for "a refusal produced no root span". The claim under test is the span; let the
+    # assertions be the ones that fail.
+    monkeypatch.setattr(main, "trace", _Recorder, raising=False)
     return roots
 
 
@@ -159,7 +178,10 @@ def tools(monkeypatch):
 
 
 def test_one_root_per_request_spanning_tool_and_validation(spans, tools):
-    """The requirement is ONE root covering entry, tools and validation.
+    """One loop root per run, covering the tools and the validation under it.
+
+    Entry is covered by `assistant.entry` one level up (`app/main.py`); this test calls
+    `run()` directly, so the loop root is the only root here.
 
     There is no `assistant.step` span since the loop swap: the framework owns the loop,
     so its own node runs are the steps, and a hand-emitted span beside them would be a
@@ -372,3 +394,186 @@ def test_result_metadata_type_checks_rather_than_trusting_the_shape(result):
         )
         if isinstance(value, list):
             assert all(isinstance(v, str) for v in value)
+
+
+# --- the entry span (app/main.py) --------------------------------------------------
+#
+# `assistant.request` opens inside `run()`, after the request is built, the policy topic
+# is checked, the KYC gate runs and the application is fetched -- so every refusal raised
+# before that point produced no trace at all. `assistant.entry` is the root that closes
+# that gap, and the tests below pin both halves of why it is safe: what it carries, and
+# that nothing is raised THROUGH it.
+
+
+class _Boom(Exception):
+    """Stands in for an exception `_run_assistant` does not catch."""
+
+
+def _http_error(app_id: int) -> httpx.HTTPStatusError:
+    """A downstream failure whose own message embeds the request URL, and so the app id.
+
+    This is the leak the entry span is designed around: `str(exc)` names
+    `/decisions/42/record`, and `trace()` would attach that string to any span the
+    exception is raised through.
+    """
+    request = httpx.Request(
+        "GET", f"http://decision-service:8004/decisions/{app_id}/record"
+    )
+    response = httpx.Response(500, request=request)
+    return httpx.HTTPStatusError("server error", request=request, response=response)
+
+
+def test_the_entry_span_is_the_root_and_parents_the_loop(spans, tools):
+    main._run_assistant(42, _client(TOOL_CALL, FINAL_DENY), "decision")
+
+    assert len(spans) == 1, f"expected one root, got {[s.name for s in spans]}"
+    entry = spans[0]
+    assert entry.name == "assistant.entry"
+    assert [c.name for c in entry.children] == ["assistant.request"]
+
+
+def test_the_entry_span_records_the_task_and_a_served_request(spans, tools):
+    main._run_assistant(42, _client(TOOL_CALL, FINAL_DENY), "decision")
+
+    entry = spans[0].metadata
+    assert entry["task"] == "decision"
+    assert entry["http_status"] == 200
+    assert "refusal" not in entry, "a served request must not be marked refused"
+    assert "policy_topic" not in entry, "absent, not null, when none was asked"
+
+
+def test_the_entry_span_records_the_policy_topic_code(spans, tools, monkeypatch):
+    monkeypatch.setitem(
+        assistant._TOOLS,
+        "search_policy",
+        lambda query, task=None: {"status": "abstain"},
+    )
+    with pytest.raises(HTTPException):
+        # An explain run that never searches is refused (PT-001); the topic is on the
+        # entry span either way, which is the point -- a closed-vocabulary code says
+        # what the officer asked about and carries nothing they typed.
+        main._run_assistant(
+            42,
+            _client(FINAL_DENY),
+            "explain",
+            policy_topic="late_fee_waiver",
+        )
+    assert spans[0].metadata["policy_topic"] == "late_fee_waiver"
+
+
+@pytest.mark.parametrize(
+    "exc,status,refusal",
+    [
+        (assistant.ApplicationNotFound("never decisioned"), 404, "not_found"),
+        (
+            assistant.AssistantError("refusing an unrecorded decision"),
+            502,
+            "assistant_refused",
+        ),
+        (LLMError("provider said something raw"), 503, "llm_unavailable"),
+    ],
+)
+def test_a_refusal_before_the_loop_still_produces_a_trace(
+    spans, monkeypatch, exc, status, refusal
+):
+    """The gap this span closes: these three are all raised before `assistant.request`
+    opens, so before this each one produced a trace with no root and no spans at all."""
+
+    def _raise(*args, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(assistant, "run", _raise)
+    with pytest.raises(HTTPException) as raised:
+        main._run_assistant(42, _client(), "decision")
+
+    assert raised.value.status_code == status
+    assert len(spans) == 1
+    entry = spans[0]
+    assert entry.name == "assistant.entry"
+    assert entry.children == [], "the loop never opened its own root"
+    assert entry.metadata["http_status"] == status
+    assert entry.metadata["refusal"] == refusal
+
+
+@pytest.mark.parametrize(
+    "exc,status,refusal",
+    [
+        (assistant.ApplicationNotFound("never decisioned"), 404, "not_found"),
+        (
+            assistant.AssistantError("refusing an unrecorded decision"),
+            502,
+            "assistant_refused",
+        ),
+        (LLMError("provider said something raw"), 503, "llm_unavailable"),
+        (_http_error(42), 503, "downstream_unavailable"),
+    ],
+)
+def test_no_exception_is_raised_through_the_entry_span(
+    spans, monkeypatch, exc, status, refusal
+):
+    """The whole reason the HTTPException is raised after the `with` block exits.
+
+    `trace()` attaches `str(exception)` to the span it crosses, and two of these carry an
+    application-linked string -- the httpx message embeds `/decisions/42/record`, and an
+    LLMError can carry raw provider text. Translated to an enum inside the span, raised
+    outside it."""
+
+    def _raise(*args, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(assistant, "run", _raise)
+    with pytest.raises(HTTPException):
+        main._run_assistant(42, _client(), "decision")
+
+    entry = spans[0]
+    assert entry.exception is None, (
+        f"{entry.exception!r} crossed the entry span; trace() would ship str(exc)"
+    )
+    assert entry.metadata["refusal"] == refusal
+    for key, value in entry.metadata.items():
+        assert "42" not in str(value), f"{key}={value!r} carries the application id"
+        assert "decisions/" not in str(value), f"{key}={value!r} carries a request URL"
+
+
+def test_an_idempotency_conflict_is_its_own_refusal_code(spans, monkeypatch):
+    request = httpx.Request("POST", "http://decision-service:8004/decisions")
+    conflict = httpx.HTTPStatusError(
+        "conflict", request=request, response=httpx.Response(409, request=request)
+    )
+
+    def _raise(*args, **kwargs):
+        raise conflict
+
+    monkeypatch.setattr(assistant, "run", _raise)
+    with pytest.raises(HTTPException) as raised:
+        main._run_assistant(42, _client(), "decision", "idem-key-1")
+
+    assert raised.value.status_code == 409
+    assert spans[0].metadata["refusal"] == "idempotency_conflict"
+
+
+def test_an_uncaught_exception_is_not_translated_into_a_served_request(
+    spans, monkeypatch
+):
+    """`_run_assistant` catches four classes; anything else must propagate as a 500 and
+    must NOT reach `entry.add_metadata({"http_status": 200})`."""
+
+    def _raise(*args, **kwargs):
+        raise _Boom("unmapped")
+
+    monkeypatch.setattr(assistant, "run", _raise)
+    with pytest.raises(_Boom):
+        main._run_assistant(42, _client(), "decision")
+
+    assert "http_status" not in spans[0].metadata
+
+
+def test_the_entry_span_never_carries_caller_linkable_identifiers(spans, tools):
+    """Same rule as the loop root: no application_id, no request_id, on any span."""
+    main._run_assistant(42, _client(TOOL_CALL, FINAL_DENY), "decision", "idem-key-1")
+
+    for span in _flatten(spans):
+        assert "application_id" not in span.metadata, span.name
+        assert "request_id" not in span.metadata, span.name
+        for key, value in span.metadata.items():
+            assert "idem-key-1" not in str(value), f"{span.name}.{key}"
