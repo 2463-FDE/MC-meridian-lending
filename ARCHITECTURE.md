@@ -81,8 +81,15 @@ contract.
 
 ### Decisioning assistant (LLM)
 
-`origination-service` runs a single-agent decisioning assistant (Week 3, ADR 0005 LLM
-client + ADR 0009 design): an LLM agent that orchestrates tools and narrates a decision to
+`origination-service` runs TWO agent surfaces. The officer decisioning assistant (Week 3,
+ADR 0005 LLM client + ADR 0009 design; policy retrieval added in ADR 0019) is a tool-calling
+loop hosted on an agent framework, with three tools — score, memory, and a bounded read-only
+policy search. The disclosure pipeline (`app/disclosure_coordinator.py`) is a separate
+LangGraph state machine: six nodes, a deterministic verify gate and one bounded retry edge,
+held by the blocking `disclosure-lifecycle-gate`. "Single-agent" described this service
+until the disclosure pipeline landed and is no longer accurate.
+
+The officer assistant is an LLM agent that orchestrates tools and narrates a decision to
 the loan officer, but never scores credit itself — the credit decision stays a
 deterministic scoring module, for reproducibility and to avoid a fair-lending "the AI
 decided" defense (12 CFR 1002.9). Adverse-action reasons are derived from the model's

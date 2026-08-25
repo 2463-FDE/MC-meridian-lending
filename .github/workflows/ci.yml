@@ -291,7 +291,8 @@ jobs:
         # the flag is a deliberate, non-production debugging act by whoever exports it in
         # their own shell, never a property of a file anyone can inherit. Today the base
         # file interpolates it (${LLM_TRACE_CONTENT:-false}), .env.example keeps the line
-        # commented, and the demo override sets none of the LLM keys. This asserts that,
+        # commented, and the demo override sets only the two non-secret provider-selection
+        # keys (CLAUDE_PROVIDER, AWS_REGION) and no trace or content key. This asserts that,
         # in EVERY committed compose file including the demo override -- the base-file-only
         # scope of the step above is wrong for this key, because the demo override is
         # exactly where a "make the trace readable on stage" edit would land. Only a

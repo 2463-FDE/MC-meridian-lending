@@ -44,6 +44,29 @@ services:
       # /health is unhealthy and submit refuses.
       ENVIRONMENT: development
       INTERNAL_SERVICE_TOKEN: *demo_internal_token
+      # The demo is specified as REAL Bedrock (docs/freeze-demo-script-week10.md §5), and
+      # the base compose defaults CLAUDE_PROVIDER to `anthropic`. Pinned here, not left to
+      # a host export, because a reproducible demo cannot rest on someone remembering one
+      # line: an export that is forgotten does not fail, it quietly runs the whole demo
+      # against the direct Anthropic API while the deck cites Bedrock.
+      #
+      # Safe to commit and safe to pin: neither value is a secret, and neither is read
+      # unless LLM_ENABLED is set — app/main.py's lifespan only calls load_llm_config()
+      # behind that gate, so a stack brought up without the LLM feature is unaffected.
+      # CREDENTIALS stay host-shell-only (AWS_BEARER_TOKEN_BEDROCK, or the
+      # AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY pair) and are never set in any committed
+      # file.
+      #
+      # The failure mode this pin creates, named rather than discovered in the room:
+      # LLM_ENABLED=true with an Anthropic key and no AWS credential now FAILS AT BOOT
+      # instead of serving direct-Anthropic. That is the intended direction — fail loud,
+      # not silently off-provider — but it means a non-Bedrock demo must override
+      # CLAUDE_PROVIDER=anthropic in the host shell, which still wins over this value.
+      CLAUDE_PROVIDER: ${CLAUDE_PROVIDER:-bedrock}
+      # us-east-1 is also app/llm/config.py's pinned default; set here so the compose file
+      # states the region the demo is graded on rather than leaving it implicit. A value
+      # outside the bedrock-runtime region allowlist is refused at boot.
+      AWS_REGION: ${AWS_REGION:-us-east-1}
   kyc-service:
     environment:
       INTERNAL_SERVICE_TOKEN: *demo_internal_token
