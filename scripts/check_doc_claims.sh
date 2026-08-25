@@ -5,7 +5,8 @@
 #
 # Why: README.md/CLAUDE.md/docs/kb.md are the platform's authoritative prose. The seed
 # README claimed "PCI-DSS compliant (cardholder data encrypted)" while
-# payment-service/app/models.py:19-20 stores PAN and CVV in plaintext columns, and told
+# payment-service/app/models.py stores the PAN in a plaintext column (the CVV column is
+# gone — migration 0020, D13a — but a stored PAN is still non-compliant), and told
 # the reader "the real .env is already in the repo" — false and unsafe (secret-scan
 # blocks a tracked .env). A false compliance claim is a governance defect, not a typo, so
 # it gets a mechanical gate on the same rung as redactor-drift and doc-path-lint.
@@ -35,7 +36,7 @@ cd "$(git rev-parse --show-toplevel)" 2>/dev/null || { echo "ABORT: not in a git
 #   REASON — why it is false, with the evidence, printed on a hit.
 # Keep the regex anchored to the affirmative phrasing so an honest negation passes.
 BANNED=(
-  'PCI[- ]DSS compliant|||affirmative PCI-DSS compliance claim, but PAN+CVV are stored plaintext (services/payment-service/app/models.py). Say "not compliant with PCI-DSS".'
+  'PCI[- ]DSS compliant|||affirmative PCI-DSS compliance claim, but the PAN is stored plaintext (services/payment-service/app/models.py, D13b). Say "not compliant with PCI-DSS".'
   'cardholder data( is)? encrypted|||claims card data is encrypted, but it is stored plaintext (services/payment-service/app/models.py).'
   'real \.env is already in the repo|||unsafe and false: no .env is tracked (secret-scan blocks it). Use "cp .env.example .env".'
 )

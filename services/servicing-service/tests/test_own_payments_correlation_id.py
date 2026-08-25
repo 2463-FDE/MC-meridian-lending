@@ -11,10 +11,22 @@ this identical route shape. This file closes both.
 
 import re
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import authz, balance, config, payments
 from app.main import app
+
+
+# The charge route now fails closed on an unready schema (D13a: a volume that skipped
+# migration 0020 still holds every stored CVV, and the NULLABLE legacy column lets the
+# capture insert succeed anyway). These cases have no database at all, so the probe would
+# refuse every request and grade nothing but the guard. The guard itself is graded in
+# test_no_sad.py (unmigrated volume) and test_db_readiness.py (the rungs).
+@pytest.fixture(autouse=True)
+def _schema_ready(monkeypatch):
+    monkeypatch.setattr(config, "database_reachable", lambda *a, **k: (True, None))
+
 
 # D19: the Idempotency-Key is required and client-minted (ADR 0013 Decision 1), so every
 # call into the charge path has to carry one. A fixed valid UUID keeps these cases
@@ -67,7 +79,6 @@ def test_no_line_claims_success_before_the_insert(monkeypatch):
         payments.charge(
             loan_id=1,
             pan="4111111111111111",
-            cvv="123",
             amount=50.0,
             idempotency_key=_IDEM_KEY,
         )
@@ -93,7 +104,6 @@ def test_generated_request_id_is_one_id_shared_by_entry_and_outcome(monkeypatch)
     result = payments.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         idempotency_key=_IDEM_KEY,
     )
@@ -115,7 +125,6 @@ def test_supplied_request_id_used_verbatim(monkeypatch):
     payments.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         request_id="abc123",
         idempotency_key=_IDEM_KEY,
@@ -131,9 +140,7 @@ def test_route_forwards_the_x_request_id_header_to_charge(monkeypatch):
 
     seen = {}
 
-    def fake_charge(
-        loan_id, pan, cvv, amount, ssn, name, method, request_id=None, **kwargs
-    ):
+    def fake_charge(loan_id, pan, amount, ssn, name, method, request_id=None, **kwargs):
         seen["request_id"] = request_id
         return {"loan_id": loan_id, "amount": amount, "balance": 0.0}
 
@@ -170,7 +177,6 @@ def test_pii_shaped_request_id_reaches_no_log_line(monkeypatch):
         payments.charge(
             loan_id=1,
             pan="4111111111111111",
-            cvv="123",
             amount=50.0,
             request_id=hostile,
             idempotency_key=_IDEM_KEY,
@@ -213,7 +219,6 @@ def test_balance_apply_payment_own_log_line_carries_the_span(monkeypatch):
     result = payments.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         request_id="abc123",
         idempotency_key=_IDEM_KEY,
@@ -254,7 +259,6 @@ def test_replay_of_a_row_captured_unapplied_by_the_other_writer_reports_zero(
     result = payments.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=250.0,
         idempotency_key=_IDEM_KEY,
     )

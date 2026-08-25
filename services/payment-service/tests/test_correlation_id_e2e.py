@@ -115,7 +115,6 @@ def test_generated_id_lands_verbatim_on_servicings_real_log_line(monkeypatch):
     result = pay.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         idempotency_key=_IDEM_KEY,
     )
@@ -141,7 +140,6 @@ def test_supplied_id_lands_verbatim_on_servicings_real_log_line(monkeypatch):
     result = pay.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         request_id="abc123",
         idempotency_key=_IDEM_KEY,
@@ -165,7 +163,6 @@ def test_pii_shaped_id_never_reaches_servicings_real_log_line(monkeypatch):
     result = pay.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         request_id=hostile,
         idempotency_key=_IDEM_KEY,

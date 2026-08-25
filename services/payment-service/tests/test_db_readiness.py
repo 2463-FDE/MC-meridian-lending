@@ -184,6 +184,11 @@ class _FakeCursor:
                 return self.overrides[name]
             column = _PAYMENTS_INDEX_COLUMNS[name]
             return (True, "payments", f"({column} IS NOT NULL)", column)
+        if "'cvv'" in sql:
+            # D13a rung (migration 0020). Inverted relative to every other rung: a
+            # correctly-migrated volume returns NO row, because the column is gone.
+            # Override with ("cvv",) to model a volume that still carries it.
+            return self.overrides.get("payments.cvv", None)
         if "is_nullable" in sql:
             # status NOT NULL DEFAULT 'captured' contract query -- unparameterized
             # (column_name is a literal in the SQL), so it is not keyed by `name`.
@@ -353,6 +358,9 @@ def test_payments_503_without_processor_key(monkeypatch):
 def test_payments_allowed_with_processor_key(monkeypatch):
     monkeypatch.setattr(config, "PROCESSOR_API_KEY", "proc_test")
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
+    # The route also gates on the schema rungs now (D13a); this case is about the
+    # processor key, and there is no database behind it.
+    monkeypatch.setattr(config, "database_reachable", lambda *a, **k: (True, None))
     from app import payments
 
     monkeypatch.setattr(
@@ -683,3 +691,20 @@ def test_rung_ready_on_a_correctly_migrated_volume(monkeypatch):
     ok, err = _probe_with(monkeypatch, {})
     assert ok is True
     assert err is None
+
+
+def test_probe_refuses_a_volume_that_still_has_the_cvv_column(monkeypatch):
+    """D13a. Every other not-ready case here is a MISSING object; this one is a present
+    one. A volume that skipped migration 0020 still holds every CVV ever written, and
+    the service must refuse to serve charges over it rather than report ready."""
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2,
+        "connect",
+        lambda *a, **k: _FakeConn({"payments.cvv": ("cvv",)}),
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:payments.cvv_present"

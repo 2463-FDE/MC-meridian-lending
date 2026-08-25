@@ -300,7 +300,8 @@ class ReconciliationResult:
 
 
 def load_ledger(window_from: date, window_to: date) -> list:
-    """The capture side, inside the window. SELECT only; `pan`/`cvv` are never read.
+    """The capture side, inside the window. SELECT only; `pan` is never read (and
+    `cvv` no longer exists — migration 0020, D13a).
 
     A query failure (Postgres unreachable, statement error) is a verifier that could
     not verify, not an unclassified server error — it aborts the same as an unreadable
@@ -846,7 +847,8 @@ def _break_json(item: Break) -> dict:
     different fields and neither dataclass holds the other's. `gap_seconds` was read
     here while the two shared a type, and `Break` has never had it.
 
-    `pan` and `cvv` are never read, so they cannot reach this document; the report is
+    `pan` is never read and `cvv` no longer exists, so neither can reach this
+    document; the report is
     stdout and is not redactor-covered, which is why the column list is a review point
     rather than an assumption (spec's redaction note).
     """

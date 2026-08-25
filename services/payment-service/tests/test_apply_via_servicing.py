@@ -23,7 +23,6 @@ from app import config, payments
 _IDEM_KEY = "11111111-1111-4111-8111-111111111111"
 
 
-
 class _FakeResponse:
     def __init__(self, status_code=200):
         self.status_code = status_code
@@ -134,7 +133,9 @@ def test_charge_reports_captured_unapplied_when_servicing_rejects(monkeypatch):
     monkeypatch.setattr(payments.db, "query", lambda *a, **k: [{"id": 1}])
     monkeypatch.setattr(payments, "_apply_via_servicing", lambda *a, **k: False)
 
-    out = payments.charge(loan_id=1, pan="4111111111111111", cvv="123", amount=50.0, idempotency_key=_IDEM_KEY)
+    out = payments.charge(
+        loan_id=1, pan="4111111111111111", amount=50.0, idempotency_key=_IDEM_KEY
+    )
 
     assert out["status"] == "captured_unapplied"
     assert out["applied_amount"] == 0.0
@@ -144,7 +145,9 @@ def test_charge_reports_captured_when_servicing_applies(monkeypatch):
     monkeypatch.setattr(payments.db, "query", lambda *a, **k: [{"id": 1}])
     monkeypatch.setattr(payments, "_apply_via_servicing", lambda *a, **k: True)
 
-    out = payments.charge(loan_id=1, pan="4111111111111111", cvv="123", amount=50.0, idempotency_key=_IDEM_KEY)
+    out = payments.charge(
+        loan_id=1, pan="4111111111111111", amount=50.0, idempotency_key=_IDEM_KEY
+    )
 
     assert out["status"] == "captured"
     assert out["applied_amount"] == 50.0

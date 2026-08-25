@@ -184,7 +184,6 @@ export default function LoanDetailPage() {
       await apiPost("/payments", {
         loan_id: loanId,
         pan: "4111111111111111", // hardcoded test card PAN (texture)
-        cvv: "123", // hardcoded test CVV (texture)
         amount: parseFloat(payAmount || "0"),
         method: "card",
       });

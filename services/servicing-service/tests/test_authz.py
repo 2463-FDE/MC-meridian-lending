@@ -19,6 +19,17 @@ from fastapi.testclient import TestClient
 from app import authz, config, reconciliation
 from app.main import app
 
+
+# The charge route now fails closed on an unready schema (D13a: a volume that skipped
+# migration 0020 still holds every stored CVV, and the NULLABLE legacy column lets the
+# capture insert succeed anyway). These cases have no database at all, so the probe would
+# refuse every request and grade nothing but the guard. The guard itself is graded in
+# test_no_sad.py (unmigrated volume) and test_db_readiness.py (the rungs).
+@pytest.fixture(autouse=True)
+def _schema_ready(monkeypatch):
+    monkeypatch.setattr(config, "database_reachable", lambda *a, **k: (True, None))
+
+
 # D19: the Idempotency-Key is required and client-minted (ADR 0013 Decision 1), so every
 # call into the charge path has to carry one. A fixed valid UUID keeps these cases
 # deterministic; the idempotency behaviour itself is covered by the R-vector suite.
@@ -468,7 +479,7 @@ def test_post_payment_allowed_for_owner(monkeypatch):
     monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
     monkeypatch.setattr(
         "app.payments.charge",
-        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None, **kw: {
+        lambda loan_id, pan, amount, ssn, name, method, request_id=None, **kw: {
             "loan_id": loan_id,
             "amount": amount,
             "balance": 0.0,
@@ -528,7 +539,7 @@ def test_post_payment_allowed_for_money_role_without_db(monkeypatch):
     monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
     monkeypatch.setattr(
         "app.payments.charge",
-        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None, **kw: {
+        lambda loan_id, pan, amount, ssn, name, method, request_id=None, **kw: {
             "loan_id": loan_id,
             "amount": amount,
             "balance": 0.0,

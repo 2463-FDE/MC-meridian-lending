@@ -70,11 +70,13 @@ SELECT l.id,
   CASE WHEN l.status = 'delinquent' THEN round((50 + (l.id % 400))::numeric, 2)::double precision ELSE 0 END
 FROM loans l WHERE l.id BETWEEN 7000 AND 7299;
 
--- 1..6 payments per loan (~600 rows). Card payments store the FULL PAN + CVV (debt preserved).
-INSERT INTO payments (loan_id, pan, cvv, amount, method, created_at)
+-- 1..6 payments per loan (~600 rows). Card payments store the FULL PAN (debt D13b,
+-- preserved). No CVV: D13a deleted the column, and this file runs on a fresh volume
+-- AFTER 001_schema.sql, so naming it here would abort the whole init with
+-- `column "cvv" of relation "payments" does not exist`.
+INSERT INTO payments (loan_id, pan, amount, method, created_at)
 SELECT l.id,
   CASE WHEN (l.id + s) % 3 = 0 THEN NULL ELSE '4111111111111111' END,
-  CASE WHEN (l.id + s) % 3 = 0 THEN NULL ELSE '123' END,
   round((l.principal / l.term_months)::numeric, 2)::double precision,
   CASE WHEN (l.id + s) % 3 = 0 THEN 'ach' ELSE 'card' END,
   TIMESTAMPTZ '2026-05-01 09:00:00' + ((l.id % 20) || ' days')::interval + (s || ' days')::interval

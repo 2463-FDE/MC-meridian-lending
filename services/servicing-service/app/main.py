@@ -63,7 +63,6 @@ def health():
 class PaymentIn(BaseModel):
     loan_id: int
     pan: Optional[str] = None
-    cvv: Optional[str] = None
     amount: float
     ssn: Optional[str] = None
     name: Optional[str] = None
@@ -109,12 +108,28 @@ def post_payment(
         idempotency_key = str(uuid.UUID(idempotency_key))
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=400, detail="Idempotency-Key must be a UUID.")
+    # Fail closed on a schema this money path cannot safely write to. /health runs these
+    # same rungs, but /health is advisory: nothing consults it before a capture, so on a
+    # volume that skipped a migration the service reports unhealthy while charges keep
+    # landing. The cvv case is the sharp one -- the legacy column is NULLABLE, so an
+    # INSERT that omits it succeeds, and the capture writes a row into a table still
+    # retaining every CVV ever stored (D13a, migration 0020). The D19 rungs matter for the
+    # same reason: without 0018's partial unique index the claim insert has no arbiter and
+    # the double-charge control is gone at the moment it is first needed.
+    #
+    # database_reachable() is TTL-cached and single-flight, so this costs one probe per
+    # 5-second window across all callers, not a Postgres connection per charge.
+    schema_ok, not_ready = config.database_reachable()
+    if not schema_ok:
+        raise HTTPException(
+            status_code=503,
+            detail=f"database not ready for capture ({not_ready})",
+        )
     # X-Request-Id enters the span here too -- this route is a second front
     # door for the same charge path as payment-service's /payments (D1(a)).
     result = payments.charge(
         body.loan_id,
         body.pan,
-        body.cvv,
         body.amount,
         body.ssn,
         body.name,

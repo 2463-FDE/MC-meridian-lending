@@ -392,6 +392,92 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_idempotency_parity.py -q
 
+  no-sad-gate:
+    # D13a / ADR 0013 Decision 2. payments.cvv stored sensitive authentication data.
+    # PCI-DSS 3.2.1 prohibits retaining SAD after authorization outright -- no retention
+    # window, no compensating control -- so the remediation is a deletion of the values
+    # and the column, and a regression here reintroduces prohibited data rather than
+    # breaking an assertion.
+    #
+    # These vectors ran ONLY in the `backend` matrix job, which is continue-on-error with
+    # `python -m pytest -q || true`. A control whose test inherits `|| true` is not a
+    # control. Same precedent as tila-vectors-gate, reconciliation-gate and
+    # atomic-apply-gate. This job MUST block -- no continue-on-error, no `|| true`.
+    #
+    # Both services, because the deletion has to hold in four places at once and two of
+    # them are duplicated per service (debt D23): the init DDL and the seed (a fresh
+    # volume must not create or populate the column), migration 0020 (an existing volume
+    # must NULL, DROP and then REWRITE the heap -- DROP COLUMN alone leaves every value
+    # readable in the data files), both charge handlers and both request models, and the
+    # readiness rung that refuses a volume still carrying the column.
+    #
+    # test_db_readiness.py is run too, not just test_no_sad.py: the rung is wired into
+    # database_reachable(), and test_no_sad.py calls it directly. Only the readiness suite
+    # proves an unmigrated volume actually reports unhealthy end to end.
+    #
+    # This is the one job in this file with a database behind it. It needs one: the
+    # migration is applied BY HAND, so "does this file run a second time" is a question
+    # only Postgres can answer, and every other vector here grades SQL as text. A skipped
+    # live vector inside a blocking gate would report success for a path it never ran --
+    # the failure these gates exist to prevent -- so the service container is what makes
+    # the re-runnability claim real rather than conditional.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci_only_not_a_real_secret
+          POSTGRES_DB: meridian
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: payment-service SAD deletion vectors + readiness
+        run: |
+          cd services/payment-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_no_sad.py tests/test_db_readiness.py -q
+      - name: servicing-service SAD deletion vectors + readiness
+        run: |
+          cd services/servicing-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_no_sad.py tests/test_db_readiness.py -q
+      # The redactor is the backstop for a stale caller that still puts a cvv key in a
+      # body: the column is gone, the field can still be logged. Both suites already run
+      # under the blocking redaction-tests job; this step names the dependency so nobody
+      # deletes the cvv masking as dead code now that no column feeds it.
+      - name: the log redactor still masks a cvv field
+        run: |
+          cd services/payment-service
+          python -m pytest tests/test_logging_redaction.py -q -k cvv
+      # Migration 0020 against a real Postgres: it must purge a pre-0020 volume AND run
+      # clean a second time. The operator applies these by hand with no runner, so a
+      # re-run after a partial attempt is the normal path -- an unguarded first statement
+      # aborts the file before the DROP and the VACUUM FULL that actually destroys the old
+      # row versions, and the recovery attempt then reports failure over a volume still
+      # holding every value. Its own install line, not the earlier step's: a step that
+      # runs on a package no manifest in its own service declares passes until the job is
+      # reordered (the kyc-persistence-gate precedent).
+      - name: migration 0020 re-runs clean against a real Postgres
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:ci_only_not_a_real_secret@localhost:5432/meridian
+          # No skip path in CI. A skipped pytest exits 0, so without this a typo'd DSN, a
+          # postgres service that never came up, or a missing psycopg2 would leave this
+          # BLOCKING gate green having verified nothing about the migration.
+          REQUIRE_LIVE_DB: "1"
+        run: |
+          cd services/payment-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_migration_0020_live.py -q
+
   tila-vectors-gate:
     # The disclosed APR is a regulated number with a Reg Z TOLERANCE: exceeding it is a
     # violation, not a rounding nit. compute_apr shipped an add-on annualization instead of
