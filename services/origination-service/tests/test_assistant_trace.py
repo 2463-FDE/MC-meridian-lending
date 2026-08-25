@@ -555,7 +555,7 @@ def test_an_idempotency_conflict_is_its_own_refusal_code(spans, monkeypatch):
 def test_an_uncaught_exception_is_not_translated_into_a_served_request(
     spans, monkeypatch
 ):
-    """`_run_assistant` catches four classes; anything else must propagate as a 500 and
+    """`_run_assistant` catches a named set; anything else must propagate as a 500 and
     must NOT reach `entry.add_metadata({"http_status": 200})`."""
 
     def _raise(*args, **kwargs):
@@ -577,3 +577,93 @@ def test_the_entry_span_never_carries_caller_linkable_identifiers(spans, tools):
         assert "request_id" not in span.metadata, span.name
         for key, value in span.metadata.items():
             assert "idem-key-1" not in str(value), f"{span.name}.{key}"
+
+
+# --- refusals that reach the entry span from INSIDE the loop -------------------------
+#
+# The parametrized tests above stub `assistant.run` to raise, which pins the translation
+# but not the propagation. These two drive the real score tool through the real graph,
+# because both exception classes are raised inside it and langgraph's default ToolNode
+# handler re-raises anything that is not a `ToolInvocationError` -- so they leave `run()`
+# unchanged and land on the entry span's translation table.
+
+
+@pytest.fixture
+def scored_app(monkeypatch):
+    """The score tool's real body, up to the call each test below makes fail."""
+    monkeypatch.setattr(
+        assistant, "decision_request_payload", lambda app_id: {"application_id": app_id}
+    )
+
+
+def test_a_kyc_refusal_is_translated_inside_the_entry_span(
+    spans, scored_app, monkeypatch
+):
+    """ADR 0011's gate refuses with `HTTPException(409)` (app/kyc_gate.py::_block), not
+    with one of the assistant's own classes, so an untranslated table exits the span as
+    an exception and marks the run neither served nor refused."""
+
+    def _blocked(app_id):
+        raise HTTPException(
+            status_code=409,
+            detail="identity verification (KYC) has not passed for this application",
+        )
+
+    monkeypatch.setattr(assistant.kyc_gate, "require_kyc_passed", _blocked)
+
+    with pytest.raises(HTTPException) as raised:
+        main._run_assistant(42, _client(TOOL_CALL, FINAL_DENY), "decision")
+
+    assert raised.value.status_code == 409
+    assert "KYC" in raised.value.detail
+    entry = spans[0]
+    assert entry.exception is None, (
+        f"{entry.exception!r} crossed the entry span; trace() would ship str(exc)"
+    )
+    assert entry.metadata["http_status"] == 409
+    assert entry.metadata["refusal"] == "kyc_blocked"
+
+
+def test_a_non_kyc_http_refusal_keeps_its_status_and_a_generic_code(spans, monkeypatch):
+    """The KYC gate is the only `HTTPException` the assistant path raises today, so any
+    other one gets its status honoured and a code that does not claim to be the gate's."""
+
+    def _raise(*args, **kwargs):
+        raise HTTPException(status_code=403, detail="refused upstream")
+
+    monkeypatch.setattr(assistant, "run", _raise)
+    with pytest.raises(HTTPException) as raised:
+        main._run_assistant(42, _client(), "decision")
+
+    assert raised.value.status_code == 403
+    entry = spans[0]
+    assert entry.exception is None
+    assert entry.metadata["http_status"] == 403
+    assert entry.metadata["refusal"] == "refused"
+
+
+def test_a_transport_outage_is_a_downstream_refusal_not_a_500(
+    spans, scored_app, monkeypatch
+):
+    """`httpx.RequestError` is not an `HTTPStatusError`: decision-service being
+    unreachable is the same outage as it answering 500, and must refuse the same way
+    rather than escaping untranslated as a 500."""
+
+    def _unreachable(base_url, path, payload):
+        raise httpx.ConnectError(
+            "All connection attempts failed",
+            request=httpx.Request("POST", f"{base_url}{path}"),
+        )
+
+    monkeypatch.setattr(assistant.clients, "post", _unreachable)
+
+    with pytest.raises(HTTPException) as raised:
+        main._run_assistant(42, _client(TOOL_CALL, FINAL_DENY), "decision")
+
+    assert raised.value.status_code == 503
+    entry = spans[0]
+    assert entry.exception is None, (
+        f"{entry.exception!r} crossed the entry span; trace() would ship str(exc)"
+    )
+    assert entry.metadata["http_status"] == 503
+    assert entry.metadata["refusal"] == "downstream_unavailable"

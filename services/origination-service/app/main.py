@@ -459,11 +459,16 @@ def _detail(resp: httpx.Response):
 #     `HTTPException` is raised after the block exits. Re-raising in place would ship to
 #     LangSmith exactly what `app/assistant.py` and `app/llm/transport.py` strip.
 #
-# Residual, stated rather than implied: an exception OUTSIDE those four classes still
-# crosses this span (and is a 500). That is not a new exposure — it already crossed the
-# loop root inside `run()` — and the four that can carry an application-linked string are
-# exactly the four caught here. `tests/test_trace_error_boundary.py` covers the provider
-# side of the same rule.
+# The classes caught below are every one the assistant path raises: its own
+# `ApplicationNotFound`/`AssistantError` (which `run()` also converts
+# `GraphRecursionError` into), `LLMError`, the `HTTPException` ADR 0011's KYC gate
+# refuses with, and `httpx.HTTPError` — status and transport alike, since a
+# `RequestError` is not an `HTTPStatusError` and unreachable is the same outage as 5xx.
+#
+# Residual, stated rather than implied: an exception outside those classes still crosses
+# this span (and is a 500). That is not a new exposure — it already crossed the loop root
+# inside `run()` — and the ones that can carry an application-linked string are all caught
+# here. `tests/test_trace_error_boundary.py` covers the provider side of the same rule.
 _SPAN_ENTRY = "assistant.entry"
 
 
@@ -496,8 +501,23 @@ def _run_assistant(
                 "assistant LLM failure for app_id=%s: %s", app_id, type(exc).__name__
             )
             refusal = (503, "llm_unavailable", "assistant unavailable", exc)
-        except httpx.HTTPStatusError as exc:
-            if exc.response is not None and exc.response.status_code == 409:
+        except HTTPException as exc:
+            # ADR 0011's KYC gate refuses through the score tool with an `HTTPException`
+            # (`app/kyc_gate.py::_block`) rather than one of the assistant's own classes,
+            # so its status and detail are already officer-facing and pass through
+            # unchanged. Its 409 is a different refusal from the idempotency conflict
+            # below and carries its own code, so a trace does not read one as the other.
+            code = "kyc_blocked" if exc.status_code == 409 else "refused"
+            log.error("assistant refused for app_id=%s: %s", app_id, exc.status_code)
+            refusal = (exc.status_code, code, exc.detail, exc)
+        except httpx.HTTPError as exc:
+            # `HTTPError`, not `HTTPStatusError`: a transport failure reaching
+            # decision-service (`httpx.ConnectError`, `httpx.ReadTimeout` — all
+            # `httpx.RequestError`, which carries no `response`) is the same outage as
+            # that service answering 5xx, and refusing the same way keeps it out of the
+            # untranslated 500 path that crosses this span.
+            response = getattr(exc, "response", None)
+            if response is not None and response.status_code == 409:
                 # Reused idempotency key with changed inputs — a conflict, not an outage.
                 refusal = (
                     409,
