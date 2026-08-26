@@ -58,10 +58,19 @@ services:
       # file.
       #
       # The failure mode this pin creates, named rather than discovered in the room:
-      # LLM_ENABLED=true with an Anthropic key and no AWS credential now FAILS AT BOOT
-      # instead of serving direct-Anthropic. That is the intended direction — fail loud,
-      # not silently off-provider — but it means a non-Bedrock demo must override
-      # CLAUDE_PROVIDER=anthropic in the host shell, which still wins over this value.
+      # LLM_ENABLED=true with an Anthropic key and no AWS credential still starts, and
+      # nothing on the startup path says otherwise. load_llm_config() requires
+      # CLAUDE_API_KEY only on the `anthropic` provider (app/llm/config.py), because boto3
+      # resolves Bedrock credentials at call time from forms — SSO, instance role — that
+      # env vars do not reveal, and BedrockAdapter builds its SDK client lazily on first
+      # use. So `compose up` succeeds, /health returns 200 (it probes secrets and the
+      # database, never the model), and the missing credential surfaces on the first model
+      # call — mid-demo rather than before the room. The pre-room credential check is
+      # therefore the Bedrock proof run (docs/freeze-demo-script-week10.md §4); a green
+      # /health is not one.
+      #
+      # A non-Bedrock demo must override CLAUDE_PROVIDER=anthropic in the host shell, which
+      # still wins over this value.
       CLAUDE_PROVIDER: ${CLAUDE_PROVIDER:-bedrock}
       # us-east-1 is also app/llm/config.py's pinned default; set here so the compose file
       # states the region the demo is graded on rather than leaving it implicit. A value

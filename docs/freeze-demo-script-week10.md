@@ -40,6 +40,11 @@ turn those on. Confirm before the room fills:
 curl -s localhost:8001/health | python3 -m json.tool     # origination-service healthy
 ```
 
+That check does **not** exercise the AWS credential. `/health` probes the required secrets and
+the database, never the model, and origination builds its Bedrock client lazily — so a stack
+started with no credential reports healthy and then fails on the first assistant call in §2.
+The credential check is §4's proof run. Do it before §2, not after.
+
 ## 2. Happy path
 
 1. Portal → log in as `underwriter` → Underwriting → open any submitted application.
@@ -107,8 +112,11 @@ empty and the service starts with the threshold genuinely unset (ADR 0019 fail-c
 
 ## 4. Exact-SHA Bedrock proof run
 
-Run this once, off a clean tree, before the room — not live, since it costs a real bureau/model
-call and its output should be captured, not re-run per rehearsal.
+**This is the pre-room credential check, not only a receipt.** Nothing in §1–§3 proves an AWS
+credential resolves: `compose up` succeeds and `/health` returns 200 without one, and the first
+thing that touches AWS is the live assistant call in §2. Run this once, off a clean tree, before
+the room and before §2 — not live, since it costs a real bureau/model call and its output should
+be captured, not re-run per rehearsal.
 
 ```bash
 cd services/origination-service
