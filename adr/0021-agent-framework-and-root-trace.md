@@ -1,14 +1,20 @@
 # ADR 0021: The Officer Loop Runs on a Framework Agent, and Its Trace Is Built by Hand
 
-- **Status:** **Accepted** — built and merged to `main`: the chat-model wrapper and the loop swap
-  (PR #76), the root trace (PR #68), the blocking `agentic-loop-gate` (PR #79), and the officer
-  trace surface (PR #80). **The root spans the officer loop, not the whole request the program
-  instruction asks for** (Context, below): it opens inside `assistant.run()` after the
-  `policy_topic` check, so a refusal raised before the loop starts is not a trace, and the
-  route's exception mapping in `_run_assistant` sits outside the span. Moving the root to the
-  route funnel is consequence 6 under Consequences, open at this ADR's date — cite this ADR for
-  the loop's trace, not for the request's.
-- **Date:** 2026-08-25
+- **Status:** **Accepted** — built and merged to `main`: the chat-model wrapper (PR #67), the
+  root trace (PR #68), the native tool schemas (PR #72), the loop swap (PR #76), the blocking
+  `agentic-loop-gate` (PR #79), the officer trace surface (PR #80), and the entry span at the
+  route funnel (PR #85). **The root spans the officer request, not only the loop**:
+  `assistant.entry` opens in `_run_assistant` (`app/main.py`) before `assistant.run()` is
+  called, so a refusal raised before the loop starts — a 404 on a missing application, ADR
+  0011's KYC 409, a 502/503 from the score tool's downstream — is now a trace with a root, an
+  HTTP status and an enum refusal code, and no exception in those classes crosses the span
+  boundary. `assistant.request` remains the loop root inside it. **What is still outside any
+  span:** the gateway hop, and the route's own pre-funnel refusals — `require_officer`'s 403,
+  `deny_self_decision`'s 403, and the unknown-`policy_topic` 422, all of which are logged and
+  not traced. Implementation plan step 6, below, is the change that closed the gap: it was
+  still open when this ADR was drafted on 2026-08-25 and merged that evening, which is why
+  the plan lists it as a step rather than as part of the decision.
+- **Date:** 2026-08-26 (drafted 2026-08-25; revised the next day for #85)
 - **Author:** Claude Code
 - **Related:** ADR 0005 (LLM client — the transport, retry and redaction boundary this decision
   keeps), ADR 0006 (logging redaction), ADR 0009 §5 (the officer assistant this replaces the loop
@@ -94,9 +100,10 @@ ADR declines it — see the options below.
 off.** A compiled graph is a runnable, so a framework tracer would export the state it is handed
 — which carries the model's prose and the model-authored query. `harden_trace_client()` claims
 the LangSmith singleton at boot, before the client exists, and `disclosure_coordinator.run()`
-keeps its unconditional suppression. Spans are emitted by hand: the loop root (Status names its
-scope), one per tool dispatch, one for retrieval, one for the deterministic validation, plus the
-existing `llm.complete` / `llm.transport` pair per model call.
+keeps its unconditional suppression. Spans are emitted by hand: `assistant.entry` at the
+route funnel, the `assistant.request` loop root inside it, one per tool dispatch, one for
+retrieval, one for the deterministic validation, plus the existing `llm.complete` /
+`llm.transport` pair per model call.
 
 **6. A span carries enum codes, integers, booleans, retrieval scores and chunk ids, and nothing
 else — including no identifiers of our own.** `application_id` and `request_id` are absent from
@@ -204,7 +211,9 @@ call site is one function, `_build_agent`.
 is what keeps a billable bureau pull from firing twice; the model is Claude Haiku 4.5.
 
 **Operational impact.** `CLAUDE_PROVIDER` and `AWS_REGION` are pinned in
-`docker-compose.demo.yml`; credentials stay host-shell-only. `LANGSMITH_TRACING` is off by
+`docker-compose.demo.yml` by PR #87, which is open at this ADR's date — until it merges the
+demo selects its provider from a host export, and the base file defaults to `anthropic`.
+Credentials stay host-shell-only in either case. `LANGSMITH_TRACING` is off by
 default, so the trace is opt-in per environment.
 
 **Testing impact.** The blocking `agentic-loop-gate` runs the loop, the interlocks, the trace
@@ -216,8 +225,9 @@ was ABSENT under the JSON-action protocol and now asserts it is present.
 
 ## Implementation plan
 
-1. `MeridianChatModel` over `ClaudeClient`, plus the three tool schemas, no loop change — the
-   slice that proves the redaction boundary survives the framework calling into it. **Done, #76.**
+1. `MeridianChatModel` over `ClaudeClient`, no loop change — the slice that proves the
+   redaction boundary survives the framework calling into it. **Done, #67** (`chat_model.py`
+   landed in `1ab4415`); the three native tool schemas followed in **#72**.
 2. Root trace on the existing loop: request root, per-tool, retrieval, validation, outcome.
    **Done, #68** — and its own review round stripped both identifiers from the span, which is
    decision 6.
@@ -227,7 +237,9 @@ was ABSENT under the JSON-action protocol and now asserts it is present.
 5. Officer trace surface: citations, searches, tool steps, run id. **Done, #80.**
 6. Move the trace root to the route funnel so a refusal raised before the loop starts is still a
    trace, and translate each caught exception to an enum inside the span rather than raising
-   through it. Lands with the trace-entry change; not on `main` at this ADR's date.
+   through it. **Done, #85** — `assistant.entry` in `app/main.py`, with
+   `tests/test_assistant_trace.py` asserting the metadata shape and that no caught exception
+   crosses the boundary.
 7. Prove the exact-SHA Bedrock path and read the correlated trace back. Open.
 
 ## Rollback strategy
