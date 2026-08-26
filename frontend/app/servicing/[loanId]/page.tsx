@@ -47,6 +47,51 @@ function errMsg(err: unknown, fallback: string): string {
   return fallback;
 }
 
+// 424 Failed Dependency: the charge captured but servicing refused the apply. The
+// only payment failure that must not be retried -- see submitPayment.
+function isCapturedUnapplied(err: unknown): boolean {
+  return (
+    !!err &&
+    typeof err === "object" &&
+    "status" in err &&
+    (err as { status: unknown }).status === 424
+  );
+}
+
+type PaymentBody = {
+  loan_id: string | undefined;
+  pan: string;
+  amount: number;
+  method: string;
+};
+
+// How the last send came back. "unresolved" is the ambiguous case -- network error,
+// timeout, 5xx -- where the charge may or may not have reached the processor.
+// "captured" is the 424: it definitely charged and only the ledger apply failed.
+type AttemptState = "unresolved" | "resolved" | "captured";
+
+// True when minting a fresh key would risk a second claim and a second capture --
+// exactly what claim_or_branch() exists to collapse. Only a 2xx clears it.
+//
+// The amount deliberately does not enter this. An earlier version lifted the block
+// once the form stopped describing the same charge, on the reasoning that a different
+// amount is a different intent. It is not: whether the first charge captured is
+// exactly what "unresolved" means is unknown, so a $250.01 charge behind a failed
+// $250 one is still potentially the second capture -- and sending it overwrites the
+// record, discarding the original key and the warning along with it. Editing a digit
+// is not an act the borrower has to mean. The reset is, which is why it is the only
+// way through (and why "captured" does not get even that -- the card charged, and the
+// balance on screen does not yet reflect it).
+//
+// This is a speed bump, not a control. It lives in component state, so a reload or a
+// route change clears it. The durable protection is server-side: the key collapses an
+// exact retry, and reconciliation catches what it cannot.
+function blocksNewIntent(
+  last: { state: AttemptState } | null
+): boolean {
+  return last !== null && last.state !== "resolved";
+}
+
 export default function LoanDetailPage() {
   const params = useParams<{ loanId: string }>();
   const loanId = params?.loanId;
@@ -65,6 +110,17 @@ export default function LoanDetailPage() {
   const [actionBusy, setActionBusy] = useState(false);
   const [newBalance, setNewBalance] = useState("");
   const [waiveAmount, setWaiveAmount] = useState("");
+
+  // The exact request last sent to POST /payments, kept so "Retry same charge" can
+  // replay it byte-for-byte (same key, same body) instead of minting a new intent.
+  // The attempt state decides both affordances: whether "Retry same charge" is worth
+  // offering, and whether the primary Pay button may mint a new key at all -- see
+  // blocksNewIntent.
+  const [lastPayment, setLastPayment] = useState<{
+    key: string;
+    body: PaymentBody;
+    state: AttemptState;
+  } | null>(null);
 
   // UI-only affordance: only CSR/admin SEE the money-moving rep actions
   // (adjust balance / waive fee). The gateway/API still accept ANY
@@ -111,6 +167,7 @@ export default function LoanDetailPage() {
     setPayAmount(DEFAULT_PAY_AMOUNT);
     setNewBalance("");
     setWaiveAmount("");
+    setLastPayment(null);
   }
 
   const loadAll = useCallback(async () => {
@@ -174,28 +231,78 @@ export default function LoanDetailPage() {
     }
   }, [loanId]);
 
-  async function makePayment() {
-    const gen = routeGenRef.current;
+  // Shared by makePayment (fresh key, new intent) and retryPayment (same key, same
+  // body) so both send the request the exact same way — POST /payments requires the
+  // header (ADR 0013 Decision 1) and collapses a retry under one key server-side.
+  async function submitPayment(
+    gen: number,
+    key: string,
+    body: PaymentBody,
+    successMsg: string
+  ) {
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
+    // Record the intent BEFORE the send. A network error, timeout or 5xx leaves the
+    // outcome unknown -- the charge may have reached the processor -- so the key has
+    // to survive the failure for the retry affordance to render. Storing it after the
+    // await would lose the key on exactly the ambiguous case, and the next Pay click
+    // would mint a fresh one and capture a second time.
+    setLastPayment({ key, body, state: "unresolved" });
     try {
-      // NOTE: no idempotency key — a retry double-charges.
-      await apiPost("/payments", {
-        loan_id: loanId,
-        pan: "4111111111111111", // hardcoded test card PAN (texture)
-        amount: parseFloat(payAmount || "0"),
-        method: "card",
-      });
+      await apiPost("/payments", body, { "Idempotency-Key": key });
       if (routeGenRef.current !== gen) return;
-      setActionMsg(`Payment of ${usd(payAmount)} submitted.`);
+      // A 2xx resolves the charge, so the gate lifts: a borrower paying the same
+      // amount again on purpose gets a new key rather than being blocked.
+      setLastPayment({ key, body, state: "resolved" });
+      setActionMsg(successMsg);
       await refreshBalanceAndHistory(gen);
     } catch (err) {
       if (routeGenRef.current !== gen) return;
+      // 424 Failed Dependency is the one non-retryable outcome: the charge captured
+      // and only the apply failed, so replaying the key returns that same captured
+      // payment and the balance stays uncredited. Drop the retry affordance rather
+      // than offer it next to a message telling the borrower not to retry -- but keep
+      // the attempt on record, because a card that definitely charged is the LAST
+      // state in which Pay should be free to mint another key. Every other failure --
+      // network error, timeout, 5xx, a rejected claim -- stays retryable under the
+      // original key.
+      if (isCapturedUnapplied(err)) {
+        setLastPayment({ key, body, state: "captured" });
+      }
       setActionErr(errMsg(err, "Payment failed."));
     } finally {
       if (routeGenRef.current === gen) setActionBusy(false);
     }
+  }
+
+  async function makePayment() {
+    // The disabled attribute on the button is cosmetic on its own; the refusal lives
+    // here so a click that lands before the re-render cannot mint a key either.
+    if (blocksNewIntent(lastPayment)) return;
+    const gen = routeGenRef.current;
+    const key = crypto.randomUUID();
+    const body: PaymentBody = {
+      loan_id: loanId,
+      pan: "4111111111111111", // hardcoded test card PAN (texture)
+      amount: parseFloat(payAmount || "0"),
+      method: "card",
+    };
+    await submitPayment(gen, key, body, `Payment of ${usd(payAmount)} submitted.`);
+  }
+
+  async function retryPayment() {
+    // The button is hidden for a captured attempt, but the refusal belongs here too:
+    // "no caller renders it" is the assumption that let the reset escape reach this
+    // state in the first place.
+    if (!lastPayment || lastPayment.state === "captured") return;
+    const gen = routeGenRef.current;
+    await submitPayment(
+      gen,
+      lastPayment.key,
+      lastPayment.body,
+      "Retry submitted with the same Idempotency-Key — collapsed to the original payment."
+    );
   }
 
   async function adjustBalance() {
@@ -258,6 +365,13 @@ export default function LoanDetailPage() {
       </main>
     );
   }
+
+  // Blocks the primary Pay button while the last attempt is not known to have
+  // finished. Only a 2xx or the explicit reset lifts it.
+  const payBlocked = blocksNewIntent(lastPayment);
+  // The ambiguity warning and the reset describe a SETTLED attempt. actionBusy is
+  // still true mid-flight, when nothing has failed yet.
+  const attemptSettled = lastPayment !== null && !actionBusy;
 
   return (
     <main className="wrap">
@@ -420,13 +534,41 @@ export default function LoanDetailPage() {
               onChange={(e) => setPayAmount(e.target.value)}
             />
           </div>
-          <button onClick={makePayment} disabled={actionBusy}>
+          <button onClick={makePayment} disabled={actionBusy || payBlocked}>
             {actionBusy ? "Processing…" : "Pay with card on file"}
           </button>
         </div>
         <p className="hint" style={{ marginTop: 10 }}>
           Charged to card ending 1111. Payments post immediately.
         </p>
+        {lastPayment ? (
+          <p className="hint" style={{ marginTop: 10 }}>
+            Idempotency-Key: <code>{lastPayment.key}</code>{" "}
+            {lastPayment.state !== "captured" ? (
+              <button
+                onClick={retryPayment}
+                disabled={actionBusy}
+                style={{ marginLeft: 8 }}
+              >
+                Retry same charge
+              </button>
+            ) : null}
+            {attemptSettled && lastPayment.state === "unresolved" ? (
+              <>
+                <button
+                  onClick={() => setLastPayment(null)}
+                  disabled={actionBusy}
+                  style={{ marginLeft: 8 }}
+                >
+                  Start a new payment
+                </button>
+                <br />
+                This charge may already have gone through. Retry it under the same
+                key, or start a new payment to charge the card again.
+              </>
+            ) : null}
+          </p>
+        ) : null}
       </div>
 
       {/* Rep actions — UI-only affordance, shown only to CSR/admin. */}
