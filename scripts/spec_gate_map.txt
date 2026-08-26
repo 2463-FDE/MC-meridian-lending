@@ -163,18 +163,29 @@ services/servicing-service/app/balance.py => adr/0020-atomic-payment-application
 
 # --- Week 10: the agent framework and the root trace ------------------------
 # ADR 0021 is Accepted -- built and merged to main across PRs #68, #76, #79 and
-# #80. Two code areas carry its decisions and both exist on main today:
+# #80. Three code areas carry its decisions and all three exist on main today:
 # assistant.py hosts the framework agent and the five interlocks the loop swap
-# moved into the tool closures, and chat_model.py is the BaseChatModel wrapper
+# moved into the tool closures, chat_model.py is the BaseChatModel wrapper
 # that keeps transport, retry, validation and the redaction boundary in
 # app/llm/ rather than handing them to the framework -- decision 1's whole
-# point, and the reason the Claude Agent SDK was rejected.
+# point, and the reason the Claude Agent SDK was rejected -- and llm/config.py
+# holds harden_trace_client(), which decision 5 rests on: it claims the
+# LangSmith singleton at boot so the framework's own tracer cannot export graph
+# state carrying the model's prose and the model-authored policy query.
 #
-# Both are mapped rather than one, because deleting either one alone would
+# All three are mapped rather than one, because deleting any one alone would
 # retire a distinct decision: drop assistant.py and the interlocks go with it;
-# drop chat_model.py and the framework talks to a provider directly.
+# drop chat_model.py and the framework talks to a provider directly; drop
+# llm/config.py and nothing primes the singleton before the client exists.
+#
+# What this mapping does NOT cover: the gate is a file-existence check, so it
+# catches deleting llm/config.py, not deleting harden_trace_client() from it or
+# the lifespan call in main.py that invokes it. The behaviour rung for that is
+# the blocking agentic-loop-gate, whose test_agentic_loop.py asserts the boot
+# hardening. Do not read a line here as coverage of all six decisions.
 #
 # policy_retrieval.py stays mapped to ADR 0019 above, not here -- ADR 0021
 # binds the tool, ADR 0019 decides what it may return.
 services/origination-service/app/assistant.py => adr/0021-agent-framework-and-root-trace.md
 services/origination-service/app/llm/chat_model.py => adr/0021-agent-framework-and-root-trace.md
+services/origination-service/app/llm/config.py => adr/0021-agent-framework-and-root-trace.md

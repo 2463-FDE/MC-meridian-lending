@@ -2,7 +2,12 @@
 
 - **Status:** **Accepted** — built and merged to `main`: the chat-model wrapper and the loop swap
   (PR #76), the root trace (PR #68), the blocking `agentic-loop-gate` (PR #79), and the officer
-  trace surface (PR #80).
+  trace surface (PR #80). **The root spans the officer loop, not the whole request the program
+  instruction asks for** (Context, below): it opens inside `assistant.run()` after the
+  `policy_topic` check, so a refusal raised before the loop starts is not a trace, and the
+  route's exception mapping in `_run_assistant` sits outside the span. Moving the root to the
+  route funnel is consequence 6 under Consequences, open at this ADR's date — cite this ADR for
+  the loop's trace, not for the request's.
 - **Date:** 2026-08-25
 - **Author:** Claude Code
 - **Related:** ADR 0005 (LLM client — the transport, retry and redaction boundary this decision
@@ -89,9 +94,9 @@ ADR declines it — see the options below.
 off.** A compiled graph is a runnable, so a framework tracer would export the state it is handed
 — which carries the model's prose and the model-authored query. `harden_trace_client()` claims
 the LangSmith singleton at boot, before the client exists, and `disclosure_coordinator.run()`
-keeps its unconditional suppression. Spans are emitted by hand: the request root, one per tool
-dispatch, one for retrieval, one for the deterministic validation, plus the existing
-`llm.complete` / `llm.transport` pair per model call.
+keeps its unconditional suppression. Spans are emitted by hand: the loop root (Status names its
+scope), one per tool dispatch, one for retrieval, one for the deterministic validation, plus the
+existing `llm.complete` / `llm.transport` pair per model call.
 
 **6. A span carries enum codes, integers, booleans, retrieval scores and chunk ids, and nothing
 else — including no identifiers of our own.** `application_id` and `request_id` are absent from
