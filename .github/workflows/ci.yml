@@ -760,11 +760,13 @@ jobs:
     # on (e.g. a document_body ALTER before its CREATE TABLE). This branch hit exactly that
     # with two 0011_* files.
     #
-    # Executability: no job in this file runs migration SQL (there is no postgres service and
-    # no psql step anywhere), and the DDL tests are text assertions, so 0018 merged unable to
-    # parse -- a `DO $$` body closed early by a nested `$$` literal, aborting the migration at
-    # a syntax error and skipping every verification block after it. The second step below
-    # reproduces Postgres's dollar-quote lexing rule over every SQL file in the repo.
+    # Executability: the DDL tests are text assertions, so 0018 merged unable to parse -- a
+    # `DO $$` body closed early by a nested `$$` literal, aborting the migration at a syntax
+    # error and skipping every verification block after it. The second step below reproduces
+    # Postgres's dollar-quote lexing rule over every SQL file in the repo, so it grades every
+    # migration without a database. Exactly one job DOES run migration SQL against a real
+    # server -- no-sad-gate, which has a postgres service and applies 0020 -- and it covers
+    # that one file only; this job stays the check that holds for all of them.
     #
     # Blocking -- no continue-on-error, no `|| true`.
     runs-on: ubuntu-latest
@@ -1023,6 +1025,75 @@ jobs:
       - uses: actions/checkout@v4
       - name: No banned compliance/safety claims in the authoritative docs
         run: ./scripts/check_doc_claims.sh
+
+  volatile-claim-lint-tests:
+    # The gate below is only worth its blocking status if it can actually fail. This
+    # proves it: an open-PR claim, a freshness stamp, a tip sha, a spelled-out count and
+    # an unanchored ref each turn it red, while an anchored merge citation stays green.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Volatile-claim lint self-tests
+        run: ./scripts/test_check_volatile_claims.sh
+
+  volatile-claim-lint:
+    # BLOCKING. Third gate in the doc family and a different KIND from its two siblings:
+    # doc-path-lint asks whether a cited path exists, docs-drift refuses a curated list of
+    # known-false literals, and this one refuses a whole CLASS of sentence -- one that is
+    # true when written and false when it lands.
+    #
+    # Why a third was needed: docs/kb.md carried ~315 hand-copied derived facts, and 14 of
+    # the 25 commits that ever touched it were pure stale-fixes. A curated list cannot
+    # close that, because the author writing the decaying sentence is the same person who
+    # would have to add it to the list. Banning the shape needs nobody to notice anything.
+    #
+    # An immutable citation still passes -- "merged as #77 (ceda4e2)" names a merge commit,
+    # and a merge commit never changes. Present-tense merge state does not.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No decaying claims in the authoritative docs
+        run: ./scripts/check_volatile_claims.sh
+
+  kb-freshness-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: State generator self-tests
+        run: ./scripts/test_gen_state.sh
+
+  kb-freshness:
+    # BLOCKING. docs/state.md is the mutable half of the knowledge base -- base tip,
+    # merged-PR ledger, ADR index, which jobs in this file block -- and every line of it
+    # is read out of git by scripts/gen_state.sh. This refuses a hand edit and refuses a
+    # copy that has not absorbed its own branch base.
+    #
+    # It grades against the MERGE BASE of the branch and main, not main's tip, so a
+    # sibling PR merging does not turn every other open PR red. The fix when it fails is
+    # always the same one command: `make kb`, then commit.
+    #
+    # pull_request ONLY, and that is structural rather than a convenience. On main the
+    # merge base IS the tip, so the merge commit that lands a regenerated page becomes
+    # the base the page would have to describe -- a state no committed file can ever be
+    # in. Running it on push would leave main red between every merge and the follow-up
+    # commit, and that follow-up would re-stale the page it just fixed. The branch side
+    # is where the page is actually authored, and it is graded there.
+    # test_gen_state.sh pins this: `committing the page on main re-stales it`.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch main so a merge base exists
+        # A PR checkout has no origin/main ref by default, and the generator must abort
+        # rather than describe the wrong base -- so fetch it explicitly. No --depth here:
+        # fetch-depth: 0 above already made this a full clone, and `--depth=0` is not a
+        # valid argument ("fatal: depth 0 is not a positive number"), so passing it fails
+        # the step outright.
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+      - name: docs/state.md still matches git
+        run: ./scripts/gen_state.sh --check
 
   # GAP: no dependency audit, no SAST, no container image scan.
   # GAP: backend tests are continue-on-error, so failing money-math tests are green --
