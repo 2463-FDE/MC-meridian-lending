@@ -1076,8 +1076,11 @@ jobs:
           fetch-depth: 0
       - name: Fetch main so a merge base exists
         # A PR checkout has no origin/main ref by default, and the generator must abort
-        # rather than describe the wrong base -- so fetch it explicitly.
-        run: git fetch --no-tags --depth=0 origin +refs/heads/main:refs/remotes/origin/main
+        # rather than describe the wrong base -- so fetch it explicitly. No --depth here:
+        # fetch-depth: 0 above already made this a full clone, and `--depth=0` is not a
+        # valid argument ("fatal: depth 0 is not a positive number"), so passing it fails
+        # the step outright.
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
       - name: docs/state.md still matches git
         run: ./scripts/gen_state.sh --check
 
