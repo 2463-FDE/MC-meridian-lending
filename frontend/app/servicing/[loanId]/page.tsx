@@ -65,36 +65,31 @@ type PaymentBody = {
   method: string;
 };
 
-function paymentBody(loanId: string | undefined, payAmount: string): PaymentBody {
-  return {
-    loan_id: loanId,
-    pan: "4111111111111111", // hardcoded test card PAN (texture)
-    amount: parseFloat(payAmount || "0"),
-    method: "card",
-  };
-}
-
 // How the last send came back. "unresolved" is the ambiguous case -- network error,
 // timeout, 5xx -- where the charge may or may not have reached the processor.
 // "captured" is the 424: it definitely charged and only the ledger apply failed.
 type AttemptState = "unresolved" | "resolved" | "captured";
 
-// True when the form still describes a charge that is not known to be finished, so
-// minting a fresh key would be a second claim and a second capture -- exactly what
-// claim_or_branch() exists to collapse. Only a 2xx clears it; the borrower reaches a
-// new intent deliberately, by resetting or by editing the amount so this stops
-// matching. Object.is for the amount so an empty field (NaN) matches itself rather
-// than reading as a different charge.
+// True when minting a fresh key would risk a second claim and a second capture --
+// exactly what claim_or_branch() exists to collapse. Only a 2xx clears it.
+//
+// The amount deliberately does not enter this. An earlier version lifted the block
+// once the form stopped describing the same charge, on the reasoning that a different
+// amount is a different intent. It is not: whether the first charge captured is
+// exactly what "unresolved" means is unknown, so a $250.01 charge behind a failed
+// $250 one is still potentially the second capture -- and sending it overwrites the
+// record, discarding the original key and the warning along with it. Editing a digit
+// is not an act the borrower has to mean. The reset is, which is why it is the only
+// way through (and why "captured" does not get even that -- the card charged, and the
+// balance on screen does not yet reflect it).
+//
+// This is a speed bump, not a control. It lives in component state, so a reload or a
+// route change clears it. The durable protection is server-side: the key collapses an
+// exact retry, and reconciliation catches what it cannot.
 function blocksNewIntent(
-  last: { body: PaymentBody; state: AttemptState } | null,
-  candidate: PaymentBody
+  last: { state: AttemptState } | null
 ): boolean {
-  if (!last || last.state === "resolved") return false;
-  return (
-    last.body.loan_id === candidate.loan_id &&
-    Object.is(last.body.amount, candidate.amount) &&
-    last.body.method === candidate.method
-  );
+  return last !== null && last.state !== "resolved";
 }
 
 export default function LoanDetailPage() {
@@ -282,17 +277,25 @@ export default function LoanDetailPage() {
   }
 
   async function makePayment() {
+    // The disabled attribute on the button is cosmetic on its own; the refusal lives
+    // here so a click that lands before the re-render cannot mint a key either.
+    if (blocksNewIntent(lastPayment)) return;
     const gen = routeGenRef.current;
-    const body = paymentBody(loanId, payAmount);
-    // The disabled attribute below is cosmetic on its own; the refusal lives here so
-    // a click that lands before the re-render cannot mint a key either.
-    if (blocksNewIntent(lastPayment, body)) return;
     const key = crypto.randomUUID();
+    const body: PaymentBody = {
+      loan_id: loanId,
+      pan: "4111111111111111", // hardcoded test card PAN (texture)
+      amount: parseFloat(payAmount || "0"),
+      method: "card",
+    };
     await submitPayment(gen, key, body, `Payment of ${usd(payAmount)} submitted.`);
   }
 
   async function retryPayment() {
-    if (!lastPayment) return;
+    // The button is hidden for a captured attempt, but the refusal belongs here too:
+    // "no caller renders it" is the assumption that let the reset escape reach this
+    // state in the first place.
+    if (!lastPayment || lastPayment.state === "captured") return;
     const gen = routeGenRef.current;
     await submitPayment(
       gen,
@@ -363,9 +366,9 @@ export default function LoanDetailPage() {
     );
   }
 
-  // Blocks the primary Pay button while the form still describes a charge that is not
-  // known to be finished. Recomputed each render, so editing the amount lifts it.
-  const payBlocked = blocksNewIntent(lastPayment, paymentBody(loanId, payAmount));
+  // Blocks the primary Pay button while the last attempt is not known to have
+  // finished. Only a 2xx or the explicit reset lifts it.
+  const payBlocked = blocksNewIntent(lastPayment);
   // The ambiguity warning and the reset describe a SETTLED attempt. actionBusy is
   // still true mid-flight, when nothing has failed yet.
   const attemptSettled = lastPayment !== null && !actionBusy;
@@ -550,7 +553,7 @@ export default function LoanDetailPage() {
                 Retry same charge
               </button>
             ) : null}
-            {attemptSettled && lastPayment.state !== "resolved" ? (
+            {attemptSettled && lastPayment.state === "unresolved" ? (
               <>
                 <button
                   onClick={() => setLastPayment(null)}
@@ -559,13 +562,9 @@ export default function LoanDetailPage() {
                 >
                   Start a new payment
                 </button>
-                {lastPayment.state === "unresolved" ? (
-                  <>
-                    <br />
-                    This charge may already have gone through. Retry it under the same
-                    key, or start a new payment to charge the card again.
-                  </>
-                ) : null}
+                <br />
+                This charge may already have gone through. Retry it under the same
+                key, or start a new payment to charge the card again.
               </>
             ) : null}
           </p>
