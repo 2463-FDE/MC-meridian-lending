@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from langsmith.run_helpers import trace
 from pydantic import BaseModel
 
 from . import (
@@ -440,6 +441,37 @@ def _detail(resp: httpx.Response):
         return "disclosure request refused"
 
 
+# Entry span for the officer assistant. `assistant.request` (app/assistant.py) is the
+# loop root, and it opens AFTER the request is built, the policy topic is checked, the
+# KYC gate runs and the application is fetched — so every refusal raised before that
+# point produced no trace at all, which is the gap this span closes: one root per
+# officer request that reached the assistant, refusal or not.
+#
+# Two rules hold it to the CONTENT RULE in `app/assistant.py`:
+#
+#   * metadata is the task, the policy topic (a closed-vocabulary code) and an enum
+#     refusal code — never `app_id`, never `request_id`, never a provider message.
+#   * NO exception crosses the span boundary. `trace()` attaches `str(exception)` to the
+#     span it is raised through, and two of the exceptions caught below carry an
+#     application-linked string: `httpx.HTTPStatusError`'s message embeds the request
+#     URL (which embeds `app_id`), and an `LLMError` can carry raw provider text. So
+#     each one is translated to an enum inside the span and the officer-facing
+#     `HTTPException` is raised after the block exits. Re-raising in place would ship to
+#     LangSmith exactly what `app/assistant.py` and `app/llm/transport.py` strip.
+#
+# The classes caught below are every one the assistant path raises: its own
+# `ApplicationNotFound`/`AssistantError` (which `run()` also converts
+# `GraphRecursionError` into), `LLMError`, the `HTTPException` ADR 0011's KYC gate
+# refuses with, and `httpx.HTTPError` — status and transport alike, since a
+# `RequestError` is not an `HTTPStatusError` and unreachable is the same outage as 5xx.
+#
+# Residual, stated rather than implied: an exception outside those classes still crosses
+# this span (and is a 500). That is not a new exposure — it already crossed the loop root
+# inside `run()` — and the ones that can carry an application-linked string are all caught
+# here. `tests/test_trace_error_boundary.py` covers the provider side of the same rule.
+_SPAN_ENTRY = "assistant.entry"
+
+
 def _run_assistant(
     app_id: int,
     client: ClaudeClient,
@@ -447,27 +479,72 @@ def _run_assistant(
     request_id: str | None = None,
     policy_topic: str | None = None,
 ):
-    try:
-        return assistant.run(app_id, client, task, request_id, policy_topic)
-    except assistant.ApplicationNotFound:
-        raise HTTPException(status_code=404, detail="application not found")
-    except assistant.AssistantError as exc:
-        log.error("assistant failed for app_id=%s: %s", app_id, exc)
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except LLMError as exc:
-        log.error("assistant LLM failure for app_id=%s: %s", app_id, type(exc).__name__)
-        raise HTTPException(status_code=503, detail="assistant unavailable") from exc
-    except httpx.HTTPStatusError as exc:
-        if exc.response is not None and exc.response.status_code == 409:
-            # Reused idempotency key with changed inputs — a conflict, not an outage.
-            raise HTTPException(
-                status_code=409,
-                detail="Idempotency-Key reused with different decision inputs",
-            ) from exc
-        # The score tool's downstream refusal (e.g. decision-service failing closed
-        # on bureau or record write) surfaces as service-unavailable, not a 500.
-        log.error("assistant downstream failure for app_id=%s: %s", app_id, exc)
-        raise HTTPException(status_code=503, detail="decisioning unavailable") from exc
+    with trace(
+        name=_SPAN_ENTRY,
+        run_type="chain",
+        metadata={
+            "task": task,
+            **({"policy_topic": policy_topic} if policy_topic else {}),
+        },
+    ) as entry:
+        # (status, enum refusal code, officer-facing detail, cause) or None on success.
+        refusal = None
+        try:
+            result = assistant.run(app_id, client, task, request_id, policy_topic)
+        except assistant.ApplicationNotFound as exc:
+            refusal = (404, "not_found", "application not found", exc)
+        except assistant.AssistantError as exc:
+            log.error("assistant failed for app_id=%s: %s", app_id, exc)
+            refusal = (502, "assistant_refused", str(exc), exc)
+        except LLMError as exc:
+            log.error(
+                "assistant LLM failure for app_id=%s: %s", app_id, type(exc).__name__
+            )
+            refusal = (503, "llm_unavailable", "assistant unavailable", exc)
+        except HTTPException as exc:
+            # ADR 0011's KYC gate refuses through the score tool with an `HTTPException`
+            # (`app/kyc_gate.py::_block`) rather than one of the assistant's own classes,
+            # so its status and detail are already officer-facing and pass through
+            # unchanged. Its 409 is a different refusal from the idempotency conflict
+            # below and carries its own code, so a trace does not read one as the other.
+            code = "kyc_blocked" if exc.status_code == 409 else "refused"
+            log.error("assistant refused for app_id=%s: %s", app_id, exc.status_code)
+            refusal = (exc.status_code, code, exc.detail, exc)
+        except httpx.HTTPError as exc:
+            # `HTTPError`, not `HTTPStatusError`: a transport failure reaching
+            # decision-service (`httpx.ConnectError`, `httpx.ReadTimeout` — all
+            # `httpx.RequestError`, which carries no `response`) is the same outage as
+            # that service answering 5xx, and refusing the same way keeps it out of the
+            # untranslated 500 path that crosses this span.
+            response = getattr(exc, "response", None)
+            if response is not None and response.status_code == 409:
+                # Reused idempotency key with changed inputs — a conflict, not an outage.
+                refusal = (
+                    409,
+                    "idempotency_conflict",
+                    "Idempotency-Key reused with different decision inputs",
+                    exc,
+                )
+            else:
+                # The score tool's downstream refusal (e.g. decision-service failing
+                # closed on bureau or record write) surfaces as service-unavailable,
+                # not a 500.
+                log.error("assistant downstream failure for app_id=%s: %s", app_id, exc)
+                refusal = (
+                    503,
+                    "downstream_unavailable",
+                    "decisioning unavailable",
+                    exc,
+                )
+        if refusal is None:
+            entry.add_metadata({"http_status": 200})
+            return result
+        status, code, detail, cause = refusal
+        entry.add_metadata({"http_status": status, "refusal": code})
+    # Outside the span on purpose — see the second rule above. The chained `cause` stays
+    # for the local traceback, which is inside the client boundary and goes through the
+    # redacting formatter; it is the span export that must not see it.
+    raise HTTPException(status_code=status, detail=detail) from cause
 
 
 class BoardIn(BaseModel):

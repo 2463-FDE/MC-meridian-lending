@@ -156,8 +156,12 @@ Full list: `docs/plan-freeze-agentic-week10.md` §6. Headline points for the roo
   `.env.local` for debugging and puts prompts/responses on spans, which the requirement
   forbids. `compose-hardening-gate` blocks a *committed* file from enabling it; nothing blocks
   a shell — check this by hand before presenting.
-- The trace root opens inside `assistant.run()`, not at the officer's HTTP request — a refusal
-  before the loop starts (404/422/503) produces no trace.
+- The trace root is `assistant.entry` (`services/origination-service/app/main.py`), which
+  opens at the assistant route funnel — so a refusal raised before the loop starts
+  (404/409/502/503) is now a trace with a root, an HTTP status and an enum refusal code.
+  What is still outside it: the gateway hop, and the route's own pre-funnel refusals
+  (`require_officer` 403, `deny_self_decision` 403, an unknown `policy_topic` 422), which
+  are logged and not traced.
 
 ## 7. Document truth pass
 
