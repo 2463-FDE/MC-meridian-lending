@@ -15,7 +15,7 @@
 # The five classes, each a whole class rather than an instance:
 #   V1 self-referential merge state  "PR #12 is open", "not yet on `main`", "unpushed"
 #   V2 freshness stamp               "Last synced: 2026-08-24"
-#   V3 base-tip assertion            "`main` tip is `0d47601`"
+#   V3 base-tip assertion            "`main` tip is `0d47601`", and the verbless "tip `0d47601`"
 #   V4 spelled-out count             "All nineteen are files in adr/"
 #   V5 unanchored ref                a #N or a sha on a line that does not tie it to a
 #                                    merge -- i.e. present-tense state, not history
@@ -54,7 +54,7 @@ COMMON=(
   '(not|isn.?t|is not) (yet )?(on|merged (in)?to) `?(main|master)`?|||V1 self-referential merge state: a doc that lands on main describing itself as not on main is false ON merge.'
   '(lives|sits|landed|held) in an (open|unmerged) (PR|branch)|||V1 self-referential merge state: names the branch that carried the work instead of the commit that landed it.'
   'Last[ -]synced|last updated:|[Aa]s of 2[0-9]{3}-[0-9]{2}-[0-9]{2}|||V2 freshness stamp: a date that asserts the page is current is a promise no one keeps. Generated state carries its own provenance.'
-  '(tip|HEAD) (is|sits at|now) `?[0-9a-f]{7,40}`?|||V3 base-tip assertion: the tip moves on every merge. docs/state.md derives it.'
+  '(tip|HEAD)( (is|sits at|now))?[ :=]+`?[0-9a-f]{7,40}`?|||V3 base-tip assertion: the tip moves on every merge. docs/state.md derives it.'
   '\b(All )?(ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two|twenty-three)\b [a-z]*[ ]?(are|exist|live|files|ADRs|services|gates|jobs)|||V4 spelled-out count: a count of a growing set goes stale silently. The kb said "Seventeen" while adr/ held nineteen.'
 )
 # V5 -- kb.md only. See the header for why it is not applied to the other two.

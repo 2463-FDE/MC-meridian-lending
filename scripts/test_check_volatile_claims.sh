@@ -72,6 +72,13 @@ r=$(new_repo)
 echo 'The `main` tip is `0d47601` today.' > "$r/docs/kb.md"
 check "V3 tip assertion fails" 1 "$r" docs/kb.md 'V[35]'
 
+# The bare form, with no verb between "tip" and the sha, and an anchor word later on the
+# line so V5 cannot fire and mask the miss. This is the shape docs/kb.md itself carried:
+# "the client's current state, tip `ec5013c` (#86)" — a tip assertion V3 read straight past.
+r=$(new_repo)
+echo 'The base is `main`, tip `ec5013c`, and weeks 1-10 have merged.' > "$r/docs/kb.md"
+check "V3 bare tip assertion fails" 1 "$r" docs/kb.md 'V3 base-tip assertion'
+
 # --- 5. V4 spelled-out count -------------------------------------------------
 r=$(new_repo)
 echo 'All nineteen are files in adr/ on the base branch.' > "$r/docs/kb.md"
