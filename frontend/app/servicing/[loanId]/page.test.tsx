@@ -231,7 +231,9 @@ describe("loan detail — captured but unapplied payment", () => {
     // with a captured_unapplied detail instead of a plain 200 (Codex review,
     // PR 32) -- apiPost throws on any non-2xx, so this must land in the catch
     // branch, never the success one.
+    // Shape mirrors ApiError from lib/api: a status alongside the detail.
     apiPost.mockRejectedValue({
+      status: 424,
       detail:
         "Payment captured (payment_id=42) but could not be applied to your " +
         "balance. Do not retry -- contact support to reconcile this payment.",
@@ -246,6 +248,13 @@ describe("loan detail — captured but unapplied payment", () => {
 
     await screen.findByText(/could not be applied to your balance/);
     expect(screen.queryByText(/submitted\.$/)).toBeNull();
+    // 424 is the one non-retryable failure: the charge captured, so replaying the
+    // key returns that same captured payment and still leaves the balance uncredited.
+    // Offering "Retry same charge" here would contradict the message's own
+    // "Do not retry -- contact support" instruction.
+    expect(
+      screen.queryByRole("button", { name: "Retry same charge" })
+    ).toBeNull();
   });
 });
 
@@ -283,6 +292,33 @@ describe("loan detail — payment idempotency (D19)", () => {
     );
     await screen.findByText("Payment of $250.00 submitted.");
 
+    fireEvent.click(screen.getByRole("button", { name: "Retry same charge" }));
+    await screen.findByText(/collapsed to the original payment/);
+
+    expect(apiPost).toHaveBeenCalledTimes(2);
+    const [, firstBody, firstHeaders] = apiPost.mock.calls[0];
+    const [, secondBody, secondHeaders] = apiPost.mock.calls[1];
+    expect(secondHeaders).toEqual(firstHeaders);
+    expect(secondBody).toEqual(firstBody);
+  });
+
+  it("keeps the original key retryable after an ambiguous failure", async () => {
+    // A network error, timeout or 5xx leaves the outcome unknown -- the request
+    // may have reached the processor and captured. The key must already be
+    // recorded when the send fails, or the retry affordance never renders and
+    // the borrower's next Pay click mints a second intent under a fresh key,
+    // which is the double charge claim_or_branch() exists to collapse.
+    apiPost.mockRejectedValueOnce(new Error("Network request failed"));
+
+    render(<LoanDetailPage />);
+    await screen.findByText("Maria Alvarez");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Pay with card on file" })
+    );
+    await screen.findByText("Network request failed");
+
+    apiPost.mockResolvedValueOnce({ ok: true });
     fireEvent.click(screen.getByRole("button", { name: "Retry same charge" }));
     await screen.findByText(/collapsed to the original payment/);
 

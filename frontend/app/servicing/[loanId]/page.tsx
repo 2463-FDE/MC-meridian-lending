@@ -47,6 +47,17 @@ function errMsg(err: unknown, fallback: string): string {
   return fallback;
 }
 
+// 424 Failed Dependency: the charge captured but servicing refused the apply. The
+// only payment failure that must not be retried -- see submitPayment.
+function isCapturedUnapplied(err: unknown): boolean {
+  return (
+    !!err &&
+    typeof err === "object" &&
+    "status" in err &&
+    (err as { status: unknown }).status === 424
+  );
+}
+
 export default function LoanDetailPage() {
   const params = useParams<{ loanId: string }>();
   const loanId = params?.loanId;
@@ -194,14 +205,26 @@ export default function LoanDetailPage() {
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
+    // Record the intent BEFORE the send. A network error, timeout or 5xx leaves the
+    // outcome unknown -- the charge may have reached the processor -- so the key has
+    // to survive the failure for the retry affordance to render. Storing it after the
+    // await would lose the key on exactly the ambiguous case, and the next Pay click
+    // would mint a fresh one and capture a second time.
+    setLastPayment({ key, body });
     try {
       await apiPost("/payments", body, { "Idempotency-Key": key });
       if (routeGenRef.current !== gen) return;
-      setLastPayment({ key, body });
       setActionMsg(successMsg);
       await refreshBalanceAndHistory(gen);
     } catch (err) {
       if (routeGenRef.current !== gen) return;
+      // 424 Failed Dependency is the one non-retryable outcome: the charge captured
+      // and only the apply failed, so replaying the key returns that same captured
+      // payment and the balance stays uncredited. Drop the affordance so the UI does
+      // not offer a retry next to a message telling the borrower not to retry. Every
+      // other failure -- network error, timeout, 5xx, a rejected claim -- is
+      // ambiguous or transient and keeps the original key retryable.
+      if (isCapturedUnapplied(err)) setLastPayment(null);
       setActionErr(errMsg(err, "Payment failed."));
     } finally {
       if (routeGenRef.current === gen) setActionBusy(false);
