@@ -300,6 +300,24 @@ jobs:
         # interpolation defaulting to true or to nothing must fail too, see
         # scripts/check_compose_trace_flag.sh.
         run: ./scripts/check_compose_trace_flag.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: demo override's boot claims match what boot actually checks
+        # test_llm_startup.py's two compose assertions are the reason this step exists:
+        # one pins the runtime behaviour (provider=bedrock with NO AWS credential boots
+        # clean -- load_llm_config validates CLAUDE_API_KEY only on the anthropic path and
+        # BedrockAdapter builds its SDK client lazily), the other pins the demo override's
+        # comment so it cannot tell an operator that `compose up` proves the credential.
+        # The file also runs in the `backend` matrix job, which is continue-on-error +
+        # `|| true` -- so without this step a comment that promises a boot-time credential
+        # check could regress on a green build, and the operator finds out in the room.
+        # Its own install line, per the kyc-persistence-gate lesson: this step must not
+        # pass on a package an unrelated earlier step installed.
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_llm_startup.py -q
 
   kyc-enforcement-gate:
     # ADR 0011 is a compliance control: a regulated decision, an offer, and loan boarding
