@@ -66,6 +66,13 @@ export default function LoanDetailPage() {
   const [newBalance, setNewBalance] = useState("");
   const [waiveAmount, setWaiveAmount] = useState("");
 
+  // The exact request last sent to POST /payments, kept so "Retry same charge" can
+  // replay it byte-for-byte (same key, same body) instead of minting a new intent.
+  const [lastPayment, setLastPayment] = useState<{
+    key: string;
+    body: { loan_id: string | undefined; pan: string; amount: number; method: string };
+  } | null>(null);
+
   // UI-only affordance: only CSR/admin SEE the money-moving rep actions
   // (adjust balance / waive fee). The gateway/API still accept ANY
   // authenticated caller — server-side authz is intentionally absent
@@ -111,6 +118,7 @@ export default function LoanDetailPage() {
     setPayAmount(DEFAULT_PAY_AMOUNT);
     setNewBalance("");
     setWaiveAmount("");
+    setLastPayment(null);
   }
 
   const loadAll = useCallback(async () => {
@@ -174,21 +182,23 @@ export default function LoanDetailPage() {
     }
   }, [loanId]);
 
-  async function makePayment() {
-    const gen = routeGenRef.current;
+  // Shared by makePayment (fresh key, new intent) and retryPayment (same key, same
+  // body) so both send the request the exact same way — POST /payments requires the
+  // header (ADR 0013 Decision 1) and collapses a retry under one key server-side.
+  async function submitPayment(
+    gen: number,
+    key: string,
+    body: { loan_id: string | undefined; pan: string; amount: number; method: string },
+    successMsg: string
+  ) {
     setActionBusy(true);
     setActionErr(null);
     setActionMsg(null);
     try {
-      // NOTE: no idempotency key — a retry double-charges.
-      await apiPost("/payments", {
-        loan_id: loanId,
-        pan: "4111111111111111", // hardcoded test card PAN (texture)
-        amount: parseFloat(payAmount || "0"),
-        method: "card",
-      });
+      await apiPost("/payments", body, { "Idempotency-Key": key });
       if (routeGenRef.current !== gen) return;
-      setActionMsg(`Payment of ${usd(payAmount)} submitted.`);
+      setLastPayment({ key, body });
+      setActionMsg(successMsg);
       await refreshBalanceAndHistory(gen);
     } catch (err) {
       if (routeGenRef.current !== gen) return;
@@ -196,6 +206,29 @@ export default function LoanDetailPage() {
     } finally {
       if (routeGenRef.current === gen) setActionBusy(false);
     }
+  }
+
+  async function makePayment() {
+    const gen = routeGenRef.current;
+    const key = crypto.randomUUID();
+    const body = {
+      loan_id: loanId,
+      pan: "4111111111111111", // hardcoded test card PAN (texture)
+      amount: parseFloat(payAmount || "0"),
+      method: "card",
+    };
+    await submitPayment(gen, key, body, `Payment of ${usd(payAmount)} submitted.`);
+  }
+
+  async function retryPayment() {
+    if (!lastPayment) return;
+    const gen = routeGenRef.current;
+    await submitPayment(
+      gen,
+      lastPayment.key,
+      lastPayment.body,
+      "Retry submitted with the same Idempotency-Key — collapsed to the original payment."
+    );
   }
 
   async function adjustBalance() {
@@ -427,6 +460,18 @@ export default function LoanDetailPage() {
         <p className="hint" style={{ marginTop: 10 }}>
           Charged to card ending 1111. Payments post immediately.
         </p>
+        {lastPayment ? (
+          <p className="hint" style={{ marginTop: 10 }}>
+            Idempotency-Key: <code>{lastPayment.key}</code>{" "}
+            <button
+              onClick={retryPayment}
+              disabled={actionBusy}
+              style={{ marginLeft: 8 }}
+            >
+              Retry same charge
+            </button>
+          </p>
+        ) : null}
       </div>
 
       {/* Rep actions — UI-only affordance, shown only to CSR/admin. */}

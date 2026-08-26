@@ -248,3 +248,48 @@ describe("loan detail — captured but unapplied payment", () => {
     expect(screen.queryByText(/submitted\.$/)).toBeNull();
   });
 });
+
+describe("loan detail — payment idempotency (D19)", () => {
+  it("sends an Idempotency-Key header on every payment submission", async () => {
+    apiPost.mockResolvedValue({ ok: true });
+
+    render(<LoanDetailPage />);
+    await screen.findByText("Maria Alvarez");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Pay with card on file" })
+    );
+    await screen.findByText("Payment of $250.00 submitted.");
+
+    expect(apiPost).toHaveBeenCalledTimes(1);
+    const [path, , headers] = apiPost.mock.calls[0] as [
+      string,
+      unknown,
+      Record<string, string> | undefined,
+    ];
+    expect(path).toBe("/payments");
+    expect(typeof headers?.["Idempotency-Key"]).toBe("string");
+    expect(headers?.["Idempotency-Key"].length).toBeGreaterThan(0);
+  });
+
+  it("retries with the exact same Idempotency-Key and body, not a fresh one", async () => {
+    apiPost.mockResolvedValue({ ok: true });
+
+    render(<LoanDetailPage />);
+    await screen.findByText("Maria Alvarez");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Pay with card on file" })
+    );
+    await screen.findByText("Payment of $250.00 submitted.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry same charge" }));
+    await screen.findByText(/collapsed to the original payment/);
+
+    expect(apiPost).toHaveBeenCalledTimes(2);
+    const [, firstBody, firstHeaders] = apiPost.mock.calls[0];
+    const [, secondBody, secondHeaders] = apiPost.mock.calls[1];
+    expect(secondHeaders).toEqual(firstHeaders);
+    expect(secondBody).toEqual(firstBody);
+  });
+});
