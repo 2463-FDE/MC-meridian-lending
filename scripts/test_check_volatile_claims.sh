@@ -17,20 +17,33 @@ set -uo pipefail
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/check_volatile_claims.sh"
 [ -x "$SCRIPT" ] || { echo "ABORT: $SCRIPT not executable." >&2; exit 1; }
 
-TMPROOT=$(mktemp -d); trap 'rm -rf "$TMPROOT"' EXIT
+# Setup is checked, not assumed. A failed `mktemp` under a full or read-only TMPDIR alone leaves TMPROOT
+# empty, every fixture path collapses to an absolute one, and the cases then run the
+# real script against the REAL repo -- reporting "expected a failure, got OK" about a
+# repo the test never built. Exit 2 = could not run, distinct from exit 1 = a case
+# failed, the same split the two scripts under test use.
+TMPROOT=$(mktemp -d) || { echo "ABORT: mktemp -d failed." >&2; exit 2; }
+[ -n "$TMPROOT" ] && [ -d "$TMPROOT" ] || { echo "ABORT: mktemp -d produced no directory." >&2; exit 2; }
+trap 'rm -rf "$TMPROOT"' EXIT
 pass=0; fail=0
 
-new_repo() {
-  local d; d=$(mktemp -d "$TMPROOT/repo.XXXXXX")
-  git -C "$d" init -q -b main; mkdir -p "$d/docs"
-  echo "x" > "$d/seed"; git -C "$d" add -A
-  git -C "$d" -c user.email=t@t -c user.name=t commit -qm init
+new_repo() {  # prints the fixture path, or nothing and returns 1 if setup failed
+  local d; d=$(mktemp -d "$TMPROOT/repo.XXXXXX") || return 1
+  [ -n "$d" ] || return 1
+  git -C "$d" init -q -b main || return 1
+  mkdir -p "$d/docs" || return 1
+  echo "x" > "$d/seed" || return 1
+  git -C "$d" add -A || return 1
+  git -C "$d" -c user.email=t@t -c user.name=t commit -qm init || return 1
   printf '%s' "$d"
 }
 
 # check NAME EXPECTED_EXIT REPO DOC [GREP_PATTERN]
 check() {
   local name=$1 want=$2 repo=$3 doc=$4 pattern=${5:-}
+  # A fixture that failed to build must stop the run, not be graded. Without this the
+  # empty repo path makes `cd ""` a successful no-op and the case grades the real repo.
+  [ -n "$repo" ] && [ -d "$repo/.git" ] || { echo "ABORT: fixture repo missing — setup failed." >&2; exit 2; }
   local out got
   out=$(cd "$repo" && "$SCRIPT" "$doc" 2>&1); got=$?
   if [ "$got" -ne "$want" ]; then

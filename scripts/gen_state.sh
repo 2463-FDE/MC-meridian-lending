@@ -101,7 +101,25 @@ adrs=$(printf '%s\n' "$raw_tree" | grep -E '^adr/[0-9]{4}-.*\.md$' | sort) || ad
 # --- 4. CI jobs, and which of them block ------------------------------------
 # A job blocks unless its body contains continue-on-error or a `|| true`. CLAUDE.md's
 # hand-maintained copy of this list drifted far enough to need its own resync PR.
-ci=$(git show "$BASE:.github/workflows/ci.yml" 2>/dev/null) || ci=""
+#
+# This one section is read from HEAD, not from the merge base, and the difference is
+# load-bearing. The workflow is a property of THIS tree, not of the history behind it:
+# a branch that ADDS a blocking job could not represent it if the list came from the
+# base, so the committed page would still end at the old list and the first
+# regeneration after that merge would report drift on output nobody could have
+# generated. History -- tip, ledger, ADR index -- stays on the merge base, where a
+# sibling merge cannot flap it. The residual is narrower and self-correcting: a PR
+# that edits ci.yml makes every OTHER open PR's page one job behind once it merges,
+# and the fix is the same `make kb` the gate already prints.
+#
+# Absent workflow and failed git read are kept apart on purpose: an absent file is a
+# truthful empty section, a failed read must abort rather than print a page whose CI
+# section silently says "none".
+ci=""
+if git cat-file -e "HEAD:.github/workflows/ci.yml" 2>/dev/null; then
+  ci=$(git show "HEAD:.github/workflows/ci.yml") || {
+    echo "ABORT: git show failed on HEAD:.github/workflows/ci.yml." >&2; exit 2; }
+fi
 jobs=""
 if [ -n "$ci" ]; then
   jobs=$(printf '%s\n' "$ci" | awk '
@@ -168,6 +186,9 @@ fi
   fi
   echo
   echo "## CI jobs"
+  echo
+  echo "Read from this tree's \`.github/workflows/ci.yml\` at HEAD, not from the base above:"
+  echo "a branch that adds a job must be able to show it."
   echo
   if [ -z "$jobs" ]; then
     echo "_No workflow read._"

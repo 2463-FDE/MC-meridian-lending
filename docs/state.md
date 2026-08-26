@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (4e03fc6)` — 4e03fc6 2026-08-26 Merge pull request #88 from 2463-FDE/docs/adr-0021-agent-framework
+Base: `origin/main (ac74ccd)` — ac74ccd 2026-08-26 Merge pull request #89 from 2463-FDE/docs/post-merge-truth-sweep
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #89 | `ac74ccd` | 2026-08-26 | Merge pull request #89 from 2463-FDE/docs/post-merge-truth-sweep |
 | #88 | `4e03fc6` | 2026-08-26 | Merge pull request #88 from 2463-FDE/docs/adr-0021-agent-framework |
 | #87 | `6a50680` | 2026-08-26 | Merge pull request #87 from 2463-FDE/docs/freeze-demo-truth-week10 |
 | #86 | `ec5013c` | 2026-08-25 | Merge pull request #86 from 2463-FDE/test/injection-resistance-week10 |
@@ -127,6 +128,9 @@ Count: 21. The next free number is one past the highest above.
 
 ## CI jobs
 
+Read from this tree's `.github/workflows/ci.yml` at HEAD, not from the base above:
+a branch that adds a job must be able to show it.
+
 A job is BLOCKING unless its body carries `continue-on-error` or `|| true`.
 
 - **soft** — `backend`
@@ -161,3 +165,7 @@ A job is BLOCKING unless its body carries `continue-on-error` or `|| true`.
 - **BLOCKING** — `spec-diff-gate`
 - **BLOCKING** — `docs-drift-tests`
 - **BLOCKING** — `docs-drift`
+- **BLOCKING** — `volatile-claim-lint-tests`
+- **BLOCKING** — `volatile-claim-lint`
+- **BLOCKING** — `kb-freshness-tests`
+- **BLOCKING** — `kb-freshness`

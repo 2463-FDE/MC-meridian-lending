@@ -1069,6 +1069,15 @@ jobs:
     # It grades against the MERGE BASE of the branch and main, not main's tip, so a
     # sibling PR merging does not turn every other open PR red. The fix when it fails is
     # always the same one command: `make kb`, then commit.
+    #
+    # pull_request ONLY, and that is structural rather than a convenience. On main the
+    # merge base IS the tip, so the merge commit that lands a regenerated page becomes
+    # the base the page would have to describe -- a state no committed file can ever be
+    # in. Running it on push would leave main red between every merge and the follow-up
+    # commit, and that follow-up would re-stale the page it just fixed. The branch side
+    # is where the page is actually authored, and it is graded there.
+    # test_gen_state.sh pins this: `committing the page on main re-stales it`.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

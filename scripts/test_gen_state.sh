@@ -16,14 +16,23 @@ set -uo pipefail
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/gen_state.sh"
 [ -x "$SCRIPT" ] || { echo "ABORT: $SCRIPT not executable." >&2; exit 1; }
 
-TMPROOT=$(mktemp -d); trap 'rm -rf "$TMPROOT"' EXIT
+# Setup is checked, not assumed. A failed `mktemp` under a full or read-only TMPDIR alone leaves TMPROOT
+# empty, every fixture path collapses to an absolute one, and the cases then run the
+# real script against the REAL repo -- reporting "expected a failure, got OK" about a
+# repo the test never built. Exit 2 = could not run, distinct from exit 1 = a case
+# failed, the same split the two scripts under test use.
+TMPROOT=$(mktemp -d) || { echo "ABORT: mktemp -d failed." >&2; exit 2; }
+[ -n "$TMPROOT" ] && [ -d "$TMPROOT" ] || { echo "ABORT: mktemp -d produced no directory." >&2; exit 2; }
+trap 'rm -rf "$TMPROOT"' EXIT
 pass=0; fail=0
 
 git_c() { git -C "$1" -c user.email=t@t -c user.name=t "${@:2}"; }
 
-new_repo() {  # a repo with one merge commit naming a PR, one ADR, one workflow
-  local d; d=$(mktemp -d "$TMPROOT/repo.XXXXXX")
-  git -C "$d" init -q -b main
+new_repo() {  # a repo with one merge commit naming a PR, one ADR, one workflow.
+              # Prints the fixture path, or nothing and returns 1 if setup failed.
+  local d; d=$(mktemp -d "$TMPROOT/repo.XXXXXX") || return 1
+  [ -n "$d" ] || return 1
+  git -C "$d" init -q -b main || return 1
   mkdir -p "$d/docs" "$d/adr" "$d/.github/workflows"
   echo "x" > "$d/seed"; echo "# adr" > "$d/adr/0001-first.md"
   printf 'jobs:\n  backend:\n    steps:\n      - run: pytest || true\n  secret-scan:\n    steps:\n      - run: ./scan.sh\n' \
@@ -38,6 +47,9 @@ new_repo() {  # a repo with one merge commit naming a PR, one ADR, one workflow
 # run NAME EXPECTED_EXIT REPO PATTERN ARGS...
 run() {
   local name=$1 want=$2 repo=$3 pattern=$4; shift 4
+  # A fixture that failed to build must stop the run, not be graded. Without this the
+  # empty repo path makes `cd ""` a successful no-op and the case grades the real repo.
+  [ -n "$repo" ] && [ -d "$repo/.git" ] || { echo "ABORT: fixture repo missing — setup failed." >&2; exit 2; }
   local out got
   out=$(cd "$repo" && "$SCRIPT" "$@" 2>&1); got=$?
   if [ "$got" -ne "$want" ]; then
@@ -95,7 +107,37 @@ run "no base ref aborts" 2 "$d" 'ABORT: neither main nor origin/main'
 r=$(new_repo)
 run "bad flag aborts" 2 "$r" 'usage:' --wat
 
-# --- 9. outside a git repo ---------------------------------------------------
+# --- 9. the CI job list comes from HEAD, not from the merge base -------------
+# The page names which jobs in ci.yml block. Reading that list from the merge base
+# means a PR that ADDS a blocking job cannot represent it: the committed page still
+# ends at the old list, and the first regeneration after the merge -- when the base
+# has moved forward -- reports drift on output nobody could have generated. History
+# (tip, ledger, ADRs) stays on the merge base; the workflow is a property of THIS
+# tree, so it is read from HEAD.
+r=$(new_repo)
+git -C "$r" checkout -q -b topic3
+printf 'jobs:\n  backend:\n    steps:\n      - run: pytest || true\n  secret-scan:\n    steps:\n      - run: ./scan.sh\n  kb-freshness:\n    steps:\n      - run: ./scripts/gen_state.sh --check\n' \
+  > "$r/.github/workflows/ci.yml"
+git -C "$r" add -A; git_c "$r" commit -qm "add a blocking job"
+run "generates on a branch that adds a job" 0 "$r" 'OK: wrote docs/state.md'
+if grep -qE '\*\*BLOCKING\*\* — `kb-freshness`' "$r/docs/state.md"; then
+  echo "ok    branch-added job reaches the page"; pass=$((pass + 1))
+else echo "FAIL  branch-added job missing from the page"; fail=$((fail + 1)); fi
+# and the base tip stays the MERGE BASE, so a sibling merge does not flap the page.
+if grep -qE 'Base: `main \(' "$r/docs/state.md" && ! grep -q 'add a blocking job' "$r/docs/state.md"; then
+  echo "ok    base tip still the merge base"; pass=$((pass + 1))
+else echo "FAIL  base tip moved off the merge base"; fail=$((fail + 1)); fi
+
+# --- 10. on main the page can never be clean, which is why CI skips push ------
+# On main the merge base IS HEAD, so committing the generated page moves the base to
+# the commit that carries it and the next --check reports drift on a page nobody can
+# fix. That is structural, not a bug in the page: ci.yml therefore runs kb-freshness
+# on pull_request only. This test pins the reason so the `if:` is never "cleaned up".
+r=$(new_repo); (cd "$r" && "$SCRIPT" >/dev/null)
+git -C "$r" add -A; git_c "$r" commit -qm "docs: regenerate state"
+run "committing the page on main re-stales it" 1 "$r" 'STALE:' --check
+
+# --- 11. outside a git repo ---------------------------------------------------
 out=$(cd "$TMPROOT" && "$SCRIPT" 2>&1); got=$?
 if [ "$got" -eq 2 ]; then echo "ok    aborts outside a git repo"; pass=$((pass + 1))
 else echo "FAIL  aborts outside a git repo — exit $got, wanted 2"; fail=$((fail + 1)); fi
