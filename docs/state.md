@@ -8,12 +8,14 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (ac74ccd)` — ac74ccd 2026-08-26 Merge pull request #89 from 2463-FDE/docs/post-merge-truth-sweep
+Base: `origin/main (49390fe)` — 49390fe 2026-08-26 Merge pull request #91 from 2463-FDE/chore/kb-mutability-split
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #91 | `49390fe` | 2026-08-26 | Merge pull request #91 from 2463-FDE/chore/kb-mutability-split |
+| #90 | `4fea412` | 2026-08-26 | Merge pull request #90 from 2463-FDE/fix/payment-idempotency-ui |
 | #89 | `ac74ccd` | 2026-08-26 | Merge pull request #89 from 2463-FDE/docs/post-merge-truth-sweep |
 | #88 | `4e03fc6` | 2026-08-26 | Merge pull request #88 from 2463-FDE/docs/adr-0021-agent-framework |
 | #87 | `6a50680` | 2026-08-26 | Merge pull request #87 from 2463-FDE/docs/freeze-demo-truth-week10 |
