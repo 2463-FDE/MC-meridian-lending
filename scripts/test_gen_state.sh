@@ -166,22 +166,79 @@ run "merge ref grades against the tip" 1 "$r" 'STALE:' --check
 # script alone cannot catch a revert of the one line that fixes it. Grade the real
 # ci.yml: kb-freshness must check out the PR head, or its merge-base grading is the
 # tip grading and the job flaps on every sibling merge.
+# checkout_ref FILE — print the `ref:` VALUE of the kb-freshness job's actions/checkout
+# step, or print nothing and return 1 when the job, the step or the key is absent.
+#
+# Structural, not textual. Grepping the job block as raw text passes on the string
+# appearing ANYWHERE in it -- including a comment that survives while the real `ref:`
+# key is dropped, which is the one edit most likely to reintroduce the merge-ref
+# grading. Comments are stripped before the keys are read, so only the value counts.
+checkout_ref() {
+  local f=$1
+  [ -f "$f" ] || return 1
+  local v
+  v=$(awk '
+    /^  kb-freshness:/                     { injob = 1; next }
+    injob && /^  [A-Za-z0-9_-]+:/          { injob = 0 }
+    !injob                                 { next }
+    {
+      line = $0
+      sub(/^[[:space:]]*#.*$/, "", line)   # a whole-line comment
+      sub(/[[:space:]]#.*$/,  "", line)    # a trailing comment
+    }
+    line ~ /^      - /                     { instep = (line ~ /uses:[[:space:]]*actions\/checkout/); next }
+    instep && line ~ /^[[:space:]]+ref:[[:space:]]*/ {
+      sub(/^[[:space:]]+ref:[[:space:]]*/, "", line)
+      print line
+      exit
+    }
+  ' "$f") || return 1
+  [ -n "$v" ] || return 1
+  printf '%s' "$v"
+}
+
+WANT_REF='${{ github.event.pull_request.head.sha }}'
 CI="$(cd "$(dirname "$SCRIPT")/.." && pwd)/.github/workflows/ci.yml"
 if [ ! -f "$CI" ]; then
   echo "FAIL  ci.yml not found at $CI"; fail=$((fail + 1))
 else
-  job=$(awk '/^  kb-freshness:/ { on = 1; next } on && /^  [A-Za-z0-9_-]+:/ { on = 0 } on' "$CI")
-  if [ -z "$job" ]; then
-    # An empty block is "verified nothing", not "verified clean": the job was renamed,
-    # deleted, or awk failed. That is a failure, never a silent pass.
-    echo "FAIL  kb-freshness job not found in ci.yml -- renamed, removed, or unreadable"
+  got_ref=$(checkout_ref "$CI") || got_ref=""
+  if [ -z "$got_ref" ]; then
+    # No job, no checkout step, or no `ref:` key. "Verified nothing" is a failure, never
+    # a silent pass -- and this is also the state the default merge-ref checkout is in.
+    echo "FAIL  kb-freshness has no actions/checkout ref: -- the default merge-ref"
+    echo "        checkout makes its merge base main's tip."
     fail=$((fail + 1))
-  elif printf '%s\n' "$job" | grep -qF 'ref: ${{ github.event.pull_request.head.sha }}'; then
+  elif [ "$got_ref" = "$WANT_REF" ]; then
     echo "ok    kb-freshness checks out the PR head sha"; pass=$((pass + 1))
   else
-    echo "FAIL  kb-freshness does not pin github.event.pull_request.head.sha --"
-    echo "        the default merge-ref checkout makes its merge base main's tip."
+    echo "FAIL  kb-freshness checks out '$got_ref', wanted '$WANT_REF'"
     fail=$((fail + 1))
+  fi
+
+  # --- 13b. the reader is structural, not textual --------------------------------
+  # Regression for review finding M1: the first version grepped the job block as raw
+  # text, so an edit that deleted the real `ref:` while leaving the string in a comment
+  # kept the assertion green over a job back on the merge ref. Feed it exactly that
+  # file and require a refusal.
+  doctored="$TMPROOT/ci-comment-only.yml"
+  sed 's|^          ref: ${{ github.event.pull_request.head.sha }}$|          # ref: ${{ github.event.pull_request.head.sha }}|' \
+    "$CI" > "$doctored"
+  if grep -qF 'ref: ${{ github.event.pull_request.head.sha }}' "$doctored" \
+     && ! checkout_ref "$doctored" >/dev/null 2>&1; then
+    echo "ok    a ref: left only in a comment does not count as pinned"; pass=$((pass + 1))
+  else
+    echo "FAIL  a commented-out ref: still reads as pinned -- the check is textual"
+    fail=$((fail + 1))
+  fi
+
+  # --- 13c. a renamed or removed job is a refusal, not a pass --------------------
+  renamed="$TMPROOT/ci-renamed.yml"
+  sed 's/^  kb-freshness:/  kb-freshness-renamed:/' "$CI" > "$renamed"
+  if checkout_ref "$renamed" >/dev/null 2>&1; then
+    echo "FAIL  a renamed kb-freshness job still reads as pinned"; fail=$((fail + 1))
+  else
+    echo "ok    a renamed or removed kb-freshness job fails closed"; pass=$((pass + 1))
   fi
 fi
 
