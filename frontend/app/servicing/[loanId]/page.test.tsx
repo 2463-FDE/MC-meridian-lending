@@ -328,4 +328,154 @@ describe("loan detail — payment idempotency (D19)", () => {
     expect(secondHeaders).toEqual(firstHeaders);
     expect(secondBody).toEqual(firstBody);
   });
+  // The primary Pay button is the default post-failure path, so it is the one that
+  // decides whether an unresolved charge becomes a second capture. While the last
+  // send is unresolved AND the form still describes that same charge, it must not
+  // mint a fresh key -- the borrower reaches a new intent by resetting or by editing
+  // the amount, both deliberate acts.
+  async function payAfterAmbiguousFailure() {
+    apiPost.mockRejectedValueOnce(new Error("Network request failed"));
+    render(<LoanDetailPage />);
+    await screen.findByText("Maria Alvarez");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Pay with card on file" })
+    );
+    await screen.findByText("Network request failed");
+  }
+
+  it("does not mint a second key when Pay is clicked after an ambiguous failure", async () => {
+    await payAfterAmbiguousFailure();
+
+    const pay = screen.getByRole("button", { name: "Pay with card on file" });
+    expect(pay.hasAttribute("disabled")).toBe(true);
+
+    fireEvent.click(pay);
+    expect(apiPost).toHaveBeenCalledTimes(1);
+  });
+
+  it("mints a fresh key only after an explicit new-payment reset", async () => {
+    await payAfterAmbiguousFailure();
+
+    fireEvent.click(screen.getByRole("button", { name: "Start a new payment" }));
+    apiPost.mockResolvedValueOnce({ ok: true });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Pay with card on file" })
+    );
+    await screen.findByText("Payment of $250.00 submitted.");
+
+    expect(apiPost).toHaveBeenCalledTimes(2);
+    const [, , firstHeaders] = apiPost.mock.calls[0];
+    const [, , secondHeaders] = apiPost.mock.calls[1];
+    expect(secondHeaders?.["Idempotency-Key"]).not.toBe(
+      firstHeaders?.["Idempotency-Key"]
+    );
+  });
+
+  it("re-enables Pay with a fresh key once the amount is edited", async () => {
+    await payAfterAmbiguousFailure();
+
+    // Editing the amount describes a different charge, so it is no longer the
+    // unresolved one and needs its own key.
+    // Same selector the per-loan scoping tests use -- the pay amount is the first
+    // number input on the page.
+    fireEvent.change(screen.getAllByRole("spinbutton")[0], {
+      target: { value: "125.00" },
+    });
+    apiPost.mockResolvedValueOnce({ ok: true });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Pay with card on file" })
+    );
+    await screen.findByText("Payment of $125.00 submitted.");
+
+    expect(apiPost).toHaveBeenCalledTimes(2);
+    const [, firstBody, firstHeaders] = apiPost.mock.calls[0];
+    const [, secondBody, secondHeaders] = apiPost.mock.calls[1];
+    expect(secondHeaders?.["Idempotency-Key"]).not.toBe(
+      firstHeaders?.["Idempotency-Key"]
+    );
+    expect((secondBody as { amount: number }).amount).toBe(125);
+    expect((firstBody as { amount: number }).amount).toBe(250);
+  });
+
+  it("still allows a genuine second identical payment after one succeeds", async () => {
+    // The gate is scoped to an UNRESOLVED send. A payment that came back 2xx is
+    // resolved, so a borrower paying $250 twice on purpose is not blocked and gets
+    // a second key -- the case that ruled out reusing the key on a matching body.
+    apiPost.mockResolvedValue({ ok: true });
+    render(<LoanDetailPage />);
+    await screen.findByText("Maria Alvarez");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Pay with card on file" })
+    );
+    await screen.findByText("Payment of $250.00 submitted.");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Pay with card on file" })
+    );
+
+    expect(apiPost).toHaveBeenCalledTimes(2);
+    const [, , firstHeaders] = apiPost.mock.calls[0];
+    const [, , secondHeaders] = apiPost.mock.calls[1];
+    expect(secondHeaders?.["Idempotency-Key"]).not.toBe(
+      firstHeaders?.["Idempotency-Key"]
+    );
+  });
+
+  it("does not warn that the charge may have gone through while it is still in flight", async () => {
+    // The key is recorded before the send, so the panel renders during the flight.
+    // The ambiguity warning and the reset must wait for the attempt to settle --
+    // shown mid-flight they describe a failure that has not happened.
+    let resolvePayment: (value: unknown) => void = () => {};
+    apiPost.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePayment = resolve;
+        })
+    );
+
+    render(<LoanDetailPage />);
+    await screen.findByText("Maria Alvarez");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Pay with card on file" })
+    );
+
+    expect(screen.queryByText(/may already have gone through/)).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Start a new payment" })
+    ).toBeNull();
+
+    await act(async () => {
+      resolvePayment({ ok: true });
+    });
+    await screen.findByText("Payment of $250.00 submitted.");
+  });
+
+  it("blocks Pay from minting a fresh key after a captured-unapplied 424", async () => {
+    // 424 means the card WAS charged and only the ledger apply failed. Minting a new
+    // key there is an outright second capture, not an ambiguous one, so the primary
+    // button stays shut until the borrower explicitly starts a new payment.
+    apiPost.mockRejectedValueOnce({
+      status: 424,
+      detail:
+        "Payment captured (payment_id=42) but could not be applied to your " +
+        "balance. Do not retry -- contact support to reconcile this payment.",
+    });
+
+    render(<LoanDetailPage />);
+    await screen.findByText("Maria Alvarez");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Pay with card on file" })
+    );
+    await screen.findByText(/could not be applied to your balance/);
+
+    const pay = screen.getByRole("button", { name: "Pay with card on file" });
+    expect(pay.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(pay);
+    expect(apiPost).toHaveBeenCalledTimes(1);
+
+    // Retry stays absent -- replaying the key returns the same captured payment.
+    expect(
+      screen.queryByRole("button", { name: "Retry same charge" })
+    ).toBeNull();
+  });
 });
