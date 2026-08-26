@@ -667,3 +667,59 @@ def test_a_transport_outage_is_a_downstream_refusal_not_a_500(
     )
     assert entry.metadata["http_status"] == 503
     assert entry.metadata["refusal"] == "downstream_unavailable"
+
+
+# --- the outcome on the root ---------------------------------------------------------
+#
+# `assistant.request` carries the business outcome (app/assistant.py, the `root.add_metadata`
+# block), and it is a CHILD of `assistant.entry`. LangSmith groups its charts by root-run
+# metadata, so an outcome-mix or policy-band chart over the officer assistant had to filter
+# child runs and could not sit beside cost, which rolls up to the root. These two tests pin
+# the promotion and the allowlist that keeps it inside the CONTENT RULE.
+
+
+# Every key the entry span may carry. The test below asserts the metadata is a SUBSET of
+# this, so a future `**final` promotion -- `final` carries the officer summary, the verbatim
+# citation text and the application id -- fails here rather than at the vendor.
+_ENTRY_KEYS = {
+    "task",
+    "policy_topic",
+    "http_status",
+    "refusal",
+    "outcome",
+    "record_status",
+    "policy_band",
+    "narration_validated",
+    "policy_citations",
+    "policy_searches",
+}
+
+
+def test_the_entry_span_carries_the_outcome_for_charting(spans, tools):
+    """The business outcome is on the ROOT, not only on the loop root beneath it."""
+    main._run_assistant(42, _client(TOOL_CALL, FINAL_DENY), "decision")
+
+    entry = spans[0].metadata
+    assert entry["outcome"] == "deny"
+    assert entry["record_status"] == "recorded"
+    assert entry["policy_band"] == "deny"
+    assert entry["narration_validated"] is True
+    # Counts, never the lists: the citation objects carry verbatim corpus text.
+    assert entry["policy_citations"] == 0
+    assert entry["policy_searches"] == 0
+
+
+def test_the_entry_span_promotes_counts_and_codes_but_no_content(spans, tools):
+    """The promotion is an allowlist of enums, counts and one bool -- nothing from the
+    officer-facing body. `run()` returns the summary, the application id and the citation
+    text in the same dict, so spreading it would ship all three."""
+    result = main._run_assistant(42, _client(TOOL_CALL, FINAL_DENY), "decision")
+
+    entry = spans[0].metadata
+    assert set(entry) <= _ENTRY_KEYS, f"unexpected keys: {set(entry) - _ENTRY_KEYS}"
+    for key, value in entry.items():
+        assert isinstance(value, (str, int, bool)), f"{key} carries {type(value)}"
+    values = list(entry.values())
+    assert result["summary"] not in values
+    assert result["application_id"] not in values
+    assert result["trace_id"] not in values
