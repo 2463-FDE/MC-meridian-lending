@@ -471,6 +471,38 @@ def _detail(resp: httpx.Response):
 # here. `tests/test_trace_error_boundary.py` covers the provider side of the same rule.
 _SPAN_ENTRY = "assistant.entry"
 
+# The enums, counts and one bool the entry span promotes from a served result, so a chart
+# can group whole requests by outcome. `assistant.request` already records them one level
+# down (app/assistant.py, the `root.add_metadata` block), but LangSmith groups by ROOT-run
+# metadata, so an outcome-mix chart had to filter child runs while token cost -- which
+# rolls up -- sat on the root.
+#
+# An allowlist, never a spread: `run()` returns the officer-facing summary, the
+# `application_id` and the verbatim `policy_citations` text in the same dict, so
+# `**result` would ship all three to LangSmith and break both the CONTENT RULE in
+# `app/assistant.py` and the no-identifiers rule this span already holds. The two list
+# fields are promoted as their LENGTHS for the same reason.
+_CHARTED_CODES = ("outcome", "record_status", "policy_band", "narration_validated")
+_CHARTED_COUNTS = ("policy_citations", "policy_searches")
+
+
+def _charted(result: dict) -> dict:
+    """Non-content metadata from a served assistant result, for the entry span.
+
+    A field the result does not carry is left OFF the span rather than sent as a null,
+    the way `policy_topic` is above: the span says what happened.
+    """
+    charted = {
+        key: result[key]
+        for key in _CHARTED_CODES
+        if isinstance(result.get(key), (str, bool))
+    }
+    for key in _CHARTED_COUNTS:
+        value = result.get(key)
+        if isinstance(value, list):
+            charted[key] = len(value)
+    return charted
+
 
 def _run_assistant(
     app_id: int,
@@ -537,7 +569,7 @@ def _run_assistant(
                     exc,
                 )
         if refusal is None:
-            entry.add_metadata({"http_status": 200})
+            entry.add_metadata({"http_status": 200, **_charted(result)})
             return result
         status, code, detail, cause = refusal
         entry.add_metadata({"http_status": status, "refusal": code})
