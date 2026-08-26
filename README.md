@@ -11,8 +11,12 @@ Halcyon Software Group (now dissolved) as **three** backend services — `gatewa
 
 This is a brownfield monorepo: a **Loan Origination System (LOS)** and a **Loan Servicing
 System (LSS)** bolted together behind a single API gateway, with a Next.js borrower +
-servicing portal. Origination also runs a single-agent decisioning assistant (ADR 0009) —
-the "AI underwriting assistant" Lending Ops asked for; see `ARCHITECTURE.md`.
+servicing portal. Origination also runs the "AI underwriting assistant" Lending Ops asked
+for, which is now **two** agent surfaces, not one: the officer assistant — a tool-calling
+loop hosted on an agent framework, with a policy-retrieval tool (`ADR 0009`, `ADR 0019`,
+`services/origination-service/app/assistant.py`) — and the disclosure pipeline, a LangGraph
+state machine with a deterministic verify gate and one bounded retry edge
+(`services/origination-service/app/disclosure_coordinator.py`). See `ARCHITECTURE.md`.
 
 Since the handoff the in-house team has begun **extracting the LOS monolith into focused
 services**, partly to match the platform's intended target architecture. The platform now
