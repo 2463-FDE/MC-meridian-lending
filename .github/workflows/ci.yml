@@ -1024,6 +1024,63 @@ jobs:
       - name: No banned compliance/safety claims in the authoritative docs
         run: ./scripts/check_doc_claims.sh
 
+  volatile-claim-lint-tests:
+    # The gate below is only worth its blocking status if it can actually fail. This
+    # proves it: an open-PR claim, a freshness stamp, a tip sha, a spelled-out count and
+    # an unanchored ref each turn it red, while an anchored merge citation stays green.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Volatile-claim lint self-tests
+        run: ./scripts/test_check_volatile_claims.sh
+
+  volatile-claim-lint:
+    # BLOCKING. Third gate in the doc family and a different KIND from its two siblings:
+    # doc-path-lint asks whether a cited path exists, docs-drift refuses a curated list of
+    # known-false literals, and this one refuses a whole CLASS of sentence -- one that is
+    # true when written and false when it lands.
+    #
+    # Why a third was needed: docs/kb.md carried ~315 hand-copied derived facts, and 14 of
+    # the 25 commits that ever touched it were pure stale-fixes. A curated list cannot
+    # close that, because the author writing the decaying sentence is the same person who
+    # would have to add it to the list. Banning the shape needs nobody to notice anything.
+    #
+    # An immutable citation still passes -- "merged as #77 (ceda4e2)" names a merge commit,
+    # and a merge commit never changes. Present-tense merge state does not.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No decaying claims in the authoritative docs
+        run: ./scripts/check_volatile_claims.sh
+
+  kb-freshness-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: State generator self-tests
+        run: ./scripts/test_gen_state.sh
+
+  kb-freshness:
+    # BLOCKING. docs/state.md is the mutable half of the knowledge base -- base tip,
+    # merged-PR ledger, ADR index, which jobs in this file block -- and every line of it
+    # is read out of git by scripts/gen_state.sh. This refuses a hand edit and refuses a
+    # copy that has not absorbed its own branch base.
+    #
+    # It grades against the MERGE BASE of the branch and main, not main's tip, so a
+    # sibling PR merging does not turn every other open PR red. The fix when it fails is
+    # always the same one command: `make kb`, then commit.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch main so a merge base exists
+        # A PR checkout has no origin/main ref by default, and the generator must abort
+        # rather than describe the wrong base -- so fetch it explicitly.
+        run: git fetch --no-tags --depth=0 origin +refs/heads/main:refs/remotes/origin/main
+      - name: docs/state.md still matches git
+        run: ./scripts/gen_state.sh --check
+
   # GAP: no dependency audit, no SAST, no container image scan.
   # GAP: backend tests are continue-on-error, so failing money-math tests are green --
   # EXCEPT where a dedicated blocking job runs the same file outside the matrix. The money

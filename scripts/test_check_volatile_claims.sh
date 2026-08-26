@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# test_check_volatile_claims.sh — tests for scripts/check_volatile_claims.sh.
+#
+# Each case builds a throwaway git repo, writes a fixture doc, runs the real script
+# inside it and asserts the exit code plus a decisive line of output.
+#
+# The load-bearing cases:
+#   `anchored ref passes` — without it the gate could ban every PR reference outright,
+#      which would gut real history from the docs to buy nothing.
+#   `unanchored ref fails in kb.md only` — pins the two-tier scope. If V5 silently
+#      widened to CLAUDE.md, that file's rationale prose would start failing.
+#   `stale exemption fails` — the escape hatch is the part most likely to rot open.
+#
+# Usage: ./scripts/test_check_volatile_claims.sh    Exit 0 = all pass, 1 = a failure.
+set -uo pipefail
+
+SCRIPT="$(cd "$(dirname "$0")" && pwd)/check_volatile_claims.sh"
+[ -x "$SCRIPT" ] || { echo "ABORT: $SCRIPT not executable." >&2; exit 1; }
+
+TMPROOT=$(mktemp -d); trap 'rm -rf "$TMPROOT"' EXIT
+pass=0; fail=0
+
+new_repo() {
+  local d; d=$(mktemp -d "$TMPROOT/repo.XXXXXX")
+  git -C "$d" init -q -b main; mkdir -p "$d/docs"
+  echo "x" > "$d/seed"; git -C "$d" add -A
+  git -C "$d" -c user.email=t@t -c user.name=t commit -qm init
+  printf '%s' "$d"
+}
+
+# check NAME EXPECTED_EXIT REPO DOC [GREP_PATTERN]
+check() {
+  local name=$1 want=$2 repo=$3 doc=$4 pattern=${5:-}
+  local out got
+  out=$(cd "$repo" && "$SCRIPT" "$doc" 2>&1); got=$?
+  if [ "$got" -ne "$want" ]; then
+    echo "FAIL  $name — exit $got, wanted $want"; printf '%s\n' "$out" | sed 's/^/        /'
+    fail=$((fail + 1)); return
+  fi
+  if [ -n "$pattern" ] && ! printf '%s\n' "$out" | grep -qE "$pattern"; then
+    echo "FAIL  $name — exit $got as wanted, but output lacks /$pattern/"
+    printf '%s\n' "$out" | sed 's/^/        /'; fail=$((fail + 1)); return
+  fi
+  echo "ok    $name"; pass=$((pass + 1))
+}
+
+# --- 1. durable prose passes ------------------------------------------------
+r=$(new_repo)
+echo 'The gateway is the sole trust boundary; it strips inbound trust headers.' > "$r/docs/kb.md"
+check "durable prose passes" 0 "$r" docs/kb.md 'OK: no decaying claim'
+
+# --- 2. V1 self-referential merge state -------------------------------------
+r=$(new_repo)
+echo 'The fix is real but PR #12 is still open, so do not cite it.' > "$r/docs/kb.md"
+check "V1 open-PR claim fails" 1 "$r" docs/kb.md 'V1 self-referential'
+
+r=$(new_repo)
+echo 'That control is not yet on `main`.' > "$r/docs/kb.md"
+check "V1 not-on-main claim fails" 1 "$r" docs/kb.md 'V1 self-referential'
+
+r=$(new_repo)
+echo 'The branch that untracks it is unpushed.' > "$r/docs/kb.md"
+check "V1 unpushed claim fails" 1 "$r" docs/kb.md 'V1 self-referential'
+
+# --- 3. V2 freshness stamp ---------------------------------------------------
+r=$(new_repo)
+echo '**Last synced:** 2026-08-24. Everything below is current.' > "$r/docs/kb.md"
+check "V2 freshness stamp fails" 1 "$r" docs/kb.md 'V2 freshness stamp'
+
+# --- 4. V3 base-tip assertion ------------------------------------------------
+r=$(new_repo)
+echo 'The `main` tip is `0d47601` today.' > "$r/docs/kb.md"
+check "V3 tip assertion fails" 1 "$r" docs/kb.md 'V[35]'
+
+# --- 5. V4 spelled-out count -------------------------------------------------
+r=$(new_repo)
+echo 'All nineteen are files in adr/ on the base branch.' > "$r/docs/kb.md"
+check "V4 spelled count fails" 1 "$r" docs/kb.md 'V4 spelled-out count'
+
+# --- 6. V5 scope: strict on kb.md, silent elsewhere --------------------------
+# This pins the two-tier design. The SAME line must fail in kb.md and pass in
+# CLAUDE.md, where PR numbers sit in stable rationale prose.
+r=$(new_repo)
+echo 'PR #12 was 7,009 additions across 46 files.' > "$r/docs/kb.md"
+check "V5 unanchored ref fails in kb.md" 1 "$r" docs/kb.md 'V5 unanchored ref'
+r2=$(new_repo)
+echo 'PR #12 was 7,009 additions across 46 files.' > "$r2/CLAUDE.md"
+check "V5 does not apply to CLAUDE.md" 0 "$r2" CLAUDE.md 'OK: no decaying claim'
+
+# --- 7. an anchored citation is history and must pass ------------------------
+# Without this case the gate could ban every ref outright and still look green.
+r=$(new_repo)
+echo 'D3 merged as #77 (`ceda4e2`), held by the blocking `atomic-apply-gate`.' > "$r/docs/kb.md"
+check "anchored ref passes" 0 "$r" docs/kb.md 'OK: no decaying claim'
+
+# --- 8. a bare number or an all-letter word is not a commit ------------------
+r=$(new_repo)
+echo 'The ceiling is 73400 and the balance column is decade-old code.' > "$r/docs/kb.md"
+check "non-commit tokens pass" 0 "$r" docs/kb.md 'OK: no decaying claim'
+
+# --- 9. the escape hatch, and its audit --------------------------------------
+r=$(new_repo)
+echo 'Artifact `5c9ed224` is immutable. <!-- VOLATILE-OK: artifact id, not a commit -->' > "$r/docs/kb.md"
+check "exemption suppresses a hit" 0 "$r" docs/kb.md 'OK: no decaying claim'
+
+r=$(new_repo)
+echo 'Nothing here decays at all. <!-- VOLATILE-OK: left over from an earlier edit -->' > "$r/docs/kb.md"
+check "stale exemption fails" 1 "$r" docs/kb.md 'STALE EXEMPTION'
+
+# --- 10. a required doc that is absent graded nothing ------------------------
+r=$(new_repo)
+check "absent required doc fails" 1 "$r" README.md 'MISSING REQUIRED DOC'
+
+# --- 11. an optional doc that is absent is SKIPPED, not a pass ----------------
+r=$(new_repo)
+check "absent optional doc skips" 0 "$r" docs/kb.md 'NOT graded'
+
+# --- 12. outside a git repo the gate must abort, not report clean ------------
+out=$(cd "$TMPROOT" && "$SCRIPT" 2>&1); got=$?
+if [ "$got" -eq 2 ]; then echo "ok    aborts outside a git repo"; pass=$((pass + 1));
+else echo "FAIL  aborts outside a git repo — exit $got, wanted 2"; fail=$((fail + 1)); fi
+
+echo ""
+echo "$pass passed, $fail failed"
+[ "$fail" -eq 0 ] || exit 1
