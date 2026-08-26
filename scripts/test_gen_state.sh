@@ -137,6 +137,54 @@ r=$(new_repo); (cd "$r" && "$SCRIPT" >/dev/null)
 git -C "$r" add -A; git_c "$r" commit -qm "docs: regenerate state"
 run "committing the page on main re-stales it" 1 "$r" 'STALE:' --check
 
+# --- 12. a merge-ref checkout grades against main's TIP, not the branch base ---
+# Characterization of git, and the reason ci.yml must pin the PR head sha.
+# `actions/checkout@v4` on a pull_request checks out refs/pull/N/merge -- the branch
+# merged with the base tip -- and the base tip is then an ANCESTOR of HEAD, so the
+# merge base collapses to that tip. Same commits, different checkout shape, opposite
+# verdict: clean at the branch head, STALE under the merge ref. That is how a sibling
+# PR merging turned every other open PR red while its page was correct.
+r=$(new_repo)
+git -C "$r" checkout -q -b topic4; echo w > "$r/w"; git -C "$r" add -A; git_c "$r" commit -qm work
+(cd "$r" && "$SCRIPT" >/dev/null)   # page generated at the branch base
+git -C "$r" add -A; git_c "$r" commit -qm "docs: regenerate state"
+run "clean at the branch head" 0 "$r" 'OK: docs/state.md matches' --check
+# a sibling merges into main, the branch is untouched
+git -C "$r" checkout -q main; git -C "$r" checkout -q -b sibling
+echo s > "$r/s"; git -C "$r" add -A; git_c "$r" commit -qm sibling
+git -C "$r" checkout -q main
+git_c "$r" merge -q --no-ff sibling -m "Merge pull request #8 from org/sibling"
+git -C "$r" checkout -q topic4
+run "branch head still clean after a sibling merge" 0 "$r" 'OK: docs/state.md matches' --check
+# now the merge-ref shape CI actually checks out
+git -C "$r" checkout -q -b prmerge topic4
+git_c "$r" merge -q --no-ff main -m "Merge main into topic4 (simulated refs/pull/N/merge)"
+run "merge ref grades against the tip" 1 "$r" 'STALE:' --check
+
+# --- 13. ci.yml pins the PR head sha for kb-freshness -------------------------
+# The defect above lives in the WORKFLOW, not the generator, so a case against the
+# script alone cannot catch a revert of the one line that fixes it. Grade the real
+# ci.yml: kb-freshness must check out the PR head, or its merge-base grading is the
+# tip grading and the job flaps on every sibling merge.
+CI="$(cd "$(dirname "$SCRIPT")/.." && pwd)/.github/workflows/ci.yml"
+if [ ! -f "$CI" ]; then
+  echo "FAIL  ci.yml not found at $CI"; fail=$((fail + 1))
+else
+  job=$(awk '/^  kb-freshness:/ { on = 1; next } on && /^  [A-Za-z0-9_-]+:/ { on = 0 } on' "$CI")
+  if [ -z "$job" ]; then
+    # An empty block is "verified nothing", not "verified clean": the job was renamed,
+    # deleted, or awk failed. That is a failure, never a silent pass.
+    echo "FAIL  kb-freshness job not found in ci.yml -- renamed, removed, or unreadable"
+    fail=$((fail + 1))
+  elif printf '%s\n' "$job" | grep -qF 'ref: ${{ github.event.pull_request.head.sha }}'; then
+    echo "ok    kb-freshness checks out the PR head sha"; pass=$((pass + 1))
+  else
+    echo "FAIL  kb-freshness does not pin github.event.pull_request.head.sha --"
+    echo "        the default merge-ref checkout makes its merge base main's tip."
+    fail=$((fail + 1))
+  fi
+fi
+
 # --- 11. outside a git repo ---------------------------------------------------
 out=$(cd "$TMPROOT" && "$SCRIPT" 2>&1); got=$?
 if [ "$got" -eq 2 ]; then echo "ok    aborts outside a git repo"; pass=$((pass + 1))

@@ -1072,6 +1072,14 @@ jobs:
     # sibling PR merging does not turn every other open PR red. The fix when it fails is
     # always the same one command: `make kb`, then commit.
     #
+    # That insulation is only real because the checkout below pins the PR HEAD sha. The
+    # default pull_request checkout is refs/pull/N/merge -- the branch already merged
+    # with the base tip -- which makes that tip an ANCESTOR of HEAD, so `git merge-base
+    # origin/main HEAD` collapses to main's tip and the merge-base grading silently
+    # becomes tip grading. It did: #92 merging turned #93 red over a page #93 never
+    # touched. test_gen_state.sh pins both halves -- `merge ref grades against the tip`
+    # (the git behaviour) and `kb-freshness checks out the PR head sha` (this file).
+    #
     # pull_request ONLY, and that is structural rather than a convenience. On main the
     # merge base IS the tip, so the merge commit that lands a regenerated page becomes
     # the base the page would have to describe -- a state no committed file can ever be
@@ -1085,6 +1093,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # The PR head, NOT the default merge ref -- see the note above. The page is
+          # authored on the branch, so the branch is what must be graded.
+          ref: ${{ github.event.pull_request.head.sha }}
       - name: Fetch main so a merge base exists
         # A PR checkout has no origin/main ref by default, and the generator must abort
         # rather than describe the wrong base -- so fetch it explicitly. No --depth here:
