@@ -192,10 +192,12 @@ Each slice is one pull request, at or under 800 changed lines, with at most two 
     `{'message': ...}` body on the `llm.complete` span. Fixed by raising with
     `from None` at both translation sites in `app/llm/adapter.py`, with
     `tests/test_trace_error_boundary.py` asserting the rendered traceback.
-- The trace root opens inside `assistant.run()`, so "entry" means entry to the assistant,
-  not the officer's HTTP request. The route wrapper (`app/main.py::_run_assistant`) and the
-  gateway hop are not spans, so a 404/422/503 refused before the loop starts produces no
-  trace at all.
+- The trace root is now `assistant.entry` on the route funnel
+  (`app/main.py::_run_assistant`), so a refusal raised before the loop starts is traced
+  with an enum refusal code. Still outside it: the gateway hop, and the route's own
+  pre-funnel refusals (`require_officer`/`deny_self_decision` 403, unknown `policy_topic`
+  422) — an authz denial never reaches the assistant and carries nothing a content-free
+  span could record.
 - The model is Claude Haiku 4.5, not an Opus- or Sonnet-tier model.
 
 ## 7. Verification
