@@ -211,9 +211,9 @@ call site is one function, `_build_agent`.
 is what keeps a billable bureau pull from firing twice; the model is Claude Haiku 4.5.
 
 **Operational impact.** `CLAUDE_PROVIDER` and `AWS_REGION` are pinned in
-`docker-compose.demo.yml` by PR #87, which is open at this ADR's date — until it merges the
-demo selects its provider from a host export, and the base file defaults to `anthropic`.
-Credentials stay host-shell-only in either case. `LANGSMITH_TRACING` is off by
+`docker-compose.demo.yml` (PR #87, `6a50680`), so a forgotten host export cannot silently run
+the demo against the direct Anthropic API; the base file still defaults to `anthropic`, and a
+host export still overrides both. Credentials stay host-shell-only. `LANGSMITH_TRACING` is off by
 default, so the trace is opt-in per environment.
 
 **Testing impact.** The blocking `agentic-loop-gate` runs the loop, the interlocks, the trace
