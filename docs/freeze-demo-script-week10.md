@@ -16,24 +16,34 @@ git rev-parse HEAD                 # note this SHA — cite it, not "main", duri
 cp .env.example .env                # POSTGRES_PASSWORD has no committed default; also gives
                                      # POLICY_RETRIEVAL_MIN_SCORE its working value (0.1609)
 export LLM_ENABLED=true             # feature gate for every LLM route — host shell only
-export CLAUDE_PROVIDER=bedrock      # §2-§3 are cited as real Bedrock below; without this
-                                     # the demo runs direct-Anthropic instead
 export AWS_BEARER_TOKEN_BEDROCK=... # or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY —
                                      # host shell only, never in a committed file
+                                     # CLAUDE_PROVIDER/AWS_REGION need no export: the demo
+                                     # override pins bedrock + us-east-1 (see below)
 export LANGSMITH_TRACING=true       # required for the trace-id walk in §2 step 4
 export LANGSMITH_API_KEY=...        # host shell only, never in a committed file
 docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
 ```
 
-`docker-compose.demo.yml` supplies internal-service tokens and the
-`ENVIRONMENT=development`/`ALLOW_SYNTHETIC_CREDIT` gates only — it does **not** set
-`LLM_ENABLED`, `LANGSMITH_TRACING`, or `CLAUDE_PROVIDER` (all three interpolate from the host
-shell in `docker-compose.yml`, `${VAR:-}`-style, defaulting to unset/false/anthropic). The
-exports above are what turn them on. Confirm before the room fills:
+`docker-compose.demo.yml` supplies internal-service tokens, the
+`ENVIRONMENT=development`/`ALLOW_SYNTHETIC_CREDIT` gates, and the two non-secret
+provider-selection keys: `CLAUDE_PROVIDER=bedrock` and `AWS_REGION=us-east-1`. Those two are
+pinned in the file precisely because a forgotten export does not fail — it runs the whole
+demo against the direct Anthropic API while the deck cites Bedrock. Both are still
+`${VAR:-...}`, so a host export overrides them.
+
+What the override does **not** set, and must come from the host shell: `LLM_ENABLED`,
+`LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, and the AWS credential. The exports above are what
+turn those on. Confirm before the room fills:
 
 ```bash
 curl -s localhost:8001/health | python3 -m json.tool     # origination-service healthy
 ```
+
+That check does **not** exercise the AWS credential. `/health` probes the required secrets and
+the database, never the model, and origination builds its Bedrock client lazily — so a stack
+started with no credential reports healthy and then fails on the first assistant call in §2.
+The credential check is §4's proof run. Do it before §2, not after.
 
 ## 2. Happy path
 
@@ -102,8 +112,11 @@ empty and the service starts with the threshold genuinely unset (ADR 0019 fail-c
 
 ## 4. Exact-SHA Bedrock proof run
 
-Run this once, off a clean tree, before the room — not live, since it costs a real bureau/model
-call and its output should be captured, not re-run per rehearsal.
+**This is the pre-room credential check, not only a receipt.** Nothing in §1–§3 proves an AWS
+credential resolves: `compose up` succeeds and `/health` returns 200 without one, and the first
+thing that touches AWS is the live assistant call in §2. Run this once, off a clean tree, before
+the room and before §2 — not live, since it costs a real bureau/model call and its output should
+be captured, not re-run per rehearsal.
 
 ```bash
 cd services/origination-service
@@ -133,8 +146,9 @@ State plainly, don't let it be inferred:
 
 - **Real**: the LLM calls in §2–§3 are real Bedrock invocations of **Claude Haiku 4.5** (not a
   fixture, not a mock) when `LLM_ENABLED=true`, `CLAUDE_PROVIDER=bedrock`, and a live AWS
-  credential are present — which the §1 export block provides (the demo override itself sets
-  none of the three).
+  credential are present. `CLAUDE_PROVIDER` (and `AWS_REGION`) come from the demo override;
+  `LLM_ENABLED` and the credential come from the §1 export block, because a feature gate and
+  a secret are not things a committed file should decide.
 - **Fixture**: the test suite (`FakeAdapter`, `native_adapter` in
   `services/origination-service/tests/test_native_script.py`) never calls a real model; it is there to prove the loop,
   interlocks, and content redaction independent of provider availability or cost.
@@ -172,3 +186,27 @@ loop swap, the blocking `agentic-loop-gate`, and the trace surface) with
 debt-log status discipline (`CLAUDE.md` "Debt-log status vocabulary"). `docs/debt-log.md`'s
 D19 entry was checked against the same rule and is already correct (`Mitigated`, citing
 `payment-idempotency-gate`) — no change needed there.
+
+## 8. Handoff ownership
+
+**Sole owner: `maha-c`** (the FDE who built this program's weeks 1–10). There is no second
+maintainer and no on-call rotation behind any of it — a receiving team inherits one author's
+work, and the list below is what they would be inheriting, not a division of labour that
+exists today.
+
+| Surface | Where it lives | What owning it means |
+|---|---|---|
+| Officer assistant loop | `services/origination-service/app/assistant.py`, `app/llm/chat_model.py` | The five interlocks (single score, explain-path substitution, query strip, step exhaustion as refusal, single search) plus PT-001's other half — a `policy_topic` run that reaches `final` having never searched is refused in code, not trusted to the prompt — and their tests in the blocking `agentic-loop-gate` |
+| Root trace and its content rule | `app/main.py` (`assistant.entry`, the route-funnel root), `app/assistant.py` CONTENT RULE and the `assistant.request` loop root, `app/llm/client.py`, `app/llm/transport.py` | Every new span key is a decision: enum codes, integers, booleans, retrieval scores and chunk ids only — never an identifier, never prose. And no caught exception may cross the entry span: each is translated to an enum refusal code inside it, because `trace()` would otherwise attach a provider message or an `app_id`-bearing URL to the span |
+| Policy retrieval and the corpus | `app/policy_retrieval.py`, `policies/` | The 8-code `policy_topic` vocabulary, the fail-closed score threshold, and the hygiene refusal on a bind-mounted corpus. Corpus CONTENT is Lending Ops' (`policies/fee_schedule.md` names them), the retrieval path is ours |
+| Provider selection and the proof | `app/llm/config.py`, `scripts/bedrock_proof.py` | The pinned region, the bedrock-runtime region allowlist, and re-running the proof receipt at whatever SHA is being cited |
+| Demo runtime | `docker-compose.demo.yml`, this document | Keeping the pinned provider/region and the export block in step with what the deck claims |
+
+**Status of the thing being handed over.** This is a synthetic training demonstration, not a
+production certification. No applicant data in it is real, the credit model is a
+deterministic stand-in, and nothing here has been through a compliance review. The blocking
+CI gates are real and hold real controls; they are not an assurance opinion.
+
+**What a receiving team should read first, in order:** `docs/kb.md` (orientation),
+`docs/plan-freeze-agentic-week10.md` (the decisions and their rejected alternatives),
+`docs/debt-log.md` (what is knowingly unbuilt, D-numbered), then this document's §6.

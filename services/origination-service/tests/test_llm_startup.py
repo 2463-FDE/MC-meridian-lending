@@ -133,21 +133,24 @@ def test_get_llm_client_503_when_disabled(monkeypatch):
 REPO = Path(__file__).resolve().parents[3]
 
 
-def _origination_environment_block() -> str:
-    """origination-service's `environment:` mapping in the BASE compose file.
+def _origination_environment_block(compose: str = "docker-compose.yml") -> str:
+    """origination-service's `environment:` mapping in `compose`.
+
+    Defaults to the BASE compose file; the demo override is read by passing its name,
+    rather than by a second copy of this reader.
 
     Asserts the stanza exists: a check that silently finds nothing must not report success
     over a file it never read.
     """
-    lines = (REPO / "docker-compose.yml").read_text().splitlines()
+    lines = (REPO / compose).read_text().splitlines()
     starts = [i for i, line in enumerate(lines) if line == "  origination-service:"]
-    assert starts, "no `  origination-service:` stanza in docker-compose.yml"
+    assert starts, f"no `  origination-service:` stanza in {compose}"
     block = []
     for line in lines[starts[0] + 1 :]:
         if re.match(r"^  \S", line):  # next service key, same indent
             break
         block.append(line)
-    assert block, "origination-service stanza in docker-compose.yml is empty"
+    assert block, f"origination-service stanza in {compose} is empty"
     return "\n".join(block)
 
 
@@ -175,3 +178,77 @@ def test_compose_leaves_the_llm_feature_gate_off_by_default():
     assert match, "LLM_ENABLED is not interpolated with a default"
     default = match.group("default").strip().strip('"').strip("'")
     assert default == "", f"LLM_ENABLED must default to empty (off), not {default!r}"
+
+
+# --- boot does not check AWS credentials, and the demo override must not claim it does ----
+#
+# The demo override pins CLAUDE_PROVIDER=bedrock. Its comment claimed that enabling the LLM
+# feature without an AWS credential "FAILS AT BOOT". It does not: load_llm_config() only
+# requires CLAUDE_API_KEY on the `anthropic` path, and says so -- boto3 resolves Bedrock
+# credentials at call time (env, profile, SSO, instance role), forms this function cannot
+# detect from env vars. Startup then builds BedrockAdapter, whose SDK client is constructed
+# lazily on first use. So the stack boots, /health returns 200 (it probes secrets and the
+# database, never the model), and the first assistant call is where the missing credential
+# surfaces -- mid-demo, which is the outcome the comment promised was impossible.
+#
+# Two tests, because the claim failed in two places: one pins the runtime behaviour, one
+# pins the document that describes it.
+
+
+def test_startup_succeeds_on_bedrock_without_aws_credential(monkeypatch):
+    """provider=bedrock + no AWS credential => boot SUCCEEDS; the failure is at call time.
+
+    This is a characterization test, not a regression test: the code already behaves this
+    way and always did -- the compose comment was the thing that was wrong. Its job is to
+    make the documented contract executable, so that adding a startup credential preflight
+    (the other candidate fix) breaks a test that names the trade-off instead of silently
+    changing when a stack is allowed to come up.
+    """
+    monkeypatch.setenv("LLM_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_PROVIDER", "bedrock")
+    # The exact configuration the comment named: an Anthropic key present, no AWS credential.
+    monkeypatch.setenv("CLAUDE_API_KEY", "test-key")
+    for var in (
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_PROFILE",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    with TestClient(app):
+        assert isinstance(app.state.llm_client, ClaudeClient)
+        assert app.state.llm_config.provider == "bedrock"
+
+
+def test_demo_compose_does_not_claim_a_missing_credential_fails_at_boot():
+    """The demo override may not tell an operator that boot proves the credential.
+
+    Scoped to a credential claim on purpose: the AWS_REGION comment in the same block
+    says a bad region is "refused at boot", which is TRUE (_aws_region raises inside
+    load_llm_config), so a blanket ban on the words would fail an accurate line.
+    """
+    block = _origination_environment_block("docker-compose.demo.yml")
+    comment = " ".join(
+        line.split("#", 1)[1].strip() for line in block.splitlines() if "#" in line
+    )
+
+    for pattern in (
+        r"credential[^.]*fails?\s+at\s+boot",
+        r"fails?\s+at\s+boot[^.]*credential",
+    ):
+        assert not re.search(pattern, comment, re.I), (
+            "docker-compose.demo.yml tells the reader that a missing AWS credential fails "
+            "at boot. It does not -- load_llm_config() does not validate Bedrock "
+            "credentials (app/llm/config.py), and BedrockAdapter builds its SDK client "
+            "lazily, so the stack boots clean and dies on the first model call. An "
+            "operator who trusts this comment treats `compose up` as the credential "
+            "check and finds out in the room."
+        )
+
+    assert re.search(r"first\s+model\s+call", comment, re.I), (
+        "docker-compose.demo.yml must name where a missing AWS credential actually "
+        "surfaces (the first model call), so the pre-room check is the Bedrock proof "
+        "run and not `compose up`"
+    )

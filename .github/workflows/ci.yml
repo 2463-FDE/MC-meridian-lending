@@ -291,7 +291,8 @@ jobs:
         # the flag is a deliberate, non-production debugging act by whoever exports it in
         # their own shell, never a property of a file anyone can inherit. Today the base
         # file interpolates it (${LLM_TRACE_CONTENT:-false}), .env.example keeps the line
-        # commented, and the demo override sets none of the LLM keys. This asserts that,
+        # commented, and the demo override sets only the two non-secret provider-selection
+        # keys (CLAUDE_PROVIDER, AWS_REGION) and no trace or content key. This asserts that,
         # in EVERY committed compose file including the demo override -- the base-file-only
         # scope of the step above is wrong for this key, because the demo override is
         # exactly where a "make the trace readable on stage" edit would land. Only a
@@ -299,6 +300,24 @@ jobs:
         # interpolation defaulting to true or to nothing must fail too, see
         # scripts/check_compose_trace_flag.sh.
         run: ./scripts/check_compose_trace_flag.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: demo override's boot claims match what boot actually checks
+        # test_llm_startup.py's two compose assertions are the reason this step exists:
+        # one pins the runtime behaviour (provider=bedrock with NO AWS credential boots
+        # clean -- load_llm_config validates CLAUDE_API_KEY only on the anthropic path and
+        # BedrockAdapter builds its SDK client lazily), the other pins the demo override's
+        # comment so it cannot tell an operator that `compose up` proves the credential.
+        # The file also runs in the `backend` matrix job, which is continue-on-error +
+        # `|| true` -- so without this step a comment that promises a boot-time credential
+        # check could regress on a green build, and the operator finds out in the room.
+        # Its own install line, per the kyc-persistence-gate lesson: this step must not
+        # pass on a package an unrelated earlier step installed.
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_llm_startup.py -q
 
   kyc-enforcement-gate:
     # ADR 0011 is a compliance control: a regulated decision, an offer, and loan boarding
@@ -569,7 +588,9 @@ jobs:
     # and reconciliation-gate exist to close for their own surfaces. This job MUST block --
     # no continue-on-error, no `|| true`.
     #
-    # Four interlocks the loop swap (#76) preserved, each with a test in this list:
+    # Five interlocks the loop swap (#76) preserved, each with a test in this list. Four
+    # live in the tool closures and are covered by test_assistant.py; the fifth is PT-001,
+    # added by #71 and covered by test_policy_topic.py:
     #   single-score cache          two score_application calls in one turn would fire two
     #                                regulated decision_events
     #   explain-path substitution   a score on an explain-only turn is a billable credit pull
@@ -581,14 +602,24 @@ jobs:
     #                                CompletionRequest, not the seam's intent
     #   step exhaustion as refusal  create_agent's recursion limit must map to a refusal
     #                                (404/422/502/503), not an unmapped 500
+    #   single search per run       PT-001: search_policy is honoured at most once, so a
+    #                                model cannot compound retrieval calls or citations;
+    #                                the second call is served the first answer. Its other
+    #                                half is the same rule read backwards -- a policy_topic
+    #                                run that reaches `final` having never searched is
+    #                                refused in code, because that answer is
+    #                                indistinguishable from one that searched and abstained
     #
-    # test_assistant.py            the loop, the four interlocks above
+    # test_assistant.py            the loop, and the first four interlocks above
     # test_assistant_trace.py      the root trace span shape and the no-identifiers content
     #                               rule (enum codes, integers, booleans, retrieval scores and
     #                               chunk ids only -- never application_id or request_id)
     # test_policy_retrieval.py     search_policy retrieval and the fail-closed score threshold
     # test_policy_topic.py         the closed 8-code policy_topic vocabulary; a free-text
-    #                               question is masked before the model sees it
+    #                               question is masked before the model sees it. Also
+    #                               interlock 5 (PT-001), both halves: a second search is
+    #                               served from cache, and an unsearched policy final is
+    #                               refused
     # test_prompt_contracts.py     tool_choice is asserted PRESENT now that create_agent binds
     #                               tools -- this file used to assert its absence
     # test_chat_model.py           MeridianChatModel / bind_tools, now wired into the loop
