@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (49390fe)` — 49390fe 2026-08-26 Merge pull request #91 from 2463-FDE/chore/kb-mutability-split
+Base: `origin/main (1eec439)` — 1eec439 2026-08-26 Merge pull request #92 from 2463-FDE/fix/cvv-deletion
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #92 | `1eec439` | 2026-08-26 | Merge pull request #92 from 2463-FDE/fix/cvv-deletion |
 | #91 | `49390fe` | 2026-08-26 | Merge pull request #91 from 2463-FDE/chore/kb-mutability-split |
 | #90 | `4fea412` | 2026-08-26 | Merge pull request #90 from 2463-FDE/fix/payment-idempotency-ui |
 | #89 | `ac74ccd` | 2026-08-26 | Merge pull request #89 from 2463-FDE/docs/post-merge-truth-sweep |
