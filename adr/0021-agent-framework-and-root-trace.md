@@ -217,8 +217,9 @@ Credentials stay host-shell-only in either case. `LANGSMITH_TRACING` is off by
 default, so the trace is opt-in per environment.
 
 **Testing impact.** The blocking `agentic-loop-gate` runs the loop, the interlocks, the trace
-content rule, the prompt contracts, the chat model, native tool_use, the tool schemas, retrieval
-and the policy-topic vocabulary. `test_prompt_contracts.py` inverted: it asserted `tool_choice`
+content rule, the prompt contracts, the chat model, native tool_use, the tool schemas, retrieval,
+the policy-topic vocabulary, and — since #86 — `test_injection_resistance.py`, which asserts that
+every inbound channel to the model is a projection to enum codes, integers and code lists. `test_prompt_contracts.py` inverted: it asserted `tool_choice`
 was ABSENT under the JSON-action protocol and now asserts it is present.
 
 ---
