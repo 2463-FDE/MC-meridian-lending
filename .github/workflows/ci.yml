@@ -760,11 +760,13 @@ jobs:
     # on (e.g. a document_body ALTER before its CREATE TABLE). This branch hit exactly that
     # with two 0011_* files.
     #
-    # Executability: no job in this file runs migration SQL (there is no postgres service and
-    # no psql step anywhere), and the DDL tests are text assertions, so 0018 merged unable to
-    # parse -- a `DO $$` body closed early by a nested `$$` literal, aborting the migration at
-    # a syntax error and skipping every verification block after it. The second step below
-    # reproduces Postgres's dollar-quote lexing rule over every SQL file in the repo.
+    # Executability: the DDL tests are text assertions, so 0018 merged unable to parse -- a
+    # `DO $$` body closed early by a nested `$$` literal, aborting the migration at a syntax
+    # error and skipping every verification block after it. The second step below reproduces
+    # Postgres's dollar-quote lexing rule over every SQL file in the repo, so it grades every
+    # migration without a database. Exactly one job DOES run migration SQL against a real
+    # server -- no-sad-gate, which has a postgres service and applies 0020 -- and it covers
+    # that one file only; this job stays the check that holds for all of them.
     #
     # Blocking -- no continue-on-error, no `|| true`.
     runs-on: ubuntu-latest
