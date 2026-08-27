@@ -23,7 +23,13 @@ _LOG_TRACE = (
 )
 
 
-def _hygiene_section(verdicts: list[FileVerdict]) -> list[str]:
+def _hygiene_section(
+    verdicts: list[FileVerdict], display_names: dict[str, str] | None = None
+) -> list[str]:
+    # `display_names` maps a path to the name safe to print for it: under manifest
+    # admission the filename is graded by nothing and can itself be the identifier,
+    # so the report shows the digest-derived doc id instead (run.corpus_doc_id).
+    display_names = display_names or {}
     lines = ["## Corpus hygiene gate (ADR 0007)", ""]
     lines.append("| File | Verdict | Findings (count per type) | Masked samples |")
     lines.append("|------|---------|---------------------------|----------------|")
@@ -33,7 +39,8 @@ def _hygiene_section(verdicts: list[FileVerdict]) -> list[str]:
         samples = sorted({f.masked_sample for f in v.findings})[:3]
         sample_str = ", ".join(f"`{s}`" for s in samples) or "—"
         verdict = "PASS" if v.passed else "**REFUSED**"
-        lines.append(f"| `{v.path}` | {verdict} | {count_str} | {sample_str} |")
+        name = display_names.get(v.path, v.path)
+        lines.append(f"| `{name}` | {verdict} | {count_str} | {sample_str} |")
     lines += [
         "",
         "Refused files are excluded wholesale — never chunked, embedded, or cached "
@@ -68,8 +75,8 @@ def _metrics_section(
             lines.append(f"| `{name}` | {stat.n} | {stat.correct} |")
     lines += [
         "",
-        "| Query | Expected chunk(s) | Top retrieved (score) | hit@1/3/5 | RR | Verdict |",
-        "|-------|-------------------|-----------------------|-----------|----|---------|",
+        "| Question id | Expected chunk(s) | Top retrieved (score) | hit@1/3/5 | RR | Verdict |",
+        "|-------------|-------------------|-----------------------|-----------|----|---------|",
     ]
     for e in evals:
         # Label an empty expected by what the case IS, not by what is missing:
@@ -89,7 +96,11 @@ def _metrics_section(
             hits = "/".join("✓" if e.hits[k] else "✗" for k in K_VALUES)
             verdict = "✓" if e.correct else "✗"
         lines.append(
-            f"| {e.query_id}: {e.query} | {expected} | {top} | {hits} | "
+            # Question identified by id, never by text: a supplied evaluation
+            # question is content the client excluded from retention, and this
+            # report is a file on disk. `gold_queries.json` maps id back to text
+            # for whoever legitimately holds it.
+            f"| {e.query_id} | {expected} | {top} | {hits} | "
             f"{e.reciprocal_rank:.2f} | {verdict} |"
         )
     lines += [
@@ -152,7 +163,7 @@ def _data_gaps_section(evals: list[QueryEval]) -> list[str]:
         for e in false_confident:
             top_id, top_score = e.retrieved[0]
             lines.append(
-                f'- **{e.query_id}** ("{e.query}"): top hit `{top_id}` scored '
+                f"- **{e.query_id}**: top hit `{top_id}` scored "
                 f"{top_score:.3f}, above the calibrated threshold. The chunk describes "
                 "*process/policy*, not the answer — it does not contain why this specific "
                 "application was denied. A naive helper would return plausible-but-wrong "
@@ -168,14 +179,41 @@ def build(
     *,
     verdicts: list[FileVerdict],
     n_chunks: int,
+    display_names: dict[str, str] | None = None,
     cache_hits: int,
     cache_misses: int,
+    caching: bool,
+    provider_calls: int,
+    provider_retries: int,
+    provider_input_tokens: int,
     threshold: float,
     evals: list[QueryEval],
     agg: Aggregate,
     embedder_signature: str,
 ) -> str:
     refused = sum(1 for v in verdicts if not v.passed)
+    # The cache counters only describe a run that had a cache. A provider backend
+    # runs cacheless (rag_eval/run.py::cache_enabled), so hits and misses are both
+    # structurally 0 there — printing them would report "nothing re-embedded" for
+    # the graded configuration, which re-embeds every chunk and every gold query
+    # on every run. Report the provider's own call counters in that mode instead.
+    if caching:
+        embedding_line = (
+            f"- Embeddings computed this run: {cache_misses}; "
+            f"served from cache: {cache_hits}"
+            + (
+                " — **unchanged corpus, nothing re-embedded** (spec D1.3)"
+                if cache_misses == 0
+                else ""
+            )
+        )
+    else:
+        embedding_line = (
+            f"- Embedding calls this run: {provider_calls} "
+            f"({provider_retries} retries, {provider_input_tokens} input tokens) "
+            "— provider backend, no on-disk cache: every indexed chunk and every "
+            "gold query is re-embedded on each run"
+        )
     lines = [
         "# RAG Retrieval Eval Report (Week 2)",
         "",
@@ -186,17 +224,12 @@ def build(
         "",
         f"- Files scanned by hygiene gate: {len(verdicts)} ({refused} refused)",
         f"- Chunks indexed: {n_chunks}",
-        f"- Embeddings computed this run: {cache_misses}; served from cache: {cache_hits}"
-        + (
-            " — **unchanged corpus, nothing re-embedded** (spec D1.3)"
-            if cache_misses == 0
-            else ""
-        ),
+        embedding_line,
         f"- Embedding backend: `{embedder_signature}`",
         f"- Calibrated confidence threshold: {threshold:.4f}",
         "",
     ]
-    lines += _hygiene_section(verdicts)
+    lines += _hygiene_section(verdicts, display_names)
     lines += _metrics_section(evals, agg, threshold, embedder_signature)
     lines += _data_gaps_section(evals)
     return "\n".join(lines)

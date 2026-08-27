@@ -615,6 +615,11 @@ jobs:
     #                               rule (enum codes, integers, booleans, retrieval scores and
     #                               chunk ids only -- never application_id or request_id)
     # test_policy_retrieval.py     search_policy retrieval and the fail-closed score threshold
+    # test_policy_corpus_manifest.py  manifest admission of a supplied corpus: the set the
+    #                               manifest audit walks is the set the loader indexes, and a
+    #                               chunk-id collision between two approved documents indexes
+    #                               nothing rather than serving one document's text under the
+    #                               other's citation
     # test_policy_topic.py         the closed 8-code policy_topic vocabulary; a free-text
     #                               question is masked before the model sees it. Also
     #                               interlock 5 (PT-001), both halves: a second search is
@@ -647,6 +652,7 @@ jobs:
           python -m pytest tests/test_assistant.py \
                            tests/test_assistant_trace.py \
                            tests/test_policy_retrieval.py \
+                           tests/test_policy_corpus_manifest.py \
                            tests/test_policy_topic.py \
                            tests/test_prompt_contracts.py \
                            tests/test_chat_model.py \

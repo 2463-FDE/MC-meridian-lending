@@ -5,8 +5,10 @@ import io
 import json
 from pathlib import Path
 
-from rag_eval.embedder import BedrockEmbedder
-from rag_eval.run import calibrate_threshold, make_embedder, run
+import pytest
+
+from rag_eval.embedder import DEFAULT_EMBED_DIMENSIONS, BedrockEmbedder
+from rag_eval.run import calibrate_threshold, main, make_embedder, run
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -622,20 +624,83 @@ def test_run_with_bedrock_backend(tmp_path: Path, monkeypatch):
 
     def fake_make_embedder():
         return BedrockEmbedder(
-            model_id="fake-model", client=_DeterministicBedrockClient()
+            model_id="fake-model",
+            client=_DeterministicBedrockClient(),
+            dimensions=8,  # matches the fake client's fixed width
         )
 
     monkeypatch.setattr("rag_eval.run.make_embedder", fake_make_embedder)
 
     result = run(base=tmp_path)
     assert result.n_chunks == 2
-    assert result.embedder_signature == "bedrock-v1:fake-model"
-    assert "bedrock-v1:fake-model" in result.report_text
-    # Dense vectors landed in the cache as JSON lists, not sparse dicts.
-    cached = json.loads(
-        (tmp_path / "rag_eval" / ".cache" / "embeddings.json").read_text()
+    assert result.embedder_signature == "bedrock-v1:fake-model:8"
+    assert "bedrock-v1:fake-model:8" in result.report_text
+    # CONTRACT CHANGE: a provider run is cacheless. Dense vectors are
+    # content-derived, and retaining them on disk is what `cache_enabled` refuses
+    # — so the assertion is that the cache file is ABSENT, not that it holds
+    # JSON lists. The cache class itself stays backend-agnostic
+    # (test_embedder.py::test_bedrock_cache_prevents_re_embedding still covers it).
+    assert not (tmp_path / "rag_eval" / ".cache" / "embeddings.json").exists()
+    assert result.cache_hits == 0 and result.cache_misses == 0
+
+
+class _MeteredBedrockClient(_DeterministicBedrockClient):
+    """Adds the response fields a real Bedrock call carries: botocore's own
+    retry count and the model's input token count."""
+
+    def invoke_model(self, modelId, body):  # noqa: N803 — boto3's kwarg name
+        text = json.loads(body)["inputText"]
+        digest = hashlib.sha256(text.encode()).digest()
+        payload = json.dumps(
+            {
+                "embedding": [digest[i] / 255.0 for i in range(8)],
+                "inputTextTokenCount": 7,
+            }
+        )
+        self.calls += 1
+        return {
+            "body": io.BytesIO(payload.encode()),
+            "ResponseMetadata": {"RetryAttempts": 1},
+        }
+
+
+def test_provider_run_reports_provider_calls_not_cache_counters(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # A provider run is cacheless, so cache hits/misses are structurally 0 — the
+    # report and the CLI must not read a full re-embed as "nothing re-embedded".
+    policies = tmp_path / "policies"
+    policies.mkdir()
+    (policies / "clean.md").write_text(
+        "# Clean Policy\n\n## Fees\n\nLate payment fee is $35 flat.\n"
+        "\n## Approval\n\nApprove when model score is at least 660.\n",
+        encoding="utf-8",
     )
-    assert all(isinstance(v, list) for v in cached.values())
+    monkeypatch.setattr(
+        "rag_eval.run.make_embedder",
+        lambda: BedrockEmbedder(
+            model_id="fake-model", client=_MeteredBedrockClient(), dimensions=8
+        ),
+    )
+
+    main(base=tmp_path)
+    stdout = capsys.readouterr().out
+    result = run(base=tmp_path)
+
+    # Every indexed chunk AND every gold query is a provider call.
+    expected_calls = result.n_chunks + len(result.evals)
+    assert result.caching is False
+    assert result.cache_hits == 0 and result.cache_misses == 0
+    assert result.provider_calls == expected_calls
+    assert result.provider_retries == expected_calls  # one RetryAttempt per call
+    assert result.provider_input_tokens == 7 * expected_calls
+
+    assert "nothing re-embedded" not in result.report_text
+    assert f"Embedding calls this run: {expected_calls}" in result.report_text
+    assert f"{7 * expected_calls} input tokens" in result.report_text
+    # The CLI summary is the second surface that reported the cache counters.
+    assert f"{expected_calls} provider calls this run" in stdout
+    assert "embedded this run" not in stdout
 
 
 def test_make_embedder_default_is_tfidf(monkeypatch):
@@ -651,3 +716,89 @@ def test_make_embedder_rejects_unknown(monkeypatch):
     monkeypatch.setenv("RAG_EMBEDDER", "word2vec")
     with pytest.raises(ValueError, match="RAG_EMBEDDER"):
         make_embedder()
+
+
+# --- Blank (present-but-empty) env values ---------------------------------
+# docker-compose.yml passes `${RAG_EMBEDDER:-}`, which sets the variable to ""
+# rather than leaving it unset, so `os.getenv(name, default)` never returns its
+# default on the compose path. Treat blank/whitespace as unset for both
+# variables, or the keyless TF-IDF default is unreachable exactly where the
+# corpus is bind-mounted.
+
+
+def test_make_embedder_blank_value_falls_back_to_tfidf(monkeypatch):
+    from rag_eval.embedder import TfidfEmbedder
+
+    monkeypatch.setenv("RAG_EMBEDDER", "")
+    assert isinstance(make_embedder(), TfidfEmbedder)
+
+
+def test_make_embedder_whitespace_value_falls_back_to_tfidf(monkeypatch):
+    from rag_eval.embedder import TfidfEmbedder
+
+    monkeypatch.setenv("RAG_EMBEDDER", "   ")
+    assert isinstance(make_embedder(), TfidfEmbedder)
+
+
+def test_make_embedder_blank_model_uses_the_default_model(monkeypatch):
+    from rag_eval import run as run_mod
+
+    captured = {}
+
+    class _Stub:
+        def __init__(self, model_id, region=None, client=None):
+            captured["model_id"] = model_id
+
+    monkeypatch.setattr(run_mod, "BedrockEmbedder", _Stub)
+    monkeypatch.setenv("RAG_EMBEDDER", "bedrock")
+    monkeypatch.setenv("RAG_BEDROCK_MODEL", "")
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+    run_mod.make_embedder()
+    assert captured["model_id"] == run_mod._DEFAULT_BEDROCK_MODEL
+
+
+def test_make_embedder_bedrock_refuses_an_unusable_region(monkeypatch):
+    """An unset region is refused HERE, before boto3 is reached.
+
+    `docker-compose.yml` passes ``AWS_REGION: ${AWS_REGION:-}``, so an unset host
+    variable arrives as "" rather than absent — the same blank-env shape
+    `RAG_EMBEDDER` and `RAG_BEDROCK_MODEL` already normalize. Blank reached boto3
+    as ``region_name=""`` and built `https://bedrock-runtime..amazonaws.com`;
+    absent became ``region_name=None``, which lets boto3 resolve a region from
+    ambient host config, and Bedrock model access is granted per region. Neither
+    is an explicitly configured region, so both are refused with a message naming
+    the variable an operator has to set.
+
+    The refusal must precede the lazy `import boto3` — CI never installs boto3,
+    and a guard that only fires after the import is not a guard there.
+    """
+    monkeypatch.setenv("RAG_EMBEDDER", "bedrock")
+    for value in ("", "   "):
+        monkeypatch.setenv("AWS_REGION", value)
+        with pytest.raises(ValueError, match="AWS_REGION"):
+            make_embedder()
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    with pytest.raises(ValueError, match="AWS_REGION"):
+        make_embedder()
+
+
+def test_bedrock_embedder_refuses_a_regionless_client_construction():
+    """The refusal lives at the construction site, not only at `make_embedder`.
+
+    `.env.example` and `docker-compose.yml` both state that rag_eval refuses to
+    construct a Bedrock client without an explicit region; a guard only in the
+    env-reading caller would leave that claim false for any other caller.
+    """
+    with pytest.raises(ValueError, match="region"):
+        BedrockEmbedder(model_id="amazon.titan-embed-text-v2:0")
+
+
+def test_bedrock_embedder_injected_client_needs_no_region():
+    """An injected client carries its own region — tests must not need one."""
+    embedder = BedrockEmbedder(model_id="m", client=object())
+    embedder.fit([])
+    # The signature carries the output dimension too: it namespaces the on-disk
+    # cache, and the same model at a different dimension returns vectors of a
+    # different length, which a model-id-only key would serve from cache.
+    assert embedder.signature == f"bedrock-v1:m:{DEFAULT_EMBED_DIMENSIONS}"
