@@ -393,6 +393,9 @@ def test_report_does_not_label_a_scored_case_unanswerable():
         agg=aggregate([e]),
         threshold=0.5,
         embedder_signature="test",
+        corpus_signature="corpus-test",
+        wrong_abstain=0,
+        false_confident=0,
     )
 
     assert "q-scored" in text

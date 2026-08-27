@@ -438,6 +438,40 @@ class RunResult:
     provider_input_tokens: int
 
 
+def corpus_signature(chunks: list[Chunk]) -> str:
+    """A short content-address for the indexed corpus, for threshold provenance.
+
+    Derived from the chunk ids the run actually indexed, so it changes when a
+    document is added, removed, renamed, re-sectioned, or (under manifest
+    admission, where ids are digest-derived) edited at all. Order-independent,
+    because index order is not part of what the threshold was calibrated on.
+
+    Ids only, never text: this string is printed in the report, and chunk ids are
+    already the one corpus-derived identifier the report is allowed to carry.
+    """
+    joined = "\n".join(sorted(c.chunk_id for c in chunks))
+    return "corpus-" + hashlib.sha256(joined.encode("utf-8")).hexdigest()[:12]
+
+
+def threshold_errors(
+    answerable_tops: list[float], unanswerable_tops: list[float], threshold: float
+) -> tuple[int, int]:
+    """(answerable that would wrongly abstain, abstentions that are false-confident).
+
+    Reported beside the threshold because on a corpus whose sections repeat
+    across documents the two score distributions can overlap completely — the
+    highest-scoring abstention case outranking every answerable one. When that
+    happens no cutoff separates them, the calibrated value is already optimal,
+    and the remaining errors are a property of the corpus. Without this count a
+    reader sees a low abstention score and reaches for the threshold, which is
+    the one thing that cannot help.
+    """
+    return (
+        sum(1 for s in answerable_tops if s < threshold),
+        sum(1 for s in unanswerable_tops if s >= threshold),
+    )
+
+
 def calibrate_threshold(
     answerable_tops: list[float], unanswerable_tops: list[float]
 ) -> float:
@@ -878,6 +912,17 @@ def run(
     provider_calls = getattr(embedder, "calls", 0)
     provider_retries = getattr(embedder, "retries", 0)
     provider_input_tokens = getattr(embedder, "input_tokens", 0)
+    _ans_tops = [
+        e.retrieved[0][1]
+        for e in evals
+        if e.scorable and not e.unanswerable and e.retrieved
+    ]
+    _una_tops = [
+        e.retrieved[0][1] for e in evals if e.scorable and e.unanswerable and e.retrieved
+    ]
+    _wrong_abstain, _false_confident = threshold_errors(
+        _ans_tops, _una_tops, threshold
+    )
     report_text = report_mod.build(
         verdicts=verdicts,
         display_names=display_names,
@@ -892,6 +937,9 @@ def run(
         evals=evals,
         agg=agg,
         embedder_signature=embedder.signature,
+        corpus_signature=corpus_signature(chunks),
+        wrong_abstain=_wrong_abstain,
+        false_confident=_false_confident,
     )
     report_path = base / "rag_eval" / "eval_report.md"
     # Created explicitly: this directory used to exist only as a side effect of
