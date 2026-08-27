@@ -23,7 +23,13 @@ _LOG_TRACE = (
 )
 
 
-def _hygiene_section(verdicts: list[FileVerdict]) -> list[str]:
+def _hygiene_section(
+    verdicts: list[FileVerdict], display_names: dict[str, str] | None = None
+) -> list[str]:
+    # `display_names` maps a path to the name safe to print for it: under manifest
+    # admission the filename is graded by nothing and can itself be the identifier,
+    # so the report shows the digest-derived doc id instead (run.corpus_doc_id).
+    display_names = display_names or {}
     lines = ["## Corpus hygiene gate (ADR 0007)", ""]
     lines.append("| File | Verdict | Findings (count per type) | Masked samples |")
     lines.append("|------|---------|---------------------------|----------------|")
@@ -33,7 +39,8 @@ def _hygiene_section(verdicts: list[FileVerdict]) -> list[str]:
         samples = sorted({f.masked_sample for f in v.findings})[:3]
         sample_str = ", ".join(f"`{s}`" for s in samples) or "—"
         verdict = "PASS" if v.passed else "**REFUSED**"
-        lines.append(f"| `{v.path}` | {verdict} | {count_str} | {sample_str} |")
+        name = display_names.get(v.path, v.path)
+        lines.append(f"| `{name}` | {verdict} | {count_str} | {sample_str} |")
     lines += [
         "",
         "Refused files are excluded wholesale — never chunked, embedded, or cached "
@@ -154,6 +161,7 @@ def build(
     *,
     verdicts: list[FileVerdict],
     n_chunks: int,
+    display_names: dict[str, str] | None = None,
     cache_hits: int,
     cache_misses: int,
     caching: bool,
@@ -203,7 +211,7 @@ def build(
         f"- Calibrated confidence threshold: {threshold:.4f}",
         "",
     ]
-    lines += _hygiene_section(verdicts)
+    lines += _hygiene_section(verdicts, display_names)
     lines += _metrics_section(evals, agg, threshold, embedder_signature)
     lines += _data_gaps_section(evals)
     return "\n".join(lines)

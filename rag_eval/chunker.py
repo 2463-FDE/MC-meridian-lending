@@ -25,9 +25,20 @@ def _slug(heading: str) -> str:
     return s or "_intro"
 
 
-def chunk_markdown(path: str | Path) -> list[Chunk]:
+def chunk_markdown(path: str | Path, doc_id: str | None = None) -> list[Chunk]:
     path = Path(path)
-    doc = path.stem
+    # `doc_id` overrides the stem, and a manifest-admitting caller MUST pass one
+    # (`run.corpus_doc_id`): on that path the filename is graded by nothing, so a
+    # bare person name would become the officer-visible chunk id. The stem is used
+    # only where admission is the lowercase-slug convention, which grades it.
+    #
+    # Lowercased so an approved corpus whose filenames are not slugs still yields
+    # ids `run._CHUNK_ID` accepts — otherwise no gold `expected` entry could
+    # reference them. Two documents sharing a stem collide here — case variants,
+    # or the same stem in two directories. The callers reject duplicate ids after
+    # chunking: `run()` aborts, and origination's policy_retrieval indexes
+    # nothing.
+    doc = doc_id if doc_id is not None else path.stem.lower()
     title = ""
     section = "_intro"
     buf: list[str] = []
@@ -46,8 +57,10 @@ def chunk_markdown(path: str | Path) -> list[Chunk]:
             # a colliding corpus is an authoring error, not a run to paper over.
             if chunk_id in seen:
                 raise ValueError(
-                    f"duplicate chunk id {chunk_id!r} in {path} — two sections "
-                    f"slug to the same id (rename a heading so ids stay unique)"
+                    f"duplicate chunk id {chunk_id!r} — two sections slug to the "
+                    "same id (rename a heading so ids stay unique). The path is "
+                    "withheld: under manifest admission the filename is graded by "
+                    "nothing and can itself be the identifier."
                 )
             seen.add(chunk_id)
             chunks.append(Chunk(chunk_id, doc, section, text))

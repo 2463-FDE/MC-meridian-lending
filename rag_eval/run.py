@@ -40,7 +40,94 @@ _SKIP_NAMES = {".gitkeep", ".gitignore", ".gitattributes", ".ds_store"}
 _SAFE_FILENAME = re.compile(r"\.?[a-z0-9][a-z0-9._-]*")
 
 
-def unsafe_corpus_path_reason(rel_path: Path) -> str | None:
+_MANIFEST_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+def load_corpus_manifest(path: Path) -> dict[str, str]:
+    """Read a corpus manifest in `shasum -a 256` format: digest, then filename.
+
+    The manifest is the declaration of WHICH corpus was approved and WHAT its
+    content was. Names are corpus-directory-relative, so a client packet whose
+    checksum file covers the whole delivery is narrowed to its policy directory
+    once, under human review, rather than reinterpreted on every run.
+
+    Malformed input raises: a manifest that cannot be parsed must not degrade to
+    an empty allowlist, which would refuse the whole corpus and read as "the
+    corpus is contaminated" instead of "the manifest is broken".
+    """
+    entries: dict[str, str] = {}
+    for lineno, raw in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        line = raw.strip()
+        if not line:
+            continue
+        # shasum writes two spaces (text mode) or " *" (binary mode).
+        digest, sep, name = line.partition("  ")
+        if not sep:
+            digest, sep, name = line.partition(" *")
+        name = name.strip()
+        if not sep or not name or not _MANIFEST_DIGEST.fullmatch(digest):
+            raise ValueError(
+                f"corpus manifest line {lineno} is not `<sha256>  <filename>`"
+            )
+        entries[name] = digest
+    return entries
+
+
+def audit_corpus_against_manifest(
+    base: Path, manifest: dict[str, str], subtree: str | None = None
+) -> list[str]:
+    """Problems making the corpus on disk differ from the approved manifest.
+
+    Audits BOTH directions. Checking only the manifest's own entries would report
+    success over an unlisted file sitting in the corpus directory, which is the
+    failure mode a hand-maintained allowlist always has: it grades what it lists
+    and stays silent about what it does not.
+
+    Findings name a manifest entry (approved text, safe to echo) but never an
+    unlisted filename — an unapproved name can itself be the PII, so it is
+    reported by position, as run()'s own refusal path does.
+    """
+    if not manifest:
+        return ["manifest declares no approved corpus files"]
+    # `subtree` scopes BOTH sides — the files graded and the manifest entries
+    # considered — with keys staying relative to `base`. Scoping only the files
+    # would report every entry outside the subtree as missing, which is what a
+    # supplied delivery's own checksum file looks like: it covers the whole
+    # package, of which the policy corpus is one directory. run() also scans
+    # kb_dump, which a policy manifest does not govern (it has its own pinned
+    # exception), so grading every root would conflate two separate controls.
+    root = base / subtree if subtree else base
+    if not root.is_dir():
+        return [f"corpus directory does not exist: {subtree or '.'}"]
+    prefix = f"{subtree}/" if subtree else ""
+    scoped = {k: v for k, v in manifest.items() if k.startswith(prefix)}
+    if not scoped:
+        # A verifier must not report success for a path on which it verified
+        # nothing: a subtree no manifest entry covers is an unapproved corpus, not
+        # a clean one.
+        return [f"manifest declares no approved files under {subtree or '.'}"]
+    on_disk = {
+        p.relative_to(base).as_posix() for p in root.rglob("*") if p.is_file()
+    }
+    problems = []
+    for name in sorted(set(scoped) - on_disk):
+        problems.append(f"manifest entry missing on disk: {name}")
+    unlisted = sorted(on_disk - set(scoped))
+    for position, _ in enumerate(unlisted, start=1):
+        problems.append(
+            f"unlisted file in corpus directory at position {position} "
+            "(name withheld — an unapproved name can itself be the identifier)"
+        )
+    return problems
+
+
+def unsafe_corpus_path_reason(
+    rel_path: Path,
+    base: Path | None = None,
+    manifest: dict[str, str] | None = None,
+) -> str | None:
     """Why a corpus-relative path cannot be trusted as a chunk id / log/report entry.
 
     A file with clean CONTENT can still leak identity through its NAME — the
@@ -48,14 +135,68 @@ def unsafe_corpus_path_reason(rel_path: Path) -> str | None:
     path. Shared by run()'s corpus-relative scan below and by
     origination-service's policy_retrieval, which indexes a bind-mounted
     corpus at runtime that this module's own CI-time scan never sees. Returns
-    "pii" or "non-slug", or None when the path is safe. Callers must not echo
-    the path itself when a reason comes back — the name can be the PII.
+    "pii", "not-in-manifest", "manifest-digest-mismatch" or "non-slug", or None
+    when the path is safe. Callers must not echo the path itself when a reason
+    comes back — the name can be the PII.
+
+    With no `manifest`, admission is the lowercase-slug convention, which is what
+    stops an unlabeled person name (`Jane-Doe.md`) becoming a chunk id when
+    `scan_text` finds no self-identifying shape in it.
+
+    With a `manifest`, admission is that declaration instead: the name must be
+    listed AND the file's content must hash to the listed digest. This is how a
+    supplied corpus whose filenames are not slugs is indexed without renaming it,
+    which would invalidate the checksums it was approved under. Name-only would
+    reopen the hole `_LEGACY_DUMP_SHA256` was pinned to close — the approved
+    filename carrying different content. The `scan_text` check still runs first
+    and unconditionally: a manifest cannot approve a name that is borrower data.
     """
     if scan_text(str(rel_path)):
         return "pii"
+    if manifest is not None:
+        if base is None:
+            raise ValueError("manifest admission needs `base` to hash the file")
+        listed = manifest.get(rel_path.as_posix())
+        if listed is None:
+            return "not-in-manifest"
+        try:
+            digest = hashlib.sha256((base / rel_path).read_bytes()).hexdigest()
+        except OSError:
+            # Unreadable is not approved: fail closed rather than admit a file
+            # whose content could not be checked against the declaration.
+            return "manifest-digest-mismatch"
+        return None if digest == listed else "manifest-digest-mismatch"
     if not all(_SAFE_FILENAME.fullmatch(part) for part in rel_path.parts):
         return "non-slug"
     return None
+
+
+def corpus_doc_id(rel_path: Path, manifest: dict[str, str] | None = None) -> str:
+    """The officer-visible document id for an admitted corpus file.
+
+    Without a manifest, admission IS the lowercase-slug convention — the name has
+    already been graded by `unsafe_corpus_path_reason`, so the stem is safe to
+    show and the gold set's `expected` entries depend on it staying readable.
+
+    With a manifest, admission is the listed digest and the NAME is graded by
+    nothing: `_SAFE_FILENAME` never runs on that branch, and `scan_text` is
+    label-gated, so a bare `Jane-Doe.md` passes and would otherwise become the
+    chunk id `jane-doe#...` — a person name in citations, logs and report ids. No
+    structural rule separates a person name from a policy code, so the name is not
+    used at all here: the id derives from the approved digest, which is
+    deterministic across runs, carries no identity, and cannot be inverted to the
+    filename. Readability survives in the chunk text, which the chunker prefixes
+    with the document title and section.
+
+    Raises ValueError (never echoing the path — the name can be the PII) when the
+    manifest does not list the file; callers refuse an unlisted file before here.
+    """
+    if manifest is None:
+        return rel_path.stem.lower()
+    listed = manifest.get(rel_path.as_posix())
+    if listed is None:
+        raise ValueError("cannot derive a doc id: file is not in the manifest")
+    return f"doc-{listed[:12]}"
 
 
 # Gold-query STRUCTURED fields are locked to machine shapes so they cannot carry
@@ -190,8 +331,13 @@ def make_embedder():
     Amazon Bedrock via boto3 (``RAG_BEDROCK_MODEL``, ``AWS_REGION``, AWS creds)
     — the scaling path. An unknown value fails loud rather than silently
     falling back to a different backend than asked for.
+
+    Blank counts as unset for both variables. docker-compose.yml passes
+    ``${RAG_EMBEDDER:-}``, which sets the variable to "" rather than omitting
+    it, so a `getenv` default alone never fires on the compose path and the
+    keyless default would be unreachable exactly where the corpus is mounted.
     """
-    name = os.getenv("RAG_EMBEDDER", "tfidf")
+    name = os.getenv("RAG_EMBEDDER", "").strip() or "tfidf"
     if name == "tfidf":
         return TfidfEmbedder()
     if name == "bedrock":
@@ -207,7 +353,8 @@ def make_embedder():
                 "access is granted per region"
             )
         return BedrockEmbedder(
-            model_id=os.getenv("RAG_BEDROCK_MODEL", _DEFAULT_BEDROCK_MODEL),
+            model_id=os.getenv("RAG_BEDROCK_MODEL", "").strip()
+            or _DEFAULT_BEDROCK_MODEL,
             region=region,
         )
     raise ValueError(f"RAG_EMBEDDER={name!r} is not one of ('tfidf', 'bedrock').")
@@ -216,6 +363,10 @@ def make_embedder():
 @dataclass
 class RunResult:
     verdicts: list[FileVerdict]
+    # path -> the name that is safe to print for it. Under manifest admission a
+    # filename is graded by nothing, so it is never echoed: report, CLI and log
+    # lines all read through this map (see `corpus_doc_id`).
+    display_names: dict[str, str]
     n_chunks: int
     cache_hits: int
     cache_misses: int
@@ -259,7 +410,20 @@ def calibrate_threshold(
     return min(candidates, key=lambda c: (errors(c[0]), -c[1]))[0]
 
 
-def run(base: Path = Path(".")) -> RunResult:
+def run(base: Path = Path("."), manifest_path: Path | None = None) -> RunResult:
+    """Gate, ingest, embed, retrieve, report.
+
+    `manifest_path` names a checksum manifest declaring the approved POLICY corpus,
+    with names relative to `base` (`policies/X.md`) — the same shape a supplied
+    delivery's own `shasum -a 256` output already has, so it is usable verbatim
+    rather than transcribed. Admission then comes from that declaration instead of
+    the lowercase-slug convention, which is how a corpus whose filenames are not
+    slugs is indexed without renaming it and invalidating its checksums.
+
+    The manifest governs `policies/` only. `kb_dump/` keeps its own pinned
+    exception (`_LEGACY_DUMP_SHA256`); a policy manifest must not turn the legacy
+    dump into an unlisted-file abort.
+    """
     # Scan EVERY file under the corpus roots, recursively and regardless of
     # extension. scan_file reads known text/JSON formats and refuses unknown or
     # non-UTF-8 ones (fail closed), so a new customers.csv or a copied text dump
@@ -278,6 +442,21 @@ def run(base: Path = Path(".")) -> RunResult:
         _corpus_files(base / "policies") + _corpus_files(base / "kb_dump")
     )
 
+    manifest = None
+    if manifest_path is not None:
+        try:
+            manifest = load_corpus_manifest(manifest_path)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"corpus manifest unusable: {exc}") from None
+        problems = audit_corpus_against_manifest(base, manifest, subtree="policies")
+        if problems:
+            # Abort rather than index the listed subset: a directory that does not
+            # match its manifest is not the corpus that was approved, and a report
+            # over part of it would read as a report over all of it.
+            raise RuntimeError(
+                "policy corpus does not match its manifest: " + "; ".join(problems)
+            )
+
     # A filename is committed corpus metadata — an input surface too. A file with
     # clean CONTENT but PII in its name (policies/Jane-Doe-330-90-5512.md) would
     # pass scan_file, then its path is written into the report and its stem
@@ -286,12 +465,38 @@ def run(base: Path = Path(".")) -> RunResult:
     # raw name is never echoed to logs or artifacts. unsafe_corpus_path_reason
     # covers both the PII-shape check and the lowercase-slug convention (see its
     # docstring); policy_retrieval reuses the same function at runtime.
-    path_reasons = [unsafe_corpus_path_reason(p.relative_to(base)) for p in candidates]
+    # The manifest covers the policy corpus only; every other root keeps the
+    # naming convention.
+    path_reasons = [
+        unsafe_corpus_path_reason(
+            p.relative_to(base),
+            base=base,
+            manifest=(
+                manifest
+                if manifest is not None
+                and p.relative_to(base).parts[:1] == ("policies",)
+                else None
+            ),
+        )
+        for p in candidates
+    ]
     pii_paths = [i for i, r in enumerate(path_reasons) if r == "pii"]
     if pii_paths:
         raise RuntimeError(
             f"corpus file path(s) at position(s) {pii_paths} contain PII in their "
             "names — rename them (paths are not echoed here)"
+        )
+    not_approved = [
+        i
+        for i, r in enumerate(path_reasons)
+        if r in {"not-in-manifest", "manifest-digest-mismatch"}
+    ]
+    if not_approved:
+        # Reachable even after a clean audit: the audit compares sets, this
+        # re-checks each file's content at the moment it is about to be read.
+        raise RuntimeError(
+            f"corpus path(s) at position(s) {not_approved} are not approved by the "
+            "manifest (path not echoed here)"
         )
     unsafe_names = [i for i, r in enumerate(path_reasons) if r == "non-slug"]
     if unsafe_names:
@@ -304,14 +509,39 @@ def run(base: Path = Path(".")) -> RunResult:
     verdicts = [scan_file(p) for p in candidates]
     cache_path = base / "rag_eval" / ".cache" / "embeddings.json"
 
+    # Every place a corpus file is NAMED downstream — the report's hygiene table,
+    # main()'s refusal lines, the chunk ids below — reads this map rather than the
+    # path. Same manifest scoping as `path_reasons` above: the declaration governs
+    # the policy corpus only, so every other root keeps the slug convention, whose
+    # names ARE graded and stay readable.
+    display_names = {}
+    doc_ids = {}
+    for v in verdicts:
+        rel = Path(v.path).relative_to(base)
+        scoped = (
+            manifest
+            if manifest is not None and rel.parts[:1] == ("policies",)
+            else None
+        )
+        doc_ids[v.path] = corpus_doc_id(rel, scoped)
+        # A display name is NOT a doc id. Without a manifest the slug convention
+        # has graded the path, so the report keeps the readable full path while
+        # the doc id stays the bare stem — the stem is what collides across
+        # directories, and the duplicate-id abort below depends on it doing so.
+        display_names[v.path] = (
+            doc_ids[v.path] if scoped is not None else rel.as_posix()
+        )
+
     # THE GATE (spec D2.4): only gate-passed markdown reaches the chunker.
     chunks: list[Chunk] = []
     for v in verdicts:
         if v.passed and v.path.endswith(".md"):
-            chunks.extend(chunk_markdown(v.path))
+            chunks.extend(chunk_markdown(v.path, doc_id=doc_ids[v.path]))
     # Recursive discovery can surface two docs with the same stem in different
     # folders → same doc# id prefix. The chunker guards collisions within one
     # file; guard across files here so the gold-set id contract still holds.
+    # Under a manifest the ids are digest-derived, so a collision means two
+    # listed files with identical content rather than a stem clash.
     ids = [c.chunk_id for c in chunks]
     dupes = sorted({cid for cid in ids if ids.count(cid) > 1})
     if dupes:
@@ -465,6 +695,7 @@ def run(base: Path = Path(".")) -> RunResult:
     provider_input_tokens = getattr(embedder, "input_tokens", 0)
     report_text = report_mod.build(
         verdicts=verdicts,
+        display_names=display_names,
         n_chunks=len(chunks),
         cache_hits=cache.hits,
         cache_misses=cache.misses,
@@ -485,6 +716,7 @@ def run(base: Path = Path(".")) -> RunResult:
     report_path.write_text(report_text, encoding="utf-8")
     return RunResult(
         verdicts=verdicts,
+        display_names=display_names,
         n_chunks=len(chunks),
         cache_hits=cache.hits,
         cache_misses=cache.misses,
@@ -501,12 +733,14 @@ def run(base: Path = Path(".")) -> RunResult:
     )
 
 
-def main(base: Path = Path(".")) -> None:
-    result = run(base=base)
+def main(base: Path = Path("."), manifest_path: Path | None = None) -> None:
+    result = run(base=base, manifest_path=manifest_path)
     refused = [v for v in result.verdicts if not v.passed]
     print(f"gate: {len(result.verdicts)} files scanned, {len(refused)} refused")
     for v in refused:
-        print(f"  REFUSED {v.path}: {v.counts()}")
+        # Named through display_names, never the raw path: a manifest-admitted
+        # filename is graded by nothing and can itself be the identifier.
+        print(f"  REFUSED {result.display_names.get(v.path, v.path)}: {v.counts()}")
     print(f"embedder: {result.embedder_signature}")
     if result.caching:
         print(
@@ -534,9 +768,31 @@ def main(base: Path = Path(".")) -> None:
             "new PII committed to the repo:"
         )
         for v in unexpected:
-            print(f"  {v.path}: {v.counts()}")
+            print(f"  {result.display_names.get(v.path, v.path)}: {v.counts()}")
         raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Retrieval eval harness (gate -> ingest -> embed -> report)."
+    )
+    parser.add_argument(
+        "--base",
+        type=Path,
+        default=Path("."),
+        help="working directory holding policies/ and receiving rag_eval/ outputs",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help=(
+            "checksum manifest (shasum -a 256) declaring the approved policy "
+            "corpus, names relative to --base (policies/X.md). Without it the "
+            "lowercase-slug naming convention governs admission."
+        ),
+    )
+    args = parser.parse_args()
+    main(base=args.base, manifest_path=args.manifest)
