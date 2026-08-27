@@ -56,8 +56,8 @@ def _metrics_section(
     )
     lines += [
         "",
-        "| Query | Expected chunk(s) | Top retrieved (score) | hit@1/3/5 | RR | Verdict |",
-        "|-------|-------------------|-----------------------|-----------|----|---------|",
+        "| Question id | Expected chunk(s) | Top retrieved (score) | hit@1/3/5 | RR | Verdict |",
+        "|-------------|-------------------|-----------------------|-----------|----|---------|",
     ]
     for e in evals:
         expected = ", ".join(f"`{c}`" for c in e.expected) or "*(unanswerable)*"
@@ -71,7 +71,11 @@ def _metrics_section(
             hits = "/".join("✓" if e.hits[k] else "✗" for k in K_VALUES)
             verdict = "✓" if e.correct else "✗"
         lines.append(
-            f"| {e.query_id}: {e.query} | {expected} | {top} | {hits} | "
+            # Question identified by id, never by text: a supplied evaluation
+            # question is content the client excluded from retention, and this
+            # report is a file on disk. `gold_queries.json` maps id back to text
+            # for whoever legitimately holds it.
+            f"| {e.query_id} | {expected} | {top} | {hits} | "
             f"{e.reciprocal_rank:.2f} | {verdict} |"
         )
     lines += [
@@ -134,7 +138,7 @@ def _data_gaps_section(evals: list[QueryEval]) -> list[str]:
         for e in false_confident:
             top_id, top_score = e.retrieved[0]
             lines.append(
-                f'- **{e.query_id}** ("{e.query}"): top hit `{top_id}` scored '
+                f"- **{e.query_id}**: top hit `{top_id}` scored "
                 f"{top_score:.3f}, above the calibrated threshold. The chunk describes "
                 "*process/policy*, not the answer — it does not contain why this specific "
                 "application was denied. A naive helper would return plausible-but-wrong "

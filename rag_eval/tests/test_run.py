@@ -587,20 +587,24 @@ def test_run_with_bedrock_backend(tmp_path: Path, monkeypatch):
 
     def fake_make_embedder():
         return BedrockEmbedder(
-            model_id="fake-model", client=_DeterministicBedrockClient()
+            model_id="fake-model",
+            client=_DeterministicBedrockClient(),
+            dimensions=8,  # matches the fake client's fixed width
         )
 
     monkeypatch.setattr("rag_eval.run.make_embedder", fake_make_embedder)
 
     result = run(base=tmp_path)
     assert result.n_chunks == 2
-    assert result.embedder_signature == "bedrock-v1:fake-model"
-    assert "bedrock-v1:fake-model" in result.report_text
-    # Dense vectors landed in the cache as JSON lists, not sparse dicts.
-    cached = json.loads(
-        (tmp_path / "rag_eval" / ".cache" / "embeddings.json").read_text()
-    )
-    assert all(isinstance(v, list) for v in cached.values())
+    assert result.embedder_signature == "bedrock-v1:fake-model:8"
+    assert "bedrock-v1:fake-model:8" in result.report_text
+    # CONTRACT CHANGE: a provider run is cacheless. Dense vectors are
+    # content-derived, and retaining them on disk is what `cache_enabled` refuses
+    # — so the assertion is that the cache file is ABSENT, not that it holds
+    # JSON lists. The cache class itself stays backend-agnostic
+    # (test_embedder.py::test_bedrock_cache_prevents_re_embedding still covers it).
+    assert not (tmp_path / "rag_eval" / ".cache" / "embeddings.json").exists()
+    assert result.cache_hits == 0 and result.cache_misses == 0
 
 
 def test_make_embedder_default_is_tfidf(monkeypatch):
