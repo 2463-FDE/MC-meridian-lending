@@ -379,6 +379,12 @@ def test_report_does_not_label_a_scored_case_unanswerable():
         n_chunks=1,
         cache_hits=0,
         cache_misses=0,
+        # The TF-IDF shape: a cached run reports cache counters, so the provider
+        # counters are the zeros run() passes for that backend.
+        caching=True,
+        provider_calls=0,
+        provider_retries=0,
+        provider_input_tokens=0,
         evals=[e],
         agg=aggregate([e]),
         threshold=0.5,
