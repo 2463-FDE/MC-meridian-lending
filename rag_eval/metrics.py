@@ -29,9 +29,11 @@ class QueryEval:
     retrieved: list[tuple[str, float]]  # (chunk_id, score), ranked
     threshold: float
     # The officer topic this case would be asked under. `unmapped` is a result,
-    # not a default to be tidied away: six of the client's questions are
+    # not a default to be tidied away: seven of the client's questions are
     # servicing and collections questions and the closed officer vocabulary has
     # no code for either, so they cannot be asked through the product at all.
+    # Seven, not the six her own needs_review set names: Q24's frozen anchor is
+    # also in SYN-POL-SERVICING-COLLECTIONS.md, which that set missed.
     # The default is the safe answer for a directly-constructed eval, NOT the
     # value the committed gold set relies on — every committed case names its own
     # topic, and a test asserts it, because a set that defaults into `unmapped`
