@@ -78,8 +78,12 @@ Ordered. Steps 1–3 are ours and need nothing from the client.
    `_ALLOWED_GOLD_KEYS` is a strict allowlist of `{id, query, expected, unanswerable, note}` and
    will reject her richer shape. `metrics.py` knows two states; her four outcome classes need a
    third (`clarification` is neither an expected-id case nor unanswerable).
-   Expected chunk ids derive cleanly: `Path(sourceDocument).stem.lower() + "#" + _slug(sourceHeading)`
-   resolves for **all 17** sourced questions, verified.
+   Expected chunk ids derive from `rag_eval.run.corpus_doc_id(relPath, manifest) + "#" +
+   _slug(sourceHeading)`. Under a manifest the doc half is `doc-<approved digest[:12]>`, NOT the
+   filename stem: an admitted name is graded by nothing, so it never becomes an officer-visible
+   id. The stem form below resolved for all 17 sourced questions and still describes the
+   committed slug corpus, but a gold set for the supplied packet must read the doc id from the
+   manifest.
 3. **Add the conclusion-support assertion** — check the retrieved passage supports her
    `acceptableConclusion` (e.g. "30 days"), not merely that the expected section came back.
    Normalise spelled numbers, or assert on `claimIds` via `policies/policy-manifest.csv`, which is
@@ -124,7 +128,9 @@ Ordered. Steps 1–3 are ours and need nothing from the client.
   instance's `IS_PROVIDER_BACKED`, never off `RAG_EMBEDDER`
 - `rag_eval/embedder.py` — `DEFAULT_EMBED_DIMENSIONS`, `_BEDROCK_CLIENT_CONFIG`,
   `EmbeddingProviderError`, call/retry/token counters
-- `rag_eval/chunker.py` — `doc = path.stem.lower()`, so ids satisfy `_CHUNK_ID`
+- `rag_eval/chunker.py` — `doc = doc_id or path.stem.lower()`, so ids satisfy `_CHUNK_ID`; a
+  manifest-admitting caller passes `run.corpus_doc_id`, which derives the id from the approved
+  digest rather than the ungraded filename
 - `services/origination-service/app/policy_retrieval.py` — manifest admission on the product path,
   fail-closed on every manifest problem
 - `services/origination-service/app/config.py` — `POLICY_CORPUS_MANIFEST`

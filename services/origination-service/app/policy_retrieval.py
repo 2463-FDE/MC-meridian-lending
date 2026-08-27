@@ -30,6 +30,7 @@ try:
     from rag_eval.index import InMemoryIndex
     from rag_eval.run import (
         audit_corpus_against_manifest,
+        corpus_doc_id,
         load_corpus_manifest,
         make_embedder,
         unsafe_corpus_path_reason,
@@ -249,9 +250,8 @@ def _load_corpus() -> list:
         # CI-time scan never sees this bind-mounted copy, so re-check the path
         # here with the same function rag_eval.run applies to the committed
         # corpus (rag_eval/run.py::run).
-        reason = unsafe_corpus_path_reason(
-            path.relative_to(base), base=base, manifest=manifest
-        )
+        rel = path.relative_to(base)
+        reason = unsafe_corpus_path_reason(rel, base=base, manifest=manifest)
         if reason is not None:
             # The filename itself is the flagged problem — unlike the branches
             # below, path.name is not safe to log here.
@@ -261,25 +261,31 @@ def _load_corpus() -> list:
                 reason,
             )
             continue
+        # Named by doc id from here down, never `path.name`: under a manifest the
+        # filename is admitted on its digest and graded by nothing — `scan_text`
+        # is label-gated, so a bare person name passes it — so the name must not
+        # reach a log line any more than it reaches a chunk id. Without a
+        # manifest the doc id is the stem the slug convention already graded.
+        doc_id = corpus_doc_id(rel, manifest)
         try:
             verdict = scan_file(path)
         except OSError as exc:
             log.warning(
-                "policy corpus file unreadable, skipped: %s (%s)", path.name, exc
+                "policy corpus file unreadable, skipped: %s (%s)", doc_id, exc
             )
             continue
         if not verdict.passed:
             log.warning(
                 "policy corpus file REFUSED by the hygiene gate, not indexed: %s (%s)",
-                path.name,
+                doc_id,
                 verdict.counts(),
             )
             continue
         try:
-            chunks.extend(chunk_markdown(path))
+            chunks.extend(chunk_markdown(path, doc_id=doc_id))
         except (OSError, ValueError) as exc:
             log.warning(
-                "policy corpus file not chunkable, skipped: %s (%s)", path.name, exc
+                "policy corpus file not chunkable, skipped: %s (%s)", doc_id, exc
             )
     return chunks
 

@@ -17,6 +17,7 @@ import logging
 from pathlib import Path
 
 from app import config, policy_retrieval
+from rag_eval.run import corpus_doc_id
 
 BODY = "# Adverse Action\n\n## Notification timing\n\nNotify within 30 days.\n"
 NAME = "SYN-POL-ADVERSE-ACTION.md"
@@ -56,7 +57,10 @@ def test_uppercase_corpus_is_indexed_when_the_manifest_admits_it(
 
     chunks = policy_retrieval._load_corpus()
     assert chunks
-    assert all(c.chunk_id.startswith("syn-pol-adverse-action#") for c in chunks)
+    # The id is digest-derived, not the stem: under manifest admission the
+    # filename is graded by nothing, so it never becomes an officer-visible id.
+    doc_id = corpus_doc_id(Path(NAME), digests)
+    assert all(c.chunk_id.startswith(f"{doc_id}#") for c in chunks)
 
 
 def test_uppercase_corpus_is_refused_without_a_manifest(tmp_path: Path, monkeypatch):
@@ -151,7 +155,10 @@ def test_manifest_approved_nested_document_is_indexed(tmp_path: Path, monkeypatc
     _configure(monkeypatch, base, _manifest(tmp_path, digests))
 
     ids = {c.chunk_id for c in policy_retrieval._load_corpus()}
-    assert any(cid.startswith("syn-pol-deep#") for cid in ids)
+    nested = next(k for k in digests if k.endswith("SYN-POL-DEEP.md"))
+    assert any(
+        cid.startswith(f"{corpus_doc_id(Path(nested), digests)}#") for cid in ids
+    )
 
 
 def test_manifest_approved_nested_document_is_retrievable(
@@ -188,24 +195,40 @@ def _twin_corpus(tmp_path: Path, twin_name: str) -> tuple[Path, dict[str, str]]:
     return base, digests
 
 
-def test_same_stem_in_two_directories_indexes_nothing(tmp_path: Path, monkeypatch):
-    # Recursive discovery is what makes this reachable: two approved documents
-    # in different folders share a stem, so they share every chunk id.
+def test_same_stem_in_two_directories_no_longer_collides(tmp_path: Path, monkeypatch):
+    # A digest-derived doc id ends the stem collision structurally: two approved
+    # documents with DIFFERENT content can no longer share a chunk id, so neither
+    # is refused and neither can be served under the other's citation.
     base, digests = _twin_corpus(tmp_path, SAME_STEM)
     _configure(monkeypatch, base, _manifest(tmp_path, digests))
 
     chunks = policy_retrieval._load_corpus()
-    # Both files are individually admitted, so the collision is not a refusal.
-    assert len(chunks) > len({c.chunk_id for c in chunks})
-    assert policy_retrieval._build_index() is None
+    assert len(chunks) == len({c.chunk_id for c in chunks})
+    assert policy_retrieval._build_index() is not None
 
 
-def test_case_variant_pair_indexes_nothing(tmp_path: Path, monkeypatch):
+def test_case_variant_pair_no_longer_collides(tmp_path: Path, monkeypatch):
     base, digests = _twin_corpus(tmp_path, CASE_TWIN)
     if len(list(base.glob("*.md"))) < 2:
         import pytest
 
         pytest.skip("case-insensitive filesystem cannot hold both spellings")
+    _configure(monkeypatch, base, _manifest(tmp_path, digests))
+
+    chunks = policy_retrieval._load_corpus()
+    assert len(chunks) == len({c.chunk_id for c in chunks})
+    assert policy_retrieval._build_index() is not None
+
+
+def test_byte_identical_approved_twins_index_nothing(tmp_path: Path, monkeypatch):
+    # The duplicate-id guard still has a job: two approved files with identical
+    # CONTENT hash the same, so they share a doc id. Both chunks then carry the
+    # same text, but the guard stays fail-closed rather than reasoning about it.
+    base, digests = _corpus(tmp_path)
+    twin = base / "archive" / NAME
+    twin.parent.mkdir(parents=True, exist_ok=True)
+    twin.write_text(BODY, encoding="utf-8")
+    digests[f"archive/{NAME}"] = hashlib.sha256(twin.read_bytes()).hexdigest()
     _configure(monkeypatch, base, _manifest(tmp_path, digests))
 
     chunks = policy_retrieval._load_corpus()
@@ -270,7 +293,9 @@ def test_manifest_approved_non_markdown_is_reported_not_silent(
         logger.removeHandler(handler)
 
     # The markdown half still indexes -- this is a report, not a refusal.
-    assert any(c.chunk_id.startswith("syn-pol-adverse-action#") for c in chunks)
+    assert any(
+        c.chunk_id.startswith(f"{corpus_doc_id(Path(NAME), digests)}#") for c in chunks
+    )
     messages = [r.getMessage() for r in handler.records]
     assert any("cannot index" in m for m in messages)
     # The name is withheld: a manifest can list a filename this path never
@@ -312,3 +337,24 @@ def test_mutated_approved_markdown_refuses_the_whole_corpus(
     policy_retrieval.reset_index_cache()
 
     assert policy_retrieval._load_corpus() == []
+
+
+def test_manifest_admitted_person_name_never_reaches_a_chunk_id(
+    tmp_path: Path, monkeypatch, caplog
+):
+    # Manifest admission grades the DIGEST, so the lowercase-slug rule that keeps
+    # an unlabeled person name out of an officer-visible chunk id never runs.
+    # `scan_text` does not cover it either — it is label-gated, so a bare
+    # `Jane-Doe.md` carries no self-identifying shape and passes. The name must
+    # not become the doc id, and must not reach this loader's own log lines.
+    base, digests = _corpus(tmp_path, names=("Jane-Doe.md",))
+    _configure(monkeypatch, base, _manifest(tmp_path, digests))
+
+    with caplog.at_level(logging.WARNING):
+        chunks = policy_retrieval._load_corpus()
+
+    assert chunks, "an approved document must stay retrievable, not be refused"
+    for c in chunks:
+        assert "jane" not in c.chunk_id.lower()
+        assert "doe" not in c.chunk_id.lower()
+    assert "jane" not in caplog.text.lower()

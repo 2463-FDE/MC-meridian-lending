@@ -148,7 +148,10 @@ def test_contaminated_corpus_file_is_refused_not_indexed(
     indexed = {chunk.doc for chunk in policy_retrieval._load_corpus()}
     assert indexed == {"clean"}, "the contaminated file must not be indexed"
     logged = "\n".join(recorder.lines)
-    assert "REFUSED" in logged and "dirty.md" in logged
+    # Named by doc id, not filename: the loader stopped echoing `path.name` so a
+    # manifest-admitted name (graded by nothing) cannot reach a log line. Without
+    # a manifest the doc id is the stem the slug convention already graded.
+    assert "REFUSED" in logged and "dirty" in logged
     assert "123-45-6789" not in logged  # the scan names the type, never the value
 
 

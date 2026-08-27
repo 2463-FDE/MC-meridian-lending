@@ -171,6 +171,34 @@ def unsafe_corpus_path_reason(
     return None
 
 
+def corpus_doc_id(rel_path: Path, manifest: dict[str, str] | None = None) -> str:
+    """The officer-visible document id for an admitted corpus file.
+
+    Without a manifest, admission IS the lowercase-slug convention — the name has
+    already been graded by `unsafe_corpus_path_reason`, so the stem is safe to
+    show and the gold set's `expected` entries depend on it staying readable.
+
+    With a manifest, admission is the listed digest and the NAME is graded by
+    nothing: `_SAFE_FILENAME` never runs on that branch, and `scan_text` is
+    label-gated, so a bare `Jane-Doe.md` passes and would otherwise become the
+    chunk id `jane-doe#...` — a person name in citations, logs and report ids. No
+    structural rule separates a person name from a policy code, so the name is not
+    used at all here: the id derives from the approved digest, which is
+    deterministic across runs, carries no identity, and cannot be inverted to the
+    filename. Readability survives in the chunk text, which the chunker prefixes
+    with the document title and section.
+
+    Raises ValueError (never echoing the path — the name can be the PII) when the
+    manifest does not list the file; callers refuse an unlisted file before here.
+    """
+    if manifest is None:
+        return rel_path.stem.lower()
+    listed = manifest.get(rel_path.as_posix())
+    if listed is None:
+        raise ValueError("cannot derive a doc id: file is not in the manifest")
+    return f"doc-{listed[:12]}"
+
+
 # Gold-query STRUCTURED fields are locked to machine shapes so they cannot carry
 # free-text PII: an id is a slug, an expected entry is a chunk id (doc#section,
 # from chunker.py). That leaves only the natural-language query/note as free
@@ -292,6 +320,10 @@ def make_embedder():
 @dataclass
 class RunResult:
     verdicts: list[FileVerdict]
+    # path -> the name that is safe to print for it. Under manifest admission a
+    # filename is graded by nothing, so it is never echoed: report, CLI and log
+    # lines all read through this map (see `corpus_doc_id`).
+    display_names: dict[str, str]
     n_chunks: int
     cache_hits: int
     cache_misses: int
@@ -425,14 +457,39 @@ def run(base: Path = Path("."), manifest_path: Path | None = None) -> RunResult:
     verdicts = [scan_file(p) for p in candidates]
     cache_path = base / "rag_eval" / ".cache" / "embeddings.json"
 
+    # Every place a corpus file is NAMED downstream — the report's hygiene table,
+    # main()'s refusal lines, the chunk ids below — reads this map rather than the
+    # path. Same manifest scoping as `path_reasons` above: the declaration governs
+    # the policy corpus only, so every other root keeps the slug convention, whose
+    # names ARE graded and stay readable.
+    display_names = {}
+    doc_ids = {}
+    for v in verdicts:
+        rel = Path(v.path).relative_to(base)
+        scoped = (
+            manifest
+            if manifest is not None and rel.parts[:1] == ("policies",)
+            else None
+        )
+        doc_ids[v.path] = corpus_doc_id(rel, scoped)
+        # A display name is NOT a doc id. Without a manifest the slug convention
+        # has graded the path, so the report keeps the readable full path while
+        # the doc id stays the bare stem — the stem is what collides across
+        # directories, and the duplicate-id abort below depends on it doing so.
+        display_names[v.path] = (
+            doc_ids[v.path] if scoped is not None else rel.as_posix()
+        )
+
     # THE GATE (spec D2.4): only gate-passed markdown reaches the chunker.
     chunks: list[Chunk] = []
     for v in verdicts:
         if v.passed and v.path.endswith(".md"):
-            chunks.extend(chunk_markdown(v.path))
+            chunks.extend(chunk_markdown(v.path, doc_id=doc_ids[v.path]))
     # Recursive discovery can surface two docs with the same stem in different
     # folders → same doc# id prefix. The chunker guards collisions within one
     # file; guard across files here so the gold-set id contract still holds.
+    # Under a manifest the ids are digest-derived, so a collision means two
+    # listed files with identical content rather than a stem clash.
     ids = [c.chunk_id for c in chunks]
     dupes = sorted({cid for cid in ids if ids.count(cid) > 1})
     if dupes:
@@ -568,6 +625,7 @@ def run(base: Path = Path("."), manifest_path: Path | None = None) -> RunResult:
     agg = aggregate(evals)
     report_text = report_mod.build(
         verdicts=verdicts,
+        display_names=display_names,
         n_chunks=len(chunks),
         cache_hits=cache.hits,
         cache_misses=cache.misses,
@@ -580,6 +638,7 @@ def run(base: Path = Path("."), manifest_path: Path | None = None) -> RunResult:
     report_path.write_text(report_text, encoding="utf-8")
     return RunResult(
         verdicts=verdicts,
+        display_names=display_names,
         n_chunks=len(chunks),
         cache_hits=cache.hits,
         cache_misses=cache.misses,
@@ -597,7 +656,9 @@ def main(base: Path = Path("."), manifest_path: Path | None = None) -> None:
     refused = [v for v in result.verdicts if not v.passed]
     print(f"gate: {len(result.verdicts)} files scanned, {len(refused)} refused")
     for v in refused:
-        print(f"  REFUSED {v.path}: {v.counts()}")
+        # Named through display_names, never the raw path: a manifest-admitted
+        # filename is graded by nothing and can itself be the identifier.
+        print(f"  REFUSED {result.display_names.get(v.path, v.path)}: {v.counts()}")
     print(f"embedder: {result.embedder_signature}")
     print(
         f"embeddings: {result.n_chunks} chunks, "
@@ -616,7 +677,7 @@ def main(base: Path = Path("."), manifest_path: Path | None = None) -> None:
             "new PII committed to the repo:"
         )
         for v in unexpected:
-            print(f"  {v.path}: {v.counts()}")
+            print(f"  {result.display_names.get(v.path, v.path)}: {v.counts()}")
         raise SystemExit(1)
 
 
