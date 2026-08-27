@@ -68,7 +68,26 @@ def unsafe_corpus_path_reason(rel_path: Path) -> str | None:
 # allowlisted so the name guard doesn't refuse them.)
 _GOLD_ID = re.compile(r"[a-z0-9][a-z0-9-]*")
 _CHUNK_ID = re.compile(r"[a-z0-9][a-z0-9._-]*#[a-z0-9._-]+")
-_ALLOWED_GOLD_KEYS = {"id", "query", "expected", "unanswerable", "note"}
+_ALLOWED_GOLD_KEYS = {"id", "query", "expected", "unanswerable", "note", "topic"}
+
+# The officer topic vocabulary, duplicated from POLICY_TOPICS in
+# origination-service's policy_retrieval. The harness cannot import a service, so
+# a test asserts the two agree rather than trusting the copy — a drifted copy
+# would score against codes the officer channel no longer offers.
+TOPIC_CODES = (
+    "fee_schedule",
+    "apr_finance_charge",
+    "interest_rate",
+    "eligibility_rules",
+    "credit_decisioning",
+    "adverse_action",
+    "debt_to_income",
+    "records_retention",
+)
+
+# A case no officer topic can express. Kept OUT of TOPIC_CODES so it can never be
+# mistaken for something the product can be asked, and reported on its own line.
+UNMAPPED = "unmapped"
 
 # The ONE corpus file ADR 0007 documents as legacy-contaminated: kb_dump is the
 # raw pre-remediation dump, so its refusal is expected and is the whole point of
@@ -323,6 +342,16 @@ def run(base: Path = Path(".")) -> RunResult:
             )
         if "note" in q and not isinstance(q["note"], str):
             raise RuntimeError(f"gold query at position {i} has a non-string 'note'")
+        topic = q.get("topic")
+        if topic is not None and topic not in TOPIC_CODES and topic != UNMAPPED:
+            # A code the officer channel cannot emit is a case the product cannot
+            # be asked. Scoring it would report coverage that does not exist, so
+            # the loader refuses rather than inventing a bucket.
+            raise RuntimeError(
+                f"gold query at position {i} has a 'topic' outside the officer "
+                f"vocabulary — allowed values are {sorted(TOPIC_CODES)} "
+                f"or {UNMAPPED!r}"
+            )
 
     # Then screen the remaining free text (query/note) for self-identifying PII.
     dirty = [
@@ -385,6 +414,7 @@ def run(base: Path = Path(".")) -> RunResult:
             unanswerable=bool(q.get("unanswerable")),
             retrieved=retrieved[q["id"]],
             threshold=threshold,
+            topic=q.get("topic", UNMAPPED),
         )
         for q in gold
     ]

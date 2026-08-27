@@ -54,6 +54,26 @@ def _metrics_section(
         f"Unanswerable queries: **{agg.n_unanswerable}**, "
         f"{agg.unanswerable_correct} correctly below threshold."
     )
+    # Per officer topic, because the client asked for results by topic rather
+    # than as one pooled number — and because a pooled number cannot show one
+    # topic failing whole. `unmapped` is listed with the rest: those cases cannot
+    # be asked through the product, which is a finding, not a blank.
+    if agg.by_topic:
+        lines += [
+            "",
+            "| Topic | Cases | Correct |",
+            "|-------|-------|---------|",
+        ]
+        for name, stat in agg.by_topic.items():
+            lines.append(f"| `{name}` | {stat.n} | {stat.correct} |")
+        if agg.n_unmapped:
+            lines += [
+                "",
+                f"**{agg.n_unmapped} case(s) carry `unmapped`** — no code in the "
+                "closed officer vocabulary expresses them, so they cannot be asked "
+                "through the product. They are counted above and excluded from "
+                "every per-topic score.",
+            ]
     lines += [
         "",
         "| Query | Expected chunk(s) | Top retrieved (score) | hit@1/3/5 | RR | Verdict |",

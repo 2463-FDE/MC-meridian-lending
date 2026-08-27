@@ -19,10 +19,15 @@ K_VALUES = (1, 3, 5)
 class QueryEval:
     query_id: str
     query: str
-    expected: list[str]          # expected chunk_ids; empty when unanswerable
+    expected: list[str]  # expected chunk_ids; empty when unanswerable
     unanswerable: bool
     retrieved: list[tuple[str, float]]  # (chunk_id, score), ranked
     threshold: float
+    # The officer topic this case would be asked under. `unmapped` is a result,
+    # not a default to be tidied away: six of the client's questions are
+    # servicing and collections questions and the closed officer vocabulary has
+    # no code for either, so they cannot be asked through the product at all.
+    topic: str = "unmapped"
     hits: dict[int, bool] = field(init=False)
     reciprocal_rank: float = field(init=False)
     correct: bool = field(init=False)
@@ -38,29 +43,52 @@ class QueryEval:
             self.reciprocal_rank = 0.0
             self.correct = not self.retrieved or top_score < self.threshold
         else:
-            self.hits = {k: any(cid in self.expected for cid in ids[:k]) for k in K_VALUES}
-            rank = next((i + 1 for i, cid in enumerate(ids) if cid in self.expected), None)
+            self.hits = {
+                k: any(cid in self.expected for cid in ids[:k]) for k in K_VALUES
+            }
+            rank = next(
+                (i + 1 for i, cid in enumerate(ids) if cid in self.expected), None
+            )
             self.reciprocal_rank = 1.0 / rank if rank else 0.0
             self.correct = self.hits[max(K_VALUES)]
+
+
+@dataclass
+class TopicStat:
+    """One topic's own count and score, so no topic hides inside a pooled mean."""
+
+    n: int
+    correct: int
 
 
 @dataclass
 class Aggregate:
     n_answerable: int
     n_unanswerable: int
-    hit_at_k: dict[int, float]       # over answerable queries
-    mrr: float                       # over answerable queries
-    unanswerable_correct: int        # count scored correct
+    hit_at_k: dict[int, float]  # over answerable queries
+    mrr: float  # over answerable queries
+    unanswerable_correct: int  # count scored correct
+    by_topic: dict[str, TopicStat]  # per officer topic, insertion-ordered
+    n_unmapped: int  # cases no officer topic can express
 
 
 def aggregate(evals: list[QueryEval]) -> Aggregate:
     answerable = [e for e in evals if not e.unanswerable]
     unanswerable = [e for e in evals if e.unanswerable]
     n = len(answerable)
+    by_topic: dict[str, TopicStat] = {}
+    for e in evals:
+        stat = by_topic.setdefault(e.topic, TopicStat(n=0, correct=0))
+        stat.n += 1
+        stat.correct += int(e.correct)
     return Aggregate(
+        by_topic=by_topic,
+        n_unmapped=sum(1 for e in evals if e.topic == "unmapped"),
         n_answerable=n,
         n_unanswerable=len(unanswerable),
-        hit_at_k={k: (sum(e.hits[k] for e in answerable) / n if n else 0.0) for k in K_VALUES},
+        hit_at_k={
+            k: (sum(e.hits[k] for e in answerable) / n if n else 0.0) for k in K_VALUES
+        },
         mrr=(sum(e.reciprocal_rank for e in answerable) / n if n else 0.0),
         unanswerable_correct=sum(e.correct for e in unanswerable),
     )
