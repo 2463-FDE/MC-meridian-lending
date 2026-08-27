@@ -52,7 +52,11 @@ def _hygiene_section(
 
 
 def _metrics_section(
-    evals: list[QueryEval], agg: Aggregate, threshold: float, embedder_signature: str
+    evals: list[QueryEval],
+    agg: Aggregate,
+    threshold: float,
+    embedder_signature: str,
+    n_chunks: int,
 ) -> list[str]:
     lines = ["## Retrieval metrics", ""]
     hit_cells = " · ".join(f"hit@{k} = {agg.hit_at_k[k]:.2f}" for k in K_VALUES)
@@ -134,7 +138,8 @@ def _metrics_section(
         "are midpoints between adjacent distinct top-1 scores; the chosen value minimizes "
         "classification errors (answerable tops that would wrongly abstain + unanswerable "
         "tops retrieved with false confidence), preferring the widest score gap on ties. "
-        f"Cosine scores from embedder `{embedder_signature}` over a ~9-chunk corpus are "
+        f"Cosine scores from embedder `{embedder_signature}` over a {n_chunks}-chunk corpus "
+        f"are "
         "lumpy; this value is calibrated to this gold set and this backend, and must be "
         "re-calibrated when the corpus or embedding backend changes.",
         "",
@@ -187,12 +192,13 @@ def _data_gaps_section(evals: list[QueryEval]) -> list[str]:
             top_id, top_score = e.retrieved[0]
             lines.append(
                 f"- **{e.query_id}**: top hit `{top_id}` scored "
-                f"{top_score:.3f}, above the calibrated threshold. The chunk describes "
-                "*process/policy*, not the answer — it does not contain why this specific "
-                "application was denied. A naive helper would return plausible-but-wrong "
-                "text with apparent confidence. Any Week 3+ helper must detect the "
-                "no-record case explicitly (e.g. answerability check against ADR 0008 "
-                "decision records), not rely on retrieval score alone."
+                f"{top_score:.3f}, above the calibrated threshold on a case whose "
+                "expected outcome is abstention. The retrieved chunk is topically near "
+                "the question without answering it, so a helper reading score alone "
+                "would return plausible-but-wrong text with apparent confidence. "
+                "Answerability has to be decided explicitly, not inferred from rank. "
+                "This note describes the retrieval only: why a particular case cannot "
+                "be answered is stated in the data-gap sections below, per case."
             )
         lines.append("")
     return lines
@@ -253,6 +259,6 @@ def build(
         "",
     ]
     lines += _hygiene_section(verdicts, display_names)
-    lines += _metrics_section(evals, agg, threshold, embedder_signature)
+    lines += _metrics_section(evals, agg, threshold, embedder_signature, n_chunks)
     lines += _data_gaps_section(evals)
     return "\n".join(lines)
