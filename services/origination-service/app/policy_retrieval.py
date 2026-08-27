@@ -178,12 +178,18 @@ def _load_corpus() -> list:
                 "; ".join(problems),
             )
             return []
-    # Recursive, to match the walk the manifest audit above grades
-    # (`audit_corpus_against_manifest` uses rglob, as does `rag_eval.run`'s own
-    # discovery). A flat glob would let a manifest-approved file in a
-    # subdirectory audit clean and then never be indexed — retrieval abstaining
-    # on approved content with nothing reporting a refusal.
-    for path in sorted(base.rglob("*.md")):
+    # Recursive ONLY under a manifest, to match the walk that declaration is
+    # graded by: `audit_corpus_against_manifest` uses rglob (as does
+    # `rag_eval.run`'s own discovery), so a flat glob would let an approved file
+    # in a subdirectory audit clean and then never be indexed — retrieval
+    # abstaining on approved content with nothing reporting a refusal.
+    #
+    # Without a manifest there is no audit to match, and the corpus arrives over
+    # a bind mount an operator controls. Descending there would newly serve
+    # whatever sits in a subdirectory — a draft, an archived copy — verbatim to
+    # an officer as policy, admitted by nothing but its filename. Stay flat.
+    walk = base.rglob("*.md") if manifest is not None else base.glob("*.md")
+    for path in sorted(walk):
         # The hygiene gate below scans CONTENT only. A file mounted with clean
         # content but an unsafe NAME (jane-doe-123-45-6789.md) would still pass
         # it, then leak identity through the officer-visible chunk id (doc =

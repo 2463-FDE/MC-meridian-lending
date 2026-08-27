@@ -210,3 +210,23 @@ def test_case_variant_pair_indexes_nothing(tmp_path: Path, monkeypatch):
     chunks = policy_retrieval._load_corpus()
     assert len(chunks) > len({c.chunk_id for c in chunks})
     assert policy_retrieval._build_index() is None
+
+
+def test_no_manifest_does_not_descend_into_subdirectories(
+    tmp_path: Path, monkeypatch
+):
+    # The recursive walk exists to match what the manifest audit grades. Without
+    # a manifest nothing is audited, and the corpus arrives over an operator's
+    # bind mount — so a draft or an archived copy parked in a subdirectory must
+    # not become policy text an officer is shown, admitted by its filename alone.
+    base = tmp_path / "policies"
+    (base / "sub").mkdir(parents=True)
+    (base / "fee_schedule.md").write_text(BODY, encoding="utf-8")
+    (base / "sub" / "internal_draft.md").write_text(
+        "# Draft\n\n## Pricing\n\nUnapproved draft pricing.\n", encoding="utf-8"
+    )
+    _configure(monkeypatch, base, None)
+
+    ids = {c.chunk_id for c in policy_retrieval._load_corpus()}
+    assert any(cid.startswith("fee_schedule#") for cid in ids)
+    assert not any(cid.startswith("internal_draft#") for cid in ids)
