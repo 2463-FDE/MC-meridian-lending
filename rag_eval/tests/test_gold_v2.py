@@ -1,0 +1,262 @@
+"""Gold set v2: an out-of-repo gold path, and the four outcome classes.
+
+Two changes drive these tests, both from the client packet.
+
+The gold set the client supplied cannot be committed. Her limits forbid retention
+of question text and the repository is a public fork, so the questions have to be
+readable from a working directory instead of from `rag_eval/gold_queries.json`.
+
+Her questions carry four outcome classes where the harness knows two. `no_match`
+maps onto the existing `unanswerable` scoring switch; `answer` and
+`manager_escalation` map onto expected chunk ids; `clarification` is neither —
+the answer exists but the question is under-specified, and the officer channel is
+a closed topic enum so no ask-back path exists to score. It is reported, not
+scored, and that has to be visible per class rather than hidden in an aggregate.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from rag_eval import run as run_mod
+from rag_eval.metrics import QueryEval, aggregate
+
+
+def _corpus(tmp_path: Path) -> Path:
+    policies = tmp_path / "policies"
+    policies.mkdir()
+    (policies / "fees.md").write_text(
+        "# Fees\n\n## Late Fee\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
+    )
+    return tmp_path
+
+
+def _write_gold(path: Path, queries: list[dict]) -> Path:
+    path.write_text(json.dumps({"queries": queries}), encoding="utf-8")
+    return path
+
+
+def test_run_reads_gold_from_supplied_path(tmp_path: Path, monkeypatch):
+    # The committed gold set must not be the only source: the client's questions
+    # live outside the repo and are named on the command line.
+    base = _corpus(tmp_path)
+    gold = _write_gold(
+        tmp_path / "gold.json",
+        [{"id": "q-late-fee", "query": "what is the late fee", "expected": []}],
+    )
+    # If the supplied path were ignored, the committed set (12 queries against a
+    # corpus not present here) would be scored instead.
+    monkeypatch.setattr(run_mod, "GOLD_PATH", tmp_path / "does-not-exist.json")
+
+    result = run_mod.run(base=base, gold_path=gold)
+
+    assert [e.query_id for e in result.evals] == ["q-late-fee"]
+
+
+def test_gold_path_defaults_to_the_committed_set(tmp_path: Path, monkeypatch):
+    # Omitting the argument keeps the existing behaviour, so the CI gate and the
+    # keyless structural run are unaffected.
+    base = _corpus(tmp_path)
+    gold = _write_gold(
+        tmp_path / "committed.json",
+        [{"id": "q-default", "query": "what is the late fee", "expected": []}],
+    )
+    monkeypatch.setattr(run_mod, "GOLD_PATH", gold)
+
+    result = run_mod.run(base=base)
+
+    assert [e.query_id for e in result.evals] == ["q-default"]
+
+
+def test_gold_accepts_outcome_class(tmp_path: Path, monkeypatch):
+    base = _corpus(tmp_path)
+    gold = _write_gold(
+        tmp_path / "gold.json",
+        [
+            {
+                "id": "q-answer",
+                "query": "what is the late fee",
+                "expected": ["fees#late-fee"],
+                "outcome_class": "answer",
+            },
+            {
+                "id": "q-clarify",
+                "query": "what fee applies here",
+                "expected": ["fees#late-fee"],
+                "outcome_class": "clarification",
+            },
+        ],
+    )
+
+    result = run_mod.run(base=base, gold_path=gold)
+
+    assert {e.query_id for e in result.evals} == {"q-answer", "q-clarify"}
+
+
+def test_gold_rejects_unknown_outcome_class(tmp_path: Path, monkeypatch):
+    # A free-text class would reappear as an unscored bucket nobody defined.
+    base = _corpus(tmp_path)
+    gold = _write_gold(
+        tmp_path / "gold.json",
+        [
+            {
+                "id": "q-bad",
+                "query": "what is the late fee",
+                "expected": [],
+                "outcome_class": "escalate-to-legal",
+            }
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="outcome_class"):
+        run_mod.run(base=base, gold_path=gold)
+
+
+def test_gold_no_match_must_be_unanswerable(tmp_path: Path, monkeypatch):
+    # `no_match` and `unanswerable` are the same fact in two fields. Letting them
+    # disagree would score an abstention case as a retrieval case, silently.
+    base = _corpus(tmp_path)
+    gold = _write_gold(
+        tmp_path / "gold.json",
+        [
+            {
+                "id": "q-nomatch",
+                "query": "what is the interest rate",
+                "expected": [],
+                "outcome_class": "no_match",
+            }
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="no_match"):
+        run_mod.run(base=base, gold_path=gold)
+
+
+def test_gold_unanswerable_must_be_no_match(tmp_path: Path, monkeypatch):
+    base = _corpus(tmp_path)
+    gold = _write_gold(
+        tmp_path / "gold.json",
+        [
+            {
+                "id": "q-mixed",
+                "query": "what is the late fee",
+                "expected": [],
+                "unanswerable": True,
+                "outcome_class": "answer",
+            }
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="no_match"):
+        run_mod.run(base=base, gold_path=gold)
+
+
+def test_aggregate_breaks_down_by_outcome_class():
+    # 40 of the packet's 66 chunks are scaffolding repeated across five
+    # documents, so an aggregate hit rate can look healthy while a whole class is
+    # wrong. The breakdown is what makes that visible.
+    evals = [
+        QueryEval(
+            query_id="a1",
+            query="q",
+            expected=["d#s"],
+            unanswerable=False,
+            retrieved=[("d#s", 0.9)],
+            threshold=0.5,
+            outcome_class="answer",
+        ),
+        QueryEval(
+            query_id="a2",
+            query="q",
+            expected=["d#s"],
+            unanswerable=False,
+            retrieved=[("d#other", 0.9)],
+            threshold=0.5,
+            outcome_class="answer",
+        ),
+        QueryEval(
+            query_id="c1",
+            query="q",
+            expected=["d#s"],
+            unanswerable=False,
+            retrieved=[("d#s", 0.9)],
+            threshold=0.5,
+            outcome_class="clarification",
+        ),
+        QueryEval(
+            query_id="n1",
+            query="q",
+            expected=[],
+            unanswerable=True,
+            retrieved=[("d#s", 0.1)],
+            threshold=0.5,
+            outcome_class="no_match",
+        ),
+    ]
+
+    agg = aggregate(evals)
+
+    assert agg.by_class["answer"].n == 2
+    assert agg.by_class["answer"].correct == 1
+    assert agg.by_class["clarification"].n == 1
+    assert agg.by_class["clarification"].correct == 1
+    assert agg.by_class["no_match"].n == 1
+    assert agg.by_class["no_match"].correct == 1
+
+
+def test_report_renders_the_per_class_breakdown(tmp_path: Path, monkeypatch):
+    # A metric computed but rendered nowhere reads as coverage that does not
+    # exist. The breakdown has to reach the report the client is sent.
+    base = _corpus(tmp_path)
+    gold = _write_gold(
+        tmp_path / "gold.json",
+        [
+            {
+                "id": "q-answer",
+                "query": "what is the late fee",
+                "expected": ["fees#late-fee"],
+                "outcome_class": "answer",
+            },
+            {
+                "id": "q-clarify",
+                "query": "which fee applies",
+                "expected": ["fees#late-fee"],
+                "outcome_class": "clarification",
+            },
+        ],
+    )
+
+    result = run_mod.run(base=base, gold_path=gold)
+
+    assert "| Outcome class | Cases | Correct |" in result.report_text
+    assert "| `answer` | 1 |" in result.report_text
+    assert "| `clarification` | 1 |" in result.report_text
+
+
+def test_outcome_class_defaults_when_absent():
+    # The committed 12-query set carries no outcome_class. It must keep scoring
+    # exactly as before rather than becoming an unclassified bucket.
+    e = QueryEval(
+        query_id="q",
+        query="q",
+        expected=["d#s"],
+        unanswerable=False,
+        retrieved=[("d#s", 0.9)],
+        threshold=0.5,
+    )
+
+    assert e.outcome_class == "answer"
+
+    u = QueryEval(
+        query_id="u",
+        query="q",
+        expected=[],
+        unanswerable=True,
+        retrieved=[],
+        threshold=0.5,
+    )
+
+    assert u.outcome_class == "no_match"

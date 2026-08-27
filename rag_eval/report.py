@@ -54,6 +54,18 @@ def _metrics_section(
         f"Unanswerable queries: **{agg.n_unanswerable}**, "
         f"{agg.unanswerable_correct} correctly below threshold."
     )
+    # Per outcome class, because an aggregate cannot show a class failing whole.
+    # A corpus whose sections repeat across documents (scaffolding headings such
+    # as purpose, scope, roles) can hold a healthy mean while every query of one
+    # class lands on the wrong document. Counts only — no query text.
+    if agg.by_class:
+        lines += [
+            "",
+            "| Outcome class | Cases | Correct |",
+            "|---------------|-------|---------|",
+        ]
+        for name, stat in agg.by_class.items():
+            lines.append(f"| `{name}` | {stat.n} | {stat.correct} |")
     lines += [
         "",
         "| Query | Expected chunk(s) | Top retrieved (score) | hit@1/3/5 | RR | Verdict |",
