@@ -14,6 +14,11 @@ from dataclasses import dataclass, field
 
 K_VALUES = (1, 3, 5)
 
+# A case no officer topic can express. Defined here rather than in run.py because
+# the loader, the aggregate and the report all have to agree on the one spelling;
+# a second copy is how a bucket silently splits in two.
+UNMAPPED = "unmapped"
+
 
 @dataclass
 class QueryEval:
@@ -23,11 +28,23 @@ class QueryEval:
     unanswerable: bool
     retrieved: list[tuple[str, float]]  # (chunk_id, score), ranked
     threshold: float
+    # The officer topic this case would be asked under. `unmapped` is a result,
+    # not a default to be tidied away: seven of the client's questions are
+    # servicing and collections questions and the closed officer vocabulary has
+    # no code for either, so they cannot be asked through the product at all.
+    # Seven, not the six her own needs_review set names: Q24's frozen anchor is
+    # also in SYN-POL-SERVICING-COLLECTIONS.md, which that set missed.
+    # The default is the safe answer for a directly-constructed eval, NOT the
+    # value the committed gold set relies on — every committed case names its own
+    # topic, and a test asserts it, because a set that defaults into `unmapped`
+    # wholesale collapses the per-topic report to a single row.
+    topic: str = UNMAPPED
     # Which of the client's four outcome classes this case belongs to. Scoring
     # is unchanged by it — `unanswerable` still decides how a case is scored —
     # but a class-blind aggregate hides a whole class going wrong, which is the
     # failure mode a corpus of near-identical scaffolding sections invites.
     # Absent on the committed gold set, where it follows from `unanswerable`.
+    # Orthogonal to `topic`: one says what was asked, the other what came back.
     outcome_class: str | None = None
     hits: dict[int, bool] = field(init=False)
     reciprocal_rank: float = field(init=False)
@@ -57,6 +74,14 @@ class QueryEval:
 
 
 @dataclass
+class TopicStat:
+    """One topic's own count and score, so no topic hides inside a pooled mean."""
+
+    n: int
+    correct: int
+
+
+@dataclass
 class ClassStat:
     """One outcome class's own count and score, so no class hides in the mean."""
 
@@ -71,6 +96,8 @@ class Aggregate:
     hit_at_k: dict[int, float]  # over answerable queries
     mrr: float  # over answerable queries
     unanswerable_correct: int  # count scored correct
+    by_topic: dict[str, TopicStat]  # per officer topic, insertion-ordered
+    n_unmapped: int  # cases no officer topic can express
     by_class: dict[str, ClassStat]  # per outcome class, insertion-ordered
 
 
@@ -78,13 +105,19 @@ def aggregate(evals: list[QueryEval]) -> Aggregate:
     answerable = [e for e in evals if not e.unanswerable]
     unanswerable = [e for e in evals if e.unanswerable]
     n = len(answerable)
+    by_topic: dict[str, TopicStat] = {}
     by_class: dict[str, ClassStat] = {}
     for e in evals:
-        # `outcome_class` is resolved in __post_init__, so it is never None here.
-        stat = by_class.setdefault(str(e.outcome_class), ClassStat(n=0, correct=0))
+        stat = by_topic.setdefault(e.topic, TopicStat(n=0, correct=0))
         stat.n += 1
         stat.correct += int(e.correct)
+        # `outcome_class` is resolved in __post_init__, so it is never None here.
+        cstat = by_class.setdefault(str(e.outcome_class), ClassStat(n=0, correct=0))
+        cstat.n += 1
+        cstat.correct += int(e.correct)
     return Aggregate(
+        by_topic=by_topic,
+        n_unmapped=sum(1 for e in evals if e.topic == "unmapped"),
         n_answerable=n,
         n_unanswerable=len(unanswerable),
         hit_at_k={
