@@ -12,6 +12,14 @@ maps onto the existing `unanswerable` scoring switch; `answer` and
 the answer exists but the question is under-specified, and the officer channel is
 a closed topic enum so no ask-back path exists to score. It is reported, not
 scored, and that has to be visible per class rather than hidden in an aggregate.
+
+That last sentence is now enforced. This module originally scored
+`clarification` beside the other classes and required it to name an expected
+chunk. The client's delivered set refutes that: all five of her clarification
+rows carry no `sourceDocument` — in the CSV and in the authoritative JSONL
+alike — because they are ambiguous ACROSS documents by design. There is no
+single anchor to score them against, so they are excluded from every rate and
+reported as a count with the reason.
 """
 
 from __future__ import annotations
@@ -213,8 +221,10 @@ def test_aggregate_breaks_down_by_outcome_class():
 
     assert agg.by_class["answer"].n == 2
     assert agg.by_class["answer"].correct == 1
-    assert agg.by_class["clarification"].n == 1
-    assert agg.by_class["clarification"].correct == 1
+    assert "clarification" not in agg.by_class, (
+        "an unscorable class must not appear as a scored row"
+    )
+    assert agg.n_unscorable == 1
     assert agg.by_class["no_match"].n == 1
     assert agg.by_class["no_match"].correct == 1
 
@@ -235,7 +245,6 @@ def test_report_renders_the_per_class_breakdown(tmp_path: Path, monkeypatch):
             {
                 "id": "q-clarify",
                 "query": "which fee applies",
-                "expected": ["fees#late-fee"],
                 "outcome_class": "clarification",
             },
         ],
@@ -245,7 +254,8 @@ def test_report_renders_the_per_class_breakdown(tmp_path: Path, monkeypatch):
 
     assert "| Outcome class | Cases | Correct |" in result.report_text
     assert "| `answer` | 1 |" in result.report_text
-    assert "| `clarification` | 1 |" in result.report_text
+    assert "| `clarification` | 1 |" not in result.report_text
+    assert "1 case(s) are `clarification`" in result.report_text
 
 
 def test_outcome_class_defaults_when_absent():
@@ -283,12 +293,6 @@ def test_outcome_class_defaults_when_absent():
             "query": "what is the late fee",
             "expected": [],
             "outcome_class": "manager_escalation",
-        },
-        {
-            "id": "q-clarify",
-            "query": "which fee applies",
-            "expected": [],
-            "outcome_class": "clarification",
         },
         # No class and not unanswerable: resolves to `answer`, same rule.
         {"id": "q-implicit", "query": "what is the late fee", "expected": []},

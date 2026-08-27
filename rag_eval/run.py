@@ -18,11 +18,17 @@ from pathlib import Path
 
 from rag_eval import report as report_mod
 from rag_eval.cache import EmbeddingCache
-from rag_eval.chunker import Chunk, chunk_markdown
+from rag_eval.chunker import Chunk, _slug, chunk_markdown
 from rag_eval.embedder import BedrockEmbedder, TfidfEmbedder
 from rag_eval.hygiene import FileVerdict, scan_file, scan_text
 from rag_eval.index import InMemoryIndex
-from rag_eval.metrics import UNMAPPED, Aggregate, QueryEval, aggregate
+from rag_eval.metrics import (
+    UNMAPPED,
+    UNSCORABLE_CLASS,
+    Aggregate,
+    QueryEval,
+    aggregate,
+)
 
 GOLD_PATH = Path(__file__).parent / "gold_queries.json"
 
@@ -234,6 +240,14 @@ _ALLOWED_GOLD_KEYS = {
     "note",
     "topic",
     "outcome_class",
+    # The frozen anchor, as the client ships it. Preferred over a literal
+    # `expected`: a chunk id is not stable across admission modes (see
+    # `corpus_doc_id`), so a set carrying literal ids is welded to one mode —
+    # and her filenames are non-slug, so manifest admission is the only mode
+    # that can index her corpus at all. Deriving the id here keeps the gold
+    # set readable and portable.
+    "source_document",
+    "source_heading",
 }
 
 # The client's four outcome classes. `no_match` is the abstention case the
@@ -580,6 +594,21 @@ def run(
             doc_ids[v.path] if scoped is not None else rel.as_posix()
         )
 
+    # Gold sets name their anchor by source FILENAME, which is what the client
+    # freezes; the chunker keys chunks by doc id, which under a manifest is
+    # digest-derived. This is the only bridge between the two.
+    doc_id_by_source: dict[str, str] = {}
+    for _path, _did in doc_ids.items():
+        _name = Path(_path).name
+        if _name in doc_id_by_source and doc_id_by_source[_name] != _did:
+            # Two admitted files share a filename in different folders. The
+            # anchor would be ambiguous, so refuse rather than pick one.
+            raise RuntimeError(
+                "two admitted corpus files share a filename, so a gold anchor "
+                "naming it would be ambiguous (name not echoed here)"
+            )
+        doc_id_by_source[_name] = _did
+
     # THE GATE (spec D2.4): only gate-passed markdown reaches the chunker.
     chunks: list[Chunk] = []
     for v in verdicts:
@@ -617,6 +646,9 @@ def run(
     # EVERY string field, not just the query. Fail closed HERE, before any
     # embedder/cache side effect, and identify offenders by position only —
     # never echo a field value (the id itself could be the PII).
+    # Built after chunking: a derived anchor is validated against the ids that
+    # actually exist, not against the ids a gold set hoped for.
+    chunk_ids = {c.chunk_id for c in chunks}
     gold_source = gold_path or GOLD_PATH
     gold = json.loads(gold_source.read_text(encoding="utf-8"))["queries"]
     # Schema-harden first: lock the structured fields to machine shapes so they
@@ -651,6 +683,51 @@ def run(
                 f"gold query at position {i} has an 'expected' that is not a list "
                 "of chunk-id slugs (doc#section)"
             )
+        src_doc = q.get("source_document")
+        src_head = q.get("source_heading")
+        if (src_doc is None) != (src_head is None):
+            raise RuntimeError(
+                f"gold query at position {i} names only one half of its frozen "
+                "anchor — 'source_document' and 'source_heading' go together"
+            )
+        if src_doc is not None:
+            if not (
+                isinstance(src_doc, str)
+                and src_doc.strip()
+                and isinstance(src_head, str)
+                and src_head.strip()
+            ):
+                raise RuntimeError(
+                    f"gold query at position {i} has a non-string or empty "
+                    "'source_document'/'source_heading'"
+                )
+            if expected:
+                # Two sources of truth for the same fact drift apart silently,
+                # and the anchor is the one the client froze.
+                raise RuntimeError(
+                    f"gold query at position {i} names both a frozen anchor and "
+                    "a literal 'expected' — give one, and prefer the anchor"
+                )
+            resolved_doc = doc_id_by_source.get(src_doc)
+            if resolved_doc is None:
+                # Fail closed: silently scoring 0 for an anchor whose document was
+                # never admitted reads as a retrieval failure, not a config error.
+                raise RuntimeError(
+                    f"gold query at position {i} names a 'source_document' that "
+                    "is not in the admitted corpus (name not echoed here)"
+                )
+            expected = [f"{resolved_doc}#{_slug(src_head)}"]
+            if expected[0] not in chunk_ids:
+                # An anchor that resolves to no chunk would score 0 on every
+                # retrieval and read as a retrieval failure. It is a typo, a
+                # renamed heading, or a document that never entered the corpus —
+                # all config errors, and all silent without this. The heading is
+                # not echoed: it reaches the report through the chunk id.
+                raise RuntimeError(
+                    f"gold query at position {i} has a frozen anchor that matches "
+                    "no section in the admitted corpus (anchor not echoed here)"
+                )
+            q["expected"] = expected
         if "unanswerable" in q and not isinstance(q["unanswerable"], bool):
             raise RuntimeError(
                 f"gold query at position {i} has a non-boolean 'unanswerable'"
@@ -707,7 +784,7 @@ def run(
                 "case is scored on staying below the threshold and must leave "
                 "'expected' empty"
             )
-        if resolved != "no_match" and not expected:
+        if resolved not in ("no_match", UNSCORABLE_CLASS) and not expected:
             raise RuntimeError(
                 f"gold query at position {i} resolves to outcome_class "
                 f"'{resolved}' but names no 'expected' chunk ids — every class "
