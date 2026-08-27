@@ -250,3 +250,27 @@ def test_the_report_gives_unmapped_no_topic_row(tmp_path: Path, monkeypatch):
     assert "| `fee_schedule` | 1 |" in result.report_text
     assert "| `unmapped` |" not in result.report_text
     assert "1 case(s) carry `unmapped`" in result.report_text
+
+
+def test_a_wholly_unmapped_set_renders_no_topic_table(tmp_path: Path, monkeypatch):
+    # The exact state the axis shipped in. With nothing the officer channel can
+    # express there is no per-topic result to show, so the honest output is the
+    # count alone -- not a table whose single row reads like a topic that scored.
+    base = _corpus(tmp_path)
+    gold = _gold(
+        tmp_path / "gold.json",
+        [
+            {
+                "id": "q-servicing",
+                "query": "first-party collections",
+                "expected": ["fees#late-fee"],
+                "topic": "unmapped",
+            }
+        ],
+    )
+
+    monkeypatch.setattr(run_mod, "GOLD_PATH", gold)
+    result = run_mod.run(base=base)
+
+    assert "| Topic | Cases | Correct |" not in result.report_text
+    assert "1 case(s) carry `unmapped`" in result.report_text
