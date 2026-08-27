@@ -163,7 +163,10 @@ def test_aggregate_reports_per_topic_and_excludes_unmapped():
 
 
 def test_topic_defaults_to_unmapped_when_absent():
-    # The committed gold set carries no topic. It must not silently join a topic.
+    # A directly-constructed eval must not silently join a topic. This is the
+    # safe default for that case only -- the committed gold set names its own
+    # topic on every case, asserted below, because relying on this default is
+    # what collapsed the per-topic report to a single row.
     e = QueryEval(
         query_id="q",
         query="q",
@@ -195,3 +198,55 @@ def test_report_renders_the_per_topic_table(tmp_path: Path, monkeypatch):
 
     assert "| Topic | Cases | Correct |" in result.report_text
     assert "| `fee_schedule` | 1 |" in result.report_text
+
+
+def test_the_committed_gold_set_names_a_topic_on_every_case():
+    # The axis only reaches the report if the committed set carries it. It
+    # shipped with `topic` on no case at all, so every case took the `unmapped`
+    # default and a real run rendered the client's by-topic report as one
+    # `unmapped` row covering all twelve: the axis in code, absent from output.
+    gold = json.loads(run_mod.GOLD_PATH.read_text(encoding="utf-8"))["queries"]
+
+    missing = [q["id"] for q in gold if "topic" not in q]
+    assert missing == [], f"committed gold cases carrying no topic: {missing}"
+
+    allowed = set(run_mod.TOPIC_CODES) | {run_mod.UNMAPPED}
+    outside = {q["id"]: q["topic"] for q in gold if q["topic"] not in allowed}
+    assert outside == {}, f"topics outside the officer vocabulary: {outside}"
+
+    scored = {q["topic"] for q in gold if q["topic"] != run_mod.UNMAPPED}
+    assert len(scored) > 1, (
+        "the committed set resolves to one topic or fewer, so the per-topic "
+        f"table cannot show a topic failing on its own: {scored}"
+    )
+
+
+def test_the_report_gives_unmapped_no_topic_row(tmp_path: Path, monkeypatch):
+    # `unmapped` is not a topic, it is the absence of one. A row scoring it
+    # beside real topics reads as coverage the officer channel does not have,
+    # and contradicts the note that calls it excluded from every per-topic score.
+    base = _corpus(tmp_path)
+    gold = _gold(
+        tmp_path / "gold.json",
+        [
+            {
+                "id": "q-fee",
+                "query": "fee schedule",
+                "expected": ["fees#late-fee"],
+                "topic": "fee_schedule",
+            },
+            {
+                "id": "q-servicing",
+                "query": "first-party collections",
+                "expected": ["fees#late-fee"],
+                "topic": "unmapped",
+            },
+        ],
+    )
+
+    monkeypatch.setattr(run_mod, "GOLD_PATH", gold)
+    result = run_mod.run(base=base)
+
+    assert "| `fee_schedule` | 1 |" in result.report_text
+    assert "| `unmapped` |" not in result.report_text
+    assert "1 case(s) carry `unmapped`" in result.report_text

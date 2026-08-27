@@ -14,6 +14,11 @@ from dataclasses import dataclass, field
 
 K_VALUES = (1, 3, 5)
 
+# A case no officer topic can express. Defined here rather than in run.py because
+# the loader, the aggregate and the report all have to agree on the one spelling;
+# a second copy is how a bucket silently splits in two.
+UNMAPPED = "unmapped"
+
 
 @dataclass
 class QueryEval:
@@ -27,7 +32,11 @@ class QueryEval:
     # not a default to be tidied away: six of the client's questions are
     # servicing and collections questions and the closed officer vocabulary has
     # no code for either, so they cannot be asked through the product at all.
-    topic: str = "unmapped"
+    # The default is the safe answer for a directly-constructed eval, NOT the
+    # value the committed gold set relies on — every committed case names its own
+    # topic, and a test asserts it, because a set that defaults into `unmapped`
+    # wholesale collapses the per-topic report to a single row.
+    topic: str = UNMAPPED
     # Which of the client's four outcome classes this case belongs to. Scoring
     # is unchanged by it — `unanswerable` still decides how a case is scored —
     # but a class-blind aggregate hides a whole class going wrong, which is the

@@ -22,7 +22,7 @@ from rag_eval.chunker import Chunk, chunk_markdown
 from rag_eval.embedder import BedrockEmbedder, TfidfEmbedder
 from rag_eval.hygiene import FileVerdict, scan_file, scan_text
 from rag_eval.index import InMemoryIndex
-from rag_eval.metrics import Aggregate, QueryEval, aggregate
+from rag_eval.metrics import UNMAPPED, Aggregate, QueryEval, aggregate
 
 GOLD_PATH = Path(__file__).parent / "gold_queries.json"
 
@@ -222,9 +222,10 @@ TOPIC_CODES = (
     "records_retention",
 )
 
-# A case no officer topic can express. Kept OUT of TOPIC_CODES so it can never be
-# mistaken for something the product can be asked, and reported on its own line.
-UNMAPPED = "unmapped"
+# `UNMAPPED` is imported from metrics rather than defined here: it is deliberately
+# kept OUT of TOPIC_CODES so it can never be mistaken for something the product can
+# be asked, and it is reported on its own line rather than as a topic.
+
 _ALLOWED_GOLD_KEYS = {
     "id",
     "query",

@@ -63,11 +63,24 @@ def test_full_run_over_real_corpus(real_corpus: Path):
     # expected chunk in the top 5.
     assert all(e.correct for e in result.evals if not e.unanswerable)
 
+    # The by-topic report the client asked for has to survive a real run. The
+    # axis shipped with `topic` on no committed case, so every case took the
+    # `unmapped` default and the table rendered a single `unmapped` row covering
+    # all twelve — present in code, absent from the output she is sent.
+    assert "| Topic | Cases | Correct |" in report
+    assert "| `credit_decisioning` | 2 |" in report
+    assert "| `fee_schedule` | 2 |" in report
+    # `unmapped` is reported as a count under the table, never as a topic row.
+    assert "| `unmapped` |" not in report
+    assert "2 case(s) carry `unmapped`" in report
+
 
 def test_no_raw_pii_in_report_or_cache(real_corpus: Path):
     result = run(base=real_corpus)
     sensitive: set[str] = set()
-    for line in (real_corpus / "kb_dump" / "applications.jsonl").read_text().splitlines():
+    for line in (
+        (real_corpus / "kb_dump" / "applications.jsonl").read_text().splitlines()
+    ):
         if not line.strip():
             continue
         record = json.loads(line)
