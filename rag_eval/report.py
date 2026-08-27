@@ -72,7 +72,13 @@ def _metrics_section(
         "|-------|-------------------|-----------------------|-----------|----|---------|",
     ]
     for e in evals:
-        expected = ", ".join(f"`{c}`" for c in e.expected) or "*(unanswerable)*"
+        # Label an empty expected by what the case IS, not by what is missing:
+        # only an abstention case is legitimately expectation-free, and the
+        # loader now refuses a scored class without one. A dash keeps a
+        # directly-constructed eval from being labelled the one class it is not.
+        expected = ", ".join(f"`{c}`" for c in e.expected) or (
+            "*(unanswerable)*" if e.unanswerable else "—"
+        )
         top = (
             ", ".join(f"`{cid}` ({score:.3f})" for cid, score in e.retrieved[:3]) or "—"
         )

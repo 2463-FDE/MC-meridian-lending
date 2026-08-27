@@ -77,11 +77,13 @@ _ALLOWED_GOLD_KEYS = {
     "outcome_class",
 }
 
-# The client's four outcome classes. `answer` and `manager_escalation` expect a
-# chunk id; `no_match` is the abstention case the harness already scores as
-# `unanswerable`; `clarification` is neither — the answer exists but the question
-# is under-specified. The officer channel is a closed topic enum with free text
-# masked at the boundary, so no ask-back path exists to exercise: those cases are
+# The client's four outcome classes. `no_match` is the abstention case the
+# harness already scores as `unanswerable`, and carries no expected chunk. The
+# other three are scored on retrieval rank and so must each name an expected
+# chunk: `answer` and `manager_escalation` by definition, and `clarification`
+# because the answer does exist — the question is only under-specified, and the
+# officer channel is a closed topic enum with free text masked at the boundary,
+# so no ask-back path exists to exercise. A `clarification` case is therefore
 # scored as retrieval and reported as a class whose product behaviour is absent.
 _OUTCOME_CLASSES = frozenset(
     {"answer", "manager_escalation", "clarification", "no_match"}
@@ -347,7 +349,12 @@ def run(base: Path = Path("."), gold_path: Path | None = None) -> RunResult:
         if "note" in q and not isinstance(q["note"], str):
             raise RuntimeError(f"gold query at position {i} has a non-string 'note'")
         outcome_class = q.get("outcome_class")
-        if outcome_class is not None and outcome_class not in _OUTCOME_CLASSES:
+        # isinstance first: a JSON array/object value is unhashable, and testing
+        # it against the frozenset raises a raw TypeError instead of the schema
+        # error every other malformed field here fails with.
+        if outcome_class is not None and (
+            not isinstance(outcome_class, str) or outcome_class not in _OUTCOME_CLASSES
+        ):
             raise RuntimeError(
                 f"gold query at position {i} has an unknown 'outcome_class' "
                 f"— allowed values are {sorted(_OUTCOME_CLASSES)}"
@@ -365,6 +372,29 @@ def run(base: Path = Path("."), gold_path: Path | None = None) -> RunResult:
                     "unanswerable true, and every other class requires it false "
                     "or absent"
                 )
+
+        # The class says what a case is FOR; `expected` is what scores it. Left
+        # free to disagree, a scored class with no expected chunk is unhittable:
+        # it scores incorrect however retrieval behaves, and its empty expected
+        # cell reads as the abstention case in the very table added to make a
+        # class-level failure visible (report.py now labels that cell by class
+        # too). Resolve the class the way QueryEval.__post_init__ does, so a
+        # set that omits the field is held to the same rule.
+        resolved = outcome_class or ("no_match" if q.get("unanswerable") else "answer")
+        if resolved == "no_match" and expected:
+            raise RuntimeError(
+                f"gold query at position {i} resolves to outcome_class "
+                "'no_match' but carries 'expected' chunk ids — an abstention "
+                "case is scored on staying below the threshold and must leave "
+                "'expected' empty"
+            )
+        if resolved != "no_match" and not expected:
+            raise RuntimeError(
+                f"gold query at position {i} resolves to outcome_class "
+                f"'{resolved}' but names no 'expected' chunk ids — every class "
+                "except 'no_match' is scored on retrieval rank and must name at "
+                "least one expected chunk"
+            )
 
     # Then screen the remaining free text (query/note) for self-identifying PII.
     dirty = [

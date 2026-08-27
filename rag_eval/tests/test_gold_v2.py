@@ -45,7 +45,13 @@ def test_run_reads_gold_from_supplied_path(tmp_path: Path, monkeypatch):
     base = _corpus(tmp_path)
     gold = _write_gold(
         tmp_path / "gold.json",
-        [{"id": "q-late-fee", "query": "what is the late fee", "expected": []}],
+        [
+            {
+                "id": "q-late-fee",
+                "query": "what is the late fee",
+                "expected": ["fees#late-fee"],
+            }
+        ],
     )
     # If the supplied path were ignored, the committed set (12 queries against a
     # corpus not present here) would be scored instead.
@@ -62,7 +68,13 @@ def test_gold_path_defaults_to_the_committed_set(tmp_path: Path, monkeypatch):
     base = _corpus(tmp_path)
     gold = _write_gold(
         tmp_path / "committed.json",
-        [{"id": "q-default", "query": "what is the late fee", "expected": []}],
+        [
+            {
+                "id": "q-default",
+                "query": "what is the late fee",
+                "expected": ["fees#late-fee"],
+            }
+        ],
     )
     monkeypatch.setattr(run_mod, "GOLD_PATH", gold)
 
@@ -260,3 +272,118 @@ def test_outcome_class_defaults_when_absent():
     )
 
     assert u.outcome_class == "no_match"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"id": "q-answer", "query": "what is the late fee", "outcome_class": "answer"},
+        {
+            "id": "q-escalate",
+            "query": "what is the late fee",
+            "expected": [],
+            "outcome_class": "manager_escalation",
+        },
+        {
+            "id": "q-clarify",
+            "query": "which fee applies",
+            "expected": [],
+            "outcome_class": "clarification",
+        },
+        # No class and not unanswerable: resolves to `answer`, same rule.
+        {"id": "q-implicit", "query": "what is the late fee", "expected": []},
+    ],
+)
+def test_scored_class_requires_expected_chunk_ids(query: dict, tmp_path: Path):
+    # A scored class with no expected chunk is unhittable: it scores incorrect
+    # however retrieval behaves, and the report prints its empty expected cell
+    # as "(unanswerable)" — the opposite of the class the case declares, in the
+    # per-class table added to make class-level failure visible.
+    base = _corpus(tmp_path)
+    gold = _write_gold(tmp_path / "gold.json", [query])
+
+    with pytest.raises(RuntimeError, match="no 'expected' chunk ids"):
+        run_mod.run(base=base, gold_path=gold)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {
+            "id": "q-nomatch",
+            "query": "what is the interest rate",
+            "expected": ["fees#late-fee"],
+            "unanswerable": True,
+            "outcome_class": "no_match",
+        },
+        # No class but unanswerable: resolves to `no_match`, same rule.
+        {
+            "id": "q-implicit-nomatch",
+            "query": "what is the interest rate",
+            "expected": ["fees#late-fee"],
+            "unanswerable": True,
+        },
+    ],
+)
+def test_no_match_must_not_carry_expected_chunk_ids(query: dict, tmp_path: Path):
+    # An abstention case is scored on staying below the threshold; `expected` is
+    # never read, so chunk ids there are printed in the report as the case's
+    # expectation while nothing scores against them.
+    base = _corpus(tmp_path)
+    gold = _write_gold(tmp_path / "gold.json", [query])
+
+    with pytest.raises(RuntimeError, match="must leave 'expected' empty"):
+        run_mod.run(base=base, gold_path=gold)
+
+
+@pytest.mark.parametrize("value", [["answer"], {"class": "answer"}])
+def test_non_string_outcome_class_fails_as_a_schema_error(value, tmp_path: Path):
+    # A JSON array/object is unhashable: testing it against the closed set
+    # raises a raw TypeError instead of the schema error every other malformed
+    # gold field fails with.
+    base = _corpus(tmp_path)
+    gold = _write_gold(
+        tmp_path / "gold.json",
+        [
+            {
+                "id": "q-bad-type",
+                "query": "what is the late fee",
+                "expected": ["fees#late-fee"],
+                "outcome_class": value,
+            }
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="unknown 'outcome_class'"):
+        run_mod.run(base=base, gold_path=gold)
+
+
+def test_report_does_not_label_a_scored_case_unanswerable():
+    # The empty-expected cell used to read "(unanswerable)" for any case with no
+    # expected chunk, which labelled a scored class as the one class it is not.
+    from rag_eval import report as report_mod
+    from rag_eval.metrics import aggregate
+
+    e = QueryEval(
+        query_id="q-scored",
+        query="q",
+        expected=[],
+        unanswerable=False,
+        retrieved=[("d#s", 0.9)],
+        threshold=0.5,
+        outcome_class="answer",
+    )
+
+    text = report_mod.build(
+        verdicts=[],
+        n_chunks=1,
+        cache_hits=0,
+        cache_misses=0,
+        evals=[e],
+        agg=aggregate([e]),
+        threshold=0.5,
+        embedder_signature="test",
+    )
+
+    assert "q-scored" in text
+    assert "*(unanswerable)*" not in text
