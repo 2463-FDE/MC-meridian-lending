@@ -281,7 +281,10 @@ def make_embedder():
         return BedrockEmbedder(
             model_id=os.getenv("RAG_BEDROCK_MODEL", "").strip()
             or _DEFAULT_BEDROCK_MODEL,
-            region=os.getenv("AWS_REGION"),
+            # Stripped like RAG_EMBEDDER/RAG_BEDROCK_MODEL above: compose
+            # passes ``AWS_REGION: ${AWS_REGION:-}``, so an unset host variable
+            # arrives as "" rather than absent. BedrockEmbedder refuses both.
+            region=os.getenv("AWS_REGION", "").strip() or None,
         )
     raise ValueError(f"RAG_EMBEDDER={name!r} is not one of ('tfidf', 'bedrock').")
 

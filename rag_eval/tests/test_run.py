@@ -5,6 +5,8 @@ import io
 import json
 from pathlib import Path
 
+import pytest
+
 from rag_eval.embedder import BedrockEmbedder
 from rag_eval.run import calibrate_threshold, make_embedder, run
 
@@ -656,3 +658,46 @@ def test_make_embedder_blank_model_uses_the_default_model(monkeypatch):
 
     run_mod.make_embedder()
     assert captured["model_id"] == run_mod._DEFAULT_BEDROCK_MODEL
+
+
+def test_make_embedder_bedrock_refuses_an_unusable_region(monkeypatch):
+    """An unset region is refused HERE, before boto3 is reached.
+
+    `docker-compose.yml` passes ``AWS_REGION: ${AWS_REGION:-}``, so an unset host
+    variable arrives as "" rather than absent — the same blank-env shape
+    `RAG_EMBEDDER` and `RAG_BEDROCK_MODEL` already normalize. Blank reached boto3
+    as ``region_name=""`` and built `https://bedrock-runtime..amazonaws.com`;
+    absent became ``region_name=None``, which lets boto3 resolve a region from
+    ambient host config, and Bedrock model access is granted per region. Neither
+    is an explicitly configured region, so both are refused with a message naming
+    the variable an operator has to set.
+
+    The refusal must precede the lazy `import boto3` — CI never installs boto3,
+    and a guard that only fires after the import is not a guard there.
+    """
+    monkeypatch.setenv("RAG_EMBEDDER", "bedrock")
+    for value in ("", "   "):
+        monkeypatch.setenv("AWS_REGION", value)
+        with pytest.raises(ValueError, match="AWS_REGION"):
+            make_embedder()
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    with pytest.raises(ValueError, match="AWS_REGION"):
+        make_embedder()
+
+
+def test_bedrock_embedder_refuses_a_regionless_client_construction():
+    """The refusal lives at the construction site, not only at `make_embedder`.
+
+    `.env.example` and `docker-compose.yml` both state that rag_eval refuses to
+    construct a Bedrock client without an explicit region; a guard only in the
+    env-reading caller would leave that claim false for any other caller.
+    """
+    with pytest.raises(ValueError, match="region"):
+        BedrockEmbedder(model_id="amazon.titan-embed-text-v2:0")
+
+
+def test_bedrock_embedder_injected_client_needs_no_region():
+    """An injected client carries its own region — tests must not need one."""
+    embedder = BedrockEmbedder(model_id="m", client=object())
+    embedder.fit([])
+    assert embedder.signature == "bedrock-v1:m"

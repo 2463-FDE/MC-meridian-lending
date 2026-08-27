@@ -375,6 +375,68 @@ def test_search_abstains_when_the_harness_is_not_importable(threshold, monkeypat
     assert answer.chunk_id == ""
 
 
+def test_search_abstains_when_the_embedder_cannot_be_built(threshold, monkeypatch):
+    """A misconfigured embedder abstains; it does not 500 the officer's request.
+
+    `make_embedder` reads `RAG_EMBEDDER`/`AWS_REGION` — both wired through
+    `docker-compose.yml` — and raises `ValueError` on a typo'd backend name or an
+    unusable Bedrock region. `_build_index` called it unguarded, so the exception
+    left `search()`, crossed `assistant.entry` (app/main.py) and became a 500:
+    the one class of retrieval failure that was NOT the documented abstention,
+    while an unset threshold and an absent harness both were.
+    """
+    threshold("0.05")
+
+    def _boom():
+        raise ValueError("RAG_EMBEDDER='bedroc' is not one of ('tfidf', 'bedrock').")
+
+    monkeypatch.setattr(policy_retrieval, "make_embedder", _boom)
+    answer = policy_retrieval.search(ELIGIBILITY_QUERY)
+    assert not answer.is_hit
+    assert answer.reason == policy_retrieval.NO_CORPUS
+    assert answer.text == ""
+    assert answer.chunk_id == ""
+
+
+def test_search_abstains_when_embedding_the_query_fails(threshold, monkeypatch):
+    """The query embed is a provider call too, and the query is model-authored.
+
+    A Bedrock fault here raised through `search()`; `assistant.entry` attaches
+    `str(exception)` to its span, so an exception echoing the text it was handed
+    would carry model-authored free text into the trace — the one thing this
+    module promises never to log. Abstain, and record only the exception TYPE.
+    """
+    threshold("0.05")
+    real = policy_retrieval.make_embedder
+
+    def _fragile():
+        embedder = real()
+        fit, embed = embedder.fit, embedder.embed
+        calls = {"n": 0}
+
+        def _embed(text):
+            calls["n"] += 1
+            if calls["n"] > len(_corpus_chunk_ids()):
+                raise RuntimeError(f"provider rejected input: {text}")
+            return embed(text)
+
+        embedder.fit, embedder.embed = fit, _embed
+        return embedder
+
+    monkeypatch.setattr(policy_retrieval, "make_embedder", _fragile)
+    answer = policy_retrieval.search(ELIGIBILITY_QUERY)
+    assert not answer.is_hit
+    assert answer.reason == policy_retrieval.NO_CORPUS
+
+
+def _corpus_chunk_ids():
+    """Chunk ids the loader builds from the checkout corpus (indexing order)."""
+    chunks = []
+    for path in sorted(policy_retrieval.corpus_dir().glob("*.md")):
+        chunks.extend(chunk_markdown(path))
+    return [c.chunk_id for c in chunks]
+
+
 def test_app_imports_without_the_repo_root_on_sys_path():
     """Reproduces CI's `backend` import smoke: `cd services/origination-service` then
     `python -c "import app.main"`. A bare interpreter never reads `pytest.ini`, so

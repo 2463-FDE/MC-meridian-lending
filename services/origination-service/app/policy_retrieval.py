@@ -6,9 +6,15 @@ model never sees that text — the loop feeds it only the status code and the sc
 decision 3), which is why nothing here is shaped for a prompt.
 
 Everything fails closed to an abstention: an unimportable `rag_eval`, no corpus, a corpus
-file the ADR 0007 hygiene scan refuses, an unset or malformed threshold, an empty query, or a
-best match below the threshold all return `PolicyAnswer(status="policy_abstain", ...)`. An officer then reads "no policy
+file the ADR 0007 hygiene scan refuses, an unset or malformed threshold, an empty query, an
+embedder that cannot be built or called, or a best match below the threshold all return
+`PolicyAnswer(status="policy_abstain", ...)`. An officer then reads "no policy
 match", which is honest; a fabricated or unvouched-for quotation would not be.
+
+"Everything" is load-bearing, not a summary: retrieval is an optional assistant tool, so no
+failure in it may reach the officer's request as a 500 (`assistant.entry`, app/main.py, would
+also attach the exception string to the span). Every call into `rag_eval` from here is
+guarded.
 
 The index is built once per process from `rag_eval` (importable in the container since card
 G2a) and kept in memory — 9 chunks, exact cosine (ADR 0007 rule 6, debt D16).
@@ -282,8 +288,29 @@ def _build_index():
     chunks = _load_corpus()
     if not chunks:
         return None
-    embedder = make_embedder()
-    embedder.fit([c.text for c in chunks])
+    try:
+        embedder = make_embedder()
+        embedder.fit([c.text for c in chunks])
+    except Exception as exc:
+        # `make_embedder` reads RAG_EMBEDDER and AWS_REGION, both wired through
+        # docker-compose.yml, and raises on an unknown backend name or a Bedrock
+        # region that was never configured; `fit` on the Bedrock backend is a
+        # provider call and can fail for network reasons. None of that is an
+        # unhealthy service -- retrieval is an optional assistant tool, so it
+        # abstains, exactly as an unset threshold and an absent harness already
+        # do. Unguarded, the exception left `search()`, crossed
+        # `assistant.entry` (app/main.py, which attaches `str(exception)` to the
+        # span) and became a 500 on the officer's request.
+        #
+        # The message is safe to log here: it is config text or a provider
+        # fault, and the model-supplied query is not in scope yet -- see
+        # `search()` for the embed that IS holding one.
+        log.warning(
+            "policy retrieval disabled: embedder unavailable (%s: %s)",
+            type(exc).__name__,
+            exc,
+        )
+        return None
     # Two documents sharing a filename stem (different directories, or two
     # manifest-approved spellings differing only by case) emit identical chunk
     # ids, because the chunker lowercases the stem. InMemoryIndex keeps both
@@ -347,7 +374,22 @@ def search(query: str) -> PolicyAnswer:
         )
         return abstain(NO_CORPUS)
     index, embedder, texts = state
-    hits = index.search(embedder.embed(query), k=1)
+    try:
+        vector = embedder.embed(query)
+    except Exception as exc:
+        # On the Bedrock backend this is a provider call holding the
+        # model-authored query. Log the exception TYPE only: a fault that echoes
+        # the input it was handed would put that free text in the log, and then
+        # -- raised -- on the `assistant.entry` span too. Abstaining keeps both
+        # promises at once (the query never leaves this process, and a provider
+        # fault is an abstention rather than a 500).
+        log.warning(
+            "policy retrieval abstained: query embedding failed (%s) — message "
+            "withheld, it can carry the model-authored query",
+            type(exc).__name__,
+        )
+        return abstain(NO_CORPUS)
+    hits = index.search(vector, k=1)
     if not hits:
         return abstain(NO_CORPUS)
     chunk_id, score = hits[0]

@@ -79,8 +79,11 @@ services:
       # Embedding backend for policy retrieval. Unset keeps the keyless TF-IDF
       # path — compose passes "" rather than omitting the variable, so
       # make_embedder treats blank as unset. `bedrock` routes through Amazon
-      # Titan and needs AWS_REGION set explicitly: leaving it unset lets boto3
-      # discover a region, and Bedrock model access is granted per region.
+      # Titan and REQUIRES AWS_REGION: rag_eval refuses to construct a Bedrock
+      # client without one (blank included), because a region boto3 discovered
+      # from ambient host config is not the one anybody configured, and Bedrock
+      # model access is granted per region. The refusal abstains — retrieval is
+      # off, the service is healthy.
       RAG_EMBEDDER: ${RAG_EMBEDDER:-}
       RAG_BEDROCK_MODEL: ${RAG_BEDROCK_MODEL:-}
       # Adds prompt/response CONTENT to the traces above. Non-production only —
