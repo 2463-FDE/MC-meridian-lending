@@ -8,12 +8,14 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (71f6f84)` — 71f6f84 2026-08-26 Merge pull request #93 from 2463-FDE/feat/root-span-outcome
+Base: `origin/main (9aeb618)` — 9aeb618 2026-08-27 Merge pull request #95 from 2463-FDE/test/rag-eval-quality-floor
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #95 | `9aeb618` | 2026-08-27 | Merge pull request #95 from 2463-FDE/test/rag-eval-quality-floor |
+| #94 | `fb8924f` | 2026-08-26 | Merge pull request #94 from 2463-FDE/fix/kb-freshness-merge-ref |
 | #93 | `71f6f84` | 2026-08-26 | Merge pull request #93 from 2463-FDE/feat/root-span-outcome |
 | #92 | `1eec439` | 2026-08-26 | Merge pull request #92 from 2463-FDE/fix/cvv-deletion |
 | #91 | `49390fe` | 2026-08-26 | Merge pull request #91 from 2463-FDE/chore/kb-mutability-split |
