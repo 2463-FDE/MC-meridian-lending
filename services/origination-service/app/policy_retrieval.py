@@ -22,7 +22,12 @@ try:
     from rag_eval.chunker import chunk_markdown
     from rag_eval.hygiene import scan_file
     from rag_eval.index import InMemoryIndex
-    from rag_eval.run import make_embedder, unsafe_corpus_path_reason
+    from rag_eval.run import (
+        audit_corpus_against_manifest,
+        load_corpus_manifest,
+        make_embedder,
+        unsafe_corpus_path_reason,
+    )
 except ImportError as exc:
     # `rag_eval` is repo-root, and card G2a puts it in the IMAGE (copied to /app/rag_eval,
     # WORKDIR /app) — it does not put it on the sys.path of every checkout. A bare
@@ -152,6 +157,27 @@ def _load_corpus() -> list:
     """
     chunks = []
     base = corpus_dir()
+    manifest = None
+    if config.POLICY_CORPUS_MANIFEST:
+        # Fail closed on every manifest problem: an unreadable or malformed
+        # declaration, or a corpus that does not match it, yields no corpus and
+        # therefore an abstention. Indexing the listed subset of a mismatched
+        # directory would serve a different corpus than the one approved, which
+        # is worse than answering "no policy match".
+        try:
+            manifest = load_corpus_manifest(Path(config.POLICY_CORPUS_MANIFEST))
+        except (OSError, ValueError) as exc:
+            log.warning(
+                "policy corpus manifest unusable, indexing nothing: %s", exc
+            )
+            return []
+        problems = audit_corpus_against_manifest(base, manifest)
+        if problems:
+            log.warning(
+                "policy corpus does not match its manifest, indexing nothing: %s",
+                "; ".join(problems),
+            )
+            return []
     for path in sorted(base.glob("*.md")):
         # The hygiene gate below scans CONTENT only. A file mounted with clean
         # content but an unsafe NAME (jane-doe-123-45-6789.md) would still pass
@@ -160,7 +186,9 @@ def _load_corpus() -> list:
         # CI-time scan never sees this bind-mounted copy, so re-check the path
         # here with the same function rag_eval.run applies to the committed
         # corpus (rag_eval/run.py::run).
-        reason = unsafe_corpus_path_reason(path.relative_to(base))
+        reason = unsafe_corpus_path_reason(
+            path.relative_to(base), base=base, manifest=manifest
+        )
         if reason is not None:
             # The filename itself is the flagged problem — unlike the branches
             # below, path.name is not safe to log here.

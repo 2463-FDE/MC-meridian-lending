@@ -419,6 +419,15 @@ POLICY_RETRIEVAL_MIN_SCORE = os.getenv("POLICY_RETRIEVAL_MIN_SCORE", "")
 # (/app/policies in the container, <repo>/policies in a checkout).
 POLICY_CORPUS_DIR = os.getenv("POLICY_CORPUS_DIR", "")
 
+# Checksum manifest declaring WHICH corpus files are approved and WHAT their
+# content is, in `shasum -a 256` format with corpus-directory-relative names.
+# Set it when the corpus is a supplied packet whose filenames are not lowercase
+# slugs: admission then comes from this declaration instead of the naming
+# convention, so the files need not be renamed (which would invalidate the
+# checksums they were approved under). Unset keeps the naming convention, which
+# is what the repository's own corpus uses.
+POLICY_CORPUS_MANIFEST = os.getenv("POLICY_CORPUS_MANIFEST", "")
+
 
 def policy_retrieval_min_score() -> float | None:
     """The configured abstain threshold, or None when unset or unusable.
