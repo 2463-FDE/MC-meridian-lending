@@ -225,6 +225,15 @@ class RunResult:
     report_path: Path
     report_text: str
     embedder_signature: str
+    # A provider backend runs cacheless (see cache_enabled), so cache_hits/misses
+    # are both 0 no matter how much was embedded and cannot describe the run. The
+    # provider counters below are what the post-run report reads in that mode;
+    # `caching` says which pair is meaningful rather than leaving a reader to
+    # infer it from two zeros.
+    caching: bool
+    provider_calls: int
+    provider_retries: int
+    provider_input_tokens: int
 
 
 def calibrate_threshold(
@@ -448,11 +457,21 @@ def run(base: Path = Path(".")) -> RunResult:
     ]
 
     agg = aggregate(evals)
+    # Read the counters AFTER the gold-query embeds above: a provider run embeds
+    # every indexed chunk and every gold query, and both are provider calls the
+    # client's report has to account for. TF-IDF carries no such counters.
+    provider_calls = getattr(embedder, "calls", 0)
+    provider_retries = getattr(embedder, "retries", 0)
+    provider_input_tokens = getattr(embedder, "input_tokens", 0)
     report_text = report_mod.build(
         verdicts=verdicts,
         n_chunks=len(chunks),
         cache_hits=cache.hits,
         cache_misses=cache.misses,
+        caching=caching,
+        provider_calls=provider_calls,
+        provider_retries=provider_retries,
+        provider_input_tokens=provider_input_tokens,
         threshold=threshold,
         evals=evals,
         agg=agg,
@@ -475,6 +494,10 @@ def run(base: Path = Path(".")) -> RunResult:
         report_path=report_path,
         report_text=report_text,
         embedder_signature=embedder.signature,
+        caching=caching,
+        provider_calls=provider_calls,
+        provider_retries=provider_retries,
+        provider_input_tokens=provider_input_tokens,
     )
 
 
@@ -485,10 +508,19 @@ def main(base: Path = Path(".")) -> None:
     for v in refused:
         print(f"  REFUSED {v.path}: {v.counts()}")
     print(f"embedder: {result.embedder_signature}")
-    print(
-        f"embeddings: {result.n_chunks} chunks, "
-        f"{result.cache_misses} embedded this run, {result.cache_hits} from cache"
-    )
+    if result.caching:
+        print(
+            f"embeddings: {result.n_chunks} chunks, "
+            f"{result.cache_misses} embedded this run, {result.cache_hits} from cache"
+        )
+    else:
+        # Cacheless provider run: the cache counters are structurally 0 here, so
+        # printing them would report a no-op for a run that embedded everything.
+        print(
+            f"embeddings: {result.n_chunks} chunks, {result.provider_calls} provider "
+            f"calls this run ({result.provider_retries} retries, "
+            f"{result.provider_input_tokens} input tokens), cache disabled"
+        )
     print(f"threshold: {result.threshold:.4f} (calibrated, see report)")
     print(f"report: {result.report_path}")
 

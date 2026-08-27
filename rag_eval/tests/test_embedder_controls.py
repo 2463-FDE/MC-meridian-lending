@@ -89,9 +89,12 @@ def test_signature_binds_the_dimension():
 
 
 def test_retry_ceiling_is_two_attempts():
-    # The client capped retries at two attempts per embedding call. boto3's own
-    # default is higher, so the ceiling has to be declared rather than inherited.
-    assert _BEDROCK_CLIENT_CONFIG["retries"]["max_attempts"] == 2
+    # The client capped attempts at two per embedding call. Asserting a value alone
+    # is not enough: botocore reads `max_attempts` as the retries made AFTER the
+    # initial request, so `max_attempts=2` is three calls. Only `total_max_attempts`
+    # includes the initial request, and `max_attempts` must not reappear beside it.
+    assert _BEDROCK_CLIENT_CONFIG["retries"]["total_max_attempts"] == 2
+    assert "max_attempts" not in _BEDROCK_CLIENT_CONFIG["retries"]
     assert _BEDROCK_CLIENT_CONFIG["retries"]["mode"] == "standard"
 
 

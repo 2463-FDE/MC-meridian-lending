@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from rag_eval.embedder import BedrockEmbedder
-from rag_eval.run import calibrate_threshold, make_embedder, run
+from rag_eval.run import calibrate_threshold, main, make_embedder, run
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -605,6 +605,65 @@ def test_run_with_bedrock_backend(tmp_path: Path, monkeypatch):
     # (test_embedder.py::test_bedrock_cache_prevents_re_embedding still covers it).
     assert not (tmp_path / "rag_eval" / ".cache" / "embeddings.json").exists()
     assert result.cache_hits == 0 and result.cache_misses == 0
+
+
+class _MeteredBedrockClient(_DeterministicBedrockClient):
+    """Adds the response fields a real Bedrock call carries: botocore's own
+    retry count and the model's input token count."""
+
+    def invoke_model(self, modelId, body):  # noqa: N803 — boto3's kwarg name
+        text = json.loads(body)["inputText"]
+        digest = hashlib.sha256(text.encode()).digest()
+        payload = json.dumps(
+            {
+                "embedding": [digest[i] / 255.0 for i in range(8)],
+                "inputTextTokenCount": 7,
+            }
+        )
+        self.calls += 1
+        return {
+            "body": io.BytesIO(payload.encode()),
+            "ResponseMetadata": {"RetryAttempts": 1},
+        }
+
+
+def test_provider_run_reports_provider_calls_not_cache_counters(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # A provider run is cacheless, so cache hits/misses are structurally 0 — the
+    # report and the CLI must not read a full re-embed as "nothing re-embedded".
+    policies = tmp_path / "policies"
+    policies.mkdir()
+    (policies / "clean.md").write_text(
+        "# Clean Policy\n\n## Fees\n\nLate payment fee is $35 flat.\n"
+        "\n## Approval\n\nApprove when model score is at least 660.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "rag_eval.run.make_embedder",
+        lambda: BedrockEmbedder(
+            model_id="fake-model", client=_MeteredBedrockClient(), dimensions=8
+        ),
+    )
+
+    main(base=tmp_path)
+    stdout = capsys.readouterr().out
+    result = run(base=tmp_path)
+
+    # Every indexed chunk AND every gold query is a provider call.
+    expected_calls = result.n_chunks + len(result.evals)
+    assert result.caching is False
+    assert result.cache_hits == 0 and result.cache_misses == 0
+    assert result.provider_calls == expected_calls
+    assert result.provider_retries == expected_calls  # one RetryAttempt per call
+    assert result.provider_input_tokens == 7 * expected_calls
+
+    assert "nothing re-embedded" not in result.report_text
+    assert f"Embedding calls this run: {expected_calls}" in result.report_text
+    assert f"{7 * expected_calls} input tokens" in result.report_text
+    # The CLI summary is the second surface that reported the cache counters.
+    assert f"{expected_calls} provider calls this run" in stdout
+    assert "embedded this run" not in stdout
 
 
 def test_make_embedder_default_is_tfidf(monkeypatch):

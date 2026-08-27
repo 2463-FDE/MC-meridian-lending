@@ -156,12 +156,38 @@ def build(
     n_chunks: int,
     cache_hits: int,
     cache_misses: int,
+    caching: bool,
+    provider_calls: int,
+    provider_retries: int,
+    provider_input_tokens: int,
     threshold: float,
     evals: list[QueryEval],
     agg: Aggregate,
     embedder_signature: str,
 ) -> str:
     refused = sum(1 for v in verdicts if not v.passed)
+    # The cache counters only describe a run that had a cache. A provider backend
+    # runs cacheless (rag_eval/run.py::cache_enabled), so hits and misses are both
+    # structurally 0 there — printing them would report "nothing re-embedded" for
+    # the graded configuration, which re-embeds every chunk and every gold query
+    # on every run. Report the provider's own call counters in that mode instead.
+    if caching:
+        embedding_line = (
+            f"- Embeddings computed this run: {cache_misses}; "
+            f"served from cache: {cache_hits}"
+            + (
+                " — **unchanged corpus, nothing re-embedded** (spec D1.3)"
+                if cache_misses == 0
+                else ""
+            )
+        )
+    else:
+        embedding_line = (
+            f"- Embedding calls this run: {provider_calls} "
+            f"({provider_retries} retries, {provider_input_tokens} input tokens) "
+            "— provider backend, no on-disk cache: every indexed chunk and every "
+            "gold query is re-embedded on each run"
+        )
     lines = [
         "# RAG Retrieval Eval Report (Week 2)",
         "",
@@ -172,12 +198,7 @@ def build(
         "",
         f"- Files scanned by hygiene gate: {len(verdicts)} ({refused} refused)",
         f"- Chunks indexed: {n_chunks}",
-        f"- Embeddings computed this run: {cache_misses}; served from cache: {cache_hits}"
-        + (
-            " — **unchanged corpus, nothing re-embedded** (spec D1.3)"
-            if cache_misses == 0
-            else ""
-        ),
+        embedding_line,
         f"- Embedding backend: `{embedder_signature}`",
         f"- Calibrated confidence threshold: {threshold:.4f}",
         "",

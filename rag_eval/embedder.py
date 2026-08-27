@@ -124,11 +124,14 @@ class TfidfEmbedder:
 # corpus size there is nothing to optimise (debt D16).
 DEFAULT_EMBED_DIMENSIONS = 1024
 
-# Retries are capped per the client's operating limit of two attempts per embedding
+# Attempts are capped per the client's operating limit of two attempts per embedding
 # call. boto3's own default is higher, so the ceiling is declared here and asserted
-# by a test rather than inherited from the SDK. Kept as data so the assertion needs
-# no boto3 import — `rag_eval` stays stdlib-only so the blocking gate runs keyless.
-_BEDROCK_CLIENT_CONFIG = {"retries": {"max_attempts": 2, "mode": "standard"}}
+# by a test rather than inherited from the SDK. The field is `total_max_attempts`,
+# not `max_attempts`: botocore counts `max_attempts` as the retries made AFTER the
+# initial request, so 2 there is three calls, while `total_max_attempts` includes
+# the initial request. Kept as data so the assertion needs no boto3 import —
+# `rag_eval` stays stdlib-only so the blocking gate runs keyless.
+_BEDROCK_CLIENT_CONFIG = {"retries": {"total_max_attempts": 2, "mode": "standard"}}
 
 
 class EmbeddingProviderError(RuntimeError):
@@ -203,9 +206,7 @@ class BedrockEmbedder:
         try:
             response = self._client.invoke_model(
                 modelId=self.model_id,
-                body=json.dumps(
-                    {"inputText": text, "dimensions": self.dimensions}
-                ),
+                body=json.dumps({"inputText": text, "dimensions": self.dimensions}),
             )
             payload = json.loads(response["body"].read())
             vec = payload["embedding"]
