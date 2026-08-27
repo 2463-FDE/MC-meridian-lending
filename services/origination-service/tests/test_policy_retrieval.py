@@ -398,6 +398,34 @@ def test_search_abstains_when_the_embedder_cannot_be_built(threshold, monkeypatc
     assert answer.chunk_id == ""
 
 
+def test_search_abstains_when_the_corpus_embed_fails(threshold, monkeypatch):
+    """The provider call that indexes the corpus is where a credential fault lands.
+
+    `BedrockEmbedder.fit` is a no-op — it only sets the signature — so on that
+    backend the FIRST network call is the per-chunk `embed` inside the index
+    build, not `make_embedder` and not `fit`. Guarding only those two left the
+    loop exposed: a container smoke with `AWS_REGION` set and no credentials
+    raised `ClientError(IncompleteSignatureException)` straight out of
+    `search()`. Region configured with credentials missing, expired or rotated is
+    the realistic production shape of this failure, and it was a 500 on the
+    officer's request.
+    """
+    threshold("0.05")
+
+    class _NoCredentials:
+        def fit(self, texts):
+            pass  # mirrors BedrockEmbedder: no network here
+
+        def embed(self, text):
+            raise RuntimeError("IncompleteSignatureException")
+
+    monkeypatch.setattr(policy_retrieval, "make_embedder", _NoCredentials)
+    answer = policy_retrieval.search(ELIGIBILITY_QUERY)
+    assert not answer.is_hit
+    assert answer.reason == policy_retrieval.NO_CORPUS
+    assert answer.text == ""
+
+
 def test_search_abstains_when_embedding_the_query_fails(threshold, monkeypatch):
     """The query embed is a provider call too, and the query is model-authored.
 

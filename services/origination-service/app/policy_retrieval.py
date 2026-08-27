@@ -288,29 +288,10 @@ def _build_index():
     chunks = _load_corpus()
     if not chunks:
         return None
-    try:
-        embedder = make_embedder()
-        embedder.fit([c.text for c in chunks])
-    except Exception as exc:
-        # `make_embedder` reads RAG_EMBEDDER and AWS_REGION, both wired through
-        # docker-compose.yml, and raises on an unknown backend name or a Bedrock
-        # region that was never configured; `fit` on the Bedrock backend is a
-        # provider call and can fail for network reasons. None of that is an
-        # unhealthy service -- retrieval is an optional assistant tool, so it
-        # abstains, exactly as an unset threshold and an absent harness already
-        # do. Unguarded, the exception left `search()`, crossed
-        # `assistant.entry` (app/main.py, which attaches `str(exception)` to the
-        # span) and became a 500 on the officer's request.
-        #
-        # The message is safe to log here: it is config text or a provider
-        # fault, and the model-supplied query is not in scope yet -- see
-        # `search()` for the embed that IS holding one.
-        log.warning(
-            "policy retrieval disabled: embedder unavailable (%s: %s)",
-            type(exc).__name__,
-            exc,
-        )
-        return None
+    # Checked BEFORE any embedder work: it needs no vectors, and on the Bedrock
+    # backend every chunk below is a billed provider call for a corpus this is
+    # about to refuse anyway.
+    #
     # Two documents sharing a filename stem (different directories, or two
     # manifest-approved spellings differing only by case) emit identical chunk
     # ids, because the chunker lowercases the stem. InMemoryIndex keeps both
@@ -327,9 +308,41 @@ def _build_index():
             duplicates,
         )
         return None
-    index = InMemoryIndex()
-    for chunk in chunks:
-        index.add(chunk.chunk_id, embedder.embed(chunk.text))
+    try:
+        embedder = make_embedder()
+        embedder.fit([c.text for c in chunks])
+        index = InMemoryIndex()
+        for chunk in chunks:
+            index.add(chunk.chunk_id, embedder.embed(chunk.text))
+    except Exception as exc:
+        # ONE guard over the whole build, deliberately: `make_embedder` reads
+        # RAG_EMBEDDER and AWS_REGION (both wired through docker-compose.yml)
+        # and raises on an unknown backend name or a region that was never
+        # configured, while the per-chunk `embed` below is a provider call on
+        # the Bedrock backend and fails on absent, expired or rotated
+        # credentials. Guarding only the first two missed that loop:
+        # `BedrockEmbedder.fit` is a no-op that just sets the signature, so the
+        # FIRST network call is inside the loop, and a container smoke with a
+        # real region and no credentials raised
+        # `ClientError(IncompleteSignatureException)` out of `search()`.
+        #
+        # None of it is an unhealthy service — retrieval is an optional
+        # assistant tool, so it abstains, exactly as an unset threshold and an
+        # absent harness already do. Unguarded, the exception left `search()`,
+        # crossed `assistant.entry` (app/main.py, which attaches
+        # `str(exception)` to the span) and became a 500 on the officer's
+        # request.
+        #
+        # The message is safe to log: it is config text or a provider fault, and
+        # the only input in scope here is gate-passed corpus text an officer may
+        # already read. The model-supplied query is NOT in scope — see
+        # `search()` for the embed that holds one, which logs the type alone.
+        log.warning(
+            "policy retrieval disabled: embedder unavailable (%s: %s)",
+            type(exc).__name__,
+            exc,
+        )
+        return None
     log.info("policy corpus indexed: %s chunks from %s", len(chunks), corpus_dir())
     return index, embedder, {c.chunk_id: c.text for c in chunks}
 
