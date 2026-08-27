@@ -120,21 +120,36 @@ Ordered. Steps 1–4 need nothing from the client.
      reports `n/a`, not `0.0`. No combined "both supported" score is computed or printed —
      S-1 refuses a merged verdict by name.
    - **Gold JSON fields** (widen `_ALLOWED_GOLD_KEYS`, `rag_eval/run.py:229`) —
-     `expected_conclusion: str` and `displayed_summary_id: str`, both required on a case whose
-     `outcome_class` is not `no_match`; both refused on a `no_match` case. Unknown keys keep
-     failing closed, as they do today.
+     `expected_conclusion: str` and `displayed_summary_id: str`, **both required on all 28 rows,
+     whatever the `outcome_class`.** Measured against the delivered packet, not assumed: all 28
+     rows of `displayed-summaries.csv` carry a populated `expected_conclusion_text` and
+     `synthetic_displayed_summary`, the six `no_match` rows included — a `no_match` case still has
+     an expected conclusion (that no policy in the corpus covers the question) and a summary shown
+     to the officer, so both are gradeable and S-1 wants them graded. An earlier draft of this
+     contract required the pair only on a non-`no_match` case and refused it on a `no_match` one:
+     that predicate rebuilds C-1 — a loader that refuses her data — and drops 6 of 28 rows out of
+     the support test she had just widened. Unknown keys keep failing closed, as they do today.
    - **Report columns** (`rag_eval/report.py`) — the per-case table gains `conclusion` and
      `summary`, each rendering the enum value; the aggregate block gains one row per target with
      `supported / n_graded` and a separate `human_review` count. Keep `{e.query_id}` only —
      #97 removed the question text and it stays out (S-10).
    - **Acceptance** — a red-first test per bullet: a merged-verdict helper does not exist, a
      `human_review` case moves neither rate, `n_graded == 0` renders `n/a`, a gold case missing
-     `displayed_summary_id` is refused, and a `no_match` case carrying one is refused.
+     `displayed_summary_id` is refused, and a `no_match` case carrying both is **accepted** — that
+     last one is the regression test for the refused-her-data predicate above.
 3. **Freeze the displayed summaries.** Reuse `load_corpus_manifest` / `audit_corpus_against_manifest`
    (`rag_eval/run.py:46` and `:78`, on `origin/main` since #96) against her `SHA256SUMS.txt`. Her ordering
    is explicit: frozen **before** retrieval runs, not alongside.
-4. **Build gold set v2 itself** — the out-of-repo file `--gold` consumes: 28 rows, `expected` from
-   the frozen anchors, both grading targets. All 17 anchors verified resolving via
+4. **Build gold set v2 itself** — the out-of-repo file `--gold` consumes 28 rows. The two axes do
+   **not** have the same coverage, and conflating them is how the row count goes wrong:
+
+   - **Support axis** — both grading targets on **all 28 rows**, `no_match` included (step 2).
+   - **Retrieval axis** — `expected` from the frozen anchors, on the **17 rows that have one**. The
+     other 11 carry no `source_document`: six are `no_match`, and five are `clarification` — Q13,
+     Q14, Q15, Q16, Q17. Those five are not `no_match` and still have no anchor, so they carry no
+     retrieval expectation and are graded on the two support verdicts alone.
+
+   All 17 anchors verified resolving via
    `Path(sourceDocument).stem.lower() + "#" + _slug(sourceHeading)`, 0 misses.
 
    **`topic` is derived, not looked up.** The rule is complete over the delivered summaries packet
