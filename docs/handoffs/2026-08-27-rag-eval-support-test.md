@@ -1,14 +1,25 @@
 # Handoff — the two-verdict support test and the graded Titan run (2026-08-27)
 
-**Branch:** `feat/rag-eval-topic-axis` (PR #99) · **Base:** `origin/main` · **Repo:** `/Users/maha/Desktop/revature/MC-meridian-lending`
+**Branch:** none — `feat/rag-eval-topic-axis` (PR #99) merged as `2525f96`. Start the next piece
+from a fresh branch off `origin/main`. · **Repo:** `/Users/maha/Desktop/revature/MC-meridian-lending`
 **Status:** The whole ingestion and scoring stack is merged. The client answered the blocking
 question, widened the requirement, and authorized a narrow exception. **No Titan call has been
 made.** Next build item is the two-verdict data model.
 
-## Read the client record first
+## The governing constraints
 
-Every exchange with Dana is on two local-only branches. Read them without switching — the working
-tree is routinely dirty and concurrent sessions hold it:
+Her 2026-08-27 reply is the governing document. **Its constraints are reproduced below rather than
+cited**, because the branches holding it do not reach a clean checkout:
+
+- **`docs/client-asks-originals`** (`d7caa2b`) — verbatim, both directions. **No remote at all.**
+- **`docs/client-asks`** (`4c601f5`) — derived readings and the topic-mapping decision. A remote
+  exists (`origin/docs/client-asks`, `3c8172f`) but is **behind**: the 2026-08-27 file is not on it.
+
+Neither is pushed on purpose, and the fix is not to push them. This repo is a **public fork**, and
+her approval covers indexing the packet, not publishing her correspondence. So the derived,
+non-sensitive constraints are inlined here — enough to implement against without the private refs.
+On the authoring machine, read the full record without switching branches (the tree is routinely
+dirty and concurrent sessions hold it):
 
 ```bash
 git show docs/client-asks-originals:docs/client-asks-2026-08-27-support-test-correction.md
@@ -16,13 +27,41 @@ git show docs/client-asks:docs/client-asks-2026-08-27-support-test-correction.md
 git ls-tree -r --name-only docs/client-asks -- docs/ | grep client-asks   # list them all
 ```
 
-- **`docs/client-asks-originals`** (`d7caa2b`) — verbatim, both directions. Never edit or summarise.
-- **`docs/client-asks`** (`4c601f5`) — derived readings, the constraint registers, and the
-  topic-mapping decision with its evidence.
+### Settled — S-1…S-10
 
-Her 2026-08-27 reply is the governing document now. Its derived reading lists **S-1…S-10**
-(settled), **C-1…C-7** (conflicts with what was built) and **O-6/O-7** (open). Start there rather
-than re-deriving.
+| # | Constraint | Consequence for the build |
+|---|---|---|
+| S-1 | The support test does **not** narrow. Expected conclusion and displayed summary are two frozen targets. | Two verdicts per case, kept distinct. A merged verdict is refused by name. |
+| S-2 | 28 synthetic displayed summaries delivered with a SHA-256 manifest. | A second frozen artifact, verified the way the corpus is, **before** retrieval runs. |
+| S-3 | The draft question-to-topic mapping is explicitly ours to change. | Six rows (Q07, Q12, Q14, Q25, Q27, Q28) marked `needs_review` — servicing/collections questions with no code in the vocabulary. |
+| S-4 | All eight officer topics stay in scope; report **by topic**, not pooled. | A reporting axis the harness did not have (shipped on #99). |
+| S-5 | Option 2 authorized as a **narrow exception for this exercise**, not a rule change. | An offline evaluator may read policy text. The officer-facing path is untouched and must be reported as untouched. |
+| S-6 | The four mechanical cases must **not** consume a model call. | Exclusion by instruction, not by preference. |
+| S-7 | One bounded evaluator pass. One retry, technical failure only. No prompt tuning against seen results. No model fallback. | Three separate controls, each needing enforcement in code. |
+| S-8 | The evaluator grades and nothing else. | Its outputs are verdicts plus one rationale line — never edits to a conclusion, a summary or a decision. |
+| S-9 | Unsupported or uncertain verdicts go to human review, counting neither way. | A third verdict state. A boolean cannot carry it. |
+| S-10 | Retention allowlist: case id, topic, source-section reference, the two verdicts, one human-reviewed rationale line. | Prompts, passages and model responses persist nowhere — logs and traces included. |
+
+Her stop condition is explicit: **if the implemented data path differs from her description, stop
+and ask again.**
+
+### Conflicts with what was built — C-1…C-7
+
+- **C-1** the gold loader refuses her data — `_ALLOWED_GOLD_KEYS` is a closed allowlist.
+- **C-2** two verdicts is a data-model change — `QueryEval.correct` is one bool, and `Aggregate`
+  counts against it.
+- **C-3** per-topic reporting did not exist (closed by #99).
+- **C-4** six questions have no topic code, and the naive fix lands on the product path.
+- **C-5** retention is satisfied only once the operating controls merge (closed by #97).
+- **C-6** the evaluator must live in `rag_eval/`, **never** on the product path.
+- **C-7** S-7's three controls need code — an intention that is not enforced is not a control.
+
+### Open — ours, not hers
+
+- **O-6** the six `needs_review` rows: remap within the eight codes, or add a servicing/collections
+  code and amend ADR 0019 and the gate.
+- **O-7** whether the four codes with no content in this corpus are retired, remapped, or left
+  permanently abstaining. S-4 keeps all eight in scope, which settles reporting, not the vocabulary.
 
 **Two gaps in the record, both known:** the 2026-08-25 outbound email was never captured at send
 time, and the gated two-line reply naming the generator model id and AWS region exists only as a
@@ -38,11 +77,11 @@ a tip moves, a merge commit does not:
 - `eaeadad` (#97) the client's operating controls: no cache under a provider backend, no query or
   question text in reports, sanitized provider errors, two-attempt retry cap, refuse-if-tracing
 - `916f9ee` (#98) `--gold` out-of-repo path, `outcome_class` + the four classes, per-class breakdown
+- `2525f96` (#99) `topic` on a gold case validated against `TOPIC_CODES`, a drift test against
+  `POLICY_TOPICS`, `unmapped` deliberately outside the vocabulary, per-topic table in the report
 
-**PR #99** `feat/rag-eval-topic-axis` — `topic` on a gold case validated against `TOPIC_CODES`, a
-drift test against `POLICY_TOPICS`, `unmapped` deliberately outside the vocabulary, per-topic table
-in the report. Its head is `25f69ed`; check whether it has merged before trusting anything below
-that assumes it has not. 222 tests pass, smoke passes.
+`origin/main` is `2525f96`; 223 tests pass there, smoke passes. A **local** `main` may be stale —
+`git fetch` and read `origin/main`, never the local ref.
 
 Her displayed-summaries package is verified: `SHA256SUMS.txt` 4/4 unedited, 28 rows, and every
 column labelled "frozen, byte-equal to the source packet" **is** — 0 mismatches across 28 rows and
@@ -52,28 +91,72 @@ column labelled "frozen, byte-equal to the source packet" **is** — 0 mismatche
 
 Ordered. Steps 1–4 need nothing from the client.
 
-1. ~~**#99 has a stale base.**~~ **Done 2026-08-27.** A parallel session merged `main` in
-   (`396f45a`) and regenerated `docs/state.md` twice (`4a50246`, `e5c4f9e`); the `_metrics_section`
-   and `_ALLOWED_GOLD_KEYS` conflicts with #98 are resolved. Two commits landed after that:
-   `9ed8488` gives every committed gold case a topic and drops `unmapped` from the scored table,
-   and `25f69ed` corrects the six/seven count in the `QueryEval.topic` comment. #99 reports
-   `mergeable: clean` against `916f9ee`. Nothing to do here but merge it.
-2. **The two-verdict data model — the largest remaining piece.** `metrics.py:34` on `main`
-   (`:51` on #99, which added comment lines above it) has
-   `correct: bool = field(init=False)`, one verdict. S-1 needs the expected conclusion and the
-   displayed summary graded **separately and never merged**; S-9 needs a third state
-   (`human_review`) that counts neither way. A boolean cannot carry it, and defaulting the third
-   state to false would score uncertainty as failure — the specific thing she forbade.
+1. ~~**#99.**~~ **Closed 2026-08-27 — merged as `2525f96`. No action.** History, for anyone
+   reading a stale copy of this file: a parallel session merged `main` in (`396f45a`) and
+   regenerated `docs/state.md` twice (`4a50246`, `e5c4f9e`), resolving the `_metrics_section` and
+   `_ALLOWED_GOLD_KEYS` conflicts with #98; then `9ed8488` gave every committed gold case a topic,
+   `25f69ed` corrected the six/seven count in the `QueryEval.topic` comment, and `c751a1f` pinned
+   the all-`unmapped` report shape. Verify with
+   `git merge-base --is-ancestor c751a1f origin/main && echo MERGED`.
+2. **The two-verdict data model — the largest remaining piece.** `rag_eval/metrics.py:51` on
+   `origin/main` has `correct: bool = field(init=False)`, one verdict. S-1 needs the expected
+   conclusion and the displayed summary graded **separately and never merged**; S-9 needs a third
+   state that counts neither way. A boolean cannot carry it, and defaulting the third state to
+   false would score uncertainty as failure — the specific thing she forbade.
+
+   The contract, so two sessions build the same thing:
+
+   - **Verdict state** — one enum, three members, used for both targets:
+     `supported` / `unsupported` / `human_review`. No boolean anywhere in the pair. No fourth
+     member, and no `None` standing in for `human_review`.
+   - **Per-case fields on `QueryEval`** — `conclusion_verdict` and `summary_verdict`, both of that
+     enum, plus one `rationale: str` (S-8/S-10: one human-reviewed line, no passage text). The
+     existing `correct` bool stays and keeps meaning **retrieval** correctness — it is a different
+     axis from the support test and must not be folded into either verdict.
+   - **Denominator rule** — each target aggregates independently. For each of the two:
+     `n_graded = supported + unsupported`, `rate = supported / n_graded`, and `human_review` is
+     reported as its own count, **never** in the numerator or the denominator. `n_graded == 0`
+     reports `n/a`, not `0.0`. No combined "both supported" score is computed or printed —
+     S-1 refuses a merged verdict by name.
+   - **Gold JSON fields** (widen `_ALLOWED_GOLD_KEYS`, `rag_eval/run.py:229`) —
+     `expected_conclusion: str` and `displayed_summary_id: str`, both required on a case whose
+     `outcome_class` is not `no_match`; both refused on a `no_match` case. Unknown keys keep
+     failing closed, as they do today.
+   - **Report columns** (`rag_eval/report.py`) — the per-case table gains `conclusion` and
+     `summary`, each rendering the enum value; the aggregate block gains one row per target with
+     `supported / n_graded` and a separate `human_review` count. Keep `{e.query_id}` only —
+     #97 removed the question text and it stays out (S-10).
+   - **Acceptance** — a red-first test per bullet: a merged-verdict helper does not exist, a
+     `human_review` case moves neither rate, `n_graded == 0` renders `n/a`, a gold case missing
+     `displayed_summary_id` is refused, and a `no_match` case carrying one is refused.
 3. **Freeze the displayed summaries.** Reuse `load_corpus_manifest` / `audit_corpus_against_manifest`
-   (`rag_eval/run.py:46` and `:78`, on `main` since #96) against her `SHA256SUMS.txt`. Her ordering
+   (`rag_eval/run.py:46` and `:78`, on `origin/main` since #96) against her `SHA256SUMS.txt`. Her ordering
    is explicit: frozen **before** retrieval runs, not alongside.
 4. **Build gold set v2 itself** — the out-of-repo file `--gold` consumes: 28 rows, `topic` from the
-   decision recorded on `docs/client-asks`, `expected` from the frozen anchors, both grading
-   targets. All 17 anchors verified resolving via
+   topic-mapping decision (recorded on `docs/client-asks`; its outcome is summarised under
+   *Key measurements* below), `expected` from the frozen anchors, both grading targets. All 17 anchors verified resolving via
    `Path(sourceDocument).stem.lower() + "#" + _slug(sourceHeading)`, 0 misses.
 5. **Re-derive the threshold.** `POLICY_RETRIEVAL_MIN_SCORE=0.1609` was calibrated for a 9-chunk
    TF-IDF corpus and is meaningless at 66 chunks under Titan. Derive per (corpus version, embedder
    signature) and store with both.
+
+   The contract, because a threshold tuned on the graded set invalidates the run it grades:
+
+   - **Calibration set — disjoint from the eval set, by construction.** Do not sample from gold set
+     v2's 28 rows. Build a separate held-out file of officer-shaped queries plus the known-absent
+     probes (the four topic codes with no content, O-7), and record its own digest. A row may
+     appear in the calibration set or in gold set v2, never both; assert the id sets are disjoint
+     in a test.
+   - **Method** — sweep the candidate threshold over the calibration set only, and pick the value
+     that satisfies the abstention criterion below. One sweep, recorded. No re-tuning after seeing
+     a gold-set number — S-7's "no prompt tuning against seen results" applies to this knob too.
+   - **Acceptance criterion** — every known-absent probe abstains (no false answer), and the
+     retrieval floor from #95 (`9aeb618`) still holds on the calibration set. If both cannot be
+     met, report the conflict rather than picking a midpoint.
+   - **Output** — write the chosen value with `(corpus_digest, embedder_signature)` alongside it,
+     to the run report and to `.env.example` as a documented example only. The service still reads
+     `POLICY_RETRIEVAL_MIN_SCORE` from the environment with **no committed default**: unset stays
+     the operational kill switch (ADR 0019).
 6. **Query generation → human review of every string → freeze with a digest.** Approved as a
    one-time offline curation step. The `policies/fee_schedule.json` + agreement-test pattern is the
    house precedent.
@@ -113,10 +196,13 @@ Ordered. Steps 1–4 need nothing from the client.
 
 ## Key files
 
-- `rag_eval/metrics.py:34` on `main` (`:51` on #99) — the single `correct` bool step 2 replaces
-- `rag_eval/run.py:210` `_ALLOWED_GOLD_KEYS`, `:227` `_OUTCOME_CLASSES` — widen for the new fields
+All line numbers are against `origin/main` at `2525f96`.
+
+- `rag_eval/metrics.py:51` — the single `correct` bool; step 2 keeps it for retrieval and adds the
+  two support verdicts beside it
+- `rag_eval/run.py:229` `_ALLOWED_GOLD_KEYS`, `:247` `_OUTCOME_CLASSES` — widen for the new fields
 - `rag_eval/run.py:46` / `:78` — manifest load and audit, reusable for the summaries
-- `rag_eval/report.py:103` — now `{e.query_id}` only; #97 removed the question text. Keep it that way
+- `rag_eval/report.py:126` — now `{e.query_id}` only; #97 removed the question text. Keep it that way
 - `services/origination-service/app/policy_retrieval.py:72` `POLICY_TOPICS` — the closed vocabulary
 - `services/origination-service/app/policy_retrieval.py:108` `tool_result()` — returns
   `{status, score}`; the officer-path guarantee her exception does **not** touch
@@ -124,7 +210,7 @@ Ordered. Steps 1–4 need nothing from the client.
 ## How to verify / run
 
 ```bash
-python3 -m pytest rag_eval/tests -q          # 222 on #99 at `25f69ed`
+python3 -m pytest rag_eval/tests -q          # 223 on `origin/main` at `2525f96`
 ./scripts/smoke_rag_eval.sh                  # SMOKE PASS
 cd services/origination-service && python3 -m pytest tests -q
 ./scripts/check_doc_paths.sh
@@ -138,18 +224,40 @@ cd <workdir> && shasum -a 256 -c SHA256SUMS.txt
 python3 -m rag_eval.run --base <workdir> --manifest <workdir>/SHA256SUMS.txt
 ```
 
-**Both packets live in session scratchpads that will not survive.** The originals are in
-`~/Downloads`, which the sandboxed shell cannot read — `ls` returns `Operation not permitted`, not
-an empty directory. Copy them out with `!` first. Never commit either: public fork, and her approval
-covers indexing, not publishing.
+**The durable copies are the two unpacked directories in `~/Downloads`, each beside its `.zip`.**
+Session scratchpad copies exist and will not survive; treat them as caches, not as the record.
+(An earlier note here said the sandboxed shell cannot read `~/Downloads` — that is no longer true;
+it reads and verifies fine. If a future sandbox does refuse, copy out with `!` first.)
+
+| Packet | Path under `~/Downloads/` | Files | `SHA256SUMS.txt` rows | `shasum -a 256 SHA256SUMS.txt` |
+|---|---|---|---|---|
+| Policy corpus + officer questions | `Mahalakshmi-Meridian-Policy-Client-Inputs-Only-2026-08-25/` | 19 | 18 | `c6037c2c92c2a1412d9f266d1624cc8a07acf5c1ce046667c622d50958397a9d` |
+| Displayed summaries | `Mahalakshmi-Synthetic-Displayed-Summaries-2026-08-27/` | 5 | 4 | `9d641ce9aadfb6d5025a1ccf0ce1e95e98b5675f318fc3ed7feebdefd27e3447` |
+
+The corpus packet holds `policies/` (5 `SYN-POL-*.md` + `policy-manifest.csv`),
+`officer-questions/`, `acceptance/`, `client-decisions/`, `scope/`, `sources/`,
+`CORPUS-SHA256SUMS.txt` and `PACKAGE-INVENTORY.txt`. The summaries packet holds
+`displayed-summaries.csv`, `DISPLAYED-SUMMARIES.md`, `TOPIC-MAPPING-REVIEW.md` and `README.md`.
+
+Confirm both before use — this checks the manifest itself, then its contents:
+
+```bash
+cd ~/Downloads/<packet> && shasum -a 256 SHA256SUMS.txt && shasum -a 256 -c SHA256SUMS.txt
+```
+
+Never commit either: public fork, and her approval covers indexing, not publishing.
 
 ## Branch state
 
-- `main` (`916f9ee`) = the client's real state, and it now holds the ingestion stack: manifest
-  admission, the operating controls, the gold schema. Retrieval still runs the two original
-  documents until a corpus is supplied at runtime. Cite `git show main:<file>` for client state.
-- `feat/rag-eval-topic-axis` = PR #99, head `25f69ed`. Check its state before relying on it.
-- `docs/client-asks` / `docs/client-asks-originals` = local-only, never pushed.
+- `origin/main` at the time of writing = `2525f96`, #99's merge commit. It is the client's real
+  state, and it now holds the ingestion stack:
+  manifest admission, the operating controls, the gold schema, the topic axis. Retrieval still runs
+  the two original documents until a corpus is supplied at runtime. Cite `git show origin/main:<file>`
+  for client state — a local `main` here is routinely behind.
+- `feat/rag-eval-topic-axis` = PR #99, merged as `2525f96`. Nothing left on it.
+- `docs/client-asks` = pushed but stale (`origin/docs/client-asks` is `3c8172f`, local is `4c601f5`);
+  the 2026-08-27 file is local-only. `docs/client-asks-originals` (`d7caa2b`) has no remote at all.
+  Both stay unpushed deliberately — see *The governing constraints*.
 
 ## Debt log refs
 
@@ -160,7 +268,11 @@ covers indexing, not publishing.
 
 ## Next session: start here
 
-#99 needs no rebase — its base is current and it is `mergeable: clean`. Merge it, then go
-straight to step 2: replace the single `correct` bool in `rag_eval/metrics.py` with two
-independent verdicts plus a `human_review` state, driven by tests written red first. Steps 1
-and 9 of the list above are the only ones touched since this file was written.
+**#99 is merged (`2525f96`). Step 1 is closed; do not re-open it.** Confirm with
+`git fetch && git merge-base --is-ancestor c751a1f origin/main && echo MERGED`, then branch off
+`origin/main` and start step 2: keep `correct` in `rag_eval/metrics.py:51` as the retrieval axis and
+add `conclusion_verdict` / `summary_verdict` beside it over the three-member enum, to the contract
+written under step 2, driven by tests written red first.
+
+If that confirmation does not print `MERGED`, the branch has diverged since this file was written —
+re-check conflicts and the 223-test count before doing anything else.
