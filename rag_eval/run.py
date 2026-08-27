@@ -289,6 +289,41 @@ def _looks_like_person_name(text: str) -> bool:
 _DEFAULT_BEDROCK_MODEL = "amazon.titan-embed-text-v2:0"
 
 
+def cache_enabled(embedder) -> bool:
+    """Whether embedding vectors may be written to disk for this backend.
+
+    The on-disk cache holds vectors derived from corpus content, which the client
+    excluded from retention for the graded run. A provider backend therefore runs
+    cacheless — it also means a rerun re-embeds, which is why the run is bounded to
+    one pass plus one correction.
+
+    The TF-IDF path keeps its cache: it makes no provider call, and the keyless
+    local run and the blocking gate both depend on it staying fast.
+    """
+    # Keyed off the embedder in use, not off RAG_EMBEDDER: a caller that injects
+    # an embedder (tests, and any future programmatic use) would otherwise have
+    # the retention decision disagree with the backend actually making calls.
+    return not getattr(embedder, "IS_PROVIDER_BACKED", True)
+
+
+def refuse_traced_provider_run(embedder) -> None:
+    """Refuse a provider-backed run while LangSmith tracing is on.
+
+    origination-service hardens the LangSmith singleton with hide_inputs and
+    hide_outputs, but that hardening deliberately does not hide ERRORS
+    (`_hide_run_error` is passthrough) and runs at service startup, which an
+    offline harness never reaches. Nothing in the required post-run report comes
+    from a trace, so the safe configuration is simply no tracing.
+    """
+    if not getattr(embedder, "IS_PROVIDER_BACKED", True):
+        return
+    if os.getenv("LANGSMITH_TRACING", "").strip().lower() in {"1", "true", "yes"}:
+        raise ValueError(
+            "LANGSMITH_TRACING is enabled and the embedding backend is a provider "
+            "— trace error bodies are not hidden, so unset it for the graded run"
+        )
+
+
 def make_embedder():
     """Pick the embedding backend from ``RAG_EMBEDDER`` (default ``tfidf``).
 
@@ -306,13 +341,21 @@ def make_embedder():
     if name == "tfidf":
         return TfidfEmbedder()
     if name == "bedrock":
+        # Validated BEFORE the client is constructed. Passing region=None lets
+        # boto3 resolve one itself from environment, profile or instance config —
+        # region discovery, which the client excluded. Failing here also keeps the
+        # check testable without boto3 installed, so the keyless gate can cover it.
+        region = os.getenv("AWS_REGION", "").strip()
+        if not region:
+            raise ValueError(
+                "AWS_REGION must be set explicitly for RAG_EMBEDDER=bedrock — "
+                "an unset value lets boto3 discover a region, and Bedrock model "
+                "access is granted per region"
+            )
         return BedrockEmbedder(
             model_id=os.getenv("RAG_BEDROCK_MODEL", "").strip()
             or _DEFAULT_BEDROCK_MODEL,
-            # Stripped like RAG_EMBEDDER/RAG_BEDROCK_MODEL above: compose
-            # passes ``AWS_REGION: ${AWS_REGION:-}``, so an unset host variable
-            # arrives as "" rather than absent. BedrockEmbedder refuses both.
-            region=os.getenv("AWS_REGION", "").strip() or None,
+            region=region,
         )
     raise ValueError(f"RAG_EMBEDDER={name!r} is not one of ('tfidf', 'bedrock').")
 
@@ -333,6 +376,15 @@ class RunResult:
     report_path: Path
     report_text: str
     embedder_signature: str
+    # A provider backend runs cacheless (see cache_enabled), so cache_hits/misses
+    # are both 0 no matter how much was embedded and cannot describe the run. The
+    # provider counters below are what the post-run report reads in that mode;
+    # `caching` says which pair is meaningful rather than leaving a reader to
+    # infer it from two zeros.
+    caching: bool
+    provider_calls: int
+    provider_retries: int
+    provider_input_tokens: int
 
 
 def calibrate_threshold(
@@ -582,16 +634,28 @@ def run(base: Path = Path("."), manifest_path: Path | None = None) -> RunResult:
         )
 
     embedder = make_embedder()
+    # Both decisions read the embedder itself, so they cannot disagree with the
+    # backend that actually makes the calls.
+    refuse_traced_provider_run(embedder)
     embedder.fit([c.text for c in chunks])
     cache = EmbeddingCache(cache_path)
+    caching = cache_enabled(embedder)
+    if not caching:
+        # A provider backend runs cacheless: the vectors are content-derived and
+        # the client excluded retention. Purge anything a prior TF-IDF run left,
+        # so "no retention" is a state on disk rather than a claim about this run.
+        cache_path.unlink(missing_ok=True)
     index = InMemoryIndex()
     try:
         for c in chunks:
             index.add(
                 c.chunk_id,
-                cache.get_or_embed(embedder.signature, c.text, embedder.embed),
+                cache.get_or_embed(embedder.signature, c.text, embedder.embed)
+                if caching
+                else embedder.embed(c.text),
             )
-        cache.save()
+        if caching:
+            cache.save()
     except Exception:
         # A partial/failed embed run (e.g. a Bedrock timeout mid-loop) must not
         # leave the prior cache — which may hold vectors for a now-removed or
@@ -623,18 +687,32 @@ def run(base: Path = Path("."), manifest_path: Path | None = None) -> RunResult:
     ]
 
     agg = aggregate(evals)
+    # Read the counters AFTER the gold-query embeds above: a provider run embeds
+    # every indexed chunk and every gold query, and both are provider calls the
+    # client's report has to account for. TF-IDF carries no such counters.
+    provider_calls = getattr(embedder, "calls", 0)
+    provider_retries = getattr(embedder, "retries", 0)
+    provider_input_tokens = getattr(embedder, "input_tokens", 0)
     report_text = report_mod.build(
         verdicts=verdicts,
         display_names=display_names,
         n_chunks=len(chunks),
         cache_hits=cache.hits,
         cache_misses=cache.misses,
+        caching=caching,
+        provider_calls=provider_calls,
+        provider_retries=provider_retries,
+        provider_input_tokens=provider_input_tokens,
         threshold=threshold,
         evals=evals,
         agg=agg,
         embedder_signature=embedder.signature,
     )
     report_path = base / "rag_eval" / "eval_report.md"
+    # Created explicitly: this directory used to exist only as a side effect of
+    # EmbeddingCache.save() writing its parent, so a cacheless provider run —
+    # which is the graded configuration — reached this line with no directory.
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report_text, encoding="utf-8")
     return RunResult(
         verdicts=verdicts,
@@ -648,6 +726,10 @@ def run(base: Path = Path("."), manifest_path: Path | None = None) -> RunResult:
         report_path=report_path,
         report_text=report_text,
         embedder_signature=embedder.signature,
+        caching=caching,
+        provider_calls=provider_calls,
+        provider_retries=provider_retries,
+        provider_input_tokens=provider_input_tokens,
     )
 
 
@@ -660,10 +742,19 @@ def main(base: Path = Path("."), manifest_path: Path | None = None) -> None:
         # filename is graded by nothing and can itself be the identifier.
         print(f"  REFUSED {result.display_names.get(v.path, v.path)}: {v.counts()}")
     print(f"embedder: {result.embedder_signature}")
-    print(
-        f"embeddings: {result.n_chunks} chunks, "
-        f"{result.cache_misses} embedded this run, {result.cache_hits} from cache"
-    )
+    if result.caching:
+        print(
+            f"embeddings: {result.n_chunks} chunks, "
+            f"{result.cache_misses} embedded this run, {result.cache_hits} from cache"
+        )
+    else:
+        # Cacheless provider run: the cache counters are structurally 0 here, so
+        # printing them would report a no-op for a run that embedded everything.
+        print(
+            f"embeddings: {result.n_chunks} chunks, {result.provider_calls} provider "
+            f"calls this run ({result.provider_retries} retries, "
+            f"{result.provider_input_tokens} input tokens), cache disabled"
+        )
     print(f"threshold: {result.threshold:.4f} (calibrated, see report)")
     print(f"report: {result.report_path}")
 

@@ -161,7 +161,12 @@ class _FakeBedrockClient:
 
 
 def _bedrock(vectors):
-    return BedrockEmbedder(model_id="fake-model", client=_FakeBedrockClient(vectors))
+    # dimensions=2 matches the toy vectors below. The width check in embed() is a
+    # real control (a wrong-width vector must not enter the index), so the fixture
+    # declares its width rather than the embedder relaxing the check.
+    return BedrockEmbedder(
+        model_id="fake-model", client=_FakeBedrockClient(vectors), dimensions=2
+    )
 
 
 def test_bedrock_embed_normalizes():
@@ -175,9 +180,13 @@ def test_bedrock_embed_normalizes():
 def test_bedrock_signature_is_model_bound():
     a = _bedrock({})
     a.fit([])
-    b = BedrockEmbedder(model_id="other-model", client=_FakeBedrockClient({}))
+    b = BedrockEmbedder(
+        model_id="other-model", client=_FakeBedrockClient({}), dimensions=2
+    )
     b.fit([])
-    assert a.signature == "bedrock-v1:fake-model"
+    # The dimension is part of the signature: same model at a different width
+    # produces incomparable vectors, so it must invalidate the cache too.
+    assert a.signature == "bedrock-v1:fake-model:2"
     assert a.signature != b.signature
 
 
@@ -187,8 +196,10 @@ def test_bedrock_embed_before_fit_raises():
 
 
 def test_bedrock_cache_prevents_re_embedding(tmp_path):
+    # The cache class stays backend-agnostic; it is run() that refuses to write
+    # provider-derived vectors to disk (cache_enabled), not the cache itself.
     client = _FakeBedrockClient({"doc a": [1.0, 0.0], "doc b": [0.0, 2.0]})
-    e = BedrockEmbedder(model_id="fake-model", client=client)
+    e = BedrockEmbedder(model_id="fake-model", client=client, dimensions=2)
     e.fit(["doc a", "doc b"])
     path = tmp_path / "emb.json"
 
