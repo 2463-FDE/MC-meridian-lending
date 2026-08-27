@@ -40,7 +40,75 @@ _SKIP_NAMES = {".gitkeep", ".gitignore", ".gitattributes", ".ds_store"}
 _SAFE_FILENAME = re.compile(r"\.?[a-z0-9][a-z0-9._-]*")
 
 
-def unsafe_corpus_path_reason(rel_path: Path) -> str | None:
+_MANIFEST_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+def load_corpus_manifest(path: Path) -> dict[str, str]:
+    """Read a corpus manifest in `shasum -a 256` format: digest, then filename.
+
+    The manifest is the declaration of WHICH corpus was approved and WHAT its
+    content was. Names are corpus-directory-relative, so a client packet whose
+    checksum file covers the whole delivery is narrowed to its policy directory
+    once, under human review, rather than reinterpreted on every run.
+
+    Malformed input raises: a manifest that cannot be parsed must not degrade to
+    an empty allowlist, which would refuse the whole corpus and read as "the
+    corpus is contaminated" instead of "the manifest is broken".
+    """
+    entries: dict[str, str] = {}
+    for lineno, raw in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        line = raw.strip()
+        if not line:
+            continue
+        # shasum writes two spaces (text mode) or " *" (binary mode).
+        digest, sep, name = line.partition("  ")
+        if not sep:
+            digest, sep, name = line.partition(" *")
+        name = name.strip()
+        if not sep or not name or not _MANIFEST_DIGEST.fullmatch(digest):
+            raise ValueError(
+                f"corpus manifest line {lineno} is not `<sha256>  <filename>`"
+            )
+        entries[name] = digest
+    return entries
+
+
+def audit_corpus_against_manifest(base: Path, manifest: dict[str, str]) -> list[str]:
+    """Problems making the corpus on disk differ from the approved manifest.
+
+    Audits BOTH directions. Checking only the manifest's own entries would report
+    success over an unlisted file sitting in the corpus directory, which is the
+    failure mode a hand-maintained allowlist always has: it grades what it lists
+    and stays silent about what it does not.
+
+    Findings name a manifest entry (approved text, safe to echo) but never an
+    unlisted filename — an unapproved name can itself be the PII, so it is
+    reported by position, as run()'s own refusal path does.
+    """
+    if not manifest:
+        return ["manifest declares no approved corpus files"]
+    on_disk = {
+        p.relative_to(base).as_posix() for p in base.rglob("*") if p.is_file()
+    }
+    problems = []
+    for name in sorted(set(manifest) - on_disk):
+        problems.append(f"manifest entry missing on disk: {name}")
+    unlisted = sorted(on_disk - set(manifest))
+    for position, _ in enumerate(unlisted, start=1):
+        problems.append(
+            f"unlisted file in corpus directory at position {position} "
+            "(name withheld — an unapproved name can itself be the identifier)"
+        )
+    return problems
+
+
+def unsafe_corpus_path_reason(
+    rel_path: Path,
+    base: Path | None = None,
+    manifest: dict[str, str] | None = None,
+) -> str | None:
     """Why a corpus-relative path cannot be trusted as a chunk id / log/report entry.
 
     A file with clean CONTENT can still leak identity through its NAME — the
@@ -48,11 +116,37 @@ def unsafe_corpus_path_reason(rel_path: Path) -> str | None:
     path. Shared by run()'s corpus-relative scan below and by
     origination-service's policy_retrieval, which indexes a bind-mounted
     corpus at runtime that this module's own CI-time scan never sees. Returns
-    "pii" or "non-slug", or None when the path is safe. Callers must not echo
-    the path itself when a reason comes back — the name can be the PII.
+    "pii", "not-in-manifest", "manifest-digest-mismatch" or "non-slug", or None
+    when the path is safe. Callers must not echo the path itself when a reason
+    comes back — the name can be the PII.
+
+    With no `manifest`, admission is the lowercase-slug convention, which is what
+    stops an unlabeled person name (`Jane-Doe.md`) becoming a chunk id when
+    `scan_text` finds no self-identifying shape in it.
+
+    With a `manifest`, admission is that declaration instead: the name must be
+    listed AND the file's content must hash to the listed digest. This is how a
+    supplied corpus whose filenames are not slugs is indexed without renaming it,
+    which would invalidate the checksums it was approved under. Name-only would
+    reopen the hole `_LEGACY_DUMP_SHA256` was pinned to close — the approved
+    filename carrying different content. The `scan_text` check still runs first
+    and unconditionally: a manifest cannot approve a name that is borrower data.
     """
     if scan_text(str(rel_path)):
         return "pii"
+    if manifest is not None:
+        if base is None:
+            raise ValueError("manifest admission needs `base` to hash the file")
+        listed = manifest.get(rel_path.as_posix())
+        if listed is None:
+            return "not-in-manifest"
+        try:
+            digest = hashlib.sha256((base / rel_path).read_bytes()).hexdigest()
+        except OSError:
+            # Unreadable is not approved: fail closed rather than admit a file
+            # whose content could not be checked against the declaration.
+            return "manifest-digest-mismatch"
+        return None if digest == listed else "manifest-digest-mismatch"
     if not all(_SAFE_FILENAME.fullmatch(part) for part in rel_path.parts):
         return "non-slug"
     return None
