@@ -108,9 +108,7 @@ def audit_corpus_against_manifest(
         # nothing: a subtree no manifest entry covers is an unapproved corpus, not
         # a clean one.
         return [f"manifest declares no approved files under {subtree or '.'}"]
-    on_disk = {
-        p.relative_to(base).as_posix() for p in root.rglob("*") if p.is_file()
-    }
+    on_disk = {p.relative_to(base).as_posix() for p in root.rglob("*") if p.is_file()}
     problems = []
     for name in sorted(set(scoped) - on_disk):
         problems.append(f"manifest entry missing on disk: {name}")
@@ -209,7 +207,26 @@ def corpus_doc_id(rel_path: Path, manifest: dict[str, str] | None = None) -> str
 # allowlisted so the name guard doesn't refuse them.)
 _GOLD_ID = re.compile(r"[a-z0-9][a-z0-9-]*")
 _CHUNK_ID = re.compile(r"[a-z0-9][a-z0-9._-]*#[a-z0-9._-]+")
-_ALLOWED_GOLD_KEYS = {"id", "query", "expected", "unanswerable", "note"}
+_ALLOWED_GOLD_KEYS = {
+    "id",
+    "query",
+    "expected",
+    "unanswerable",
+    "note",
+    "outcome_class",
+}
+
+# The client's four outcome classes. `no_match` is the abstention case the
+# harness already scores as `unanswerable`, and carries no expected chunk. The
+# other three are scored on retrieval rank and so must each name an expected
+# chunk: `answer` and `manager_escalation` by definition, and `clarification`
+# because the answer does exist — the question is only under-specified, and the
+# officer channel is a closed topic enum with free text masked at the boundary,
+# so no ask-back path exists to exercise. A `clarification` case is therefore
+# scored as retrieval and reported as a class whose product behaviour is absent.
+_OUTCOME_CLASSES = frozenset(
+    {"answer", "manager_escalation", "clarification", "no_match"}
+)
 
 # The ONE corpus file ADR 0007 documents as legacy-contaminated: kb_dump is the
 # raw pre-remediation dump, so its refusal is expected and is the whole point of
@@ -410,8 +427,18 @@ def calibrate_threshold(
     return min(candidates, key=lambda c: (errors(c[0]), -c[1]))[0]
 
 
-def run(base: Path = Path("."), manifest_path: Path | None = None) -> RunResult:
+def run(
+    base: Path = Path("."),
+    gold_path: Path | None = None,
+    manifest_path: Path | None = None,
+) -> RunResult:
     """Gate, ingest, embed, retrieve, report.
+
+    `gold_path` names a gold set outside the repository. The client's questions
+    cannot be committed — her limits forbid retaining question text, and this
+    repository is a public fork — so they are read from the working directory
+    that already holds her corpus. Omitted, the committed set is used and
+    behaviour is unchanged.
 
     `manifest_path` names a checksum manifest declaring the approved POLICY corpus,
     with names relative to `base` (`policies/X.md`) — the same shape a supplied
@@ -424,6 +451,7 @@ def run(base: Path = Path("."), manifest_path: Path | None = None) -> RunResult:
     exception (`_LEGACY_DUMP_SHA256`); a policy manifest must not turn the legacy
     dump into an unlisted-file abort.
     """
+
     # Scan EVERY file under the corpus roots, recursively and regardless of
     # extension. scan_file reads known text/JSON formats and refuses unknown or
     # non-UTF-8 ones (fail closed), so a new customers.csv or a copied text dump
@@ -569,7 +597,8 @@ def run(base: Path = Path("."), manifest_path: Path | None = None) -> RunResult:
     # EVERY string field, not just the query. Fail closed HERE, before any
     # embedder/cache side effect, and identify offenders by position only —
     # never echo a field value (the id itself could be the PII).
-    gold = json.loads(GOLD_PATH.read_text(encoding="utf-8"))["queries"]
+    gold_source = gold_path or GOLD_PATH
+    gold = json.loads(gold_source.read_text(encoding="utf-8"))["queries"]
     # Schema-harden first: lock the structured fields to machine shapes so they
     # cannot smuggle free-text PII (a name hidden in an id or an expected entry),
     # and reject unknown keys so a future free-text field cannot appear that the
@@ -608,6 +637,53 @@ def run(base: Path = Path("."), manifest_path: Path | None = None) -> RunResult:
             )
         if "note" in q and not isinstance(q["note"], str):
             raise RuntimeError(f"gold query at position {i} has a non-string 'note'")
+        outcome_class = q.get("outcome_class")
+        # isinstance first: a JSON array/object value is unhashable, and testing
+        # it against the frozenset raises a raw TypeError instead of the schema
+        # error every other malformed field here fails with.
+        if outcome_class is not None and (
+            not isinstance(outcome_class, str) or outcome_class not in _OUTCOME_CLASSES
+        ):
+            raise RuntimeError(
+                f"gold query at position {i} has an unknown 'outcome_class' "
+                f"— allowed values are {sorted(_OUTCOME_CLASSES)}"
+            )
+        # `no_match` and `unanswerable` state the same fact. Allowing them to
+        # disagree would score an abstention case on rank of an expected chunk it
+        # does not have, or score a retrieval case on staying below the
+        # threshold — either way silently, and only in the class whose whole
+        # purpose is proving abstention works.
+        if outcome_class is not None:
+            if (outcome_class == "no_match") != bool(q.get("unanswerable")):
+                raise RuntimeError(
+                    f"gold query at position {i} sets outcome_class and "
+                    "'unanswerable' inconsistently — 'no_match' requires "
+                    "unanswerable true, and every other class requires it false "
+                    "or absent"
+                )
+
+        # The class says what a case is FOR; `expected` is what scores it. Left
+        # free to disagree, a scored class with no expected chunk is unhittable:
+        # it scores incorrect however retrieval behaves, and its empty expected
+        # cell reads as the abstention case in the very table added to make a
+        # class-level failure visible (report.py now labels that cell by class
+        # too). Resolve the class the way QueryEval.__post_init__ does, so a
+        # set that omits the field is held to the same rule.
+        resolved = outcome_class or ("no_match" if q.get("unanswerable") else "answer")
+        if resolved == "no_match" and expected:
+            raise RuntimeError(
+                f"gold query at position {i} resolves to outcome_class "
+                "'no_match' but carries 'expected' chunk ids — an abstention "
+                "case is scored on staying below the threshold and must leave "
+                "'expected' empty"
+            )
+        if resolved != "no_match" and not expected:
+            raise RuntimeError(
+                f"gold query at position {i} resolves to outcome_class "
+                f"'{resolved}' but names no 'expected' chunk ids — every class "
+                "except 'no_match' is scored on retrieval rank and must name at "
+                "least one expected chunk"
+            )
 
     # Then screen the remaining free text (query/note) for self-identifying PII.
     dirty = [
@@ -616,7 +692,7 @@ def run(base: Path = Path("."), manifest_path: Path | None = None) -> RunResult:
     if dirty:
         raise RuntimeError(
             f"gold queries at position(s) {dirty} contain PII and must be "
-            "sanitized (rag_eval/gold_queries.json) — no field values are echoed"
+            f"sanitized ({gold_source}) — no field values are echoed"
         )
     # scan_text is label-gated for names; also refuse a probable person name in
     # free text, which would otherwise be embedded (Bedrock) and printed to the
@@ -629,7 +705,7 @@ def run(base: Path = Path("."), manifest_path: Path | None = None) -> RunResult:
     if named:
         raise RuntimeError(
             f"gold queries at position(s) {named} contain a probable person name "
-            "and must use synthetic ids/placeholders (rag_eval/gold_queries.json) "
+            f"and must use synthetic ids/placeholders ({gold_source}) "
             "— no field values are echoed"
         )
 
@@ -682,6 +758,7 @@ def run(base: Path = Path("."), manifest_path: Path | None = None) -> RunResult:
             unanswerable=bool(q.get("unanswerable")),
             retrieved=retrieved[q["id"]],
             threshold=threshold,
+            outcome_class=q.get("outcome_class"),
         )
         for q in gold
     ]
@@ -733,8 +810,12 @@ def run(base: Path = Path("."), manifest_path: Path | None = None) -> RunResult:
     )
 
 
-def main(base: Path = Path("."), manifest_path: Path | None = None) -> None:
-    result = run(base=base, manifest_path=manifest_path)
+def main(
+    base: Path = Path("."),
+    gold_path: Path | None = None,
+    manifest_path: Path | None = None,
+) -> None:
+    result = run(base=base, gold_path=gold_path, manifest_path=manifest_path)
     refused = [v for v in result.verdicts if not v.passed]
     print(f"gate: {len(result.verdicts)} files scanned, {len(refused)} refused")
     for v in refused:
@@ -785,6 +866,16 @@ if __name__ == "__main__":
         help="working directory holding policies/ and receiving rag_eval/ outputs",
     )
     parser.add_argument(
+        "--gold",
+        type=Path,
+        default=None,
+        help=(
+            "gold query set to score, in the committed set's schema. Defaults to "
+            "rag_eval/gold_queries.json. Use it to score a question set that "
+            "must not be committed."
+        ),
+    )
+    parser.add_argument(
         "--manifest",
         type=Path,
         default=None,
@@ -795,4 +886,4 @@ if __name__ == "__main__":
         ),
     )
     args = parser.parse_args()
-    main(base=args.base, manifest_path=args.manifest)
+    main(base=args.base, gold_path=args.gold, manifest_path=args.manifest)

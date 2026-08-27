@@ -227,7 +227,15 @@ def test_gold_query_with_pii_fails_closed(tmp_path: Path, monkeypatch):
     gold = tmp_path / "gold.json"
     gold.write_text(
         json.dumps(
-            {"queries": [{"id": "q-pii", "query": "why was ssn 412-55-9981 denied?"}]}
+            {
+                "queries": [
+                    {
+                        "id": "q-pii",
+                        "query": "why was ssn 412-55-9981 denied?",
+                        "expected": ["clean#fees"],
+                    }
+                ]
+            }
         ),
         encoding="utf-8",
     )
@@ -258,7 +266,15 @@ def test_gold_query_unlabeled_spaced_ssn_fails_closed(tmp_path: Path, monkeypatc
     gold = tmp_path / "gold.json"
     gold.write_text(
         json.dumps(
-            {"queries": [{"id": "q-pii", "query": "why was 412 55 9981 denied?"}]}
+            {
+                "queries": [
+                    {
+                        "id": "q-pii",
+                        "query": "why was 412 55 9981 denied?",
+                        "expected": ["clean#fees"],
+                    }
+                ]
+            }
         ),
         encoding="utf-8",
     )
@@ -286,7 +302,11 @@ def test_gold_pii_in_id_or_expected_fails_without_echo(tmp_path: Path, monkeypat
         json.dumps(
             {
                 "queries": [
-                    {"id": "ssn-412-55-9981", "query": "approve cutoff?"},
+                    {
+                        "id": "ssn-412-55-9981",
+                        "query": "approve cutoff?",
+                        "expected": ["clean#fees"],
+                    },
                     {"id": "q2", "query": "dti?", "expected": ["ssn 330-90-5512"]},
                 ]
             }
@@ -318,12 +338,19 @@ def test_gold_schema_rejects_malformed_structured_fields(tmp_path: Path, monkeyp
         "# Clean\n\n## Fees\n\nLate payment fee is $35 flat.\n", encoding="utf-8"
     )
     gold = tmp_path / "gold.json"
+    ok = ["clean#fees"]
     cases = [
-        ({"id": "q1", "query": "ok?", "surprise": "extra"}, "unknown field"),
-        ({"id": "Q_BAD", "query": "ok?"}, "non-slug id"),
+        (
+            {"id": "q1", "query": "ok?", "expected": ok, "surprise": "x"},
+            "unknown field",
+        ),
+        ({"id": "Q_BAD", "query": "ok?", "expected": ok}, "non-slug id"),
         ({"id": "q1", "query": "ok?", "expected": ["not-a-chunk-id"]}, "chunk-id slug"),
-        ({"id": "q1", "query": "ok?", "unanswerable": "yes"}, "non-boolean"),
-        ({"id": "q1", "query": ""}, "non-empty 'query'"),
+        (
+            {"id": "q1", "query": "ok?", "expected": ok, "unanswerable": "yes"},
+            "non-boolean",
+        ),
+        ({"id": "q1", "query": "", "expected": ok}, "non-empty 'query'"),
     ]
     for q, needle in cases:
         gold.write_text(json.dumps({"queries": [q]}), encoding="utf-8")
@@ -380,7 +407,15 @@ def test_gold_query_person_name_fails_closed(tmp_path: Path, monkeypatch):
     gold = tmp_path / "gold.json"
     gold.write_text(
         json.dumps(
-            {"queries": [{"id": "q-x", "query": "why was Alice Smith denied?"}]}
+            {
+                "queries": [
+                    {
+                        "id": "q-x",
+                        "query": "why was Alice Smith denied?",
+                        "expected": ["clean#fees"],
+                    }
+                ]
+            }
         ),
         encoding="utf-8",
     )

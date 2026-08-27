@@ -61,13 +61,31 @@ def _metrics_section(
         f"Unanswerable queries: **{agg.n_unanswerable}**, "
         f"{agg.unanswerable_correct} correctly below threshold."
     )
+    # Per outcome class, because an aggregate cannot show a class failing whole.
+    # A corpus whose sections repeat across documents (scaffolding headings such
+    # as purpose, scope, roles) can hold a healthy mean while every query of one
+    # class lands on the wrong document. Counts only — no query text.
+    if agg.by_class:
+        lines += [
+            "",
+            "| Outcome class | Cases | Correct |",
+            "|---------------|-------|---------|",
+        ]
+        for name, stat in agg.by_class.items():
+            lines.append(f"| `{name}` | {stat.n} | {stat.correct} |")
     lines += [
         "",
         "| Question id | Expected chunk(s) | Top retrieved (score) | hit@1/3/5 | RR | Verdict |",
         "|-------------|-------------------|-----------------------|-----------|----|---------|",
     ]
     for e in evals:
-        expected = ", ".join(f"`{c}`" for c in e.expected) or "*(unanswerable)*"
+        # Label an empty expected by what the case IS, not by what is missing:
+        # only an abstention case is legitimately expectation-free, and the
+        # loader now refuses a scored class without one. A dash keeps a
+        # directly-constructed eval from being labelled the one class it is not.
+        expected = ", ".join(f"`{c}`" for c in e.expected) or (
+            "*(unanswerable)*" if e.unanswerable else "—"
+        )
         top = (
             ", ".join(f"`{cid}` ({score:.3f})" for cid, score in e.retrieved[:3]) or "—"
         )
