@@ -58,8 +58,9 @@ and ask again.**
 
 ### Open — ours, not hers
 
-- **O-6** the six `needs_review` rows: remap within the eight codes, or add a servicing/collections
-  code and amend ADR 0019 and the gate.
+- **O-6** the six `needs_review` rows: their assignment is settled — they take `unmapped`, by the
+  rule under *What's left* step 4. What stays open is the vocabulary itself: whether to add a
+  servicing/collections code and amend ADR 0019 and the gate.
 - **O-7** whether the four codes with no content in this corpus are retired, remapped, or left
   permanently abstaining. S-4 keeps all eight in scope, which settles reporting, not the vocabulary.
 
@@ -132,10 +133,22 @@ Ordered. Steps 1–4 need nothing from the client.
 3. **Freeze the displayed summaries.** Reuse `load_corpus_manifest` / `audit_corpus_against_manifest`
    (`rag_eval/run.py:46` and `:78`, on `origin/main` since #96) against her `SHA256SUMS.txt`. Her ordering
    is explicit: frozen **before** retrieval runs, not alongside.
-4. **Build gold set v2 itself** — the out-of-repo file `--gold` consumes: 28 rows, `topic` from the
-   topic-mapping decision (recorded on `docs/client-asks`; its outcome is summarised under
-   *Key measurements* below), `expected` from the frozen anchors, both grading targets. All 17 anchors verified resolving via
+4. **Build gold set v2 itself** — the out-of-repo file `--gold` consumes: 28 rows, `expected` from
+   the frozen anchors, both grading targets. All 17 anchors verified resolving via
    `Path(sourceDocument).stem.lower() + "#" + _slug(sourceHeading)`, 0 misses.
+
+   **`topic` is derived, not looked up.** The rule is complete over the delivered summaries packet
+   (`displayed-summaries.csv`, columns `question_id`, `draft_topic`, `topic_review_status`):
+
+   > `topic = draft_topic`, except a row whose `topic_review_status` is `needs_review`, which takes
+   > the literal `unmapped`.
+
+   That is the decision in full: **22 rows keep her label, 6 become `unmapped`, no ninth code.**
+   The six are Q07, Q12, Q14, Q25, Q27, Q28 — the servicing/collections questions the eight-code
+   vocabulary cannot express (S-3). `draft_topic` is populated on all 28 rows and every value is
+   already inside `rag_eval/run.py::TOPIC_CODES`, so no row needs a judgement call. Why her labels
+   stay rather than being remapped for score is under *Key measurements*; the full rationale is on
+   `docs/client-asks` (`4c601f5`), authoring-machine only — the rule above does not need it.
 5. **Re-derive the threshold.** `POLICY_RETRIEVAL_MIN_SCORE=0.1609` was calibrated for a 9-chunk
    TF-IDF corpus and is meaningless at 66 chunks under Titan. Derive per (corpus version, embedder
    signature) and store with both.
@@ -188,6 +201,8 @@ Ordered. Steps 1–4 need nothing from the client.
 - Querying with each row's own `draft_topic`: the frozen anchor returns for **2 of 17**. Choosing
   whichever code retrieves best reaches **10 of 17**. The decision was to keep her labels — they are
   semantically sound, and remapping for score would tune the gold set against the system under test.
+  The six `needs_review` stand-ins take `unmapped` instead: a wrong label that scores is worse than
+  no label, and `unmapped` records that the vocabulary cannot express those questions at all.
 - Support test splits **4 mechanical / 13 interpretation-dependent**. The four are Q01 (30 days),
   Q03 (`12 CFR 1002.9`), Q04 (25 months), Q24 (36%).
 - `claimIds` cannot anchor support: `policies/policy-manifest.csv` maps claims to *documents*, and
