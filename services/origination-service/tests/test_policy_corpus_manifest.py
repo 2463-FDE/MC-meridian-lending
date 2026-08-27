@@ -13,6 +13,7 @@ outside the repository.
 """
 
 import hashlib
+import logging
 from pathlib import Path
 
 from app import config, policy_retrieval
@@ -230,3 +231,48 @@ def test_no_manifest_does_not_descend_into_subdirectories(
     ids = {c.chunk_id for c in policy_retrieval._load_corpus()}
     assert any(cid.startswith("fee_schedule#") for cid in ids)
     assert not any(cid.startswith("internal_draft#") for cid in ids)
+
+
+class _CaptureHandler(logging.Handler):
+    """Collect records emitted on the policy_retrieval logger. `logging_config.get_logger`
+    sets `propagate = False`, so `caplog` reports "nothing was logged" for a line that WAS
+    logged -- a false green on the very report under test (same reason test_authz.py and
+    test_llm_client.py each carry their own copy)."""
+
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+def test_manifest_approved_non_markdown_is_reported_not_silent(
+    tmp_path: Path, monkeypatch
+):
+    # The audit grades every listed file; the loader chunks markdown only. An
+    # approved .txt therefore audits clean and is never indexed -- which must not
+    # be silent, or an officer gets "no policy match" on approved content with
+    # nothing explaining why. The count is logged, never the names: this path
+    # never ran scan_text over them.
+    base, digests = _corpus(tmp_path)
+    other = base / "SYN-POL-PLAIN.txt"
+    other.write_text("Approved plain-text policy: fee cap is 5%.", encoding="utf-8")
+    digests["SYN-POL-PLAIN.txt"] = hashlib.sha256(other.read_bytes()).hexdigest()
+    _configure(monkeypatch, base, _manifest(tmp_path, digests))
+
+    handler = _CaptureHandler()
+    logger = logging.getLogger("policy_retrieval")
+    logger.addHandler(handler)
+    try:
+        chunks = policy_retrieval._load_corpus()
+    finally:
+        logger.removeHandler(handler)
+
+    # The markdown half still indexes -- this is a report, not a refusal.
+    assert any(c.chunk_id.startswith("syn-pol-adverse-action#") for c in chunks)
+    messages = [r.getMessage() for r in handler.records]
+    assert any("cannot index" in m for m in messages)
+    # The name is withheld: a manifest can list a filename this path never
+    # scanned, and the name itself can be the borrower data.
+    assert not any("SYN-POL-PLAIN" in m for m in messages)

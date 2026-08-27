@@ -178,6 +178,22 @@ def _load_corpus() -> list:
                 "; ".join(problems),
             )
             return []
+    if manifest is not None:
+        # The audit grades every file the manifest lists; the loader only chunks
+        # markdown. An approved file in another format therefore audits clean and
+        # is then never indexed — the same silent coverage hole a flat walk
+        # created for subdirectories. Say so: an officer getting "no policy
+        # match" on approved content otherwise has nothing to read. Count only,
+        # never the names — a manifest can list a filename this path never ran
+        # `scan_text` over, and the name itself can be the borrower data.
+        unindexable = sum(1 for name in manifest if not name.endswith(".md"))
+        if unindexable:
+            log.warning(
+                "policy corpus manifest approves %s file(s) this loader cannot "
+                "index (not .md), which are not retrievable (names withheld)",
+                unindexable,
+            )
+
     # Recursive ONLY under a manifest, to match the walk that declaration is
     # graded by: `audit_corpus_against_manifest` uses rglob (as does
     # `rag_eval.run`'s own discovery), so a flat glob would let an approved file
