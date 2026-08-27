@@ -137,6 +137,20 @@ class BedrockEmbedder:
         if client is not None:
             self._client = client
         else:
+            # An explicit region is REQUIRED: `region_name=None` lets boto3
+            # resolve one from ambient host config, and Bedrock model access is
+            # granted per region, so a discovered region silently changes which
+            # account grant the run depends on. Blank is the same absence
+            # wearing a different shape -- `region_name=""` builds
+            # `https://bedrock-runtime..amazonaws.com`. Refuse BEFORE the lazy
+            # import: CI never installs boto3, and a guard behind the import
+            # would not run there. `.env.example` and `docker-compose.yml` both
+            # state this refusal; it has to be real for them to be true.
+            if not (region or "").strip():
+                raise ValueError(
+                    "BedrockEmbedder needs an explicit region -- set AWS_REGION "
+                    "to the region your Bedrock model access is granted in."
+                )
             import boto3  # lazy: only when this backend is actually selected
 
             self._client = boto3.client("bedrock-runtime", region_name=region)
