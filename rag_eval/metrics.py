@@ -28,11 +28,20 @@ class QueryEval:
     # servicing and collections questions and the closed officer vocabulary has
     # no code for either, so they cannot be asked through the product at all.
     topic: str = "unmapped"
+    # Which of the client's four outcome classes this case belongs to. Scoring
+    # is unchanged by it — `unanswerable` still decides how a case is scored —
+    # but a class-blind aggregate hides a whole class going wrong, which is the
+    # failure mode a corpus of near-identical scaffolding sections invites.
+    # Absent on the committed gold set, where it follows from `unanswerable`.
+    # Orthogonal to `topic`: one says what was asked, the other what came back.
+    outcome_class: str | None = None
     hits: dict[int, bool] = field(init=False)
     reciprocal_rank: float = field(init=False)
     correct: bool = field(init=False)
 
     def __post_init__(self) -> None:
+        if self.outcome_class is None:
+            self.outcome_class = "no_match" if self.unanswerable else "answer"
         ids = [cid for cid, _ in self.retrieved]
         top_score = self.retrieved[0][1] if self.retrieved else 0.0
         if self.unanswerable:
@@ -62,6 +71,14 @@ class TopicStat:
 
 
 @dataclass
+class ClassStat:
+    """One outcome class's own count and score, so no class hides in the mean."""
+
+    n: int
+    correct: int
+
+
+@dataclass
 class Aggregate:
     n_answerable: int
     n_unanswerable: int
@@ -70,6 +87,7 @@ class Aggregate:
     unanswerable_correct: int  # count scored correct
     by_topic: dict[str, TopicStat]  # per officer topic, insertion-ordered
     n_unmapped: int  # cases no officer topic can express
+    by_class: dict[str, ClassStat]  # per outcome class, insertion-ordered
 
 
 def aggregate(evals: list[QueryEval]) -> Aggregate:
@@ -77,10 +95,15 @@ def aggregate(evals: list[QueryEval]) -> Aggregate:
     unanswerable = [e for e in evals if e.unanswerable]
     n = len(answerable)
     by_topic: dict[str, TopicStat] = {}
+    by_class: dict[str, ClassStat] = {}
     for e in evals:
         stat = by_topic.setdefault(e.topic, TopicStat(n=0, correct=0))
         stat.n += 1
         stat.correct += int(e.correct)
+        # `outcome_class` is resolved in __post_init__, so it is never None here.
+        cstat = by_class.setdefault(str(e.outcome_class), ClassStat(n=0, correct=0))
+        cstat.n += 1
+        cstat.correct += int(e.correct)
     return Aggregate(
         by_topic=by_topic,
         n_unmapped=sum(1 for e in evals if e.topic == "unmapped"),
@@ -91,4 +114,5 @@ def aggregate(evals: list[QueryEval]) -> Aggregate:
         },
         mrr=(sum(e.reciprocal_rank for e in answerable) / n if n else 0.0),
         unanswerable_correct=sum(e.correct for e in unanswerable),
+        by_class=by_class,
     )
