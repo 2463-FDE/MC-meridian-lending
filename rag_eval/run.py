@@ -22,7 +22,7 @@ from rag_eval.chunker import Chunk, chunk_markdown
 from rag_eval.embedder import BedrockEmbedder, TfidfEmbedder
 from rag_eval.hygiene import FileVerdict, scan_file, scan_text
 from rag_eval.index import InMemoryIndex
-from rag_eval.metrics import Aggregate, QueryEval, aggregate
+from rag_eval.metrics import UNMAPPED, Aggregate, QueryEval, aggregate
 
 GOLD_PATH = Path(__file__).parent / "gold_queries.json"
 
@@ -207,12 +207,32 @@ def corpus_doc_id(rel_path: Path, manifest: dict[str, str] | None = None) -> str
 # allowlisted so the name guard doesn't refuse them.)
 _GOLD_ID = re.compile(r"[a-z0-9][a-z0-9-]*")
 _CHUNK_ID = re.compile(r"[a-z0-9][a-z0-9._-]*#[a-z0-9._-]+")
+# The officer topic vocabulary, duplicated from POLICY_TOPICS in
+# origination-service's policy_retrieval. The harness cannot import a service, so
+# a test asserts the two agree rather than trusting the copy — a drifted copy
+# would score against codes the officer channel no longer offers.
+TOPIC_CODES = (
+    "fee_schedule",
+    "apr_finance_charge",
+    "interest_rate",
+    "eligibility_rules",
+    "credit_decisioning",
+    "adverse_action",
+    "debt_to_income",
+    "records_retention",
+)
+
+# `UNMAPPED` is imported from metrics rather than defined here: it is deliberately
+# kept OUT of TOPIC_CODES so it can never be mistaken for something the product can
+# be asked, and it is reported on its own line rather than as a topic.
+
 _ALLOWED_GOLD_KEYS = {
     "id",
     "query",
     "expected",
     "unanswerable",
     "note",
+    "topic",
     "outcome_class",
 }
 
@@ -637,6 +657,16 @@ def run(
             )
         if "note" in q and not isinstance(q["note"], str):
             raise RuntimeError(f"gold query at position {i} has a non-string 'note'")
+        topic = q.get("topic")
+        if topic is not None and topic not in TOPIC_CODES and topic != UNMAPPED:
+            # A code the officer channel cannot emit is a case the product cannot
+            # be asked. Scoring it would report coverage that does not exist, so
+            # the loader refuses rather than inventing a bucket.
+            raise RuntimeError(
+                f"gold query at position {i} has a 'topic' outside the officer "
+                f"vocabulary — allowed values are {sorted(TOPIC_CODES)} "
+                f"or {UNMAPPED!r}"
+            )
         outcome_class = q.get("outcome_class")
         # isinstance first: a JSON array/object value is unhashable, and testing
         # it against the frozenset raises a raw TypeError instead of the schema
@@ -758,6 +788,7 @@ def run(
             unanswerable=bool(q.get("unanswerable")),
             retrieved=retrieved[q["id"]],
             threshold=threshold,
+            topic=q.get("topic", UNMAPPED),
             outcome_class=q.get("outcome_class"),
         )
         for q in gold

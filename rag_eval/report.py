@@ -9,7 +9,7 @@ wholesale (the adjacent lines in that purged file held raw PAN/SSN).
 from __future__ import annotations
 
 from rag_eval.hygiene import FileVerdict
-from rag_eval.metrics import Aggregate, K_VALUES, QueryEval
+from rag_eval.metrics import UNMAPPED, Aggregate, K_VALUES, QueryEval
 
 # The only trace of denial 6012's reason anywhere in the estate. The file was
 # purged from the repo in the 2026-07 security remediation (commit 9ba96ee,
@@ -61,6 +61,29 @@ def _metrics_section(
         f"Unanswerable queries: **{agg.n_unanswerable}**, "
         f"{agg.unanswerable_correct} correctly below threshold."
     )
+    # Per officer topic, because the client asked for results by topic rather
+    # than as one pooled number — and because a pooled number cannot show one
+    # topic failing whole. `unmapped` gets NO row: it is not a topic, it is the
+    # absence of one, and a row scoring it beside real topics reads as coverage
+    # the officer channel does not have. It is reported under the table instead,
+    # as a count, which is what "excluded from every per-topic score" means.
+    mapped = {n: s for n, s in agg.by_topic.items() if n != UNMAPPED}
+    if mapped:
+        lines += [
+            "",
+            "| Topic | Cases | Correct |",
+            "|-------|-------|---------|",
+        ]
+        for name, stat in mapped.items():
+            lines.append(f"| `{name}` | {stat.n} | {stat.correct} |")
+    if agg.n_unmapped:
+        lines += [
+            "",
+            f"**{agg.n_unmapped} case(s) carry `unmapped`** — no code in the "
+            "closed officer vocabulary expresses them, so they cannot be asked "
+            "through the product. They are outside the table above and excluded "
+            "from every per-topic score.",
+        ]
     # Per outcome class, because an aggregate cannot show a class failing whole.
     # A corpus whose sections repeat across documents (scaffolding headings such
     # as purpose, scope, roles) can hold a healthy mean while every query of one

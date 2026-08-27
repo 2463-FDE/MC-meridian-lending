@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (eaeadad)` — eaeadad 2026-08-27 Merge pull request #97 from 2463-FDE/fix/rag-eval-titan-controls
+Base: `origin/main (916f9ee)` — 916f9ee 2026-08-27 Merge pull request #98 from 2463-FDE/feat/rag-eval-gold-set-v2
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #98 | `916f9ee` | 2026-08-27 | Merge pull request #98 from 2463-FDE/feat/rag-eval-gold-set-v2 |
 | #97 | `eaeadad` | 2026-08-27 | Merge pull request #97 from 2463-FDE/fix/rag-eval-titan-controls |
 | #96 | `e573401` | 2026-08-27 | Merge pull request #96 from 2463-FDE/fix/policy-corpus-admission |
 | #95 | `9aeb618` | 2026-08-27 | Merge pull request #95 from 2463-FDE/test/rag-eval-quality-floor |
