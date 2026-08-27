@@ -616,3 +616,43 @@ def test_make_embedder_rejects_unknown(monkeypatch):
     monkeypatch.setenv("RAG_EMBEDDER", "word2vec")
     with pytest.raises(ValueError, match="RAG_EMBEDDER"):
         make_embedder()
+
+
+# --- Blank (present-but-empty) env values ---------------------------------
+# docker-compose.yml passes `${RAG_EMBEDDER:-}`, which sets the variable to ""
+# rather than leaving it unset, so `os.getenv(name, default)` never returns its
+# default on the compose path. Treat blank/whitespace as unset for both
+# variables, or the keyless TF-IDF default is unreachable exactly where the
+# corpus is bind-mounted.
+
+
+def test_make_embedder_blank_value_falls_back_to_tfidf(monkeypatch):
+    from rag_eval.embedder import TfidfEmbedder
+
+    monkeypatch.setenv("RAG_EMBEDDER", "")
+    assert isinstance(make_embedder(), TfidfEmbedder)
+
+
+def test_make_embedder_whitespace_value_falls_back_to_tfidf(monkeypatch):
+    from rag_eval.embedder import TfidfEmbedder
+
+    monkeypatch.setenv("RAG_EMBEDDER", "   ")
+    assert isinstance(make_embedder(), TfidfEmbedder)
+
+
+def test_make_embedder_blank_model_uses_the_default_model(monkeypatch):
+    from rag_eval import run as run_mod
+
+    captured = {}
+
+    class _Stub:
+        def __init__(self, model_id, region=None, client=None):
+            captured["model_id"] = model_id
+
+    monkeypatch.setattr(run_mod, "BedrockEmbedder", _Stub)
+    monkeypatch.setenv("RAG_EMBEDDER", "bedrock")
+    monkeypatch.setenv("RAG_BEDROCK_MODEL", "")
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+    run_mod.make_embedder()
+    assert captured["model_id"] == run_mod._DEFAULT_BEDROCK_MODEL

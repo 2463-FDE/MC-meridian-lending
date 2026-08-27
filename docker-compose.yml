@@ -77,10 +77,10 @@ services:
       POLICY_CORPUS_DIR: ${POLICY_CORPUS_DIR:-}
       POLICY_CORPUS_MANIFEST: ${POLICY_CORPUS_MANIFEST:-}
       # Embedding backend for policy retrieval. Unset keeps the keyless TF-IDF
-      # path; `bedrock` routes through Amazon Titan and REQUIRES AWS_REGION to be
-      # set explicitly — rag_eval refuses to construct the client otherwise,
-      # because region=None lets boto3 discover one and Bedrock model access is
-      # granted per region.
+      # path — compose passes "" rather than omitting the variable, so
+      # make_embedder treats blank as unset. `bedrock` routes through Amazon
+      # Titan and needs AWS_REGION set explicitly: leaving it unset lets boto3
+      # discover a region, and Bedrock model access is granted per region.
       RAG_EMBEDDER: ${RAG_EMBEDDER:-}
       RAG_BEDROCK_MODEL: ${RAG_BEDROCK_MODEL:-}
       # Adds prompt/response CONTENT to the traces above. Non-production only —

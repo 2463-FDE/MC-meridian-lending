@@ -268,13 +268,19 @@ def make_embedder():
     Amazon Bedrock via boto3 (``RAG_BEDROCK_MODEL``, ``AWS_REGION``, AWS creds)
     — the scaling path. An unknown value fails loud rather than silently
     falling back to a different backend than asked for.
+
+    Blank counts as unset for both variables. docker-compose.yml passes
+    ``${RAG_EMBEDDER:-}``, which sets the variable to "" rather than omitting
+    it, so a `getenv` default alone never fires on the compose path and the
+    keyless default would be unreachable exactly where the corpus is mounted.
     """
-    name = os.getenv("RAG_EMBEDDER", "tfidf")
+    name = os.getenv("RAG_EMBEDDER", "").strip() or "tfidf"
     if name == "tfidf":
         return TfidfEmbedder()
     if name == "bedrock":
         return BedrockEmbedder(
-            model_id=os.getenv("RAG_BEDROCK_MODEL", _DEFAULT_BEDROCK_MODEL),
+            model_id=os.getenv("RAG_BEDROCK_MODEL", "").strip()
+            or _DEFAULT_BEDROCK_MODEL,
             region=os.getenv("AWS_REGION"),
         )
     raise ValueError(f"RAG_EMBEDDER={name!r} is not one of ('tfidf', 'bedrock').")

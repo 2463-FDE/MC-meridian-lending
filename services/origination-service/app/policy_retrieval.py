@@ -178,7 +178,12 @@ def _load_corpus() -> list:
                 "; ".join(problems),
             )
             return []
-    for path in sorted(base.glob("*.md")):
+    # Recursive, to match the walk the manifest audit above grades
+    # (`audit_corpus_against_manifest` uses rglob, as does `rag_eval.run`'s own
+    # discovery). A flat glob would let a manifest-approved file in a
+    # subdirectory audit clean and then never be indexed — retrieval abstaining
+    # on approved content with nothing reporting a refusal.
+    for path in sorted(base.rglob("*.md")):
         # The hygiene gate below scans CONTENT only. A file mounted with clean
         # content but an unsafe NAME (jane-doe-123-45-6789.md) would still pass
         # it, then leak identity through the officer-visible chunk id (doc =
@@ -227,6 +232,22 @@ def _build_index():
         return None
     embedder = make_embedder()
     embedder.fit([c.text for c in chunks])
+    # Two documents sharing a filename stem (different directories, or two
+    # manifest-approved spellings differing only by case) emit identical chunk
+    # ids, because the chunker lowercases the stem. InMemoryIndex keeps both
+    # entries while the id->text map keeps one, so search would score one
+    # chunk's vector and return the other chunk's text — the wrong policy under
+    # a citation that looks legitimate. `rag_eval.run` aborts the run on this;
+    # the service's equivalent is to index nothing, which abstains.
+    ids = [c.chunk_id for c in chunks]
+    duplicates = sorted({cid for cid in ids if ids.count(cid) > 1})
+    if duplicates:
+        log.warning(
+            "policy corpus has duplicate chunk ids, indexing nothing: %s "
+            "— two documents share a filename stem",
+            duplicates,
+        )
+        return None
     index = InMemoryIndex()
     for chunk in chunks:
         index.add(chunk.chunk_id, embedder.embed(chunk.text))

@@ -30,8 +30,11 @@ def chunk_markdown(path: str | Path) -> list[Chunk]:
     # Lowercased so an approved corpus whose filenames are not slugs (a client
     # packet admitted by manifest digest rather than by `_SAFE_FILENAME`) still
     # yields ids `run._CHUNK_ID` accepts — otherwise no gold `expected` entry
-    # could reference them. Two filenames differing only by case would collide
-    # here; the manifest is what prevents that, since one spelling is listed.
+    # could reference them. Two documents sharing a stem collide here — case
+    # variants, or the same stem in two directories — and a manifest does not
+    # prevent it, since it can list both. The callers reject duplicate ids
+    # after chunking: `run()` aborts, and origination's policy_retrieval
+    # indexes nothing.
     doc = path.stem.lower()
     title = ""
     section = "_intro"
