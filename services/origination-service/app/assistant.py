@@ -151,6 +151,18 @@ class ApplicationNotFound(AssistantError):
     """The application id does not exist in the LOS."""
 
 
+class ApplicationNeverDecisioned(ApplicationNotFound):
+    """The application exists, but decision-service holds no record for it.
+
+    A SUBCLASS, so every existing `except ApplicationNotFound` keeps catching it and the
+    officer still gets the same 404 — this changes what is recorded, not what is served.
+    The two were one exception and one refusal code, which fused a broken officer link
+    (the id is not a real application) with an asked-too-early request (it is real and has
+    simply not been decisioned). Those have opposite remedies, so a single rate over both
+    tells an operator nothing, and the telemetry table records them apart.
+    """
+
+
 def _score_application(app_id: int, request_id: str | None = None) -> dict:
     """Score tool: decision-service decisions the app and persists the Reg B record
     atomically (fail closed there). Returns the identifier-free result the model may
@@ -538,7 +550,7 @@ def _validated_final(
             # Identifier-free (B1 follow-up): this raises through the root trace
             # span, and a raw app_id here would ship to LangSmith via trace()'s
             # `error` field even though the metadata dict never carried it.
-            raise ApplicationNotFound("application was never decisioned")
+            raise ApplicationNeverDecisioned("application was never decisioned")
         raise AssistantError(
             "assistant returned a final answer but no decision record exists — "
             "refusing an unrecorded decision"

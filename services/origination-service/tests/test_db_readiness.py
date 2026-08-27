@@ -117,6 +117,17 @@ READABLE_DOB_CONSTRAINT_DEF = (
 )
 
 
+# The current assistant_runs code set, as Postgres renders it back (`IN (...)` is stored
+# as `= ANY (ARRAY[...])`), which is why the rung normalises and looks for the literals
+# instead of pinning the string.
+ASSISTANT_RUNS_CHECK_DEF = (
+    "check(((refusal_code is null) or (refusal_code = any (array['not_found'::text,"
+    "'never_decisioned'::text,'assistant_refused'::text,'llm_unavailable'::text,"
+    "'kyc_blocked'::text,'refused'::text,'idempotency_conflict'::text,"
+    "'downstream_unavailable'::text]))))"
+)
+
+
 class _FakeCursor:
     def __init__(self):
         self._last = ""
@@ -131,6 +142,11 @@ class _FakeCursor:
         self._last = sql
 
     def fetchone(self):
+        # Dispatch on the CONSTRAINT NAME, not on `pg_get_constraintdef` alone: there are
+        # two definition-checking rungs now, and answering both with the dob definition
+        # made the assistant_runs rung read a constraint that is not its own.
+        if "ck_assistant_runs_refusal_code" in self._last:
+            return (ASSISTANT_RUNS_CHECK_DEF,)
         if "pg_get_constraintdef" in self._last:
             return (READABLE_DOB_CONSTRAINT_DEF,)
         return (1,)
@@ -810,3 +826,89 @@ def test_every_readiness_rung_exists_in_the_init_schema():
         "readiness rungs name objects absent from db/init/001_schema.sql, so a fresh "
         f"database can never report ready: {missing}"
     )
+
+
+class _AssistantRunsCursor:
+    """Every rung before assistant_runs answers ready; that one answers as configured.
+
+    The assistant_runs write is deliberately non-fatal — `assistant_runs.record` swallows
+    everything so a telemetry fault cannot 500 an officer's answer — so an unmigrated
+    volume loses every row while the request and /health both look fine. This rung is the
+    only thing that reports it, which is why it is worth a test of its own.
+    """
+
+    def __init__(self, table=("assistant_runs",), constraint=(ASSISTANT_RUNS_CHECK_DEF,)):
+        self._table = table
+        self._constraint = constraint
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "ck_applicants_dob_readable" in self._last:
+            return (READABLE_DOB_CONSTRAINT_DEF,)
+        if "ck_assistant_runs_refusal_code" in self._last:
+            return self._constraint
+        if "to_regclass" in self._last:
+            return self._table
+        return (1,)
+
+
+class _AssistantRunsConn:
+    def __init__(self, **kwargs):
+        self._kwargs = kwargs
+
+    def cursor(self):
+        return _AssistantRunsCursor(**self._kwargs)
+
+    def close(self):
+        pass
+
+
+def _probe_with(monkeypatch, **kwargs):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _AssistantRunsConn(**kwargs)
+    )
+    return config.database_reachable()
+
+
+def test_probe_fails_when_assistant_runs_is_absent(monkeypatch):
+    # A volume that never ran migration 0021: the telemetry write fails on every request
+    # and is swallowed, so nothing else in the system reports the gap.
+    ok, err = _probe_with(monkeypatch, table=(None,))
+    assert ok is False
+    assert err == "schema_not_ready:assistant_runs"
+
+
+def test_probe_fails_when_the_refusal_code_check_predates_the_split(monkeypatch):
+    # The constraint is probed by DEFINITION, not by name. `CREATE TABLE IF NOT EXISTS`
+    # accepts a pre-existing table of any shape, so a hand-applied earlier attempt whose
+    # CHECK still lacks never_decisioned would satisfy a name-only rung while admitting a
+    # code set the reader does not recognise.
+    stale = "check(((refusal_code is null) or (refusal_code = any (array['not_found'::text]))))"
+    ok, err = _probe_with(monkeypatch, constraint=(stale,))
+    assert ok is False
+    assert err == "schema_not_ready:ck_assistant_runs_refusal_code"
+
+
+def test_probe_fails_when_the_refusal_code_check_is_not_valid(monkeypatch):
+    # `convalidated` is part of the query, so a constraint added NOT VALID returns no row
+    # at all — it enforces nothing against the rows already there.
+    ok, err = _probe_with(monkeypatch, constraint=None)
+    assert ok is False
+    assert err == "schema_not_ready:ck_assistant_runs_refusal_code"
+
+
+def test_probe_is_ready_when_the_table_and_its_check_are_current(monkeypatch):
+    ok, err = _probe_with(monkeypatch, constraint=(ASSISTANT_RUNS_CHECK_DEF,))
+    assert (ok, err) == (True, None)

@@ -19,7 +19,10 @@ from fastapi.testclient import TestClient
 from app import config
 from app.llm import ClaudeClient, LLMConfigError
 from app.main import app, get_llm_client
-from tests.test_db_readiness import READABLE_DOB_CONSTRAINT_DEF
+from tests.test_db_readiness import (
+    ASSISTANT_RUNS_CHECK_DEF,
+    READABLE_DOB_CONSTRAINT_DEF,
+)
 
 
 class _Req:
@@ -44,7 +47,13 @@ class _FakeCursor:
         # the name, so a ready-DB stub has to answer with it -- reuse the one constant
         # test_db_readiness pins against config._DOB_READABLE_EXPECTED_DEF rather than
         # copying the literal here, where it would drift unnoticed.
-        if "pg_get_constraintdef" in getattr(self, "_last", ""):
+        # Two rungs now compare a constraint DEFINITION, so this dispatches on the
+        # constraint NAME. Answering both with the dob definition made the assistant_runs
+        # rung read a constraint that is not its own and /health return 503 here.
+        last = getattr(self, "_last", "")
+        if "ck_assistant_runs_refusal_code" in last:
+            return (ASSISTANT_RUNS_CHECK_DEF,)
+        if "pg_get_constraintdef" in last:
             return (READABLE_DOB_CONSTRAINT_DEF,)
         return (1,)
 

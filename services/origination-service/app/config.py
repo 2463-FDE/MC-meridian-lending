@@ -298,6 +298,40 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             )
             if cur.fetchone() is None:
                 return False, "schema_not_ready:loans.note_rate"
+            # The assistant entry span records one assistant_runs row per officer request
+            # (migration 0021). That write is deliberately non-fatal —
+            # `assistant_runs.record` swallows every failure so a telemetry problem can
+            # never 500 an officer's answer — which means a volume missing the migration
+            # loses every row while both the request and /health look fine. Silence is the
+            # failure mode this rung exists to make visible; nothing else would report it.
+            #
+            # to_regclass, not information_schema + current_schema(): the rung must ask
+            # about the SAME table the INSERT resolves to, and that resolves by
+            # search_path. Same rule as migrations 0020 and 0021.
+            cur.execute("SELECT to_regclass('assistant_runs')")
+            row = cur.fetchone()
+            if row is None or row[0] is None:
+                return False, "schema_not_ready:assistant_runs"
+            # The CHECK is probed by DEFINITION and not by name. `CREATE TABLE IF NOT
+            # EXISTS` accepts a pre-existing assistant_runs of any shape, so a table left
+            # by a hand-applied attempt — or one whose constraint predates the
+            # never_decisioned split — satisfies a name-only rung while admitting codes
+            # the reader will not recognise. `convalidated` is required too: a constraint
+            # added NOT VALID enforces nothing against the rows already there.
+            #
+            # Postgres re-renders a stored CHECK (`IN (...)` comes back as
+            # `= ANY (ARRAY[...])`), so the rendered string is normalised and tested for
+            # the load-bearing literals rather than pinned verbatim.
+            cur.execute(
+                r"SELECT lower(regexp_replace(pg_get_constraintdef(oid), '\s+', '', 'g')) "
+                "FROM pg_constraint "
+                "WHERE conrelid = to_regclass('assistant_runs') "
+                "AND conname = 'ck_assistant_runs_refusal_code' "
+                "AND contype = 'c' AND convalidated"
+            )
+            row = cur.fetchone()
+            if row is None or "never_decisioned" not in row[0]:
+                return False, "schema_not_ready:ck_assistant_runs_refusal_code"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__

@@ -417,3 +417,70 @@ LEFT JOIN disclosures d       ON d.offer_id = o.id
 LEFT JOIN decision_events de  ON de.id = o.decision_event_id
 LEFT JOIN decision_events dde ON dde.id = d.decision_event_id
 LEFT JOIN applications app    ON app.id = o.app_id;
+
+-- >>> assistant_runs DDL (init/migration parity block -- byte-identical in both files)
+-- Assistant run telemetry. One row per officer assistant request that reached the entry
+-- span (services/origination-service/app/main.py), refused or served.
+--
+-- WHY A TABLE AND NOT THE TRACE. The spans are content-free by design, and `trace()` is a
+-- no-op unless LANGSMITH_TRACING is set. LangSmith can therefore answer "what did this one
+-- run do" but never "what fraction of runs refused last week": its population is whatever
+-- happened to be exported. This row is written either way, which is what makes an
+-- aggregate over it honest.
+--
+-- application_id CARRIES NO FOREIGN KEY, deliberately. `not_found` refusals are exactly
+-- the rows whose id references nothing, so a FK could only reject those rows or null the
+-- column -- and a run of requests against ids that do not exist is itself the signal
+-- (a broken officer link, or id enumeration). Same shape as
+-- applications.submitted_by_user_id. This is telemetry, not a regulated artifact: ADR
+-- 0012's FK-as-provenance governs the decision -> offer -> disclosure chain, and there is
+-- no append-only trigger here for that same reason (contrast decision_events).
+--
+-- NO FREE TEXT, and refusal_code is CHECK-constrained rather than bare TEXT on purpose.
+-- The entry span's own comment records why: httpx.HTTPStatusError's message embeds the
+-- request URL (which embeds app_id) and an LLMError can carry raw provider text, so an
+-- unconstrained column invites `str(exc)` and reintroduces precisely what that span
+-- strips before export.
+CREATE TABLE IF NOT EXISTS assistant_runs (
+    id                  BIGSERIAL PRIMARY KEY,
+    -- LangSmith's own run id. Opaque outside this database, so it carries none of the
+    -- exposure the omitted application_id/request_id do on the spans themselves.
+    trace_id            TEXT NOT NULL,
+    application_id      INTEGER NOT NULL,
+    task                TEXT NOT NULL,
+    policy_topic        TEXT,
+    http_status         INTEGER NOT NULL,
+    refusal_code        TEXT,
+    -- Served-run columns. NULL on a refusal, and NULL individually when _charted() left
+    -- the key off because the result did not carry it.
+    outcome             TEXT,
+    record_status       TEXT,
+    policy_band         TEXT,
+    narration_validated BOOLEAN,
+    policy_citations    INTEGER,
+    policy_searches     INTEGER,
+    latency_ms          INTEGER NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ck_assistant_runs_task
+        CHECK (task IN ('decision', 'explain')),
+    -- Every code _run_assistant can record. never_decisioned is the half of the old
+    -- single `not_found` that means the application EXISTS but carries no decision
+    -- record; fusing the two made a broken-link spike and an asked-too-early spike one
+    -- number with opposite remedies.
+    CONSTRAINT ck_assistant_runs_refusal_code
+        CHECK (refusal_code IS NULL OR refusal_code IN (
+            'not_found', 'never_decisioned', 'assistant_refused', 'llm_unavailable',
+            'kyc_blocked', 'refused', 'idempotency_conflict', 'downstream_unavailable'
+        )),
+    -- A row is either a served answer or a refusal, never ambiguously both -- so a
+    -- refusal can never be read as "outcome unknown". Keyed on http_status and NOT on
+    -- `outcome`: _charted() omits outcome when the result does not carry it, so an
+    -- outcome-keyed constraint would reject a legitimately served row and lose it. The
+    -- control flow guarantees this form -- refusal is None if and only if the response
+    -- is 200.
+    CONSTRAINT ck_assistant_runs_refusal_matches_status
+        CHECK ((http_status = 200) = (refusal_code IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_assistant_runs_created ON assistant_runs(created_at);
+CREATE INDEX IF NOT EXISTS idx_assistant_runs_app ON assistant_runs(application_id);
+-- <<< assistant_runs DDL
