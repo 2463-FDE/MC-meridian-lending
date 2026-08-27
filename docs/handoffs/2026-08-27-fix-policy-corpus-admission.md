@@ -26,6 +26,19 @@ Every exchange with Dana is recorded on two branches. Neither is pushed except
   ten settled decisions D-1…D-10, five open O-1…O-5, and nine constraints the eval design has
   to satisfy. **Start here for the "why" behind any of the code below.**
 
+**The client records are on other branches, so read them without switching** — the working tree
+is routinely dirty and a concurrent session may hold it:
+
+```bash
+git show docs/client-asks-originals:docs/client-asks-2026-08-27-pre-run-disclosures.md
+git show docs/client-asks:docs/eval-design-inputs-2026-08-26.md
+git ls-tree -r --name-only docs/client-asks -- docs/ | grep client-asks   # list them all
+```
+
+Both branches are **local-only** except `docs/client-asks`, which is 33 commits ahead of its
+remote and stays unpushed until there is an explicit go-ahead. If a branch appears missing, check
+`git worktree list` — one of its worktrees was already found stale and pruned this session.
+
 Her operating limits, condensed: one full evaluation pass plus at most one correction; two
 attempts per embedding call; $1.00 generator cap and a separate $1.00 Titan cap; existing
 credentials only; no fallback model, region probing, or free-form searches; no retention of
