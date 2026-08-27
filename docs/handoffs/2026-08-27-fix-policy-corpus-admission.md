@@ -1,9 +1,11 @@
 # Handoff — policy-corpus ingestion for the client's synthetic packet (2026-08-27)
 
 **Branch:** `fix/policy-corpus-admission` · **Base:** `origin/main` · **Repo:** `/Users/maha/Desktop/revature/MC-meridian-lending`
-**Status:** Ingestion and controls shipped and pushed, both PROVEN, no PRs raised. The graded
-Titan run is blocked on client-side work (query generation → human review → freeze) and on
-our own topic-mapping work. **One correction email to Dana is drafted and unsent.**
+**Status:** Ingestion and controls shipped and pushed, both PROVEN. The graded Titan run is
+blocked on client-side work (query generation → human review → freeze) and on our own
+topic-mapping work. **The correction email to Dana was sent on 2026-08-27** and is recorded on
+both client-record branches as `docs/client-asks-2026-08-27-support-test-correction.md`; her
+answer on the support test is outstanding.
 
 ## Where the client interaction lives — read this first
 
@@ -69,10 +71,10 @@ mechanisms (one on content, one on filename).
 
 Ordered. Steps 1–3 are ours and need nothing from the client.
 
-1. **Send the correction email** — drafted in chat, not in a file. The sent pre-run email claims
+1. ~~**Send the correction email.**~~ Sent 2026-08-27; see the status line above. The pre-run email had claimed
    four topics are uncovered and the comparison should be narrowed to the rest. Both halves are
    wrong; see "Blockers" below for the measured numbers.
-2. **Map her 28 questions to topic codes and build gold set v2.** `rag_eval/run.py:71`
+2. **Map her 28 questions to topic codes and build gold set v2.** `rag_eval/run.py:184`
    `_ALLOWED_GOLD_KEYS` is a strict allowlist of `{id, query, expected, unanswerable, note}` and
    will reject her richer shape. `metrics.py` knows two states; her four outcome classes need a
    third (`clarification` is neither an expected-id case nor unanswerable).
@@ -107,14 +109,17 @@ Ordered. Steps 1–3 are ours and need nothing from the client.
   Determines whether step 3 stays small or becomes a new capability.
 - **Two client constraints trade against each other.** No retention means no cached vectors, so
   her permitted correction rerun re-embeds the full 66 chunks. Disclosed in the sent email.
-- **PR/WIP:** three PRs were already open before these two branches; the cap is two. Nothing
-  raised yet — deliberately.
+- **PR/WIP:** the cap is two and it is breached. Track the live count from the API rather than
+  from this file — a written count is false as soon as anything merges.
 
 ## Key files
 
 - `rag_eval/run.py:43` `_MANIFEST_DIGEST`, `load_corpus_manifest`, `audit_corpus_against_manifest`
   (`subtree` scopes **both** files and manifest entries), `unsafe_corpus_path_reason`
-- `rag_eval/run.py:71` `_ALLOWED_GOLD_KEYS` — the gold-schema blocker for step 2
+- `rag_eval/run.py:184` `_ALLOWED_GOLD_KEYS` — the gold-schema blocker for step 2. Widened on
+  `feat/rag-eval-gold-set-v2` (cut from `origin/main`, so the line is 71 there): a `--gold` path,
+  an `outcome_class` field validated against the four client classes, and a per-class breakdown in
+  the report. The mapping itself is still unbuilt.
 - `rag_eval/run.py:245` `cache_enabled` / `refuse_traced_provider_run` — both key off the embedder
   instance's `IS_PROVIDER_BACKED`, never off `RAG_EMBEDDER`
 - `rag_eval/embedder.py` — `DEFAULT_EMBED_DIMENSIONS`, `_BEDROCK_CLIENT_CONFIG`,
@@ -173,5 +178,7 @@ Never commit it: public fork, and her approval covers indexing, not publishing.
 
 Send the correction email in `docs/client-asks-2026-08-27-pre-run-disclosures.md`'s "Correction to
 send" section (regenerate the wording with the measured numbers above — **eight** of ten, not
-seven), then start step 2: widen `_ALLOWED_GOLD_KEYS` at `rag_eval/run.py:71` and build gold set
-v2 from `officer-questions-and-acceptance.jsonl`.
+seven) — done 2026-08-27. Step 2's schema half is also done on `feat/rag-eval-gold-set-v2`. What
+remains is the mapping itself: assign each of the 28 questions to one of the eight topic codes and
+emit gold set v2 from `officer-questions-and-acceptance.jsonl`. Note the gold `query` is the topic
+code, not her wording — officers select topics — so her question text never enters the file.
