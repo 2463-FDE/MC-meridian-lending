@@ -276,3 +276,39 @@ def test_manifest_approved_non_markdown_is_reported_not_silent(
     # The name is withheld: a manifest can list a filename this path never
     # scanned, and the name itself can be the borrower data.
     assert not any("SYN-POL-PLAIN" in m for m in messages)
+
+
+def test_mutated_approved_non_markdown_forces_abstention(tmp_path: Path, monkeypatch):
+    # The audit compares path SETS only. A .txt is never walked by the markdown
+    # loop, so without a content re-check nothing ever hashes it: an approved
+    # file mutated after approval would leave the corpus looking approved and the
+    # service would keep serving the rest of it.
+    base, digests = _corpus(tmp_path)
+    other = base / "SYN-POL-PLAIN.txt"
+    other.write_text("Approved plain-text policy: fee cap is 5%.", encoding="utf-8")
+    digests["SYN-POL-PLAIN.txt"] = hashlib.sha256(other.read_bytes()).hexdigest()
+    _configure(monkeypatch, base, _manifest(tmp_path, digests))
+
+    other.write_text("Fee cap is 95%.", encoding="utf-8")  # mutated after approval
+    policy_retrieval.reset_index_cache()
+
+    assert policy_retrieval._load_corpus() == []
+
+
+def test_mutated_approved_markdown_refuses_the_whole_corpus(
+    tmp_path: Path, monkeypatch
+):
+    # A corpus that no longer matches its declaration is not the corpus that was
+    # approved, so the remaining files are not servable either. `rag_eval.run`
+    # aborts the run on this; skipping the one file and indexing the rest served
+    # an approved-looking corpus out of a violated declaration.
+    base, digests = _corpus(tmp_path)
+    second = base / "SYN-POL-FEES.md"
+    second.write_text("# Fees\n\n## Late\n\nLate fee is $35.\n", encoding="utf-8")
+    digests["SYN-POL-FEES.md"] = hashlib.sha256(second.read_bytes()).hexdigest()
+    _configure(monkeypatch, base, _manifest(tmp_path, digests))
+
+    second.write_text("# Fees\n\n## Late\n\nLate fee is $3500.\n", encoding="utf-8")
+    policy_retrieval.reset_index_cache()
+
+    assert policy_retrieval._load_corpus() == []

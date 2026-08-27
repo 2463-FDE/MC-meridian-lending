@@ -179,6 +179,36 @@ def _load_corpus() -> list:
             )
             return []
     if manifest is not None:
+        # The audit compares path SETS; it never reads content. Re-check every
+        # approved entry's digest here, at the moment the corpus is about to be
+        # read — `rag_eval.run` does exactly this after its own clean audit, and
+        # aborts the run. It is also the ONLY place a non-markdown entry is
+        # verified at all, since the walk below is markdown-only: a listed .txt
+        # mutated after approval would otherwise leave the corpus looking
+        # approved. A corpus that no longer matches its declaration is not the
+        # corpus that was approved, so this refuses all of it rather than
+        # skipping the offending file and serving the rest.
+        unapproved = [
+            reason
+            for name in manifest
+            if (
+                reason := unsafe_corpus_path_reason(
+                    Path(name), base=base, manifest=manifest
+                )
+            )
+            is not None
+        ]
+        if unapproved:
+            log.warning(
+                "policy corpus does not match its manifest on content, indexing "
+                "nothing: %s of %s approved entries (%s) — names withheld, an "
+                "unapproved name can itself be the identifier",
+                len(unapproved),
+                len(manifest),
+                ", ".join(sorted(set(unapproved))),
+            )
+            return []
+
         # The audit grades every file the manifest lists; the loader only chunks
         # markdown. An approved file in another format therefore audits clean and
         # is then never indexed — the same silent coverage hole a flat walk
