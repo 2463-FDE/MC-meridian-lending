@@ -281,6 +281,15 @@ _ALLOWED_GOLD_KEYS = {
     # mechanically checkable, which S-6 requires to consume no model call.
     # Absent, the case is `not_evaluated` rather than assumed correct.
     "support_literal",
+    # The two fields the evaluator grades, required together (see the pairing rule
+    # below). `expected_conclusion` is the conclusion a correct run reaches, in her
+    # own words; `displayed_summary_id` names the row of the frozen displayed-summaries
+    # package the officer is shown. Both are present on all 28 of her rows, the six
+    # `no_match` ones included — a `no_match` case still has an expected conclusion
+    # (that no policy in the corpus covers the question) and a summary, so both are
+    # gradeable and S-1 wants them graded.
+    "expected_conclusion",
+    "displayed_summary_id",
     # The conclusion the run must NOT reach, as her authoritative JSONL states it
     # (every one of the 28 rows carries one). Prose, not a literal: the mechanical
     # check cannot grade it, so only the evaluator moves its verdict off
@@ -308,7 +317,14 @@ _ANCHOR_KEYS = frozenset({"source_document", "source_heading"})
 # that, and loosening the regex to skip sentence-initial capitals would stop the
 # guard seeing a real applicant name at the start of a sentence.
 # `scan_text` still covers this field for labelled PII.
-_UNECHOED_TEXT_KEYS = frozenset({"prohibited_conclusion"})
+_UNECHOED_TEXT_KEYS = frozenset({"prohibited_conclusion", "expected_conclusion"})
+
+# The support-test pair. Required together on a row, and all-or-nothing across a
+# file: a set that grades conclusions must grade all of them, or its rate
+# describes a subset nobody chose. Enforced per FILE rather than per row of every
+# gold set in the repository, so the committed set and the retrieval-only test
+# fixtures — which predate the support test — keep loading unchanged.
+_SUPPORT_PAIR = ("expected_conclusion", "displayed_summary_id")
 
 # Her delivery names these columns in camelCase, in the CSV and in the
 # authoritative JSONL alike, so a gold set transcribed from it keeps that
@@ -318,6 +334,7 @@ _GOLD_KEY_ALIASES = {
     "sourceDocument": "source_document",
     "sourceHeading": "source_heading",
     "prohibitedUnsupportedConclusion": "prohibited_conclusion",
+    "acceptableConclusion": "expected_conclusion",
 }
 
 # The client's four outcome classes. `no_match` is the abstention case the
@@ -905,6 +922,19 @@ def run(
                 f"gold query at position {i} has a non-string or empty "
                 "'support_literal'"
             )
+        for key in _SUPPORT_PAIR:
+            if key in q and not (isinstance(q[key], str) and q[key].strip()):
+                raise RuntimeError(
+                    f"gold query at position {i} has a non-string or empty '{key}'"
+                )
+        present = [key for key in _SUPPORT_PAIR if key in q]
+        if len(present) == 1:
+            missing = next(key for key in _SUPPORT_PAIR if key not in q)
+            raise RuntimeError(
+                f"gold query at position {i} carries '{present[0]}' without "
+                f"'{missing}' — the support-test pair is graded together, and one "
+                "half alone cannot be"
+            )
         if "prohibited_conclusion" in q and not (
             isinstance(q["prohibited_conclusion"], str)
             and q["prohibited_conclusion"].strip()
@@ -993,6 +1023,19 @@ def run(
             f"gold queries at position(s) {dirty} contain PII and must be "
             f"sanitized ({gold_source}) — no field values are echoed"
         )
+    # "Required on all 28 rows, whatever the outcome_class" — enforced across the
+    # file, once every row has been checked for the pair itself. A set that grades
+    # some conclusions and not others reports a rate over a subset nobody chose,
+    # and the earlier draft that made the pair conditional on `outcome_class` is
+    # exactly the refuses-her-data shape C-1 names.
+    n_paired = sum(1 for q in gold if _SUPPORT_PAIR[0] in q)
+    if 0 < n_paired < len(gold):
+        raise RuntimeError(
+            f"gold set carries the support-test pair on some rows but not all "
+            f"({n_paired} of {len(gold)}) — every row is graded or none is "
+            f"({gold_source})"
+        )
+
     # scan_text is label-gated for names; also refuse a probable person name in
     # free text, which would otherwise be embedded (Bedrock) and printed to the
     # report. Position-only — the name itself is the PII, so it is never echoed.
