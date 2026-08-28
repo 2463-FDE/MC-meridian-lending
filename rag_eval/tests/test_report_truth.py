@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 from rag_eval import report as report_mod
-from rag_eval.hygiene import FileVerdict
+from rag_eval.hygiene import Finding, FileVerdict
 from rag_eval.metrics import QueryEval, aggregate
 from rag_eval.run import _looks_like_person_name
 
@@ -36,11 +36,13 @@ def _report(
     evals: list[QueryEval],
     n_chunks: int,
     verdicts: list[FileVerdict] | None = None,
+    display_names: dict[str, str] | None = None,
 ) -> str:
     return report_mod.build(
         verdicts=verdicts
         or [FileVerdict(path="policies/fees.md", passed=True, findings=[])],
         n_chunks=n_chunks,
+        display_names=display_names,
         cache_hits=0,
         cache_misses=n_chunks,
         caching=True,
@@ -157,3 +159,102 @@ def test_denial_gap_section_is_not_emitted_for_the_other_denial() -> None:
         "a #6013 question opened the #6012 subsection"
     )
     assert "app_id=6012" not in text
+
+
+def _refused_applications(*pii_types: str) -> list[FileVerdict]:
+    return [
+        FileVerdict(
+            path="kb_dump/applications.jsonl",
+            passed=False,
+            findings=[Finding(t, "\u2022\u2022\u2022\u20220000") for t in pii_types],
+        )
+    ]
+
+
+def test_past_applications_gap_states_this_runs_findings() -> None:
+    """The parenthetical counts what the gate found, so it must read the verdict.
+
+    "raw SSN/PAN/DOB in five of six records, raw EIN in the sixth" is true of the
+    fixture this harness started on and of nothing else. It was emitted whenever a
+    refusal for that path existed, whatever the refusal actually found -- the same
+    defect as the strings this file already holds shut, one level in.
+    """
+    ev = _eval("q1", "What is the late fee?", unanswerable=False, top=0.5)
+    text = _report([ev], 66, verdicts=_refused_applications("ein"))
+    assert "Past applications contribute nothing" in text, (
+        "expected the subsection for this fixture"
+    )
+    assert "five of six records" not in text, (
+        "the report states a finding breakdown this run did not produce"
+    )
+    assert "ein: 1" in text
+
+
+def test_denial_gap_ignores_a_number_that_merely_contains_the_app_id() -> None:
+    """The gate was a substring search over free query text.
+
+    An account number containing the digits, or a dollar amount, opened the whole
+    #6012 denial narrative on a run that asked nothing about a denial.
+    """
+    for query in (
+        "What is the balance on account 46012?",
+        "Is a $6012.50 loan inside the allowed range?",
+    ):
+        text = _report([_eval("q30", query, unanswerable=True, top=0.9)], 66)
+        assert "data-capture failure" not in text, (
+            f"{query!r} opened the #6012 subsection"
+        )
+
+
+def test_denial_gap_opens_on_the_case_id_when_the_question_is_reworded() -> None:
+    """The id is the stable key: a reworded question is still the same case."""
+    text = _report(
+        [
+            _eval(
+                "q11-why-6012-denied",
+                "Why was the second denial refused?",
+                unanswerable=True,
+                top=0.9,
+            )
+        ],
+        66,
+    )
+    assert "data-capture failure, not a retrieval bug" in text
+
+
+def test_denial_gap_needs_an_unanswerable_case() -> None:
+    """The subsection asserts the case cannot be answered, so it must be one.
+
+    Once ADR 0008's decision-record fields exist the #6012 case becomes
+    answerable, and a gate keyed on the app id alone keeps claiming otherwise.
+    """
+    text = _report(
+        [
+            _eval(
+                "q11", "Why was application #6012 denied?", unanswerable=False, top=0.9
+            )
+        ],
+        66,
+    )
+    assert "cannot be answered" not in text, (
+        "the report says an answerable case cannot be answered"
+    )
+
+
+def test_past_applications_gap_names_the_file_through_display_names() -> None:
+    """A refused file is named through `display_names`, never the raw path.
+
+    `run.py` states the rule where it prints refusals: a manifest-admitted
+    filename is graded by nothing and can itself be the identifier. The hygiene
+    table obeys it; this subsection hardcoded the path in its prose.
+    """
+    text = _report(
+        [_eval("q1", "What is the late fee?", unanswerable=False, top=0.5)],
+        66,
+        verdicts=_refused_applications("ein"),
+        display_names={"kb_dump/applications.jsonl": "doc-9f3a1c"},
+    )
+    assert "doc-9f3a1c" in text
+    assert "kb_dump/applications.jsonl" not in text, (
+        "the subsection prints the raw path the display-name map exists to replace"
+    )

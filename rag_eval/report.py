@@ -8,6 +8,8 @@ wholesale (the adjacent lines in that purged file held raw PAN/SSN).
 
 from __future__ import annotations
 
+import re
+
 from rag_eval.hygiene import FileVerdict
 from rag_eval.metrics import UNMAPPED, Aggregate, K_VALUES, QueryEval
 
@@ -153,18 +155,41 @@ def _metrics_section(
 # alone. A #6013 question gets no section rather than #6012's, which would be
 # the same false statement in a new place; parameterising heading and evidence
 # by app id is unbuilt because no gold case asks it.
-_DENIAL_WITH_A_WRITTEN_GAP = "6012"
+#
+# The id is bounded by digits AND by a decimal point, because a plain substring
+# search over the query text opened the whole denial narrative on "account 46012"
+# and on "$6012.50". Checked against `query_id` as well as `query`: the id is the
+# stable key when the same case is reworded ("why was the second denial
+# refused?"), and the text is what carries the id when a gold set numbers its
+# cases sequentially instead.
+_DENIAL_WITH_A_WRITTEN_GAP = re.compile(r"(?<![\d.])6012(?![\d.])")
+
+
+def _asks_about_the_written_denial(e: QueryEval) -> bool:
+    # `unanswerable` is part of the key, not a detail: the subsection asserts the
+    # case cannot be answered, and once ADR 0008's decision-record fields exist
+    # this case is answerable while its app id is unchanged.
+    return bool(
+        e.unanswerable
+        and (
+            _DENIAL_WITH_A_WRITTEN_GAP.search(e.query_id)
+            or _DENIAL_WITH_A_WRITTEN_GAP.search(e.query)
+        )
+    )
 
 
 def _data_gaps_section(
-    evals: list[QueryEval], verdicts: list[FileVerdict]
+    evals: list[QueryEval],
+    verdicts: list[FileVerdict],
+    display_names: dict[str, str] | None = None,
 ) -> list[str]:
     # Every subsection here is gated on the run it describes. Both were written
     # for the run this harness started on and were emitted verbatim afterwards,
     # so on a corpus that asks neither question the report explained a denial
     # nobody asked about and asserted a hygiene refusal that never happened.
+    display_names = display_names or {}
     lines: list[str] = []
-    if any(_DENIAL_WITH_A_WRITTEN_GAP in e.query for e in evals):
+    if any(_asks_about_the_written_denial(e) for e in evals):
         lines += [
             '### Why "why was application #6012 denied?" cannot be answered',
             "",
@@ -191,17 +216,31 @@ def _data_gaps_section(
             "reasons for 6012/6013 were never captured and no migration can recover them.",
             "",
         ]
-    if any(
-        not v.passed and v.path.endswith("kb_dump/applications.jsonl") for v in verdicts
-    ):
+    refused_applications = next(
+        (
+            v
+            for v in verdicts
+            if not v.passed and v.path.endswith("kb_dump/applications.jsonl")
+        ),
+        None,
+    )
+    if refused_applications is not None:
+        # Named through `display_names` and counted from the verdict, for the same
+        # reason `run.py` prints refusals that way: the filename may be the
+        # identifier under manifest admission, and the finding breakdown is a fact
+        # about this run. The previous wording ("SSN/PAN/DOB in five of six
+        # records, raw EIN in the sixth") describes one fixture and no other.
+        name = display_names.get(refused_applications.path, refused_applications.path)
+        counts = refused_applications.counts()
+        count_str = ", ".join(f"{t}: {n}" for t, n in sorted(counts.items())) or "—"
         lines += [
             "### Past applications contribute nothing to retrieval",
             "",
-            "`kb_dump/applications.jsonl` was refused by the hygiene gate (raw SSN/PAN/DOB in "
-            "five of six records, raw EIN in the sixth) and carries no answer content anyway — "
-            "outcome without reason. Per ADR 0007, past decisions enter the corpus only as an "
-            'identifier-free projection after ADR 0008\'s fields exist. The "past decisions" '
-            "half of the helper ask is blocked on the data model, not on retrieval engineering.",
+            f"`{name}` was refused by the hygiene gate ({count_str}) and carries no "
+            "answer content anyway — outcome without reason. Per ADR 0007, past "
+            "decisions enter the corpus only as an identifier-free projection after "
+            'ADR 0008\'s fields exist. The "past decisions" half of the helper ask is '
+            "blocked on the data model, not on retrieval engineering.",
             "",
         ]
     false_confident = [
@@ -282,5 +321,5 @@ def build(
     ]
     lines += _hygiene_section(verdicts, display_names)
     lines += _metrics_section(evals, agg, threshold, embedder_signature, n_chunks)
-    lines += _data_gaps_section(evals, verdicts)
+    lines += _data_gaps_section(evals, verdicts, display_names)
     return "\n".join(lines)
