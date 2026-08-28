@@ -51,16 +51,48 @@ def test_migration_contains_statement(statement):
     assert statement in MIGRATION_SQL
 
 
+ADR_0012_MARKER = "-- ADR 0012 / spec D3"
+# A later parity block opens its own fence (`-- >>> <name> DDL`). The ADR 0012 section ends
+# where the first one begins.
+PARITY_FENCE = "\n-- >>> "
+
+
+def _adr_0012_section(sql: str) -> str:
+    """The ADR 0012 DDL, from its marker to the next parity fence or end of file.
+
+    Bounded rather than read to EOF: db/init/001_schema.sql keeps growing after this
+    section — assistant_runs was appended below it — and a marker-to-EOF comparison makes
+    every later table a failure of THIS test, which is about ADR 0012 and knows nothing
+    about them.
+    """
+    section = sql[sql.index(ADR_0012_MARKER) :]
+    fence = section.find(PARITY_FENCE)
+    if fence != -1:
+        section = section[:fence]
+    # Trailing blank lines only: one file ends the section at EOF, the other separates it
+    # from the next block. Everything above the last statement still compares byte for byte.
+    return section.rstrip("\n") + "\n"
+
+
 def test_init_and_migration_ddl_are_identical():
     """Not merely 'both mention the objects' — byte-identical DDL.
 
     The migration is the init DDL plus a header of apply-order notes. Anything else is
     drift waiting to happen.
     """
-    marker = "-- ADR 0012 / spec D3"
-    assert (
-        INIT_SQL[INIT_SQL.index(marker) :]
-        == MIGRATION_SQL[MIGRATION_SQL.index(marker) :]
+    assert _adr_0012_section(INIT_SQL) == _adr_0012_section(MIGRATION_SQL)
+
+
+def test_adr_0012_section_is_bounded_by_a_later_block():
+    """The bound above is only honest while it actually cuts something off.
+
+    If the fence convention is dropped — a later table appended with no `-- >>>` header —
+    this test fails while the parity test silently goes back to comparing to EOF and
+    reports drift on DDL that has nothing to do with ADR 0012.
+    """
+    assert PARITY_FENCE in INIT_SQL, "no later parity block found in the init DDL"
+    assert len(_adr_0012_section(INIT_SQL)) < len(
+        INIT_SQL[INIT_SQL.index(ADR_0012_MARKER) :]
     )
 
 
