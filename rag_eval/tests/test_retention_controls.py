@@ -51,7 +51,9 @@ def test_data_gaps_section_omits_query_text():
     # The false-confident section quoted the query directly, which is the one place
     # a supplied question would have been written out in full.
     rows = "\n".join(
-        _data_gaps_section([_eval(True, [("syn-pol-loan-review#counteroffers", 0.31)])])
+        _data_gaps_section(
+            [_eval(True, [("syn-pol-loan-review#counteroffers", 0.31)])], verdicts=[]
+        )
     )
     assert "Q01" in rows
     assert SECRET not in rows
