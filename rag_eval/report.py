@@ -140,8 +140,8 @@ def _metrics_section(
         "are midpoints between adjacent distinct top-1 scores; the chosen value minimizes "
         "classification errors (answerable tops that would wrongly abstain + unanswerable "
         "tops retrieved with false confidence), preferring the widest score gap on ties. "
-        f"Cosine scores from embedder `{embedder_signature}` over a {n_chunks}-chunk corpus "
-        f"are "
+        f"Cosine scores from embedder `{embedder_signature}` over a corpus of "
+        f"{n_chunks} chunks are "
         "lumpy; this value is calibrated to this gold set and this backend, and must be "
         "re-calibrated when the corpus or embedding backend changes.",
         "",
@@ -165,17 +165,37 @@ def _metrics_section(
 _DENIAL_WITH_A_WRITTEN_GAP = re.compile(r"(?<![\d.])6012(?![\d.])")
 
 
-def _asks_about_the_written_denial(e: QueryEval) -> bool:
+def asks_about_the_written_denial(
+    query_id: str, query: str, unanswerable: bool
+) -> bool:
+    """Whether this gold case is the one the #6012 subsection is written about.
+
+    Public and taking plain fields because `scripts/smoke_rag_eval.sh` asks the
+    same question of the gold file, before any eval exists. Two copies of this
+    predicate is how the smoke ends up asserting a section the report is right
+    not to render.
+    """
     # `unanswerable` is part of the key, not a detail: the subsection asserts the
     # case cannot be answered, and once ADR 0008's decision-record fields exist
     # this case is answerable while its app id is unchanged.
     return bool(
-        e.unanswerable
+        unanswerable
         and (
-            _DENIAL_WITH_A_WRITTEN_GAP.search(e.query_id)
-            or _DENIAL_WITH_A_WRITTEN_GAP.search(e.query)
+            _DENIAL_WITH_A_WRITTEN_GAP.search(query_id)
+            or _DENIAL_WITH_A_WRITTEN_GAP.search(query)
         )
     )
+
+
+# The corpus root is absolute at runtime and relative in tests, so the match is a
+# suffix — anchored on the separator, because a bare `endswith` also accepts
+# `legacy_kb_dump/applications.jsonl`, a different file that every claim in the
+# subsection would be wrong about.
+_PAST_APPLICATIONS = "kb_dump/applications.jsonl"
+
+
+def _is_past_applications(path: str) -> bool:
+    return path == _PAST_APPLICATIONS or path.endswith("/" + _PAST_APPLICATIONS)
 
 
 def _data_gaps_section(
@@ -189,7 +209,10 @@ def _data_gaps_section(
     # nobody asked about and asserted a hygiene refusal that never happened.
     display_names = display_names or {}
     lines: list[str] = []
-    if any(_asks_about_the_written_denial(e) for e in evals):
+    if any(
+        asks_about_the_written_denial(e.query_id, e.query, e.unanswerable)
+        for e in evals
+    ):
         lines += [
             '### Why "why was application #6012 denied?" cannot be answered',
             "",
@@ -217,11 +240,7 @@ def _data_gaps_section(
             "",
         ]
     refused_applications = next(
-        (
-            v
-            for v in verdicts
-            if not v.passed and v.path.endswith("kb_dump/applications.jsonl")
-        ),
+        (v for v in verdicts if not v.passed and _is_past_applications(v.path)),
         None,
     )
     if refused_applications is not None:

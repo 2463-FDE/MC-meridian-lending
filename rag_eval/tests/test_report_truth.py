@@ -13,6 +13,8 @@ in the deliverable, not a cosmetic one.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from rag_eval import report as report_mod
@@ -258,3 +260,48 @@ def test_past_applications_gap_names_the_file_through_display_names() -> None:
     assert "kb_dump/applications.jsonl" not in text, (
         "the subsection prints the raw path the display-name map exists to replace"
     )
+
+
+@pytest.mark.parametrize("n_chunks", [8, 11, 18, 80])
+def test_calibration_note_reads_correctly_for_any_corpus_size(n_chunks: int) -> None:
+    """The corpus size is interpolated, so no wording may assume its first digit.
+
+    `a {n}-chunk corpus` renders "a 8-chunk corpus" on the sizes whose spoken
+    form starts with a vowel. The report is the graded deliverable and a
+    reviewer reads this sentence, so the phrasing must not depend on the number.
+    """
+    text = _report(
+        [_eval("q1", "What is the late fee?", unanswerable=False, top=0.5)], n_chunks
+    )
+    assert re.search(rf"\b{n_chunks}\b", text), "expected the size in the report"
+    assert not re.search(rf"\ba {n_chunks}\b", text), (
+        f"the calibration note reads 'a {n_chunks}...' where English wants 'an'"
+    )
+
+
+def test_past_applications_gap_does_not_match_a_similarly_named_directory() -> None:
+    """The path gate is a suffix match, so it must anchor on the separator.
+
+    `legacy_kb_dump/applications.jsonl` is a different file; a refusal for it
+    opened a subsection whose every claim is about `kb_dump/applications.jsonl`.
+    """
+    ev = _eval("q1", "What is the late fee?", unanswerable=False, top=0.5)
+    lookalike = [
+        FileVerdict(
+            path="/base/corpus/legacy_kb_dump/applications.jsonl",
+            passed=False,
+            findings=[Finding("ein", "\u2022\u2022\u2022\u20220000")],
+        )
+    ]
+    assert "Past applications contribute nothing" not in _report(
+        [ev], 66, verdicts=lookalike
+    ), "a refusal for a different file opened the past-applications subsection"
+
+    real = [
+        FileVerdict(
+            path="/base/kb_dump/applications.jsonl",
+            passed=False,
+            findings=[Finding("ein", "\u2022\u2022\u2022\u20220000")],
+        )
+    ]
+    assert "Past applications contribute nothing" in _report([ev], 66, verdicts=real)
