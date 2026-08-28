@@ -87,7 +87,10 @@ def load_corpus_manifest(path: Path) -> dict[str, str]:
 
 
 def audit_corpus_against_manifest(
-    base: Path, manifest: dict[str, str], subtree: str | None = None
+    base: Path,
+    manifest: dict[str, str],
+    subtree: str | None = None,
+    manifest_file: Path | None = None,
 ) -> list[str]:
     """Problems making the corpus on disk differ from the approved manifest.
 
@@ -99,6 +102,12 @@ def audit_corpus_against_manifest(
     Findings name a manifest entry (approved text, safe to echo) but never an
     unlisted filename — an unapproved name can itself be the PII, so it is
     reported by position, as run()'s own refusal path does.
+
+    `manifest_file` names the checksum file itself when it sits inside the
+    audited root (a flat package with no subtree to exclude it by, unlike the
+    policy corpus's manifest at `base`, one level above the scoped `policies/`
+    subtree). The manifest never lists its own path, so without this it would
+    always report itself as one unlisted file.
     """
     if not manifest:
         return ["manifest declares no approved corpus files"]
@@ -120,6 +129,8 @@ def audit_corpus_against_manifest(
         # a clean one.
         return [f"manifest declares no approved files under {subtree or '.'}"]
     on_disk = {p.relative_to(base).as_posix() for p in root.rglob("*") if p.is_file()}
+    if manifest_file is not None:
+        on_disk.discard(manifest_file.relative_to(base).as_posix())
     problems = []
     for name in sorted(set(scoped) - on_disk):
         problems.append(f"manifest entry missing on disk: {name}")
@@ -129,6 +140,18 @@ def audit_corpus_against_manifest(
             f"unlisted file in corpus directory at position {position} "
             "(name withheld — an unapproved name can itself be the identifier)"
         )
+    # Content, not just presence: a listed name whose bytes were edited after
+    # the manifest was pinned is not the approved corpus either. The policy
+    # corpus also gets this checked per-file at admission time
+    # (unsafe_corpus_path_reason), but nothing else ingests a manifest-governed
+    # artifact, so an unlisted-artifact caller (the displayed-summaries package)
+    # has no second pass to catch a content edit — this is its only one.
+    for name in sorted(set(scoped) & on_disk):
+        digest = hashlib.sha256((base / name).read_bytes()).hexdigest()
+        if digest != scoped[name]:
+            problems.append(
+                f"manifest entry does not match its approved digest: {name}"
+            )
     return problems
 
 
@@ -550,6 +573,7 @@ def run(
     base: Path = Path("."),
     gold_path: Path | None = None,
     manifest_path: Path | None = None,
+    displayed_summaries_manifest_path: Path | None = None,
 ) -> RunResult:
     """Gate, ingest, embed, retrieve, report.
 
@@ -569,7 +593,33 @@ def run(
     The manifest governs `policies/` only. `kb_dump/` keeps its own pinned
     exception (`_LEGACY_DUMP_SHA256`); a policy manifest must not turn the legacy
     dump into an unlisted-file abort.
+
+    `displayed_summaries_manifest_path` names the checksum manifest shipped
+    alongside the client's synthetic-displayed-summaries package (her own
+    `shasum -a 256` output, sitting next to the files it covers). It is a
+    second, unrelated frozen artifact — not part of the policy corpus and not
+    fed into ingestion — verified the same way and audited first, before
+    ingest or retrieval touch anything, so a support-test run never scores
+    against a summaries file that drifted from what she approved.
     """
+
+    if displayed_summaries_manifest_path is not None:
+        try:
+            summaries_manifest = load_corpus_manifest(displayed_summaries_manifest_path)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                f"displayed-summaries manifest unusable: {exc}"
+            ) from None
+        summaries_problems = audit_corpus_against_manifest(
+            displayed_summaries_manifest_path.parent,
+            summaries_manifest,
+            manifest_file=displayed_summaries_manifest_path,
+        )
+        if summaries_problems:
+            raise RuntimeError(
+                "displayed-summaries package does not match its manifest: "
+                + "; ".join(summaries_problems)
+            )
 
     # Scan EVERY file under the corpus roots, recursively and regardless of
     # extension. scan_file reads known text/JSON formats and refuses unknown or
@@ -1093,8 +1143,14 @@ def main(
     base: Path = Path("."),
     gold_path: Path | None = None,
     manifest_path: Path | None = None,
+    displayed_summaries_manifest_path: Path | None = None,
 ) -> None:
-    result = run(base=base, gold_path=gold_path, manifest_path=manifest_path)
+    result = run(
+        base=base,
+        gold_path=gold_path,
+        manifest_path=manifest_path,
+        displayed_summaries_manifest_path=displayed_summaries_manifest_path,
+    )
     refused = [v for v in result.verdicts if not v.passed]
     print(f"gate: {len(result.verdicts)} files scanned, {len(refused)} refused")
     for v in refused:
@@ -1164,5 +1220,20 @@ if __name__ == "__main__":
             "lowercase-slug naming convention governs admission."
         ),
     )
+    parser.add_argument(
+        "--displayed-summaries-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "checksum manifest (shasum -a 256) for the synthetic-displayed-"
+            "summaries package, sitting next to the files it covers. Audited "
+            "before ingest or retrieval; unrelated to --manifest."
+        ),
+    )
     args = parser.parse_args()
-    main(base=args.base, gold_path=args.gold, manifest_path=args.manifest)
+    main(
+        base=args.base,
+        gold_path=args.gold,
+        manifest_path=args.manifest,
+        displayed_summaries_manifest_path=args.displayed_summaries_manifest,
+    )
