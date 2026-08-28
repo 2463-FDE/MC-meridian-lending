@@ -122,6 +122,55 @@ _DOB_READABLE_EXPECTED_DEF = _normalize_constraint_def(
 )
 
 
+# The shape assistant_runs.record's INSERT requires, column by column: rendered type,
+# NOT NULL, and whether a default exists. `CREATE TABLE IF NOT EXISTS` accepts a
+# pre-existing table of ANY shape, so a table left by an earlier hand-applied attempt
+# satisfies both the migration and a name-only rung -- and then every INSERT raises
+# inside `record`, which swallows it. Nothing else in the system reports that silence.
+#
+# `id` and `created_at` are not written by the INSERT but are asserted anyway: both are
+# NOT NULL, so an omitted column with no default fails the write exactly as a missing one
+# does. Types are the `format_type` rendering, which is what pg_attribute reports.
+_ASSISTANT_RUNS_COLUMNS = {
+    "id": ("bigint", True, True),
+    "trace_id": ("text", True, False),
+    "application_id": ("integer", True, False),
+    "task": ("text", True, False),
+    "policy_topic": ("text", False, False),
+    "http_status": ("integer", True, False),
+    "refusal_code": ("text", False, False),
+    "outcome": ("text", False, False),
+    "record_status": ("text", False, False),
+    "policy_band": ("text", False, False),
+    "narration_validated": ("boolean", False, False),
+    "policy_citations": ("integer", False, False),
+    "policy_searches": ("integer", False, False),
+    "latency_ms": ("integer", True, False),
+    "created_at": ("timestamp with time zone", True, True),
+}
+
+# The expected definitions of the three assistant_runs CHECKs, written as Postgres renders
+# them back (`IN (...)` is stored as `= ANY (ARRAY[...])`, each literal cast to ::text) and
+# normalised the same way the rung normalises what it reads. Compared in FULL rather than
+# probed for a substring: a substring test answers "does this constraint mention
+# never_decisioned", which a WIDER constraint -- one admitting a code no reader recognises,
+# or admitting free text -- passes just as easily as the intended one.
+_ASSISTANT_RUNS_CHECKS = {
+    "ck_assistant_runs_task": _normalize_constraint_def(
+        "CHECK ((task = ANY (ARRAY['decision'::text, 'explain'::text])))"
+    ),
+    "ck_assistant_runs_refusal_code": _normalize_constraint_def(
+        "CHECK (((refusal_code IS NULL) OR (refusal_code = ANY (ARRAY["
+        "'not_found'::text, 'never_decisioned'::text, 'assistant_refused'::text, "
+        "'llm_unavailable'::text, 'kyc_blocked'::text, 'refused'::text, "
+        "'idempotency_conflict'::text, 'downstream_unavailable'::text]))))"
+    ),
+    "ck_assistant_runs_refusal_matches_status": _normalize_constraint_def(
+        "CHECK (((http_status = 200) = (refusal_code IS NULL)))"
+    ),
+}
+
+
 def reset_database_probe_cache() -> None:
     """Drop the cached probe result (forces the next call to reconnect)."""
     global _probe_state
@@ -312,26 +361,52 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             row = cur.fetchone()
             if row is None or row[0] is None:
                 return False, "schema_not_ready:assistant_runs"
-            # The CHECK is probed by DEFINITION and not by name. `CREATE TABLE IF NOT
-            # EXISTS` accepts a pre-existing assistant_runs of any shape, so a table left
-            # by a hand-applied attempt — or one whose constraint predates the
-            # never_decisioned split — satisfies a name-only rung while admitting codes
-            # the reader will not recognise. `convalidated` is required too: a constraint
-            # added NOT VALID enforces nothing against the rows already there.
-            #
-            # Postgres re-renders a stored CHECK (`IN (...)` comes back as
-            # `= ANY (ARRAY[...])`), so the rendered string is normalised and tested for
-            # the load-bearing literals rather than pinned verbatim.
+            # The table resolving is not the same as the table accepting the row. Every
+            # column the INSERT names is asserted by rendered type, nullability and
+            # whether it has a default — a pre-existing table missing policy_searches, or
+            # carrying latency_ms as TEXT, satisfies `CREATE TABLE IF NOT EXISTS`, passes
+            # a name-only rung, and then fails every write into a caller that swallows the
+            # error. That is the silent-zero-rows state this rung exists to name.
             cur.execute(
-                r"SELECT lower(regexp_replace(pg_get_constraintdef(oid), '\s+', '', 'g')) "
-                "FROM pg_constraint "
-                "WHERE conrelid = to_regclass('assistant_runs') "
-                "AND conname = 'ck_assistant_runs_refusal_code' "
-                "AND contype = 'c' AND convalidated"
+                "SELECT a.attname, format_type(a.atttypid, a.atttypmod), "
+                "a.attnotnull, a.atthasdef "
+                "FROM pg_attribute a "
+                "WHERE a.attrelid = to_regclass('assistant_runs') "
+                "AND a.attnum > 0 AND NOT a.attisdropped"
             )
-            row = cur.fetchone()
-            if row is None or "never_decisioned" not in row[0]:
-                return False, "schema_not_ready:ck_assistant_runs_refusal_code"
+            found = {
+                str(r[0]): (str(r[1]), bool(r[2]), bool(r[3])) for r in cur.fetchall()
+            }
+            for column, expected in _ASSISTANT_RUNS_COLUMNS.items():
+                if found.get(column) != expected:
+                    return False, "schema_not_ready:assistant_runs:" + column
+            # An EXTRA column is harmless unless the write has to supply it: a NOT NULL
+            # column with no default that the INSERT does not name fails every row, and
+            # the expected-columns loop above cannot see it.
+            for column, (_type, notnull, hasdef) in found.items():
+                if column not in _ASSISTANT_RUNS_COLUMNS and notnull and not hasdef:
+                    return False, "schema_not_ready:assistant_runs:" + column
+            # The CHECKs are probed by DEFINITION and not by name, and in full rather than
+            # for a substring. `CREATE TABLE IF NOT EXISTS` accepts a pre-existing table of
+            # any shape, so a constraint predating the never_decisioned split — or a WIDER
+            # one admitting codes the reader will not recognise — satisfies a name-only or
+            # substring rung. `convalidated` is required too: a constraint added NOT VALID
+            # enforces nothing against the rows already there.
+            #
+            # Missing/NOT VALID and drifted are distinct reasons: the first is an
+            # unapplied migration, the second a table someone else built.
+            for conname, expected_def in _ASSISTANT_RUNS_CHECKS.items():
+                cur.execute(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conrelid = to_regclass('assistant_runs') "
+                    "AND conname = '" + conname + "' "
+                    "AND contype = 'c' AND convalidated"
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return False, "schema_not_ready:" + conname
+                if _normalize_constraint_def(str(row[0] or "")) != expected_def:
+                    return False, "schema_not_ready:" + conname + ":definition"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__

@@ -99,59 +99,132 @@ CREATE INDEX IF NOT EXISTS idx_assistant_runs_app ON assistant_runs(application_
 -- current_schema() is myapp, the lookup finds nothing, and the assertion passes
 -- vacuously on exactly the volume it exists to catch. Same rule as migration 0020.
 --
+-- The columns are asserted too, not just the constraints. A pre-existing table missing
+-- policy_searches, or carrying latency_ms as TEXT, satisfies CREATE TABLE IF NOT EXISTS
+-- and every constraint check below, and then fails every INSERT in
+-- services/origination-service/app/assistant_runs.py -- which swallows the error, by
+-- design, so a telemetry fault cannot 500 an officer's answer. The result is a table that
+-- exists, a migration that reported success, a healthy /health, and no rows at all.
+--
+-- id and created_at are asserted although the INSERT does not name them: both are NOT
+-- NULL, so an omitted column with no default fails the write exactly as a missing one
+-- does. format_type is the rendering pg_attribute reports, and attnotnull/atthasdef are
+-- the two properties that decide whether the write may leave a column out.
+--
 -- The CHECK definitions are compared by CONTENT, not merely by name, and `convalidated`
 -- is required so a constraint added NOT VALID cannot pass. Postgres rewrites and
 -- re-parenthesizes a CHECK when it stores it (`IN (...)` comes back as
--- `= ANY (ARRAY[...])`), so pinning the rendered string verbatim would fail on a
--- correct table. The comparison instead strips whitespace, lowercases, and requires the
--- load-bearing literals to be present -- which is what actually distinguishes this
--- constraint from a same-named weaker one.
+-- `= ANY (ARRAY[...])`), so the comparison strips whitespace and parentheses and
+-- lowercases both sides -- but it compares the WHOLE expression. A substring test asks
+-- only whether the constraint mentions a code, and a WIDER constraint passes that just as
+-- easily as the intended one -- which is how `str(exc)` reaches a column that was
+-- CHECK-constrained precisely to keep it out.
 DO $mig$
 DECLARE
-  ck_codes  text;
-  ck_status text;
+  bad_columns    text;
+  extra_required text;
+  actual         text;
+  r              record;
 BEGIN
   IF to_regclass('assistant_runs') IS NULL THEN
     RAISE EXCEPTION
       'migration 0021: assistant_runs does not resolve on the search_path after CREATE';
   END IF;
 
-  SELECT lower(regexp_replace(pg_get_constraintdef(oid), '\s+', '', 'g'))
-    INTO ck_codes
-    FROM pg_constraint
-   WHERE conrelid = to_regclass('assistant_runs')
-     AND conname = 'ck_assistant_runs_refusal_code'
-     AND contype = 'c'
-     AND convalidated;
-  IF ck_codes IS NULL THEN
+  SELECT string_agg(
+           format('%s (expected %s, not null %s, default %s; found %s)',
+                  e.name, e.typ, e.not_null, e.has_default,
+                  coalesce(f.typ || ', not null ' || f.not_null || ', default ' || f.has_default,
+                           'no such column')),
+           '; ' ORDER BY e.name)
+    INTO bad_columns
+    FROM (VALUES
+      ('id'::text,            'bigint'::text,             true,  true),
+      ('trace_id',            'text',                     true,  false),
+      ('application_id',      'integer',                  true,  false),
+      ('task',                'text',                     true,  false),
+      ('policy_topic',        'text',                     false, false),
+      ('http_status',         'integer',                  true,  false),
+      ('refusal_code',        'text',                     false, false),
+      ('outcome',             'text',                     false, false),
+      ('record_status',       'text',                     false, false),
+      ('policy_band',         'text',                     false, false),
+      ('narration_validated', 'boolean',                  false, false),
+      ('policy_citations',    'integer',                  false, false),
+      ('policy_searches',     'integer',                  false, false),
+      ('latency_ms',          'integer',                  true,  false),
+      ('created_at',          'timestamp with time zone', true,  true)
+    ) AS e(name, typ, not_null, has_default)
+    LEFT JOIN (
+      SELECT a.attname                            AS name,
+             format_type(a.atttypid, a.atttypmod) AS typ,
+             a.attnotnull                         AS not_null,
+             a.atthasdef                          AS has_default
+        FROM pg_attribute a
+       WHERE a.attrelid = to_regclass('assistant_runs')
+         AND a.attnum > 0
+         AND NOT a.attisdropped
+    ) AS f ON f.name = e.name
+   WHERE f.name IS NULL
+      OR f.typ <> e.typ
+      OR f.not_null <> e.not_null
+      OR f.has_default <> e.has_default;
+  IF bad_columns IS NOT NULL THEN
     RAISE EXCEPTION
-      'migration 0021: ck_assistant_runs_refusal_code is missing or NOT VALID';
-  END IF;
-  IF ck_codes NOT LIKE '%never_decisioned%'
-     OR ck_codes NOT LIKE '%downstream_unavailable%'
-     OR ck_codes NOT LIKE '%idempotency_conflict%' THEN
-    RAISE EXCEPTION
-      'migration 0021: ck_assistant_runs_refusal_code does not admit the current code set (%)',
-      ck_codes;
+      'migration 0021: assistant_runs does not have the shape the INSERT in services/origination-service/app/assistant_runs.py writes: %',
+      bad_columns;
   END IF;
 
-  SELECT lower(regexp_replace(pg_get_constraintdef(oid), '\s+', '', 'g'))
-    INTO ck_status
-    FROM pg_constraint
-   WHERE conrelid = to_regclass('assistant_runs')
-     AND conname = 'ck_assistant_runs_refusal_matches_status'
-     AND contype = 'c'
-     AND convalidated;
-  IF ck_status IS NULL THEN
+  -- An extra column is harmless unless the write has to supply it: NOT NULL, no default,
+  -- and absent from the INSERT column list fails every row. The list below is that column
+  -- list, restricted to the columns the write always supplies a value for.
+  SELECT string_agg(a.attname, ', ' ORDER BY a.attname)
+    INTO extra_required
+    FROM pg_attribute a
+   WHERE a.attrelid = to_regclass('assistant_runs')
+     AND a.attnum > 0
+     AND NOT a.attisdropped
+     AND a.attnotnull
+     AND NOT a.atthasdef
+     AND a.attname NOT IN (
+       'trace_id', 'application_id', 'task', 'http_status', 'latency_ms'
+     );
+  IF extra_required IS NOT NULL THEN
     RAISE EXCEPTION
-      'migration 0021: ck_assistant_runs_refusal_matches_status is missing or NOT VALID';
+      'migration 0021: assistant_runs requires columns the INSERT does not write: %',
+      extra_required;
   END IF;
-  IF ck_status NOT LIKE '%http_status=200%'
-     OR ck_status NOT LIKE '%refusal_codeisnull%' THEN
-    RAISE EXCEPTION
-      'migration 0021: ck_assistant_runs_refusal_matches_status does not bind the refusal to the status (%)',
-      ck_status;
-  END IF;
+
+  FOR r IN
+    SELECT *
+      FROM (VALUES
+        ('ck_assistant_runs_task'::text,
+         'checktask=anyarray[''decision''::text,''explain''::text]'::text),
+        ('ck_assistant_runs_refusal_code',
+         'checkrefusal_codeisnullorrefusal_code=anyarray[''not_found''::text,'
+         '''never_decisioned''::text,''assistant_refused''::text,'
+         '''llm_unavailable''::text,''kyc_blocked''::text,''refused''::text,'
+         '''idempotency_conflict''::text,''downstream_unavailable''::text]'),
+        ('ck_assistant_runs_refusal_matches_status',
+         'checkhttp_status=200=refusal_codeisnull')
+      ) AS e(conname, expected)
+  LOOP
+    SELECT lower(regexp_replace(pg_get_constraintdef(oid), '[\s()]', '', 'g'))
+      INTO actual
+      FROM pg_constraint
+     WHERE conrelid = to_regclass('assistant_runs')
+       AND conname = r.conname
+       AND contype = 'c'
+       AND convalidated;
+    IF actual IS NULL THEN
+      RAISE EXCEPTION 'migration 0021: % is missing or NOT VALID', r.conname;
+    END IF;
+    IF actual <> r.expected THEN
+      RAISE EXCEPTION
+        'migration 0021: % does not match the intended expression (found %)',
+        r.conname, actual;
+    END IF;
+  END LOOP;
 END
 $mig$;
 
