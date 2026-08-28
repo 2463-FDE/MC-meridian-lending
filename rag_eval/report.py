@@ -1,4 +1,4 @@
-"""Markdown eval-report writer (spec D1.5–D1.6, D2.5).
+"""Markdown eval-report writer (spec D1.5–D1.7, D2.5).
 
 The report never contains a raw PII value: hygiene findings carry masked
 samples only (hygiene.py masks before anything reaches this module), and the
@@ -7,6 +7,8 @@ wholesale (the adjacent lines in that purged file held raw PAN/SSN).
 """
 
 from __future__ import annotations
+
+import re
 
 from rag_eval.hygiene import FileVerdict
 from rag_eval.metrics import (
@@ -138,7 +140,15 @@ def _metrics_section(
         top = (
             ", ".join(f"`{cid}` ({score:.3f})" for cid, score in e.retrieved[:3]) or "—"
         )
-        if e.unanswerable:
+        rr = f"{e.reciprocal_rank:.2f}"
+        if not e.scorable:
+            # Scored on nothing (see UNSCORABLE_CLASS), so it carries no verdict:
+            # a ✗ here would read as a retrieval miss beside real failures, and
+            # the zeroed hits/RR behind it are an absence, not a result.
+            hits = "—"
+            rr = "—"
+            verdict = "*(not scored)*"
+        elif e.unanswerable:
             hits = "—"
             verdict = "below threshold ✓" if e.correct else "**false-confident ✗**"
         else:
@@ -149,8 +159,7 @@ def _metrics_section(
             # question is content the client excluded from retention, and this
             # report is a file on disk. `gold_queries.json` maps id back to text
             # for whoever legitimately holds it.
-            f"| {e.query_id} | {expected} | {top} | {hits} | "
-            f"{e.reciprocal_rank:.2f} | {verdict} |"
+            f"| {e.query_id} | {expected} | {top} | {hits} | {rr} | {verdict} |"
         )
     lines += [
         "",
@@ -160,9 +169,9 @@ def _metrics_section(
         "are midpoints between adjacent distinct top-1 scores; the chosen value minimizes "
         "classification errors (answerable tops that would wrongly abstain + unanswerable "
         "tops retrieved with false confidence), preferring the widest score gap on ties. "
-        f"Cosine scores from embedder `{embedder_signature}` over a "
-        f"{n_chunks}-chunk corpus are lumpy, and are not comparable across a change "
-        "to either. This value belongs to exactly one pair and must be re-derived "
+        f"Cosine scores from embedder `{embedder_signature}` over a corpus of "
+        f"{n_chunks} chunks are lumpy, and are not comparable across a change to "
+        "either. This value belongs to exactly one pair and must be re-derived "
         "when either side of it moves:",
         "",
         f"- corpus: `{corpus_signature}` ({n_chunks} chunks)",
@@ -186,42 +195,119 @@ def _metrics_section(
     return lines
 
 
-def _data_gaps_section(evals: list[QueryEval]) -> list[str]:
-    lines = ["## Data gaps", ""]
-    lines += [
-        '### Why "why was application #6012 denied?" cannot be answered',
-        "",
-        "This is a **data-capture failure, not a retrieval bug**. The answer was never "
-        "recorded anywhere retrievable:",
-        "",
-        "- The `decisions` table stores outcome only — `decisions(app_id, outcome)`, "
-        "no reason, no drivers, no timestamp, no decider (`db/init/001_schema.sql:59`; "
-        'schema comment: *"Decision: OUTCOME ONLY."*).',
-        '- The seed data says it outright: *"Denials 6012/6013 have no recorded reason '
-        'anywhere"* (`db/init/002_seed.sql:38`).',
-        '- The underwriting guidelines flag the practice themselves: *"the tool currently '
-        "records the outcome of a decision but the reasons are produced ad hoc at "
-        'letter-generation time"* (`policies/underwriting_guidelines.md`, Adverse action).',
-        f"- The only trace in the whole estate is one unstructured log line: {_LOG_TRACE}. "
-        "It is ephemeral, non-queryable, and not a system of record — and its content is "
-        'itself non-compliant: "purchasing history" is not specific Reg B principal-reason '
-        "language, and `model_score=612` falls in the policy's **refer band (600–659)** per "
-        "`policies/underwriting_guidelines.md` — yet the recorded outcome is deny, with no "
-        "record of who overrode the band or why.",
-        "",
-        "**Fix path:** ADR 0008 locks the required decision-record fields (principal "
-        "reasons, drivers, policy band, timestamp, decider). Backfill is impossible — "
-        "reasons for 6012/6013 were never captured and no migration can recover them.",
-        "",
-        "### Past applications contribute nothing to retrieval",
-        "",
-        "`kb_dump/applications.jsonl` was refused by the hygiene gate (raw SSN/PAN/DOB in "
-        "five of six records, raw EIN in the sixth) and carries no answer content anyway — "
-        "outcome without reason. Per ADR 0007, past decisions enter the corpus only as an "
-        'identifier-free projection after ADR 0008\'s fields exist. The "past decisions" '
-        "half of the helper ask is blocked on the data model, not on retrieval engineering.",
-        "",
-    ]
+# The seed data names two denials with no recorded reason (6012/6013), but the
+# subsection below is written for one of them: its heading quotes the #6012
+# question and its only log evidence is `app_id=6012`. So it opens on #6012
+# alone. A #6013 question gets no section rather than #6012's, which would be
+# the same false statement in a new place; parameterising heading and evidence
+# by app id is unbuilt because no gold case asks it.
+#
+# The id is bounded by digits AND by a decimal point, because a plain substring
+# search over the query text opened the whole denial narrative on "account 46012"
+# and on "$6012.50". Checked against `query_id` as well as `query`: the id is the
+# stable key when the same case is reworded ("why was the second denial
+# refused?"), and the text is what carries the id when a gold set numbers its
+# cases sequentially instead.
+_DENIAL_WITH_A_WRITTEN_GAP = re.compile(r"(?<![\d.])6012(?![\d.])")
+
+
+def asks_about_the_written_denial(
+    query_id: str, query: str, unanswerable: bool
+) -> bool:
+    """Whether this gold case is the one the #6012 subsection is written about.
+
+    Public and taking plain fields because `scripts/smoke_rag_eval.sh` asks the
+    same question of the gold file, before any eval exists. Two copies of this
+    predicate is how the smoke ends up asserting a section the report is right
+    not to render.
+    """
+    # `unanswerable` is part of the key, not a detail: the subsection asserts the
+    # case cannot be answered, and once ADR 0008's decision-record fields exist
+    # this case is answerable while its app id is unchanged.
+    return bool(
+        unanswerable
+        and (
+            _DENIAL_WITH_A_WRITTEN_GAP.search(query_id)
+            or _DENIAL_WITH_A_WRITTEN_GAP.search(query)
+        )
+    )
+
+
+# The corpus root is absolute at runtime and relative in tests, so the match is a
+# suffix — anchored on the separator, because a bare `endswith` also accepts
+# `legacy_kb_dump/applications.jsonl`, a different file that every claim in the
+# subsection would be wrong about.
+_PAST_APPLICATIONS = "kb_dump/applications.jsonl"
+
+
+def _is_past_applications(path: str) -> bool:
+    return path == _PAST_APPLICATIONS or path.endswith("/" + _PAST_APPLICATIONS)
+
+
+def _data_gaps_section(
+    evals: list[QueryEval],
+    verdicts: list[FileVerdict],
+    display_names: dict[str, str] | None = None,
+) -> list[str]:
+    # Every subsection here is gated on the run it describes. Both were written
+    # for the run this harness started on and were emitted verbatim afterwards,
+    # so on a corpus that asks neither question the report explained a denial
+    # nobody asked about and asserted a hygiene refusal that never happened.
+    display_names = display_names or {}
+    lines: list[str] = []
+    if any(
+        asks_about_the_written_denial(e.query_id, e.query, e.unanswerable)
+        for e in evals
+    ):
+        lines += [
+            '### Why "why was application #6012 denied?" cannot be answered',
+            "",
+            "This is a **data-capture failure, not a retrieval bug**. The answer was never "
+            "recorded anywhere retrievable:",
+            "",
+            "- The `decisions` table stores outcome only — `decisions(app_id, outcome)`, "
+            "no reason, no drivers, no timestamp, no decider (`db/init/001_schema.sql:59`; "
+            'schema comment: *"Decision: OUTCOME ONLY."*).',
+            '- The seed data says it outright: *"Denials 6012/6013 have no recorded reason '
+            'anywhere"* (`db/init/002_seed.sql:38`).',
+            '- The underwriting guidelines flag the practice themselves: *"the tool currently '
+            "records the outcome of a decision but the reasons are produced ad hoc at "
+            'letter-generation time"* (`policies/underwriting_guidelines.md`, Adverse action).',
+            f"- The only trace in the whole estate is one unstructured log line: {_LOG_TRACE}. "
+            "It is ephemeral, non-queryable, and not a system of record — and its content is "
+            'itself non-compliant: "purchasing history" is not specific Reg B principal-reason '
+            "language, and `model_score=612` falls in the policy's **refer band (600–659)** per "
+            "`policies/underwriting_guidelines.md` — yet the recorded outcome is deny, with no "
+            "record of who overrode the band or why.",
+            "",
+            "**Fix path:** ADR 0008 locks the required decision-record fields (principal "
+            "reasons, drivers, policy band, timestamp, decider). Backfill is impossible — "
+            "reasons for 6012/6013 were never captured and no migration can recover them.",
+            "",
+        ]
+    refused_applications = next(
+        (v for v in verdicts if not v.passed and _is_past_applications(v.path)),
+        None,
+    )
+    if refused_applications is not None:
+        # Named through `display_names` and counted from the verdict, for the same
+        # reason `run.py` prints refusals that way: the filename may be the
+        # identifier under manifest admission, and the finding breakdown is a fact
+        # about this run. The previous wording ("SSN/PAN/DOB in five of six
+        # records, raw EIN in the sixth") describes one fixture and no other.
+        name = display_names.get(refused_applications.path, refused_applications.path)
+        counts = refused_applications.counts()
+        count_str = ", ".join(f"{t}: {n}" for t, n in sorted(counts.items())) or "—"
+        lines += [
+            "### Past applications contribute nothing to retrieval",
+            "",
+            f"`{name}` was refused by the hygiene gate ({count_str}) and carries no "
+            "answer content anyway — outcome without reason. Per ADR 0007, past "
+            "decisions enter the corpus only as an identifier-free projection after "
+            'ADR 0008\'s fields exist. The "past decisions" half of the helper ask is '
+            "blocked on the data model, not on retrieval engineering.",
+            "",
+        ]
     false_confident = [
         e for e in evals if e.unanswerable and not e.correct and e.retrieved
     ]
@@ -231,15 +317,17 @@ def _data_gaps_section(evals: list[QueryEval]) -> list[str]:
             top_id, top_score = e.retrieved[0]
             lines.append(
                 f"- **{e.query_id}**: top hit `{top_id}` scored "
-                f"{top_score:.3f}, above the calibrated threshold. The chunk describes "
-                "*process/policy*, not the answer — it does not contain why this specific "
-                "application was denied. A naive helper would return plausible-but-wrong "
-                "text with apparent confidence. Any Week 3+ helper must detect the "
-                "no-record case explicitly (e.g. answerability check against ADR 0008 "
-                "decision records), not rely on retrieval score alone."
+                f"{top_score:.3f}, above the calibrated threshold on a case whose "
+                "expected outcome is abstention. The retrieved chunk is topically near "
+                "the question without answering it, so a helper reading score alone "
+                "would return plausible-but-wrong text with apparent confidence. "
+                "Answerability has to be decided explicitly, not inferred from rank. "
+                "This note is about the retrieval, not about why this particular "
+                "case has no answer."
             )
         lines.append("")
-    return lines
+    # A bare "## Data gaps" heading over nothing is its own false claim.
+    return (["## Data gaps", ""] + lines) if lines else []
 
 
 def build(
@@ -310,5 +398,5 @@ def build(
         wrong_abstain,
         false_confident,
     )
-    lines += _data_gaps_section(evals)
+    lines += _data_gaps_section(evals, verdicts, display_names)
     return "\n".join(lines)

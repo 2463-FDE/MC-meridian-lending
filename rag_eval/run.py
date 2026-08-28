@@ -250,14 +250,31 @@ _ALLOWED_GOLD_KEYS = {
     "source_heading",
 }
 
+# The anchor halves, as structured fields rather than free text. run() resolves
+# them against the ADMITTED corpus — the document must be one the gate
+# passed, and the heading must match a section that exists in it, or the load has
+# already failed — so neither can carry arbitrary prose. That resolution is what
+# lets them sit out the free-text name heuristic (_looks_like_person_name);
+# scan_text still covers them for labelled PII.
+_ANCHOR_KEYS = frozenset({"source_document", "source_heading"})
+
+# Her delivery names these columns in camelCase, in the CSV and in the
+# authoritative JSONL alike, so a gold set transcribed from it keeps that
+# spelling. Accept both and normalize BEFORE the unknown-key check, rather than
+# refusing the shape her own data ships in.
+_GOLD_KEY_ALIASES = {
+    "sourceDocument": "source_document",
+    "sourceHeading": "source_heading",
+}
+
 # The client's four outcome classes. `no_match` is the abstention case the
-# harness already scores as `unanswerable`, and carries no expected chunk. The
-# other three are scored on retrieval rank and so must each name an expected
-# chunk: `answer` and `manager_escalation` by definition, and `clarification`
-# because the answer does exist — the question is only under-specified, and the
-# officer channel is a closed topic enum with free text masked at the boundary,
-# so no ask-back path exists to exercise. A `clarification` case is therefore
-# scored as retrieval and reported as a class whose product behaviour is absent.
+# harness already scores as `unanswerable`, and carries no expected chunk.
+# `answer` and `manager_escalation` are scored on retrieval rank and so must
+# each name an expected chunk. `clarification` is UNSCORABLE_CLASS (see
+# metrics.py): the officer channel is a closed topic enum with free text
+# masked at the boundary, so no ask-back path exists to exercise, and the case
+# is excluded from every denominator rather than scored on a target it has no
+# way to hit.
 _OUTCOME_CLASSES = frozenset(
     {"answer", "manager_escalation", "clarification", "no_match"}
 )
@@ -315,6 +332,8 @@ _NAME_ALLOWLIST = (
     "Fair Debt Collection Practices Act",
     "Truth in Lending Act",
     "Consumer Financial Protection Bureau",
+    "Military Lending Act",
+    "Servicemembers Civil Relief Act",
     "Social Security",
     "Meridian Lending",
 )
@@ -693,6 +712,17 @@ def run(
     for i, q in enumerate(gold):
         if not isinstance(q, dict):
             raise RuntimeError(f"gold query at position {i} is not an object")
+        for alias, canonical in _GOLD_KEY_ALIASES.items():
+            if alias not in q:
+                continue
+            if canonical in q:
+                # Refuse rather than pick: a silent precedence would score the
+                # row against whichever half the loader happened to prefer.
+                raise RuntimeError(
+                    f"gold query at position {i} carries both spellings of "
+                    f"'{canonical}' — give one, not both spellings"
+                )
+            q[canonical] = q.pop(alias)
         extra = set(q) - _ALLOWED_GOLD_KEYS
         if extra:
             raise RuntimeError(
@@ -818,6 +848,17 @@ def run(
                 "case is scored on staying below the threshold and must leave "
                 "'expected' empty"
             )
+        # `clarification` is UNSCORABLE_CLASS: aggregate() drops the row from
+        # every denominator, so a target here is validated, resolved and
+        # printed while nothing ever scores against it — the same
+        # two-sources-of-truth drift the anchor fields exist to prevent.
+        if resolved == UNSCORABLE_CLASS and (expected or src_doc is not None):
+            raise RuntimeError(
+                f"gold query at position {i} resolves to outcome_class "
+                f"'{UNSCORABLE_CLASS}' but carries 'expected' chunk ids or a "
+                "frozen anchor — an unscorable case is excluded from every "
+                "denominator and must leave both empty"
+            )
         if resolved not in ("no_match", UNSCORABLE_CLASS) and not expected:
             raise RuntimeError(
                 f"gold query at position {i} resolves to outcome_class "
@@ -838,10 +879,19 @@ def run(
     # scan_text is label-gated for names; also refuse a probable person name in
     # free text, which would otherwise be embedded (Bedrock) and printed to the
     # report. Position-only — the name itself is the PII, so it is never echoed.
+    # Structured anchor fields are excluded (see _ANCHOR_KEYS): an ordinary
+    # policy heading is title-case ("Adverse Action"), which the heuristic reads
+    # as a probable person name, and a resolved anchor is already constrained to
+    # a section of the admitted corpus.
     named = [
         i
         for i, q in enumerate(gold)
-        if any(_looks_like_person_name(s) for s in _gold_strings(q))
+        if any(
+            _looks_like_person_name(s)
+            for s in _gold_strings(
+                {k: v for k, v in q.items() if k not in _ANCHOR_KEYS}
+            )
+        )
     ]
     if named:
         raise RuntimeError(
@@ -884,10 +934,15 @@ def run(
     retrieved = {q["id"]: index.search(embedder.embed(q["query"]), k=5) for q in gold}
 
     def tops(unanswerable: bool) -> list[float]:
+        # Unscorable cases leave calibration for the same reason aggregate()
+        # drops them: they have no scoring target, so admitting one as an
+        # answerable example moves the threshold every scored case is graded
+        # against. Same predicate as QueryEval.scorable.
         return [
             retrieved[q["id"]][0][1] if retrieved[q["id"]] else 0.0
             for q in gold
-            if bool(q.get("unanswerable")) == unanswerable
+            if q.get("outcome_class") != UNSCORABLE_CLASS
+            and bool(q.get("unanswerable")) == unanswerable
         ]
 
     threshold = calibrate_threshold(tops(False), tops(True))

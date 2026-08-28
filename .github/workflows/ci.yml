@@ -411,6 +411,79 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_idempotency_parity.py -q
 
+  assistant-telemetry-gate:
+    # Production evals for the officer assistant (migration 0021). One assistant_runs row
+    # per officer request is what gives any rate about the assistant a denominator: the
+    # spans are content-free by design and `trace()` is a no-op unless LANGSMITH_TRACING
+    # is set, so LangSmith's population is whatever happened to be exported.
+    #
+    # A regression here is SILENT, which is why it needs a blocking job rather than the
+    # `backend` matrix. `assistant_runs.record` swallows every failure on purpose -- a
+    # telemetry fault must never 500 an officer's answer -- so a broken write path, a
+    # dropped column, or an unapplied migration produces working requests, a healthy
+    # response, and no rows at all. Nothing fails. The reports simply get quieter, and a
+    # quiet report reads like a good week.
+    #
+    # These suites also run in the `backend` matrix job, which is continue-on-error with
+    # `python -m pytest -q || true`, so they cannot hold anything there. Same precedent as
+    # tila-vectors-gate, reconciliation-gate, atomic-apply-gate and no-sad-gate. This job
+    # MUST block -- no continue-on-error, no `|| true`.
+    #
+    # Why these files:
+    # test_assistant_runs.py       the row is written at the ENTRY span, where refusals
+    #                              are translated -- inside assistant.run() it would
+    #                              record successes only. Also the never_decisioned split:
+    #                              a subclass caught in the wrong order silently refiles
+    #                              every never-decisioned run as not_found.
+    # test_assistant_runs_ddl.py   the init DDL and the migration declare one table; drift
+    #                              between them means a fresh volume and a migrated volume
+    #                              disagree about what may be stored.
+    # test_db_readiness.py         the rung is wired into database_reachable(). Only this
+    #                              suite proves an unmigrated volume reports unhealthy end
+    #                              to end -- and it is the ONLY thing that reports the
+    #                              swallowed write at all.
+    # test_migration_0021_live.py  against a real Postgres. Text vectors cannot answer
+    #                              whether the file runs twice, whether the guard fires on
+    #                              a table CREATE TABLE IF NOT EXISTS would have accepted,
+    #                              or whether the CHECKs reject the rows they claim to. A
+    #                              constraint nobody has watched refuse a row is a comment.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci_only_not_a_real_secret
+          POSTGRES_DB: meridian
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: origination-service assistant_runs write path, DDL parity, readiness rung
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_assistant_runs.py \
+                           tests/test_assistant_runs_ddl.py \
+                           tests/test_db_readiness.py -q
+      - name: migration 0021 against a real Postgres
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:ci_only_not_a_real_secret@localhost:5432/meridian
+          # No skip path in CI. A skipped pytest exits 0, so without this a typo'd DSN, a
+          # postgres service that never came up, or a missing psycopg2 would leave this
+          # BLOCKING gate green having verified nothing about the migration.
+          REQUIRE_LIVE_DB: "1"
+        run: |
+          cd services/origination-service
+          python -m pytest tests/test_migration_0021_live.py -q
+
   no-sad-gate:
     # D13a / ADR 0013 Decision 2. payments.cvv stored sensitive authentication data.
     # PCI-DSS 3.2.1 prohibits retaining SAD after authorization outright -- no retention

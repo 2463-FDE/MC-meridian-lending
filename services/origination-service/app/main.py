@@ -7,6 +7,7 @@ LOS->LSS boarding seam. Read paths (list/detail) use SQLAlchemy; the older write
 
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 
 import httpx
@@ -17,6 +18,7 @@ from pydantic import BaseModel
 
 from . import (
     assistant,
+    assistant_runs,
     authz,
     clients,
     config,
@@ -521,8 +523,15 @@ def _run_assistant(
     ) as entry:
         # (status, enum refusal code, officer-facing detail, cause) or None on success.
         refusal = None
+        started = time.monotonic()
         try:
             result = assistant.run(app_id, client, task, request_id, policy_topic)
+        except assistant.ApplicationNeverDecisioned as exc:
+            # BEFORE its parent, or the subclass never matches. Same 404 and the same
+            # officer-facing detail as `not_found`: what changes is the recorded code,
+            # because "the id is not a real application" and "it is real and has not been
+            # decisioned yet" are one number today with opposite remedies.
+            refusal = (404, "never_decisioned", "application not found", exc)
         except assistant.ApplicationNotFound as exc:
             refusal = (404, "not_found", "application not found", exc)
         except assistant.AssistantError as exc:
@@ -568,11 +577,38 @@ def _run_assistant(
                     "decisioning unavailable",
                     exc,
                 )
+        latency_ms = int((time.monotonic() - started) * 1000)
+        # `entry.trace_id` rather than `result["trace_id"]`: the same trace either way
+        # (`assistant.request` opens inside this span), but it is also populated on the
+        # refusal path, where no result exists — and populated when tracing is off, since
+        # tracing off means "do not ship spans", not "do not build them".
+        trace_id = str(entry.trace_id)
         if refusal is None:
-            entry.add_metadata({"http_status": 200, **_charted(result)})
+            charted = _charted(result)
+            entry.add_metadata({"http_status": 200, **charted})
+            assistant_runs.record(
+                trace_id=trace_id,
+                application_id=app_id,
+                task=task,
+                policy_topic=policy_topic,
+                http_status=200,
+                refusal_code=None,
+                charted=charted,
+                latency_ms=latency_ms,
+            )
             return result
         status, code, detail, cause = refusal
         entry.add_metadata({"http_status": status, "refusal": code})
+        assistant_runs.record(
+            trace_id=trace_id,
+            application_id=app_id,
+            task=task,
+            policy_topic=policy_topic,
+            http_status=status,
+            refusal_code=code,
+            charted={},
+            latency_ms=latency_ms,
+        )
     # Outside the span on purpose — see the second rule above. The chained `cause` stays
     # for the local traceback, which is inside the client boundary and goes through the
     # redacting formatter; it is the span export that must not see it.
