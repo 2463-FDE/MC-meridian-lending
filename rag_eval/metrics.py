@@ -32,6 +32,23 @@ UNMAPPED = "unmapped"
 # exercise and scoring these would report coverage the product does not have.
 UNSCORABLE_CLASS = "clarification"
 
+# The support-test verdict states. The client's correction (S-1) makes the
+# expected conclusion and the displayed summary two frozen targets graded
+# separately, so there are two of these per case and they are never merged: a run
+# that retrieves the right passage and states the wrong deadline is a different
+# failure from one that states the right deadline off the wrong passage.
+SUPPORTED = "supported"
+UNSUPPORTED = "unsupported"
+# S-9. Counts neither way. Defaulting an uncertain verdict to `UNSUPPORTED` would
+# score "we could not tell" as "the system was wrong", which she ruled out by name.
+HUMAN_REVIEW = "human_review"
+# Not a verdict — the absence of one. Every case starts here and only a check
+# that actually ran moves it, so an ungraded case can never read as a pass. The
+# design doc's rule: "a field that is loaded but unscored reads as coverage that
+# does not exist."
+NOT_EVALUATED = "not_evaluated"
+VERDICT_STATES = (SUPPORTED, UNSUPPORTED, HUMAN_REVIEW, NOT_EVALUATED)
+
 
 @dataclass
 class QueryEval:
@@ -59,6 +76,9 @@ class QueryEval:
     # Absent on the committed gold set, where it follows from `unanswerable`.
     # Orthogonal to `topic`: one says what was asked, the other what came back.
     outcome_class: str | None = None
+    # Two independent support verdicts, never combined into one score.
+    conclusion_verdict: str = NOT_EVALUATED
+    summary_verdict: str = NOT_EVALUATED
     hits: dict[int, bool] = field(init=False)
     reciprocal_rank: float = field(init=False)
     correct: bool = field(init=False)
@@ -91,7 +111,6 @@ class QueryEval:
             self.reciprocal_rank = 0.0
             self.correct = False
 
-
     @property
     def scorable(self) -> bool:
         """Whether this case has a retrieval target it can be graded against."""
@@ -115,6 +134,19 @@ class ClassStat:
 
 
 @dataclass
+class SupportStat:
+    """One support target's verdict counts and graded rate.
+
+    S-1: never merged with the other target. S-9: `human_review` counts in
+    neither `n_graded` nor `rate` — only `supported`/`unsupported` are graded.
+    """
+
+    counts: dict[str, int]  # by VERDICT_STATES, omitting states with no cases
+    n_graded: int  # supported + unsupported
+    rate: float | None  # supported / n_graded, or None ("n/a") when n_graded == 0
+
+
+@dataclass
 class Aggregate:
     n_answerable: int
     n_unanswerable: int
@@ -125,6 +157,23 @@ class Aggregate:
     n_unmapped: int  # cases no officer topic can express
     by_class: dict[str, ClassStat]  # per outcome class, insertion-ordered
     n_unscorable: int  # cases with no retrieval target (see UNSCORABLE_CLASS)
+    # Counted per state and kept apart, because S-1 forbids one merged number.
+    conclusion_verdicts: SupportStat
+    summary_verdicts: SupportStat
+
+
+def _support_stat(values) -> SupportStat:
+    """Verdict counts plus the graded rate, omitting states with no cases."""
+    counts = {state: 0 for state in VERDICT_STATES}
+    for v in values:
+        counts[v] = counts.get(v, 0) + 1
+    n_graded = counts[SUPPORTED] + counts[UNSUPPORTED]
+    rate = counts[SUPPORTED] / n_graded if n_graded else None
+    return SupportStat(
+        counts={k: n for k, n in counts.items() if n},
+        n_graded=n_graded,
+        rate=rate,
+    )
 
 
 def aggregate(evals: list[QueryEval]) -> Aggregate:
@@ -149,6 +198,11 @@ def aggregate(evals: list[QueryEval]) -> Aggregate:
         by_topic=by_topic,
         n_unmapped=sum(1 for e in scorable if e.topic == UNMAPPED),
         n_unscorable=sum(1 for e in evals if not e.scorable),
+        # Over ALL evals, not just scorable ones: a support verdict is about the
+        # conclusion text, which exists independently of whether the case has a
+        # retrieval target.
+        conclusion_verdicts=_support_stat(e.conclusion_verdict for e in evals),
+        summary_verdicts=_support_stat(e.summary_verdict for e in evals),
         n_answerable=n,
         n_unanswerable=len(unanswerable),
         hit_at_k={

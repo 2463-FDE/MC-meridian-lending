@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from rag_eval.metrics import SUPPORTED
 from rag_eval.run import run
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -73,6 +74,28 @@ def test_full_run_over_real_corpus(real_corpus: Path):
     # `unmapped` is reported as a count under the table, never as a topic row.
     assert "| `unmapped` |" not in report
     assert "2 case(s) carry `unmapped`" in report
+
+    # The committed gold set carries two mechanical `support_literal` cases (M-1
+    # review finding): the eval must actually grade them, not leave every
+    # committed case at `not_evaluated`.
+    by_id = {e.query_id: e for e in result.evals}
+    assert by_id["q04-adverse-action-timing"].conclusion_verdict == SUPPORTED
+    assert by_id["q10-retention"].conclusion_verdict == SUPPORTED
+    assert result.agg.conclusion_verdicts.counts.get(SUPPORTED, 0) == 2
+    assert result.agg.conclusion_verdicts.n_graded == 2
+    assert result.agg.conclusion_verdicts.rate == 1.0
+
+    # The report shows per-case verdicts (M-2) and a graded rate, not raw counts
+    # a reader cannot turn into a rate (M-3).
+    assert (
+        "| Question id | Expected chunk(s) | Top retrieved (score) | hit@1/3/5 | RR | Verdict | Conclusion | Summary |"
+        in report
+    )
+    assert "| q04-adverse-action-timing |" in report and "| supported |" in report
+    assert "Graded rate: **1.00** (2 of 2 graded)" in report
+    # No support_literal on the displayed-summary axis yet, so it stays n/a
+    # rather than reading as a coincidental 0.00.
+    assert "Graded rate: **n/a** (0 of 0 graded)" in report
 
 
 def test_no_raw_pii_in_report_or_cache(real_corpus: Path):

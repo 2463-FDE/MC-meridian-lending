@@ -12,11 +12,15 @@ import re
 
 from rag_eval.hygiene import FileVerdict
 from rag_eval.metrics import (
+    HUMAN_REVIEW,
+    NOT_EVALUATED,
+    SUPPORTED,
     UNMAPPED,
     UNSCORABLE_CLASS,
     Aggregate,
     K_VALUES,
     QueryEval,
+    VERDICT_STATES,
 )
 
 # The only trace of denial 6012's reason anywhere in the estate. The file was
@@ -126,8 +130,8 @@ def _metrics_section(
         ]
     lines += [
         "",
-        "| Question id | Expected chunk(s) | Top retrieved (score) | hit@1/3/5 | RR | Verdict |",
-        "|-------------|-------------------|-----------------------|-----------|----|---------|",
+        "| Question id | Expected chunk(s) | Top retrieved (score) | hit@1/3/5 | RR | Verdict | Conclusion | Summary |",
+        "|-------------|-------------------|-----------------------|-----------|----|---------|------------|---------|",
     ]
     for e in evals:
         # Label an empty expected by what the case IS, not by what is missing:
@@ -154,12 +158,16 @@ def _metrics_section(
         else:
             hits = "/".join("✓" if e.hits[k] else "✗" for k in K_VALUES)
             verdict = "✓" if e.correct else "✗"
+        # Enum value only — never the conclusion or summary text (S-10).
+        conclusion = _VERDICT_LABEL.get(e.conclusion_verdict, e.conclusion_verdict)
+        summary = _VERDICT_LABEL.get(e.summary_verdict, e.summary_verdict)
         lines.append(
             # Question identified by id, never by text: a supplied evaluation
             # question is content the client excluded from retention, and this
             # report is a file on disk. `gold_queries.json` maps id back to text
             # for whoever legitimately holds it.
-            f"| {e.query_id} | {expected} | {top} | {hits} | {rr} | {verdict} |"
+            f"| {e.query_id} | {expected} | {top} | {hits} | {rr} | {verdict} "
+            f"| {conclusion} | {summary} |"
         )
     lines += [
         "",
@@ -249,6 +257,54 @@ _PAST_APPLICATIONS = "kb_dump/applications.jsonl"
 
 def _is_past_applications(path: str) -> bool:
     return path == _PAST_APPLICATIONS or path.endswith("/" + _PAST_APPLICATIONS)
+
+
+_VERDICT_LABEL = {
+    "supported": "supported",
+    "unsupported": "unsupported",
+    "human_review": "human review (counts neither way)",
+    "not_evaluated": "not evaluated",
+}
+
+
+def _support_section(agg: Aggregate) -> list[str]:
+    """The two support verdicts, side by side and never added together.
+
+    S-1 makes the expected conclusion and the displayed summary two frozen
+    targets. One merged number would hide which half failed, so they get one
+    table each and there is deliberately no combined score anywhere.
+
+    Counts only. S-10's retention allowlist is case id, topic, source-section
+    reference, the two verdicts and one rationale line -- no conclusion text, no
+    summary text, no passage.
+    """
+    lines = ["## Support test", ""]
+    for title, stat in (
+        ("Expected conclusion", agg.conclusion_verdicts),
+        ("Displayed summary", agg.summary_verdicts),
+    ):
+        lines += [f"### {title}", "", "| Verdict | Cases |", "|---------|-------|"]
+        for state in VERDICT_STATES:
+            n = stat.counts.get(state, 0)
+            if n:
+                lines.append(f"| {_VERDICT_LABEL.get(state, state)} | {n} |")
+        rate_str = f"{stat.rate:.2f}" if stat.rate is not None else "n/a"
+        n_human_review = stat.counts.get(HUMAN_REVIEW, 0)
+        lines += [
+            "",
+            f"Graded rate: **{rate_str}** ({stat.counts.get(SUPPORTED, 0)} of "
+            f"{stat.n_graded} graded). {n_human_review} case(s) sent to human "
+            "review count in neither the numerator nor the denominator (S-9).",
+            "",
+        ]
+        if stat.counts.get(NOT_EVALUATED):
+            lines += [
+                f"{stat.counts[NOT_EVALUATED]} case(s) are not evaluated: no mechanical "
+                "check applies and the evaluator is not built. They are neither a "
+                "pass nor a failure, and must not be read as either.",
+                "",
+            ]
+    return lines
 
 
 def _data_gaps_section(
@@ -405,5 +461,6 @@ def build(
         wrong_abstain,
         false_confident,
     )
+    lines += _support_section(agg)
     lines += _data_gaps_section(evals, verdicts, display_names)
     return "\n".join(lines)
