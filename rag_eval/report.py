@@ -64,7 +64,10 @@ def _metrics_section(
     agg: Aggregate,
     threshold: float,
     embedder_signature: str,
+    corpus_signature: str,
     n_chunks: int,
+    wrong_abstain: int,
+    false_confident: int,
 ) -> list[str]:
     lines = ["## Retrieval metrics", ""]
     hit_cells = " · ".join(f"hit@{k} = {agg.hit_at_k[k]:.2f}" for k in K_VALUES)
@@ -162,14 +165,38 @@ def _metrics_section(
         "",
         "### Confidence threshold (calibration, DL-6)",
         "",
-        f"Threshold = **{threshold:.4f}**. Method: over the gold set, candidate thresholds "
-        "are midpoints between adjacent distinct top-1 scores; the chosen value minimizes "
+        # repr(), not :.4f — this is the value a reader copies into
+        # POLICY_RETRIEVAL_MIN_SCORE. The abstain-always candidate can be one ULP
+        # above the highest observed score (math.nextafter); rounding to 4 places
+        # can round it back down onto that score, reintroducing the exact
+        # false-confident hit the calibration picked the cutoff to avoid.
+        f"Threshold = **{threshold!r}**. Method: over the gold set, candidate thresholds "
+        "are the midpoints between adjacent distinct top-1 scores plus the two outer cutoffs "
+        "(the lowest score itself, and the first value above the highest) — one candidate per "
+        "behaviourally distinct cutoff, so the search is exhaustive. The chosen value minimizes "
         "classification errors (answerable tops that would wrongly abstain + unanswerable "
         "tops retrieved with false confidence), preferring the widest score gap on ties. "
         f"Cosine scores from embedder `{embedder_signature}` over a corpus of "
-        f"{n_chunks} chunks are "
-        "lumpy; this value is calibrated to this gold set and this backend, and must be "
-        "re-calibrated when the corpus or embedding backend changes.",
+        f"{n_chunks} chunks are lumpy, and are not comparable across a change to "
+        "either. This value belongs to exactly one pair and must be re-derived "
+        "when either side of it moves:",
+        "",
+        f"- corpus: `{corpus_signature}` ({n_chunks} chunks)",
+        f"- embedder: `{embedder_signature}`",
+        "",
+        f"At this threshold {wrong_abstain} answerable case(s) would wrongly abstain "
+        f"and {false_confident} abstention case(s) retrieve with false confidence. "
+        + (
+            "No cutoff on this gold set separates the two classes any better — the "
+            "value is already the minimum-error choice, so the remaining errors are a "
+            "property of the corpus and the gold set, not an untuned parameter. A "
+            "corpus whose sections repeat across documents (purpose, scope, roles) "
+            "puts scaffolding text topically near every question, which is what makes "
+            "the two score distributions overlap. Abstention has to be decided "
+            "explicitly rather than inferred from rank."
+            if (wrong_abstain + false_confident)
+            else "The two classes separate cleanly on this gold set."
+        ),
         "",
     ]
     return lines
@@ -325,6 +352,9 @@ def build(
     evals: list[QueryEval],
     agg: Aggregate,
     embedder_signature: str,
+    corpus_signature: str,
+    wrong_abstain: int,
+    false_confident: int,
 ) -> str:
     refused = sum(1 for v in verdicts if not v.passed)
     # The cache counters only describe a run that had a cache. A provider backend
@@ -361,10 +391,19 @@ def build(
         f"- Chunks indexed: {n_chunks}",
         embedding_line,
         f"- Embedding backend: `{embedder_signature}`",
-        f"- Calibrated confidence threshold: {threshold:.4f}",
+        f"- Calibrated confidence threshold: {threshold!r}",
         "",
     ]
     lines += _hygiene_section(verdicts, display_names)
-    lines += _metrics_section(evals, agg, threshold, embedder_signature, n_chunks)
+    lines += _metrics_section(
+        evals,
+        agg,
+        threshold,
+        embedder_signature,
+        corpus_signature,
+        n_chunks,
+        wrong_abstain,
+        false_confident,
+    )
     lines += _data_gaps_section(evals, verdicts, display_names)
     return "\n".join(lines)

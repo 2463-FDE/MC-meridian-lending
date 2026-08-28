@@ -55,6 +55,9 @@ def _report(
         evals=evals,
         agg=aggregate(evals),
         embedder_signature="tfidf-v1:test",
+        corpus_signature="corpus-test",
+        wrong_abstain=0,
+        false_confident=0,
     )
 
 

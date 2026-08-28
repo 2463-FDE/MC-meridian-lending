@@ -40,7 +40,10 @@ def test_metrics_table_identifies_a_question_by_id_only():
             aggregate(evals),
             threshold=0.16,
             embedder_signature="tfidf-v1:test",
+            corpus_signature="corpus-test",
             n_chunks=9,
+            wrong_abstain=0,
+            false_confident=0,
         )
     )
     assert "Q01" in rows
