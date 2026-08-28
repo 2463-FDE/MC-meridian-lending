@@ -19,7 +19,11 @@ from fastapi.testclient import TestClient
 from app import config
 from app.llm import ClaudeClient, LLMConfigError
 from app.main import app, get_llm_client
-from tests.test_db_readiness import READABLE_DOB_CONSTRAINT_DEF
+from tests.test_db_readiness import (
+    ASSISTANT_RUNS_CHECK_DEFS,
+    ASSISTANT_RUNS_COLUMN_ROWS,
+    READABLE_DOB_CONSTRAINT_DEF,
+)
 
 
 class _Req:
@@ -41,12 +45,29 @@ class _FakeCursor:
 
     def fetchone(self):
         # The ck_applicants_dob_readable rung compares the constraint DEFINITION, not just
-        # the name, so a ready-DB stub has to answer with it -- reuse the one constant
+        # the name, so a ready-DB stub has to answer with it -- reuse the constant
         # test_db_readiness pins against config._DOB_READABLE_EXPECTED_DEF rather than
-        # copying the literal here, where it would drift unnoticed.
-        if "pg_get_constraintdef" in getattr(self, "_last", ""):
+        # copying the literal here, where it would drift unnoticed. Same for the three
+        # assistant_runs CHECKs, which the shape rung now compares in full.
+        last = getattr(self, "_last", "")
+        if last.strip() == "SELECT to_regclass('assistant_runs')":
+            return ("assistant_runs",)
+        if "pg_get_constraintdef" in last:
+            for conname, definition in ASSISTANT_RUNS_CHECK_DEFS.items():
+                if "conname = '" + conname + "'" in last:
+                    return (definition,)
             return (READABLE_DOB_CONSTRAINT_DEF,)
         return (1,)
+
+    def fetchall(self):
+        # The assistant_runs shape rung reads its column list via fetchall(); every other
+        # rung on this fake uses fetchone(), so an unimplemented fetchall() here silently
+        # returns {} -- every expected column reads as absent -- and /health goes 503 over
+        # a stub meant to model a fully-migrated database.
+        last = getattr(self, "_last", "")
+        if "pg_attribute" in last:
+            return list(ASSISTANT_RUNS_COLUMN_ROWS)
+        return []
 
 
 class _FakeConn:
