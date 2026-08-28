@@ -281,6 +281,11 @@ _ALLOWED_GOLD_KEYS = {
     # mechanically checkable, which S-6 requires to consume no model call.
     # Absent, the case is `not_evaluated` rather than assumed correct.
     "support_literal",
+    # The conclusion the run must NOT reach, as her authoritative JSONL states it
+    # (every one of the 28 rows carries one). Prose, not a literal: the mechanical
+    # check cannot grade it, so only the evaluator moves its verdict off
+    # `not_evaluated`. Graded on its own axis — see PROHIBITED_STATES.
+    "prohibited_conclusion",
 }
 
 # The anchor halves, as structured fields rather than free text. run() resolves
@@ -291,6 +296,20 @@ _ALLOWED_GOLD_KEYS = {
 # scan_text still covers them for labelled PII.
 _ANCHOR_KEYS = frozenset({"source_document", "source_heading"})
 
+# The person-name heuristic guards text that gets embedded (sent to the provider)
+# and printed verbatim into the report. `prohibited_conclusion` is neither: only
+# the query is embedded, and S-10's retention allowlist permits counts, ids, the
+# source-section reference and one rationale line — no conclusion text — so a
+# test asserts the field never reaches the report. Without this exemption her own
+# wording refuses the run: `Credit Manager` and `Credit Policy Schedule` are
+# Title-Case runs, and `If Meridian ...` is a sentence-initial capital followed by
+# the lender's bare name, which the `Meridian Lending` allowlist entry cannot
+# cover because the allowlist is phrase replacement. Adding entries does not close
+# that, and loosening the regex to skip sentence-initial capitals would stop the
+# guard seeing a real applicant name at the start of a sentence.
+# `scan_text` still covers this field for labelled PII.
+_UNECHOED_TEXT_KEYS = frozenset({"prohibited_conclusion"})
+
 # Her delivery names these columns in camelCase, in the CSV and in the
 # authoritative JSONL alike, so a gold set transcribed from it keeps that
 # spelling. Accept both and normalize BEFORE the unknown-key check, rather than
@@ -298,6 +317,7 @@ _ANCHOR_KEYS = frozenset({"source_document", "source_heading"})
 _GOLD_KEY_ALIASES = {
     "sourceDocument": "source_document",
     "sourceHeading": "source_heading",
+    "prohibitedUnsupportedConclusion": "prohibited_conclusion",
 }
 
 # The client's four outcome classes. `no_match` is the abstention case the
@@ -885,6 +905,14 @@ def run(
                 f"gold query at position {i} has a non-string or empty "
                 "'support_literal'"
             )
+        if "prohibited_conclusion" in q and not (
+            isinstance(q["prohibited_conclusion"], str)
+            and q["prohibited_conclusion"].strip()
+        ):
+            raise RuntimeError(
+                f"gold query at position {i} has a non-string or empty "
+                "'prohibited_conclusion'"
+            )
         if "note" in q and not isinstance(q["note"], str):
             raise RuntimeError(f"gold query at position {i} has a non-string 'note'")
         topic = q.get("topic")
@@ -971,15 +999,16 @@ def run(
     # Structured anchor fields are excluded (see _ANCHOR_KEYS): an ordinary
     # policy heading is title-case ("Adverse Action"), which the heuristic reads
     # as a probable person name, and a resolved anchor is already constrained to
-    # a section of the admitted corpus.
+    # a section of the admitted corpus. The negative target is excluded for a
+    # different reason (see _UNECHOED_TEXT_KEYS): it is neither embedded nor
+    # reported, so it has no exposure for this guard to protect.
+    exempt = _ANCHOR_KEYS | _UNECHOED_TEXT_KEYS
     named = [
         i
         for i, q in enumerate(gold)
         if any(
             _looks_like_person_name(s)
-            for s in _gold_strings(
-                {k: v for k, v in q.items() if k not in _ANCHOR_KEYS}
-            )
+            for s in _gold_strings({k: v for k, v in q.items() if k not in exempt})
         )
     ]
     if named:

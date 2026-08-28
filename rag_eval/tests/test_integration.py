@@ -92,10 +92,16 @@ def test_full_run_over_real_corpus(real_corpus: Path):
         in report
     )
     assert "| q04-adverse-action-timing |" in report and "| supported |" in report
-    assert "Graded rate: **1.00** (2 of 2 graded)" in report
+    # The rate names the state it counts. Three tables now share this line and two
+    # of them have opposite polarity (`supported` vs `avoided`), so a bare 1.00
+    # under the prohibited-conclusion heading would read as the wrong finding.
+    assert "Graded rate: **1.00** (2 of 2 graded, as `supported`)" in report
     # No support_literal on the displayed-summary axis yet, so it stays n/a
     # rather than reading as a coincidental 0.00.
-    assert "Graded rate: **n/a** (0 of 0 graded)" in report
+    assert "Graded rate: **n/a** (0 of 0 graded, as `supported`)" in report
+    # The negative target loads on no case here, so it is reported ungraded.
+    assert "### Prohibited conclusion" in report
+    assert "Graded rate: **n/a** (0 of 0 graded, as `avoided`)" in report
 
 
 def test_no_raw_pii_in_report_or_cache(real_corpus: Path):

@@ -49,6 +49,19 @@ HUMAN_REVIEW = "human_review"
 NOT_EVALUATED = "not_evaluated"
 VERDICT_STATES = (SUPPORTED, UNSUPPORTED, HUMAN_REVIEW, NOT_EVALUATED)
 
+# The third grading target's own states. Her authoritative JSONL carries
+# `prohibitedUnsupportedConclusion` on every row: an explicit negative naming the
+# conclusion the run must not reach. Reusing SUPPORTED/UNSUPPORTED for it would
+# print "the prohibited conclusion is supported" in her report, which reads as the
+# opposite of the finding. A conclusion can also be unsupported without being
+# prohibited, so this is a separate axis, not a third half of the support test.
+AVOIDED = "avoided"
+ASSERTED = "asserted"
+# HUMAN_REVIEW and NOT_EVALUATED carry the same meaning here as above. The first
+# two entries are the graded pair and the first is the numerator, which is the
+# contract `_support_stat` reads — so the order is load-bearing.
+PROHIBITED_STATES = (AVOIDED, ASSERTED, HUMAN_REVIEW, NOT_EVALUATED)
+
 
 @dataclass
 class QueryEval:
@@ -79,6 +92,10 @@ class QueryEval:
     # Two independent support verdicts, never combined into one score.
     conclusion_verdict: str = NOT_EVALUATED
     summary_verdict: str = NOT_EVALUATED
+    # The negative target (PROHIBITED_STATES). Only the evaluator can move it off
+    # NOT_EVALUATED: her prohibition is prose and carries no literal for the
+    # mechanical check to match, so nothing here grades it.
+    prohibited_verdict: str = NOT_EVALUATED
     hits: dict[int, bool] = field(init=False)
     reciprocal_rank: float = field(init=False)
     correct: bool = field(init=False)
@@ -135,15 +152,15 @@ class ClassStat:
 
 @dataclass
 class SupportStat:
-    """One support target's verdict counts and graded rate.
+    """One target's verdict counts and graded rate.
 
-    S-1: never merged with the other target. S-9: `human_review` counts in
-    neither `n_graded` nor `rate` — only `supported`/`unsupported` are graded.
+    S-1: never merged with another target. S-9: `human_review` counts in neither
+    `n_graded` nor `rate` — only the two graded states are.
     """
 
-    counts: dict[str, int]  # by VERDICT_STATES, omitting states with no cases
-    n_graded: int  # supported + unsupported
-    rate: float | None  # supported / n_graded, or None ("n/a") when n_graded == 0
+    counts: dict[str, int]  # by the target's state tuple, omitting empty states
+    n_graded: int  # the two graded states, summed
+    rate: float | None  # good / n_graded, or None ("n/a") when n_graded == 0
 
 
 @dataclass
@@ -160,15 +177,23 @@ class Aggregate:
     # Counted per state and kept apart, because S-1 forbids one merged number.
     conclusion_verdicts: SupportStat
     summary_verdicts: SupportStat
+    # The negative target, on its own axis and never added to the two above.
+    prohibited_verdicts: SupportStat
 
 
-def _support_stat(values) -> SupportStat:
-    """Verdict counts plus the graded rate, omitting states with no cases."""
-    counts = {state: 0 for state in VERDICT_STATES}
+def _support_stat(values, states=VERDICT_STATES) -> SupportStat:
+    """Verdict counts plus the graded rate, omitting states with no cases.
+
+    `states[0]` is the numerator and `states[:2]` the graded pair, so the same
+    counting serves the support targets (`supported`) and the negative target
+    (`avoided`) without either borrowing the other's polarity.
+    """
+    good, bad = states[0], states[1]
+    counts = {state: 0 for state in states}
     for v in values:
         counts[v] = counts.get(v, 0) + 1
-    n_graded = counts[SUPPORTED] + counts[UNSUPPORTED]
-    rate = counts[SUPPORTED] / n_graded if n_graded else None
+    n_graded = counts[good] + counts[bad]
+    rate = counts[good] / n_graded if n_graded else None
     return SupportStat(
         counts={k: n for k, n in counts.items() if n},
         n_graded=n_graded,
@@ -203,6 +228,9 @@ def aggregate(evals: list[QueryEval]) -> Aggregate:
         # retrieval target.
         conclusion_verdicts=_support_stat(e.conclusion_verdict for e in evals),
         summary_verdicts=_support_stat(e.summary_verdict for e in evals),
+        prohibited_verdicts=_support_stat(
+            (e.prohibited_verdict for e in evals), PROHIBITED_STATES
+        ),
         n_answerable=n,
         n_unanswerable=len(unanswerable),
         hit_at_k={

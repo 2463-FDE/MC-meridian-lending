@@ -14,7 +14,7 @@ from rag_eval.hygiene import FileVerdict
 from rag_eval.metrics import (
     HUMAN_REVIEW,
     NOT_EVALUATED,
-    SUPPORTED,
+    PROHIBITED_STATES,
     UNMAPPED,
     UNSCORABLE_CLASS,
     Aggregate,
@@ -264,37 +264,47 @@ _VERDICT_LABEL = {
     "unsupported": "unsupported",
     "human_review": "human review (counts neither way)",
     "not_evaluated": "not evaluated",
+    # The negative target's states. `avoided` is the good one, which is why it
+    # cannot share a label with `supported`.
+    "avoided": "avoided (did not reach the prohibited conclusion)",
+    "asserted": "asserted the prohibited conclusion",
 }
 
 
 def _support_section(agg: Aggregate) -> list[str]:
-    """The two support verdicts, side by side and never added together.
+    """The three targets, side by side and never added together.
 
     S-1 makes the expected conclusion and the displayed summary two frozen
     targets. One merged number would hide which half failed, so they get one
-    table each and there is deliberately no combined score anywhere.
+    table each and there is deliberately no combined score anywhere. The
+    prohibited conclusion is a third target on its own axis, with its own states
+    (`avoided`/`asserted`), because "supported" would name the opposite finding.
 
     Counts only. S-10's retention allowlist is case id, topic, source-section
-    reference, the two verdicts and one rationale line -- no conclusion text, no
-    summary text, no passage.
+    reference, the verdicts and one rationale line -- no conclusion text, no
+    summary text, no prohibited-conclusion text, no passage.
     """
     lines = ["## Support test", ""]
-    for title, stat in (
-        ("Expected conclusion", agg.conclusion_verdicts),
-        ("Displayed summary", agg.summary_verdicts),
+    for title, stat, states in (
+        ("Expected conclusion", agg.conclusion_verdicts, VERDICT_STATES),
+        ("Displayed summary", agg.summary_verdicts, VERDICT_STATES),
+        ("Prohibited conclusion", agg.prohibited_verdicts, PROHIBITED_STATES),
     ):
         lines += [f"### {title}", "", "| Verdict | Cases |", "|---------|-------|"]
-        for state in VERDICT_STATES:
+        for state in states:
             n = stat.counts.get(state, 0)
             if n:
                 lines.append(f"| {_VERDICT_LABEL.get(state, state)} | {n} |")
         rate_str = f"{stat.rate:.2f}" if stat.rate is not None else "n/a"
         n_human_review = stat.counts.get(HUMAN_REVIEW, 0)
+        # `states[0]` is the numerator for this target, so the printed count and
+        # the printed rate cannot disagree about which state is the good one.
         lines += [
             "",
-            f"Graded rate: **{rate_str}** ({stat.counts.get(SUPPORTED, 0)} of "
-            f"{stat.n_graded} graded). {n_human_review} case(s) sent to human "
-            "review count in neither the numerator nor the denominator (S-9).",
+            f"Graded rate: **{rate_str}** ({stat.counts.get(states[0], 0)} of "
+            f"{stat.n_graded} graded, as `{states[0]}`). {n_human_review} case(s) "
+            "sent to human review count in neither the numerator nor the "
+            "denominator (S-9).",
             "",
         ]
         if stat.counts.get(NOT_EVALUATED):
