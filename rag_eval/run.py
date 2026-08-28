@@ -268,13 +268,13 @@ _GOLD_KEY_ALIASES = {
 }
 
 # The client's four outcome classes. `no_match` is the abstention case the
-# harness already scores as `unanswerable`, and carries no expected chunk. The
-# other three are scored on retrieval rank and so must each name an expected
-# chunk: `answer` and `manager_escalation` by definition, and `clarification`
-# because the answer does exist — the question is only under-specified, and the
-# officer channel is a closed topic enum with free text masked at the boundary,
-# so no ask-back path exists to exercise. A `clarification` case is therefore
-# scored as retrieval and reported as a class whose product behaviour is absent.
+# harness already scores as `unanswerable`, and carries no expected chunk.
+# `answer` and `manager_escalation` are scored on retrieval rank and so must
+# each name an expected chunk. `clarification` is UNSCORABLE_CLASS (see
+# metrics.py): the officer channel is a closed topic enum with free text
+# masked at the boundary, so no ask-back path exists to exercise, and the case
+# is excluded from every denominator rather than scored on a target it has no
+# way to hit.
 _OUTCOME_CLASSES = frozenset(
     {"answer", "manager_escalation", "clarification", "no_match"}
 )
@@ -811,6 +811,17 @@ def run(
                 "'no_match' but carries 'expected' chunk ids — an abstention "
                 "case is scored on staying below the threshold and must leave "
                 "'expected' empty"
+            )
+        # `clarification` is UNSCORABLE_CLASS: aggregate() drops the row from
+        # every denominator, so a target here is validated, resolved and
+        # printed while nothing ever scores against it — the same
+        # two-sources-of-truth drift the anchor fields exist to prevent.
+        if resolved == UNSCORABLE_CLASS and (expected or src_doc is not None):
+            raise RuntimeError(
+                f"gold query at position {i} resolves to outcome_class "
+                f"'{UNSCORABLE_CLASS}' but carries 'expected' chunk ids or a "
+                "frozen anchor — an unscorable case is excluded from every "
+                "denominator and must leave both empty"
             )
         if resolved not in ("no_match", UNSCORABLE_CLASS) and not expected:
             raise RuntimeError(

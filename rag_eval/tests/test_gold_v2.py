@@ -105,7 +105,6 @@ def test_gold_accepts_outcome_class(tmp_path: Path, monkeypatch):
             {
                 "id": "q-clarify",
                 "query": "what fee applies here",
-                "expected": ["fees#late-fee"],
                 "outcome_class": "clarification",
             },
         ],
@@ -114,6 +113,46 @@ def test_gold_accepts_outcome_class(tmp_path: Path, monkeypatch):
     result = run_mod.run(base=base, gold_path=gold)
 
     assert {e.query_id for e in result.evals} == {"q-answer", "q-clarify"}
+
+
+def test_gold_clarification_rejects_expected(tmp_path: Path, monkeypatch):
+    # UNSCORABLE_CLASS rows are dropped from every denominator (aggregate()),
+    # so a target here would be validated, resolved and printed while nothing
+    # ever scores against it — the drift the anchor fields exist to prevent.
+    base = _corpus(tmp_path)
+    gold = _write_gold(
+        tmp_path / "gold.json",
+        [
+            {
+                "id": "q-clarify",
+                "query": "what fee applies here",
+                "expected": ["fees#late-fee"],
+                "outcome_class": "clarification",
+            }
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="clarification"):
+        run_mod.run(base=base, gold_path=gold)
+
+
+def test_gold_clarification_rejects_anchor(tmp_path: Path, monkeypatch):
+    base = _corpus(tmp_path)
+    gold = _write_gold(
+        tmp_path / "gold.json",
+        [
+            {
+                "id": "q-clarify",
+                "query": "what fee applies here",
+                "sourceDocument": "fees.md",
+                "sourceHeading": "Late Fee",
+                "outcome_class": "clarification",
+            }
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="clarification"):
+        run_mod.run(base=base, gold_path=gold)
 
 
 def test_gold_rejects_unknown_outcome_class(tmp_path: Path, monkeypatch):
