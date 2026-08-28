@@ -147,9 +147,13 @@ def _metrics_section(
     return lines
 
 
-# The denials whose reason was never recorded. The subsection below is a claim
-# about those cases, so it is emitted only when the run actually asked about one.
-_UNRECORDED_DENIALS = ("6012", "6013")
+# The seed data names two denials with no recorded reason (6012/6013), but the
+# subsection below is written for one of them: its heading quotes the #6012
+# question and its only log evidence is `app_id=6012`. So it opens on #6012
+# alone. A #6013 question gets no section rather than #6012's, which would be
+# the same false statement in a new place; parameterising heading and evidence
+# by app id is unbuilt because no gold case asks it.
+_DENIAL_WITH_A_WRITTEN_GAP = "6012"
 
 
 def _data_gaps_section(
@@ -160,7 +164,7 @@ def _data_gaps_section(
     # so on a corpus that asks neither question the report explained a denial
     # nobody asked about and asserted a hygiene refusal that never happened.
     lines: list[str] = []
-    if any(any(n in e.query for n in _UNRECORDED_DENIALS) for e in evals):
+    if any(_DENIAL_WITH_A_WRITTEN_GAP in e.query for e in evals):
         lines += [
             '### Why "why was application #6012 denied?" cannot be answered',
             "",

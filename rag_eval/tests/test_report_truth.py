@@ -139,3 +139,21 @@ def test_past_applications_gap_needs_a_refusal_in_this_run() -> None:
         ],
     )
     assert "Past applications contribute nothing" in refused
+
+
+def test_denial_gap_section_is_not_emitted_for_the_other_denial() -> None:
+    """The subsection is titled and evidenced for #6012, so only #6012 may open it.
+
+    Seed data names two denials with no recorded reason (6012/6013), but the
+    section's heading quotes the #6012 question and its only log evidence is
+    `app_id=6012`. Opening it for a #6013 question states something about a case
+    nobody asked about -- the defect class this file exists to hold shut.
+    """
+    text = _report(
+        [_eval("q13", "Why was application #6013 denied?", unanswerable=True, top=0.9)],
+        66,
+    )
+    assert '#6012 denied?" cannot be answered' not in text, (
+        "a #6013 question opened the #6012 subsection"
+    )
+    assert "app_id=6012" not in text
