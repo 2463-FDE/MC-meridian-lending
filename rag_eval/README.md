@@ -48,7 +48,11 @@ input tokens in place of cache hits.
    calibrated unanswerable-confidence threshold and its method, and a **Data gaps**
    section: why "why was #6012 denied?" is unanswerable by design
    (`decisions(app_id, outcome)` records no reason — see ADR 0008), and the
-   false-confident-retrieval risk for a naive helper.
+   false-confident-retrieval risk for a naive helper. Every part of the report is
+   gated on the run it describes (spec D1.7): each **Data gaps** subsection renders
+   only when its own subject is in this run, the heading only when a subsection
+   does, and corpus size, file names and finding counts are read from the run's
+   own chunks and verdicts rather than written into the prose.
 
 ## Backends
 

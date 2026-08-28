@@ -1,4 +1,4 @@
-"""Markdown eval-report writer (spec D1.5–D1.6, D2.5).
+"""Markdown eval-report writer (spec D1.5–D1.7, D2.5).
 
 The report never contains a raw PII value: hygiene findings carry masked
 samples only (hygiene.py masks before anything reaches this module), and the
