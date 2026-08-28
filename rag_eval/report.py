@@ -11,7 +11,13 @@ from __future__ import annotations
 import re
 
 from rag_eval.hygiene import FileVerdict
-from rag_eval.metrics import UNMAPPED, Aggregate, K_VALUES, QueryEval
+from rag_eval.metrics import (
+    UNMAPPED,
+    UNSCORABLE_CLASS,
+    Aggregate,
+    K_VALUES,
+    QueryEval,
+)
 
 # The only trace of denial 6012's reason anywhere in the estate. The file was
 # purged from the repo in the 2026-07 security remediation (commit 9ba96ee,
@@ -102,6 +108,19 @@ def _metrics_section(
         ]
         for name, stat in agg.by_class.items():
             lines.append(f"| `{name}` | {stat.n} | {stat.correct} |")
+    if agg.n_unscorable:
+        # Reported like `unmapped`: a count and a reason, never a scored row. A
+        # row beside the real classes would read as coverage the officer channel
+        # does not have — these cases are ambiguous across documents by design,
+        # carry no single frozen anchor, and describe an ask-back the closed
+        # topic enum gives no way to exercise.
+        lines += [
+            "",
+            f"**{agg.n_unscorable} case(s) are `{UNSCORABLE_CLASS}`** — ambiguous "
+            "across documents by design, so they carry no single frozen anchor "
+            "and are scored on nothing. They are outside every table above and "
+            "excluded from every rate, including the abstention count.",
+        ]
     lines += [
         "",
         "| Question id | Expected chunk(s) | Top retrieved (score) | hit@1/3/5 | RR | Verdict |",
@@ -118,7 +137,15 @@ def _metrics_section(
         top = (
             ", ".join(f"`{cid}` ({score:.3f})" for cid, score in e.retrieved[:3]) or "—"
         )
-        if e.unanswerable:
+        rr = f"{e.reciprocal_rank:.2f}"
+        if not e.scorable:
+            # Scored on nothing (see UNSCORABLE_CLASS), so it carries no verdict:
+            # a ✗ here would read as a retrieval miss beside real failures, and
+            # the zeroed hits/RR behind it are an absence, not a result.
+            hits = "—"
+            rr = "—"
+            verdict = "*(not scored)*"
+        elif e.unanswerable:
             hits = "—"
             verdict = "below threshold ✓" if e.correct else "**false-confident ✗**"
         else:
@@ -129,8 +156,7 @@ def _metrics_section(
             # question is content the client excluded from retention, and this
             # report is a file on disk. `gold_queries.json` maps id back to text
             # for whoever legitimately holds it.
-            f"| {e.query_id} | {expected} | {top} | {hits} | "
-            f"{e.reciprocal_rank:.2f} | {verdict} |"
+            f"| {e.query_id} | {expected} | {top} | {hits} | {rr} | {verdict} |"
         )
     lines += [
         "",

@@ -19,6 +19,19 @@ K_VALUES = (1, 3, 5)
 # a second copy is how a bucket silently splits in two.
 UNMAPPED = "unmapped"
 
+# The one outcome class that cannot be scored on retrieval rank. The client's
+# clarification cases are ambiguous ACROSS documents by design — Q13's own
+# rationale reads "Ambiguous across Adverse Action, Loan Review, and Credit
+# cutoffs" — so they carry no single frozen anchor, in her CSV and in the
+# authoritative JSONL alike. Scoring them against one chunk would grade a case
+# on a target it was never given; folding them into `no_match` would inflate
+# the abstention class, which is the one ratio proving abstention works. They
+# are excluded from every score and reported as a count with the reason, the
+# same treatment `UNMAPPED` gets for topics: the officer channel is a closed
+# enum with free text masked at the boundary, so there is no ask-back path to
+# exercise and scoring these would report coverage the product does not have.
+UNSCORABLE_CLASS = "clarification"
+
 
 @dataclass
 class QueryEval:
@@ -71,6 +84,18 @@ class QueryEval:
             )
             self.reciprocal_rank = 1.0 / rank if rank else 0.0
             self.correct = self.hits[max(K_VALUES)]
+        if not self.scorable:
+            # Not a failure — an absence of a scoring target. Zeroed so a caller
+            # reading these directly cannot read a stale hit as a result.
+            self.hits = {k: False for k in K_VALUES}
+            self.reciprocal_rank = 0.0
+            self.correct = False
+
+
+    @property
+    def scorable(self) -> bool:
+        """Whether this case has a retrieval target it can be graded against."""
+        return self.outcome_class != UNSCORABLE_CLASS
 
 
 @dataclass
@@ -99,15 +124,20 @@ class Aggregate:
     by_topic: dict[str, TopicStat]  # per officer topic, insertion-ordered
     n_unmapped: int  # cases no officer topic can express
     by_class: dict[str, ClassStat]  # per outcome class, insertion-ordered
+    n_unscorable: int  # cases with no retrieval target (see UNSCORABLE_CLASS)
 
 
 def aggregate(evals: list[QueryEval]) -> Aggregate:
-    answerable = [e for e in evals if not e.unanswerable]
-    unanswerable = [e for e in evals if e.unanswerable]
+    # Unscorable cases leave EVERY denominator, not just hit@k: a case with no
+    # target must not dilute a rate, appear as a scored topic row, or land in
+    # the abstention count. It is reported on its own line instead.
+    scorable = [e for e in evals if e.scorable]
+    answerable = [e for e in scorable if not e.unanswerable]
+    unanswerable = [e for e in scorable if e.unanswerable]
     n = len(answerable)
     by_topic: dict[str, TopicStat] = {}
     by_class: dict[str, ClassStat] = {}
-    for e in evals:
+    for e in scorable:
         stat = by_topic.setdefault(e.topic, TopicStat(n=0, correct=0))
         stat.n += 1
         stat.correct += int(e.correct)
@@ -117,7 +147,8 @@ def aggregate(evals: list[QueryEval]) -> Aggregate:
         cstat.correct += int(e.correct)
     return Aggregate(
         by_topic=by_topic,
-        n_unmapped=sum(1 for e in evals if e.topic == "unmapped"),
+        n_unmapped=sum(1 for e in scorable if e.topic == UNMAPPED),
+        n_unscorable=sum(1 for e in evals if not e.scorable),
         n_answerable=n,
         n_unanswerable=len(unanswerable),
         hit_at_k={

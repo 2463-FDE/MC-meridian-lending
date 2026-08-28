@@ -18,11 +18,17 @@ from pathlib import Path
 
 from rag_eval import report as report_mod
 from rag_eval.cache import EmbeddingCache
-from rag_eval.chunker import Chunk, chunk_markdown
+from rag_eval.chunker import Chunk, _slug, chunk_markdown
 from rag_eval.embedder import BedrockEmbedder, TfidfEmbedder
 from rag_eval.hygiene import FileVerdict, scan_file, scan_text
 from rag_eval.index import InMemoryIndex
-from rag_eval.metrics import UNMAPPED, Aggregate, QueryEval, aggregate
+from rag_eval.metrics import (
+    UNMAPPED,
+    UNSCORABLE_CLASS,
+    Aggregate,
+    QueryEval,
+    aggregate,
+)
 
 GOLD_PATH = Path(__file__).parent / "gold_queries.json"
 
@@ -234,16 +240,41 @@ _ALLOWED_GOLD_KEYS = {
     "note",
     "topic",
     "outcome_class",
+    # The frozen anchor, as the client ships it. Preferred over a literal
+    # `expected`: a chunk id is not stable across admission modes (see
+    # `corpus_doc_id`), so a set carrying literal ids is welded to one mode —
+    # and her filenames are non-slug, so manifest admission is the only mode
+    # that can index her corpus at all. Deriving the id here keeps the gold
+    # set readable and portable.
+    "source_document",
+    "source_heading",
+}
+
+# The anchor halves, as structured fields rather than free text. run() resolves
+# them against the ADMITTED corpus — the document must be one the gate
+# passed, and the heading must match a section that exists in it, or the load has
+# already failed — so neither can carry arbitrary prose. That resolution is what
+# lets them sit out the free-text name heuristic (_looks_like_person_name);
+# scan_text still covers them for labelled PII.
+_ANCHOR_KEYS = frozenset({"source_document", "source_heading"})
+
+# Her delivery names these columns in camelCase, in the CSV and in the
+# authoritative JSONL alike, so a gold set transcribed from it keeps that
+# spelling. Accept both and normalize BEFORE the unknown-key check, rather than
+# refusing the shape her own data ships in.
+_GOLD_KEY_ALIASES = {
+    "sourceDocument": "source_document",
+    "sourceHeading": "source_heading",
 }
 
 # The client's four outcome classes. `no_match` is the abstention case the
-# harness already scores as `unanswerable`, and carries no expected chunk. The
-# other three are scored on retrieval rank and so must each name an expected
-# chunk: `answer` and `manager_escalation` by definition, and `clarification`
-# because the answer does exist — the question is only under-specified, and the
-# officer channel is a closed topic enum with free text masked at the boundary,
-# so no ask-back path exists to exercise. A `clarification` case is therefore
-# scored as retrieval and reported as a class whose product behaviour is absent.
+# harness already scores as `unanswerable`, and carries no expected chunk.
+# `answer` and `manager_escalation` are scored on retrieval rank and so must
+# each name an expected chunk. `clarification` is UNSCORABLE_CLASS (see
+# metrics.py): the officer channel is a closed topic enum with free text
+# masked at the boundary, so no ask-back path exists to exercise, and the case
+# is excluded from every denominator rather than scored on a target it has no
+# way to hit.
 _OUTCOME_CLASSES = frozenset(
     {"answer", "manager_escalation", "clarification", "no_match"}
 )
@@ -582,6 +613,21 @@ def run(
             doc_ids[v.path] if scoped is not None else rel.as_posix()
         )
 
+    # Gold sets name their anchor by source FILENAME, which is what the client
+    # freezes; the chunker keys chunks by doc id, which under a manifest is
+    # digest-derived. This is the only bridge between the two.
+    doc_id_by_source: dict[str, str] = {}
+    for _path, _did in doc_ids.items():
+        _name = Path(_path).name
+        if _name in doc_id_by_source and doc_id_by_source[_name] != _did:
+            # Two admitted files share a filename in different folders. The
+            # anchor would be ambiguous, so refuse rather than pick one.
+            raise RuntimeError(
+                "two admitted corpus files share a filename, so a gold anchor "
+                "naming it would be ambiguous (name not echoed here)"
+            )
+        doc_id_by_source[_name] = _did
+
     # THE GATE (spec D2.4): only gate-passed markdown reaches the chunker.
     chunks: list[Chunk] = []
     for v in verdicts:
@@ -619,6 +665,9 @@ def run(
     # EVERY string field, not just the query. Fail closed HERE, before any
     # embedder/cache side effect, and identify offenders by position only —
     # never echo a field value (the id itself could be the PII).
+    # Built after chunking: a derived anchor is validated against the ids that
+    # actually exist, not against the ids a gold set hoped for.
+    chunk_ids = {c.chunk_id for c in chunks}
     gold_source = gold_path or GOLD_PATH
     gold = json.loads(gold_source.read_text(encoding="utf-8"))["queries"]
     # Schema-harden first: lock the structured fields to machine shapes so they
@@ -629,6 +678,17 @@ def run(
     for i, q in enumerate(gold):
         if not isinstance(q, dict):
             raise RuntimeError(f"gold query at position {i} is not an object")
+        for alias, canonical in _GOLD_KEY_ALIASES.items():
+            if alias not in q:
+                continue
+            if canonical in q:
+                # Refuse rather than pick: a silent precedence would score the
+                # row against whichever half the loader happened to prefer.
+                raise RuntimeError(
+                    f"gold query at position {i} carries both spellings of "
+                    f"'{canonical}' — give one, not both spellings"
+                )
+            q[canonical] = q.pop(alias)
         extra = set(q) - _ALLOWED_GOLD_KEYS
         if extra:
             raise RuntimeError(
@@ -653,6 +713,51 @@ def run(
                 f"gold query at position {i} has an 'expected' that is not a list "
                 "of chunk-id slugs (doc#section)"
             )
+        src_doc = q.get("source_document")
+        src_head = q.get("source_heading")
+        if (src_doc is None) != (src_head is None):
+            raise RuntimeError(
+                f"gold query at position {i} names only one half of its frozen "
+                "anchor — 'source_document' and 'source_heading' go together"
+            )
+        if src_doc is not None:
+            if not (
+                isinstance(src_doc, str)
+                and src_doc.strip()
+                and isinstance(src_head, str)
+                and src_head.strip()
+            ):
+                raise RuntimeError(
+                    f"gold query at position {i} has a non-string or empty "
+                    "'source_document'/'source_heading'"
+                )
+            if expected:
+                # Two sources of truth for the same fact drift apart silently,
+                # and the anchor is the one the client froze.
+                raise RuntimeError(
+                    f"gold query at position {i} names both a frozen anchor and "
+                    "a literal 'expected' — give one, and prefer the anchor"
+                )
+            resolved_doc = doc_id_by_source.get(src_doc)
+            if resolved_doc is None:
+                # Fail closed: silently scoring 0 for an anchor whose document was
+                # never admitted reads as a retrieval failure, not a config error.
+                raise RuntimeError(
+                    f"gold query at position {i} names a 'source_document' that "
+                    "is not in the admitted corpus (name not echoed here)"
+                )
+            expected = [f"{resolved_doc}#{_slug(src_head)}"]
+            if expected[0] not in chunk_ids:
+                # An anchor that resolves to no chunk would score 0 on every
+                # retrieval and read as a retrieval failure. It is a typo, a
+                # renamed heading, or a document that never entered the corpus —
+                # all config errors, and all silent without this. The heading is
+                # not echoed: it reaches the report through the chunk id.
+                raise RuntimeError(
+                    f"gold query at position {i} has a frozen anchor that matches "
+                    "no section in the admitted corpus (anchor not echoed here)"
+                )
+            q["expected"] = expected
         if "unanswerable" in q and not isinstance(q["unanswerable"], bool):
             raise RuntimeError(
                 f"gold query at position {i} has a non-boolean 'unanswerable'"
@@ -709,7 +814,18 @@ def run(
                 "case is scored on staying below the threshold and must leave "
                 "'expected' empty"
             )
-        if resolved != "no_match" and not expected:
+        # `clarification` is UNSCORABLE_CLASS: aggregate() drops the row from
+        # every denominator, so a target here is validated, resolved and
+        # printed while nothing ever scores against it — the same
+        # two-sources-of-truth drift the anchor fields exist to prevent.
+        if resolved == UNSCORABLE_CLASS and (expected or src_doc is not None):
+            raise RuntimeError(
+                f"gold query at position {i} resolves to outcome_class "
+                f"'{UNSCORABLE_CLASS}' but carries 'expected' chunk ids or a "
+                "frozen anchor — an unscorable case is excluded from every "
+                "denominator and must leave both empty"
+            )
+        if resolved not in ("no_match", UNSCORABLE_CLASS) and not expected:
             raise RuntimeError(
                 f"gold query at position {i} resolves to outcome_class "
                 f"'{resolved}' but names no 'expected' chunk ids — every class "
@@ -729,10 +845,19 @@ def run(
     # scan_text is label-gated for names; also refuse a probable person name in
     # free text, which would otherwise be embedded (Bedrock) and printed to the
     # report. Position-only — the name itself is the PII, so it is never echoed.
+    # Structured anchor fields are excluded (see _ANCHOR_KEYS): an ordinary
+    # policy heading is title-case ("Adverse Action"), which the heuristic reads
+    # as a probable person name, and a resolved anchor is already constrained to
+    # a section of the admitted corpus.
     named = [
         i
         for i, q in enumerate(gold)
-        if any(_looks_like_person_name(s) for s in _gold_strings(q))
+        if any(
+            _looks_like_person_name(s)
+            for s in _gold_strings(
+                {k: v for k, v in q.items() if k not in _ANCHOR_KEYS}
+            )
+        )
     ]
     if named:
         raise RuntimeError(
@@ -775,10 +900,15 @@ def run(
     retrieved = {q["id"]: index.search(embedder.embed(q["query"]), k=5) for q in gold}
 
     def tops(unanswerable: bool) -> list[float]:
+        # Unscorable cases leave calibration for the same reason aggregate()
+        # drops them: they have no scoring target, so admitting one as an
+        # answerable example moves the threshold every scored case is graded
+        # against. Same predicate as QueryEval.scorable.
         return [
             retrieved[q["id"]][0][1] if retrieved[q["id"]] else 0.0
             for q in gold
-            if bool(q.get("unanswerable")) == unanswerable
+            if q.get("outcome_class") != UNSCORABLE_CLASS
+            and bool(q.get("unanswerable")) == unanswerable
         ]
 
     threshold = calibrate_threshold(tops(False), tops(True))
