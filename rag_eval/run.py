@@ -23,8 +23,12 @@ from rag_eval.embedder import BedrockEmbedder, TfidfEmbedder
 from rag_eval.hygiene import FileVerdict, scan_file, scan_text
 from rag_eval.index import InMemoryIndex
 from rag_eval.metrics import (
+    K_VALUES,
+    NOT_EVALUATED,
+    SUPPORTED,
     UNMAPPED,
     UNSCORABLE_CLASS,
+    UNSUPPORTED,
     Aggregate,
     QueryEval,
     aggregate,
@@ -248,6 +252,11 @@ _ALLOWED_GOLD_KEYS = {
     # set readable and portable.
     "source_document",
     "source_heading",
+    # The load-bearing literal the expected conclusion asserts ("30 days",
+    # "25 months", "12 CFR 1002.9"). Its presence is what makes a case
+    # mechanically checkable, which S-6 requires to consume no model call.
+    # Absent, the case is `not_evaluated` rather than assumed correct.
+    "support_literal",
 }
 
 # The anchor halves, as structured fields rather than free text. run() resolves
@@ -762,6 +771,13 @@ def run(
             raise RuntimeError(
                 f"gold query at position {i} has a non-boolean 'unanswerable'"
             )
+        if "support_literal" in q and not (
+            isinstance(q["support_literal"], str) and q["support_literal"].strip()
+        ):
+            raise RuntimeError(
+                f"gold query at position {i} has a non-string or empty "
+                "'support_literal'"
+            )
         if "note" in q and not isinstance(q["note"], str):
             raise RuntimeError(f"gold query at position {i} has a non-string 'note'")
         topic = q.get("topic")
@@ -912,6 +928,31 @@ def run(
         ]
 
     threshold = calibrate_threshold(tops(False), tops(True))
+
+    chunk_text = {c.chunk_id: c.text for c in chunks}
+
+    def _support_verdict(q: dict, ranked: list[tuple[str, float]]) -> str:
+        """Mechanical support: does a retrieved passage contain the assertion?
+
+        No model call, per S-6 -- the four mechanical cases are excluded from the
+        evaluator by instruction, not by preference. Checked against the passages
+        this run actually retrieved rather than the expected one: an assertion
+        that is true of a chunk the run never surfaced is not supported BY THE
+        RUN, which is what the support test asks.
+
+        Case- and whitespace-insensitive, and nothing cleverer. A fuzzy match
+        would turn a mechanical check into a judgement, which is precisely the
+        work the evaluator does under its own controls.
+        """
+        literal = q.get("support_literal")
+        if not literal or not ranked:
+            return NOT_EVALUATED
+        needle = " ".join(literal.lower().split())
+        for cid, _ in ranked[: max(K_VALUES)]:
+            if needle in " ".join(chunk_text.get(cid, "").lower().split()):
+                return SUPPORTED
+        return UNSUPPORTED
+
     evals = [
         QueryEval(
             query_id=q["id"],
@@ -922,6 +963,10 @@ def run(
             threshold=threshold,
             topic=q.get("topic", UNMAPPED),
             outcome_class=q.get("outcome_class"),
+            conclusion_verdict=_support_verdict(q, retrieved[q["id"]]),
+            # The displayed summary describes a passage rather than asserting a
+            # literal, so no mechanical check applies. It stays NOT_EVALUATED
+            # until the evaluator lands -- reported as such, never as a pass.
         )
         for q in gold
     ]

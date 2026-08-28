@@ -12,6 +12,7 @@ import re
 
 from rag_eval.hygiene import FileVerdict
 from rag_eval.metrics import (
+    NOT_EVALUATED,
     UNMAPPED,
     UNSCORABLE_CLASS,
     Aggregate,
@@ -224,6 +225,44 @@ def _is_past_applications(path: str) -> bool:
     return path == _PAST_APPLICATIONS or path.endswith("/" + _PAST_APPLICATIONS)
 
 
+_VERDICT_LABEL = {
+    "supported": "supported",
+    "unsupported": "unsupported",
+    "human_review": "human review (counts neither way)",
+    "not_evaluated": "not evaluated",
+}
+
+
+def _support_section(agg: Aggregate) -> list[str]:
+    """The two support verdicts, side by side and never added together.
+
+    S-1 makes the expected conclusion and the displayed summary two frozen
+    targets. One merged number would hide which half failed, so they get one
+    table each and there is deliberately no combined score anywhere.
+
+    Counts only. S-10's retention allowlist is case id, topic, source-section
+    reference, the two verdicts and one rationale line -- no conclusion text, no
+    summary text, no passage.
+    """
+    lines = ["## Support test", ""]
+    for title, counts in (
+        ("Expected conclusion", agg.conclusion_verdicts),
+        ("Displayed summary", agg.summary_verdicts),
+    ):
+        lines += [f"### {title}", "", "| Verdict | Cases |", "|---------|-------|"]
+        for state, n in counts.items():
+            lines.append(f"| {_VERDICT_LABEL.get(state, state)} | {n} |")
+        lines.append("")
+        if counts.get(NOT_EVALUATED):
+            lines += [
+                f"{counts[NOT_EVALUATED]} case(s) are not evaluated: no mechanical "
+                "check applies and the evaluator is not built. They are neither a "
+                "pass nor a failure, and must not be read as either.",
+                "",
+            ]
+    return lines
+
+
 def _data_gaps_section(
     evals: list[QueryEval],
     verdicts: list[FileVerdict],
@@ -366,5 +405,6 @@ def build(
     ]
     lines += _hygiene_section(verdicts, display_names)
     lines += _metrics_section(evals, agg, threshold, embedder_signature, n_chunks)
+    lines += _support_section(agg)
     lines += _data_gaps_section(evals, verdicts, display_names)
     return "\n".join(lines)
