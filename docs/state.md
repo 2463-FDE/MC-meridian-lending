@@ -8,12 +8,15 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (ea25537)` — ea25537 2026-08-27 Merge pull request #100 from 2463-FDE/docs/handoff-rag-eval-support-test
+Base: `origin/main (26d00e8)` — 26d00e8 2026-08-28 Merge pull request #103 from 2463-FDE/feat/assistant-run-telemetry
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #103 | `26d00e8` | 2026-08-28 | Merge pull request #103 from 2463-FDE/feat/assistant-run-telemetry |
+| #102 | `b2d9892` | 2026-08-28 | Merge pull request #102 from 2463-FDE/feat/rag-eval-gold-anchors |
+| #101 | `1ff8cc1` | 2026-08-27 | Merge pull request #101 from 2463-FDE/fix/rag-eval-report-truth |
 | #100 | `ea25537` | 2026-08-27 | Merge pull request #100 from 2463-FDE/docs/handoff-rag-eval-support-test |
 | #99 | `2525f96` | 2026-08-27 | Merge pull request #99 from 2463-FDE/feat/rag-eval-topic-axis |
 | #98 | `916f9ee` | 2026-08-27 | Merge pull request #98 from 2463-FDE/feat/rag-eval-gold-set-v2 |
