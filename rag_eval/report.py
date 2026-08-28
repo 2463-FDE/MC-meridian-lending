@@ -166,7 +166,9 @@ def _metrics_section(
         "### Confidence threshold (calibration, DL-6)",
         "",
         f"Threshold = **{threshold:.4f}**. Method: over the gold set, candidate thresholds "
-        "are midpoints between adjacent distinct top-1 scores; the chosen value minimizes "
+        "are the midpoints between adjacent distinct top-1 scores plus the two outer cutoffs "
+        "(the lowest score itself, and the first value above the highest) — one candidate per "
+        "behaviourally distinct cutoff, so the search is exhaustive. The chosen value minimizes "
         "classification errors (answerable tops that would wrongly abstain + unanswerable "
         "tops retrieved with false confidence), preferring the widest score gap on ties. "
         f"Cosine scores from embedder `{embedder_signature}` over a corpus of "

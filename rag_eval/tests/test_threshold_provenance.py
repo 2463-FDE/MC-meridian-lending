@@ -89,3 +89,47 @@ def test_report_names_the_corpus_and_embedder_the_threshold_belongs_to(
     text = result.report_text
     assert "corpus-" in text, "report does not name the corpus the threshold belongs to"
     assert result.embedder_signature in text
+
+
+def test_corpus_signature_moves_when_only_body_text_changes() -> None:
+    """The signature has to bind content, not just the shape of the corpus.
+
+    On the default non-manifest path a chunk id is the filename stem plus the
+    section slug, so editing the body of `policies/fee_schedule.md` without
+    renaming the file or its headings changes the embeddings — and potentially
+    the right threshold — while leaving every id identical. A signature over ids
+    alone would not move, and the report's "this threshold belongs to this
+    corpus" claim would be false for exactly the edit most likely to happen.
+    """
+    before = [Chunk("fees#late-fee", "fees", "Late fee", "The late fee is $35 flat.")]
+    after = [Chunk("fees#late-fee", "fees", "Late fee", "The late fee is $40 flat.")]
+    assert corpus_signature(before) != corpus_signature(after), (
+        "signature must move when body text changes under an unchanged id"
+    )
+    # The signature is printed in the report, and the client's retention limits
+    # forbid retaining retrieved content: hash the text, never carry it.
+    assert "35" not in corpus_signature(before)
+
+
+def test_calibrate_threshold_searches_below_the_lowest_score() -> None:
+    """Midpoints alone cannot reach the retrieve-everything cutoff.
+
+    With one answerable at 0.2 under one abstention case at 0.3, the only
+    midpoint (0.25) costs one wrong abstain plus one false confident. Any cutoff
+    at or below 0.2 costs one error, not two — so the report's minimum-error
+    claim needs that region in the candidate set.
+    """
+    answerable, unanswerable = [0.2], [0.3]
+    t = calibrate_threshold(answerable, unanswerable)
+    assert sum(threshold_errors(answerable, unanswerable, t)) == 1
+
+
+def test_calibrate_threshold_searches_above_the_highest_score() -> None:
+    """The mirror region: abstain-always is reachable only from above the max.
+
+    One answerable at 0.1 under two abstention cases at 0.2 and 0.3 costs two
+    errors at the best midpoint and one at any cutoff above 0.3.
+    """
+    answerable, unanswerable = [0.1], [0.2, 0.3]
+    t = calibrate_threshold(answerable, unanswerable)
+    assert sum(threshold_errors(answerable, unanswerable, t)) == 1

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -460,15 +461,21 @@ class RunResult:
 def corpus_signature(chunks: list[Chunk]) -> str:
     """A short content-address for the indexed corpus, for threshold provenance.
 
-    Derived from the chunk ids the run actually indexed, so it changes when a
-    document is added, removed, renamed, re-sectioned, or (under manifest
-    admission, where ids are digest-derived) edited at all. Order-independent,
-    because index order is not part of what the threshold was calibrated on.
+    Derived from each chunk id paired with the digest of its text, so it changes
+    when a document is added, removed, renamed, re-sectioned, or edited in place.
+    Ids alone would not: on the default slug path an id is the filename stem plus
+    the section slug, so rewriting the body of a policy without touching its name
+    or its headings moves the embeddings — and the threshold they calibrate —
+    while leaving every id identical. Order-independent, because index order is
+    not part of what the threshold was calibrated on.
 
-    Ids only, never text: this string is printed in the report, and chunk ids are
-    already the one corpus-derived identifier the report is allowed to carry.
+    Digests, never text: this string is printed in the report, and the client's
+    retention limits forbid carrying retrieved content out of a run.
     """
-    joined = "\n".join(sorted(c.chunk_id for c in chunks))
+    joined = "\n".join(
+        f"{c.chunk_id} {hashlib.sha256(c.text.encode('utf-8')).hexdigest()}"
+        for c in sorted(chunks, key=lambda c: c.chunk_id)
+    )
     return "corpus-" + hashlib.sha256(joined.encode("utf-8")).hexdigest()[:12]
 
 
@@ -494,17 +501,33 @@ def threshold_errors(
 def calibrate_threshold(
     answerable_tops: list[float], unanswerable_tops: list[float]
 ) -> float:
-    """Empirical threshold (DL-6): midpoint split minimizing gold-set errors.
+    """Empirical threshold (DL-6): minimum-error split over the whole cutoff space.
 
-    Candidate thresholds are midpoints between adjacent distinct top scores.
     Error = answerable tops below threshold (would wrongly abstain) plus
     unanswerable tops at/above it (false-confident retrieval). Ties prefer
     the widest gap. The value and method are recorded in the report.
+
+    `errors()` is constant between adjacent observed scores, so one candidate per
+    region searches the space exhaustively: the midpoints cover the interior, and
+    the two outer regions need candidates of their own — the lowest score itself
+    (retrieve everything) and the first float above the highest (abstain always).
+    Both are reachable minima when the classes invert, which is the overlap the
+    report's own prose describes: with one answerable at 0.2 under one abstention
+    case at 0.3, the only midpoint costs two errors while any cutoff at or below
+    0.2 costs one. Without them the report's minimum-error claim is stronger than
+    the search behind it. They carry gap 0.0, so an interior candidate — which
+    has real separation on both sides — wins any tie.
     """
     points = sorted(set(answerable_tops + unanswerable_tops))
+    # Fewer than two distinct scores is not a calibration, and the outer regions
+    # are not searched here on purpose: 0.0 is the sentinel for "too little
+    # evidence to set a cutoff", and returning a real-looking value derived from
+    # one observation would invite exactly the transcription this function's
+    # provenance reporting exists to prevent. Pinned by test_run.py.
     if len(points) < 2:
         return 0.0
     candidates = [((a + b) / 2, b - a) for a, b in zip(points, points[1:])]
+    candidates += [(points[0], 0.0), (math.nextafter(points[-1], math.inf), 0.0)]
 
     def errors(t: float) -> int:
         return sum(1 for s in answerable_tops if s < t) + sum(
@@ -973,11 +996,11 @@ def run(
         if e.scorable and not e.unanswerable and e.retrieved
     ]
     _una_tops = [
-        e.retrieved[0][1] for e in evals if e.scorable and e.unanswerable and e.retrieved
+        e.retrieved[0][1]
+        for e in evals
+        if e.scorable and e.unanswerable and e.retrieved
     ]
-    _wrong_abstain, _false_confident = threshold_errors(
-        _ans_tops, _una_tops, threshold
-    )
+    _wrong_abstain, _false_confident = threshold_errors(_ans_tops, _una_tops, threshold)
     report_text = report_mod.build(
         verdicts=verdicts,
         display_names=display_names,
