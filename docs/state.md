@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (26d00e8)` — 26d00e8 2026-08-28 Merge pull request #103 from 2463-FDE/feat/assistant-run-telemetry
+Base: `origin/main (95d7858)` — 95d7858 2026-08-28 Merge pull request #104 from 2463-FDE/fix/rag-eval-threshold-provenance
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #104 | `95d7858` | 2026-08-28 | Merge pull request #104 from 2463-FDE/fix/rag-eval-threshold-provenance |
 | #103 | `26d00e8` | 2026-08-28 | Merge pull request #103 from 2463-FDE/feat/assistant-run-telemetry |
 | #102 | `b2d9892` | 2026-08-28 | Merge pull request #102 from 2463-FDE/feat/rag-eval-gold-anchors |
 | #101 | `1ff8cc1` | 2026-08-27 | Merge pull request #101 from 2463-FDE/fix/rag-eval-report-truth |
