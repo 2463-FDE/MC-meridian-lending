@@ -1070,7 +1070,7 @@ def main(
             f"calls this run ({result.provider_retries} retries, "
             f"{result.provider_input_tokens} input tokens), cache disabled"
         )
-    print(f"threshold: {result.threshold:.4f} (calibrated, see report)")
+    print(f"threshold: {result.threshold!r} (calibrated, see report)")
     print(f"report: {result.report_path}")
 
     # Fail closed: the report is written above (so the refusal is always

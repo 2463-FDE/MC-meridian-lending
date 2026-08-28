@@ -165,7 +165,12 @@ def _metrics_section(
         "",
         "### Confidence threshold (calibration, DL-6)",
         "",
-        f"Threshold = **{threshold:.4f}**. Method: over the gold set, candidate thresholds "
+        # repr(), not :.4f — this is the value a reader copies into
+        # POLICY_RETRIEVAL_MIN_SCORE. The abstain-always candidate can be one ULP
+        # above the highest observed score (math.nextafter); rounding to 4 places
+        # can round it back down onto that score, reintroducing the exact
+        # false-confident hit the calibration picked the cutoff to avoid.
+        f"Threshold = **{threshold!r}**. Method: over the gold set, candidate thresholds "
         "are the midpoints between adjacent distinct top-1 scores plus the two outer cutoffs "
         "(the lowest score itself, and the first value above the highest) — one candidate per "
         "behaviourally distinct cutoff, so the search is exhaustive. The chosen value minimizes "
@@ -386,7 +391,7 @@ def build(
         f"- Chunks indexed: {n_chunks}",
         embedding_line,
         f"- Embedding backend: `{embedder_signature}`",
-        f"- Calibrated confidence threshold: {threshold:.4f}",
+        f"- Calibrated confidence threshold: {threshold!r}",
         "",
     ]
     lines += _hygiene_section(verdicts, display_names)

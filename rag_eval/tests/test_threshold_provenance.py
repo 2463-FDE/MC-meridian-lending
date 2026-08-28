@@ -133,3 +133,72 @@ def test_calibrate_threshold_searches_above_the_highest_score() -> None:
     answerable, unanswerable = [0.1], [0.2, 0.3]
     t = calibrate_threshold(answerable, unanswerable)
     assert sum(threshold_errors(answerable, unanswerable, t)) == 1
+
+
+def test_printed_threshold_reproduces_the_calibrated_classification() -> None:
+    """The report is what a reader copies into POLICY_RETRIEVAL_MIN_SCORE.
+
+    The abstain-always candidate is `math.nextafter(max_score, inf)` — for this
+    gold set that is 0.30000000000000004, one ULP above the 0.3 abstention
+    score it must stay above. Rounding the printed value to 4 decimal places
+    collapses it back to 0.3: `float("0.3000") >= 0.3` is True, so a config
+    transcribed from the rounded report reintroduces the exact false-confident
+    hit the calibration picked this cutoff to avoid.
+    """
+    import re
+
+    from rag_eval.metrics import QueryEval, aggregate
+    from rag_eval.report import _metrics_section
+
+    answerable, unanswerable = [0.1], [0.2, 0.3]
+    threshold = calibrate_threshold(answerable, unanswerable)
+    wrong_abstain, false_confident = threshold_errors(
+        answerable, unanswerable, threshold
+    )
+
+    evals = [
+        QueryEval(
+            query_id="Q01",
+            query="q",
+            expected=["doc#a"],
+            unanswerable=False,
+            retrieved=[("doc#a", 0.1)],
+            threshold=threshold,
+        ),
+        QueryEval(
+            query_id="Q02",
+            query="q",
+            expected=[],
+            unanswerable=True,
+            retrieved=[("doc#b", 0.2)],
+            threshold=threshold,
+        ),
+        QueryEval(
+            query_id="Q03",
+            query="q",
+            expected=[],
+            unanswerable=True,
+            retrieved=[("doc#c", 0.3)],
+            threshold=threshold,
+        ),
+    ]
+    text = "\n".join(
+        _metrics_section(
+            evals,
+            aggregate(evals),
+            threshold=threshold,
+            embedder_signature="tfidf-v1:test",
+            corpus_signature="corpus-test",
+            n_chunks=3,
+            wrong_abstain=wrong_abstain,
+            false_confident=false_confident,
+        )
+    )
+    printed = re.search(r"Threshold = \*\*(.+?)\*\*", text)
+    assert printed, "report must print the threshold"
+    round_tripped = float(printed.group(1))
+
+    assert threshold_errors(answerable, unanswerable, round_tripped) == (
+        wrong_abstain,
+        false_confident,
+    ), "the printed value must classify the gold set the same as the calibrated one"
