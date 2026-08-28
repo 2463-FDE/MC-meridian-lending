@@ -89,9 +89,11 @@ def test_a_case_with_no_literal_is_not_evaluated_rather_than_passed(
     gold = _gold(base, [_case("q01", "Notification timing", None)])
     result = run_mod.run(base=base, gold_path=gold)
     assert result.evals[0].conclusion_verdict == NOT_EVALUATED
-    assert result.agg.conclusion_verdicts.get(SUPPORTED, 0) == 0, (
+    assert result.agg.conclusion_verdicts.counts.get(SUPPORTED, 0) == 0, (
         "an ungraded case was counted as supported"
     )
+    assert result.agg.conclusion_verdicts.n_graded == 0
+    assert result.agg.conclusion_verdicts.rate is None
 
 
 def test_the_summary_verdict_is_independent_of_the_conclusion_verdict() -> None:
@@ -107,9 +109,11 @@ def test_the_summary_verdict_is_independent_of_the_conclusion_verdict() -> None:
         summary_verdict=UNSUPPORTED,
     )
     agg = aggregate([e])
-    assert agg.conclusion_verdicts[SUPPORTED] == 1
-    assert agg.summary_verdicts[UNSUPPORTED] == 1
-    assert agg.conclusion_verdicts.get(UNSUPPORTED, 0) == 0
+    assert agg.conclusion_verdicts.counts[SUPPORTED] == 1
+    assert agg.summary_verdicts.counts[UNSUPPORTED] == 1
+    assert agg.conclusion_verdicts.counts.get(UNSUPPORTED, 0) == 0
+    assert agg.conclusion_verdicts.rate == 1.0
+    assert agg.summary_verdicts.rate == 0.0
 
 
 def test_human_review_counts_neither_way() -> None:
@@ -127,9 +131,12 @@ def test_human_review_counts_neither_way() -> None:
         for i, v in enumerate((SUPPORTED, UNSUPPORTED, HUMAN_REVIEW))
     ]
     agg = aggregate(evals)
-    assert agg.conclusion_verdicts[HUMAN_REVIEW] == 1
-    assert agg.conclusion_verdicts[SUPPORTED] == 1
-    assert agg.conclusion_verdicts[UNSUPPORTED] == 1
+    assert agg.conclusion_verdicts.counts[HUMAN_REVIEW] == 1
+    assert agg.conclusion_verdicts.counts[SUPPORTED] == 1
+    assert agg.conclusion_verdicts.counts[UNSUPPORTED] == 1
+    # S-9: human_review counts in neither the numerator nor the denominator.
+    assert agg.conclusion_verdicts.n_graded == 2
+    assert agg.conclusion_verdicts.rate == 0.5
 
 
 def test_report_shows_both_verdicts_separately_and_never_a_merged_score(

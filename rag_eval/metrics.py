@@ -111,7 +111,6 @@ class QueryEval:
             self.reciprocal_rank = 0.0
             self.correct = False
 
-
     @property
     def scorable(self) -> bool:
         """Whether this case has a retrieval target it can be graded against."""
@@ -135,6 +134,19 @@ class ClassStat:
 
 
 @dataclass
+class SupportStat:
+    """One support target's verdict counts and graded rate.
+
+    S-1: never merged with the other target. S-9: `human_review` counts in
+    neither `n_graded` nor `rate` — only `supported`/`unsupported` are graded.
+    """
+
+    counts: dict[str, int]  # by VERDICT_STATES, omitting states with no cases
+    n_graded: int  # supported + unsupported
+    rate: float | None  # supported / n_graded, or None ("n/a") when n_graded == 0
+
+
+@dataclass
 class Aggregate:
     n_answerable: int
     n_unanswerable: int
@@ -146,16 +158,22 @@ class Aggregate:
     by_class: dict[str, ClassStat]  # per outcome class, insertion-ordered
     n_unscorable: int  # cases with no retrieval target (see UNSCORABLE_CLASS)
     # Counted per state and kept apart, because S-1 forbids one merged number.
-    conclusion_verdicts: dict[str, int]
-    summary_verdicts: dict[str, int]
+    conclusion_verdicts: SupportStat
+    summary_verdicts: SupportStat
 
 
-def _count_verdicts(values) -> dict[str, int]:
-    """Verdict counts, omitting states with no cases so a table stays readable."""
+def _support_stat(values) -> SupportStat:
+    """Verdict counts plus the graded rate, omitting states with no cases."""
     counts = {state: 0 for state in VERDICT_STATES}
     for v in values:
         counts[v] = counts.get(v, 0) + 1
-    return {k: n for k, n in counts.items() if n}
+    n_graded = counts[SUPPORTED] + counts[UNSUPPORTED]
+    rate = counts[SUPPORTED] / n_graded if n_graded else None
+    return SupportStat(
+        counts={k: n for k, n in counts.items() if n},
+        n_graded=n_graded,
+        rate=rate,
+    )
 
 
 def aggregate(evals: list[QueryEval]) -> Aggregate:
@@ -183,8 +201,8 @@ def aggregate(evals: list[QueryEval]) -> Aggregate:
         # Over ALL evals, not just scorable ones: a support verdict is about the
         # conclusion text, which exists independently of whether the case has a
         # retrieval target.
-        conclusion_verdicts=_count_verdicts(e.conclusion_verdict for e in evals),
-        summary_verdicts=_count_verdicts(e.summary_verdict for e in evals),
+        conclusion_verdicts=_support_stat(e.conclusion_verdict for e in evals),
+        summary_verdicts=_support_stat(e.summary_verdict for e in evals),
         n_answerable=n,
         n_unanswerable=len(unanswerable),
         hit_at_k={

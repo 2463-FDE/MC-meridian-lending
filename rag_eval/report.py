@@ -12,12 +12,15 @@ import re
 
 from rag_eval.hygiene import FileVerdict
 from rag_eval.metrics import (
+    HUMAN_REVIEW,
     NOT_EVALUATED,
+    SUPPORTED,
     UNMAPPED,
     UNSCORABLE_CLASS,
     Aggregate,
     K_VALUES,
     QueryEval,
+    VERDICT_STATES,
 )
 
 # The only trace of denial 6012's reason anywhere in the estate. The file was
@@ -124,8 +127,8 @@ def _metrics_section(
         ]
     lines += [
         "",
-        "| Question id | Expected chunk(s) | Top retrieved (score) | hit@1/3/5 | RR | Verdict |",
-        "|-------------|-------------------|-----------------------|-----------|----|---------|",
+        "| Question id | Expected chunk(s) | Top retrieved (score) | hit@1/3/5 | RR | Verdict | Conclusion | Summary |",
+        "|-------------|-------------------|-----------------------|-----------|----|---------|------------|---------|",
     ]
     for e in evals:
         # Label an empty expected by what the case IS, not by what is missing:
@@ -152,12 +155,16 @@ def _metrics_section(
         else:
             hits = "/".join("✓" if e.hits[k] else "✗" for k in K_VALUES)
             verdict = "✓" if e.correct else "✗"
+        # Enum value only — never the conclusion or summary text (S-10).
+        conclusion = _VERDICT_LABEL.get(e.conclusion_verdict, e.conclusion_verdict)
+        summary = _VERDICT_LABEL.get(e.summary_verdict, e.summary_verdict)
         lines.append(
             # Question identified by id, never by text: a supplied evaluation
             # question is content the client excluded from retention, and this
             # report is a file on disk. `gold_queries.json` maps id back to text
             # for whoever legitimately holds it.
-            f"| {e.query_id} | {expected} | {top} | {hits} | {rr} | {verdict} |"
+            f"| {e.query_id} | {expected} | {top} | {hits} | {rr} | {verdict} "
+            f"| {conclusion} | {summary} |"
         )
     lines += [
         "",
@@ -245,17 +252,27 @@ def _support_section(agg: Aggregate) -> list[str]:
     summary text, no passage.
     """
     lines = ["## Support test", ""]
-    for title, counts in (
+    for title, stat in (
         ("Expected conclusion", agg.conclusion_verdicts),
         ("Displayed summary", agg.summary_verdicts),
     ):
         lines += [f"### {title}", "", "| Verdict | Cases |", "|---------|-------|"]
-        for state, n in counts.items():
-            lines.append(f"| {_VERDICT_LABEL.get(state, state)} | {n} |")
-        lines.append("")
-        if counts.get(NOT_EVALUATED):
+        for state in VERDICT_STATES:
+            n = stat.counts.get(state, 0)
+            if n:
+                lines.append(f"| {_VERDICT_LABEL.get(state, state)} | {n} |")
+        rate_str = f"{stat.rate:.2f}" if stat.rate is not None else "n/a"
+        n_human_review = stat.counts.get(HUMAN_REVIEW, 0)
+        lines += [
+            "",
+            f"Graded rate: **{rate_str}** ({stat.counts.get(SUPPORTED, 0)} of "
+            f"{stat.n_graded} graded). {n_human_review} case(s) sent to human "
+            "review count in neither the numerator nor the denominator (S-9).",
+            "",
+        ]
+        if stat.counts.get(NOT_EVALUATED):
             lines += [
-                f"{counts[NOT_EVALUATED]} case(s) are not evaluated: no mechanical "
+                f"{stat.counts[NOT_EVALUATED]} case(s) are not evaluated: no mechanical "
                 "check applies and the evaluator is not built. They are neither a "
                 "pass nor a failure, and must not be read as either.",
                 "",
