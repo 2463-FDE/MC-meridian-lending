@@ -32,7 +32,7 @@ from rag_eval import run as run_mod
 
 def _corpus(tmp_path: Path) -> Path:
     policies = tmp_path / "policies"
-    policies.mkdir()
+    policies.mkdir(parents=True)
     # Slug-named on purpose: this fixture must be admissible under BOTH modes so
     # the mode-independence assertion below can compare them. The client's own
     # filenames are non-slug, which is why manifest admission is her only option.
@@ -148,3 +148,151 @@ def test_report_states_the_unscorable_count_and_reason(tmp_path: Path) -> None:
     assert "| `clarification` |" not in text, (
         "clarification appears as a scored row beside real classes"
     )
+
+
+def _with_title_case_section(base: Path) -> Path:
+    """Her real headings are title-case ("Adverse Action"), the fixture's are not."""
+    doc = base / "policies" / "syn-pol-fees.md"
+    doc.write_text(
+        doc.read_text(encoding="utf-8")
+        + "\n## Adverse Action\n\nAn adverse action notice goes out within 30 days.\n",
+        encoding="utf-8",
+    )
+    return base
+
+
+def test_title_case_anchor_heading_is_not_refused_as_a_person_name(
+    tmp_path: Path,
+) -> None:
+    """A structured anchor is not free text: her headings are title-case, and the
+    person-name heuristic reads any two title-case words as a probable name."""
+    base = _with_title_case_section(_corpus(tmp_path))
+    gold = _gold(
+        base,
+        [
+            {
+                "id": "q06",
+                "query": "When does an adverse action notice go out?",
+                "source_document": "syn-pol-fees.md",
+                "source_heading": "Adverse Action",
+                "outcome_class": "answer",
+            }
+        ],
+    )
+    result = run_mod.run(base=base, gold_path=gold)
+    assert result.agg.hit_at_k[1] == 1.0
+
+
+def test_person_name_in_gold_free_text_is_still_refused(tmp_path: Path) -> None:
+    """Exempting the anchor must not exempt the query/note it sits beside."""
+    base = _with_title_case_section(_corpus(tmp_path))
+    gold = _gold(
+        base,
+        [
+            {
+                "id": "q06",
+                "query": "Did Jane Doe get an adverse action notice?",
+                "source_document": "syn-pol-fees.md",
+                "source_heading": "Adverse Action",
+                "outcome_class": "answer",
+            }
+        ],
+    )
+    with pytest.raises(RuntimeError, match="probable person name"):
+        run_mod.run(base=base, gold_path=gold)
+
+
+def test_anchor_keys_are_accepted_in_the_delivered_spelling(tmp_path: Path) -> None:
+    """Her rows carry sourceDocument/sourceHeading; both spellings must load."""
+    base = _corpus(tmp_path)
+    gold = _gold(
+        base,
+        [
+            {
+                "id": "q01",
+                "query": "What is the late payment fee?",
+                "sourceDocument": "syn-pol-fees.md",
+                "sourceHeading": "Late fee",
+                "outcome_class": "answer",
+            }
+        ],
+    )
+    result = run_mod.run(base=base, gold_path=gold)
+    assert result.agg.hit_at_k[1] == 1.0
+
+
+def test_both_anchor_key_spellings_at_once_are_refused(tmp_path: Path) -> None:
+    """Silent precedence between two spellings would score against a hidden pick."""
+    base = _corpus(tmp_path)
+    gold = _gold(
+        base,
+        [
+            {
+                "id": "q01",
+                "query": "What is the late payment fee?",
+                "source_document": "syn-pol-fees.md",
+                "sourceDocument": "syn-pol-fees.md",
+                "source_heading": "Late fee",
+                "sourceHeading": "Origination fee",
+                "outcome_class": "answer",
+            }
+        ],
+    )
+    with pytest.raises(RuntimeError, match="both spellings"):
+        run_mod.run(base=base, gold_path=gold)
+
+
+_CALIBRATION_BASE = [
+    {
+        "id": "q01",
+        "query": "What is the late payment fee?",
+        "source_document": "syn-pol-fees.md",
+        "source_heading": "Late fee",
+        "outcome_class": "answer",
+    },
+    {
+        "id": "q21",
+        "query": "What is the wire transfer fee?",
+        "unanswerable": True,
+        "outcome_class": "no_match",
+    },
+]
+
+
+def test_clarification_does_not_move_the_calibrated_threshold(tmp_path: Path) -> None:
+    """A row scored on nothing must not steer the threshold every scored row is
+    graded against. "late payment" tops at 0.687, between the abstention top
+    (0.487) and the answerable top (0.821), so admitting it as answerable pulls
+    the midpoint down from 0.654 to 0.587."""
+    base_a = _corpus(tmp_path / "a")
+    without = run_mod.run(base=base_a, gold_path=_gold(base_a, _CALIBRATION_BASE))
+    base_b = _corpus(tmp_path / "b")
+    with_clarification = run_mod.run(
+        base=base_b,
+        gold_path=_gold(
+            base_b,
+            _CALIBRATION_BASE
+            + [
+                {"id": "q13", "query": "late payment", "outcome_class": "clarification"}
+            ],
+        ),
+    )
+    assert with_clarification.threshold == without.threshold, (
+        "a clarification case entered threshold calibration as an answerable "
+        "example, so it moved the threshold every scored case is graded against"
+    )
+
+
+def test_clarification_row_is_not_rendered_as_a_failed_case(tmp_path: Path) -> None:
+    """The report says these cases are scored on nothing; the per-question table
+    must not then print them as a miss beside real failures."""
+    base = _corpus(tmp_path)
+    gold = _gold(
+        base,
+        [ANCHORED, {"id": "q13", "query": "Fees?", "outcome_class": "clarification"}],
+    )
+    run_mod.run(base=base, gold_path=gold)
+    text = (base / "rag_eval" / "eval_report.md").read_text(encoding="utf-8")
+    row = next(line for line in text.splitlines() if line.startswith("| q13 |"))
+    assert "✗" not in row, f"clarification row rendered as a scored failure: {row}"
+    assert "not scored" in row

@@ -131,7 +131,15 @@ def _metrics_section(
         top = (
             ", ".join(f"`{cid}` ({score:.3f})" for cid, score in e.retrieved[:3]) or "—"
         )
-        if e.unanswerable:
+        rr = f"{e.reciprocal_rank:.2f}"
+        if not e.scorable:
+            # Scored on nothing (see UNSCORABLE_CLASS), so it carries no verdict:
+            # a ✗ here would read as a retrieval miss beside real failures, and
+            # the zeroed hits/RR behind it are an absence, not a result.
+            hits = "—"
+            rr = "—"
+            verdict = "*(not scored)*"
+        elif e.unanswerable:
             hits = "—"
             verdict = "below threshold ✓" if e.correct else "**false-confident ✗**"
         else:
@@ -142,8 +150,7 @@ def _metrics_section(
             # question is content the client excluded from retention, and this
             # report is a file on disk. `gold_queries.json` maps id back to text
             # for whoever legitimately holds it.
-            f"| {e.query_id} | {expected} | {top} | {hits} | "
-            f"{e.reciprocal_rank:.2f} | {verdict} |"
+            f"| {e.query_id} | {expected} | {top} | {hits} | {rr} | {verdict} |"
         )
     lines += [
         "",
