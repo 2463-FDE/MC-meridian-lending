@@ -301,6 +301,8 @@ _NAME_ALLOWLIST = (
     "Fair Debt Collection Practices Act",
     "Truth in Lending Act",
     "Consumer Financial Protection Bureau",
+    "Military Lending Act",
+    "Servicemembers Civil Relief Act",
     "Social Security",
     "Meridian Lending",
 )

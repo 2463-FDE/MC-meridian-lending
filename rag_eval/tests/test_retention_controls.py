@@ -40,6 +40,7 @@ def test_metrics_table_identifies_a_question_by_id_only():
             aggregate(evals),
             threshold=0.16,
             embedder_signature="tfidf-v1:test",
+            n_chunks=9,
         )
     )
     assert "Q01" in rows
@@ -50,7 +51,9 @@ def test_data_gaps_section_omits_query_text():
     # The false-confident section quoted the query directly, which is the one place
     # a supplied question would have been written out in full.
     rows = "\n".join(
-        _data_gaps_section([_eval(True, [("syn-pol-loan-review#counteroffers", 0.31)])])
+        _data_gaps_section(
+            [_eval(True, [("syn-pol-loan-review#counteroffers", 0.31)])], verdicts=[]
+        )
     )
     assert "Q01" in rows
     assert SECRET not in rows

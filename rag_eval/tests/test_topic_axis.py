@@ -8,8 +8,9 @@ belong to the closed officer vocabulary, because a code the product cannot emit
 is a case the product cannot be asked — scoring it would report coverage the
 system does not have.
 
-Six of her questions are servicing and collections questions, and the vocabulary
-has no code for either. They carry `unmapped`, which is a result rather than a
+Seven of her questions are servicing and collections questions, and the
+vocabulary has no code for either. Seven, not the six her own needs_review set
+names: Q24's frozen anchor is also in SYN-POL-SERVICING-COLLECTIONS.md. They carry `unmapped`, which is a result rather than a
 gap to paper over: those questions cannot be asked through the product at all,
 and they are excluded from topic scoring with the denominator stated.
 """
