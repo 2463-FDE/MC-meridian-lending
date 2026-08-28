@@ -22,7 +22,7 @@ from rag_eval.chunker import Chunk, chunk_markdown
 from rag_eval.embedder import BedrockEmbedder, TfidfEmbedder
 from rag_eval.hygiene import FileVerdict, scan_file, scan_text
 from rag_eval.index import InMemoryIndex
-from rag_eval.metrics import Aggregate, QueryEval, aggregate
+from rag_eval.metrics import UNMAPPED, Aggregate, QueryEval, aggregate
 
 GOLD_PATH = Path(__file__).parent / "gold_queries.json"
 
@@ -40,7 +40,92 @@ _SKIP_NAMES = {".gitkeep", ".gitignore", ".gitattributes", ".ds_store"}
 _SAFE_FILENAME = re.compile(r"\.?[a-z0-9][a-z0-9._-]*")
 
 
-def unsafe_corpus_path_reason(rel_path: Path) -> str | None:
+_MANIFEST_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+def load_corpus_manifest(path: Path) -> dict[str, str]:
+    """Read a corpus manifest in `shasum -a 256` format: digest, then filename.
+
+    The manifest is the declaration of WHICH corpus was approved and WHAT its
+    content was. Names are corpus-directory-relative, so a client packet whose
+    checksum file covers the whole delivery is narrowed to its policy directory
+    once, under human review, rather than reinterpreted on every run.
+
+    Malformed input raises: a manifest that cannot be parsed must not degrade to
+    an empty allowlist, which would refuse the whole corpus and read as "the
+    corpus is contaminated" instead of "the manifest is broken".
+    """
+    entries: dict[str, str] = {}
+    for lineno, raw in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        line = raw.strip()
+        if not line:
+            continue
+        # shasum writes two spaces (text mode) or " *" (binary mode).
+        digest, sep, name = line.partition("  ")
+        if not sep:
+            digest, sep, name = line.partition(" *")
+        name = name.strip()
+        if not sep or not name or not _MANIFEST_DIGEST.fullmatch(digest):
+            raise ValueError(
+                f"corpus manifest line {lineno} is not `<sha256>  <filename>`"
+            )
+        entries[name] = digest
+    return entries
+
+
+def audit_corpus_against_manifest(
+    base: Path, manifest: dict[str, str], subtree: str | None = None
+) -> list[str]:
+    """Problems making the corpus on disk differ from the approved manifest.
+
+    Audits BOTH directions. Checking only the manifest's own entries would report
+    success over an unlisted file sitting in the corpus directory, which is the
+    failure mode a hand-maintained allowlist always has: it grades what it lists
+    and stays silent about what it does not.
+
+    Findings name a manifest entry (approved text, safe to echo) but never an
+    unlisted filename — an unapproved name can itself be the PII, so it is
+    reported by position, as run()'s own refusal path does.
+    """
+    if not manifest:
+        return ["manifest declares no approved corpus files"]
+    # `subtree` scopes BOTH sides — the files graded and the manifest entries
+    # considered — with keys staying relative to `base`. Scoping only the files
+    # would report every entry outside the subtree as missing, which is what a
+    # supplied delivery's own checksum file looks like: it covers the whole
+    # package, of which the policy corpus is one directory. run() also scans
+    # kb_dump, which a policy manifest does not govern (it has its own pinned
+    # exception), so grading every root would conflate two separate controls.
+    root = base / subtree if subtree else base
+    if not root.is_dir():
+        return [f"corpus directory does not exist: {subtree or '.'}"]
+    prefix = f"{subtree}/" if subtree else ""
+    scoped = {k: v for k, v in manifest.items() if k.startswith(prefix)}
+    if not scoped:
+        # A verifier must not report success for a path on which it verified
+        # nothing: a subtree no manifest entry covers is an unapproved corpus, not
+        # a clean one.
+        return [f"manifest declares no approved files under {subtree or '.'}"]
+    on_disk = {p.relative_to(base).as_posix() for p in root.rglob("*") if p.is_file()}
+    problems = []
+    for name in sorted(set(scoped) - on_disk):
+        problems.append(f"manifest entry missing on disk: {name}")
+    unlisted = sorted(on_disk - set(scoped))
+    for position, _ in enumerate(unlisted, start=1):
+        problems.append(
+            f"unlisted file in corpus directory at position {position} "
+            "(name withheld — an unapproved name can itself be the identifier)"
+        )
+    return problems
+
+
+def unsafe_corpus_path_reason(
+    rel_path: Path,
+    base: Path | None = None,
+    manifest: dict[str, str] | None = None,
+) -> str | None:
     """Why a corpus-relative path cannot be trusted as a chunk id / log/report entry.
 
     A file with clean CONTENT can still leak identity through its NAME — the
@@ -48,14 +133,68 @@ def unsafe_corpus_path_reason(rel_path: Path) -> str | None:
     path. Shared by run()'s corpus-relative scan below and by
     origination-service's policy_retrieval, which indexes a bind-mounted
     corpus at runtime that this module's own CI-time scan never sees. Returns
-    "pii" or "non-slug", or None when the path is safe. Callers must not echo
-    the path itself when a reason comes back — the name can be the PII.
+    "pii", "not-in-manifest", "manifest-digest-mismatch" or "non-slug", or None
+    when the path is safe. Callers must not echo the path itself when a reason
+    comes back — the name can be the PII.
+
+    With no `manifest`, admission is the lowercase-slug convention, which is what
+    stops an unlabeled person name (`Jane-Doe.md`) becoming a chunk id when
+    `scan_text` finds no self-identifying shape in it.
+
+    With a `manifest`, admission is that declaration instead: the name must be
+    listed AND the file's content must hash to the listed digest. This is how a
+    supplied corpus whose filenames are not slugs is indexed without renaming it,
+    which would invalidate the checksums it was approved under. Name-only would
+    reopen the hole `_LEGACY_DUMP_SHA256` was pinned to close — the approved
+    filename carrying different content. The `scan_text` check still runs first
+    and unconditionally: a manifest cannot approve a name that is borrower data.
     """
     if scan_text(str(rel_path)):
         return "pii"
+    if manifest is not None:
+        if base is None:
+            raise ValueError("manifest admission needs `base` to hash the file")
+        listed = manifest.get(rel_path.as_posix())
+        if listed is None:
+            return "not-in-manifest"
+        try:
+            digest = hashlib.sha256((base / rel_path).read_bytes()).hexdigest()
+        except OSError:
+            # Unreadable is not approved: fail closed rather than admit a file
+            # whose content could not be checked against the declaration.
+            return "manifest-digest-mismatch"
+        return None if digest == listed else "manifest-digest-mismatch"
     if not all(_SAFE_FILENAME.fullmatch(part) for part in rel_path.parts):
         return "non-slug"
     return None
+
+
+def corpus_doc_id(rel_path: Path, manifest: dict[str, str] | None = None) -> str:
+    """The officer-visible document id for an admitted corpus file.
+
+    Without a manifest, admission IS the lowercase-slug convention — the name has
+    already been graded by `unsafe_corpus_path_reason`, so the stem is safe to
+    show and the gold set's `expected` entries depend on it staying readable.
+
+    With a manifest, admission is the listed digest and the NAME is graded by
+    nothing: `_SAFE_FILENAME` never runs on that branch, and `scan_text` is
+    label-gated, so a bare `Jane-Doe.md` passes and would otherwise become the
+    chunk id `jane-doe#...` — a person name in citations, logs and report ids. No
+    structural rule separates a person name from a policy code, so the name is not
+    used at all here: the id derives from the approved digest, which is
+    deterministic across runs, carries no identity, and cannot be inverted to the
+    filename. Readability survives in the chunk text, which the chunker prefixes
+    with the document title and section.
+
+    Raises ValueError (never echoing the path — the name can be the PII) when the
+    manifest does not list the file; callers refuse an unlisted file before here.
+    """
+    if manifest is None:
+        return rel_path.stem.lower()
+    listed = manifest.get(rel_path.as_posix())
+    if listed is None:
+        raise ValueError("cannot derive a doc id: file is not in the manifest")
+    return f"doc-{listed[:12]}"
 
 
 # Gold-query STRUCTURED fields are locked to machine shapes so they cannot carry
@@ -68,7 +207,46 @@ def unsafe_corpus_path_reason(rel_path: Path) -> str | None:
 # allowlisted so the name guard doesn't refuse them.)
 _GOLD_ID = re.compile(r"[a-z0-9][a-z0-9-]*")
 _CHUNK_ID = re.compile(r"[a-z0-9][a-z0-9._-]*#[a-z0-9._-]+")
-_ALLOWED_GOLD_KEYS = {"id", "query", "expected", "unanswerable", "note"}
+# The officer topic vocabulary, duplicated from POLICY_TOPICS in
+# origination-service's policy_retrieval. The harness cannot import a service, so
+# a test asserts the two agree rather than trusting the copy — a drifted copy
+# would score against codes the officer channel no longer offers.
+TOPIC_CODES = (
+    "fee_schedule",
+    "apr_finance_charge",
+    "interest_rate",
+    "eligibility_rules",
+    "credit_decisioning",
+    "adverse_action",
+    "debt_to_income",
+    "records_retention",
+)
+
+# `UNMAPPED` is imported from metrics rather than defined here: it is deliberately
+# kept OUT of TOPIC_CODES so it can never be mistaken for something the product can
+# be asked, and it is reported on its own line rather than as a topic.
+
+_ALLOWED_GOLD_KEYS = {
+    "id",
+    "query",
+    "expected",
+    "unanswerable",
+    "note",
+    "topic",
+    "outcome_class",
+}
+
+# The client's four outcome classes. `no_match` is the abstention case the
+# harness already scores as `unanswerable`, and carries no expected chunk. The
+# other three are scored on retrieval rank and so must each name an expected
+# chunk: `answer` and `manager_escalation` by definition, and `clarification`
+# because the answer does exist — the question is only under-specified, and the
+# officer channel is a closed topic enum with free text masked at the boundary,
+# so no ask-back path exists to exercise. A `clarification` case is therefore
+# scored as retrieval and reported as a class whose product behaviour is absent.
+_OUTCOME_CLASSES = frozenset(
+    {"answer", "manager_escalation", "clarification", "no_match"}
+)
 
 # The ONE corpus file ADR 0007 documents as legacy-contaminated: kb_dump is the
 # raw pre-remediation dump, so its refusal is expected and is the whole point of
@@ -148,6 +326,41 @@ def _looks_like_person_name(text: str) -> bool:
 _DEFAULT_BEDROCK_MODEL = "amazon.titan-embed-text-v2:0"
 
 
+def cache_enabled(embedder) -> bool:
+    """Whether embedding vectors may be written to disk for this backend.
+
+    The on-disk cache holds vectors derived from corpus content, which the client
+    excluded from retention for the graded run. A provider backend therefore runs
+    cacheless — it also means a rerun re-embeds, which is why the run is bounded to
+    one pass plus one correction.
+
+    The TF-IDF path keeps its cache: it makes no provider call, and the keyless
+    local run and the blocking gate both depend on it staying fast.
+    """
+    # Keyed off the embedder in use, not off RAG_EMBEDDER: a caller that injects
+    # an embedder (tests, and any future programmatic use) would otherwise have
+    # the retention decision disagree with the backend actually making calls.
+    return not getattr(embedder, "IS_PROVIDER_BACKED", True)
+
+
+def refuse_traced_provider_run(embedder) -> None:
+    """Refuse a provider-backed run while LangSmith tracing is on.
+
+    origination-service hardens the LangSmith singleton with hide_inputs and
+    hide_outputs, but that hardening deliberately does not hide ERRORS
+    (`_hide_run_error` is passthrough) and runs at service startup, which an
+    offline harness never reaches. Nothing in the required post-run report comes
+    from a trace, so the safe configuration is simply no tracing.
+    """
+    if not getattr(embedder, "IS_PROVIDER_BACKED", True):
+        return
+    if os.getenv("LANGSMITH_TRACING", "").strip().lower() in {"1", "true", "yes"}:
+        raise ValueError(
+            "LANGSMITH_TRACING is enabled and the embedding backend is a provider "
+            "— trace error bodies are not hidden, so unset it for the graded run"
+        )
+
+
 def make_embedder():
     """Pick the embedding backend from ``RAG_EMBEDDER`` (default ``tfidf``).
 
@@ -155,14 +368,31 @@ def make_embedder():
     Amazon Bedrock via boto3 (``RAG_BEDROCK_MODEL``, ``AWS_REGION``, AWS creds)
     — the scaling path. An unknown value fails loud rather than silently
     falling back to a different backend than asked for.
+
+    Blank counts as unset for both variables. docker-compose.yml passes
+    ``${RAG_EMBEDDER:-}``, which sets the variable to "" rather than omitting
+    it, so a `getenv` default alone never fires on the compose path and the
+    keyless default would be unreachable exactly where the corpus is mounted.
     """
-    name = os.getenv("RAG_EMBEDDER", "tfidf")
+    name = os.getenv("RAG_EMBEDDER", "").strip() or "tfidf"
     if name == "tfidf":
         return TfidfEmbedder()
     if name == "bedrock":
+        # Validated BEFORE the client is constructed. Passing region=None lets
+        # boto3 resolve one itself from environment, profile or instance config —
+        # region discovery, which the client excluded. Failing here also keeps the
+        # check testable without boto3 installed, so the keyless gate can cover it.
+        region = os.getenv("AWS_REGION", "").strip()
+        if not region:
+            raise ValueError(
+                "AWS_REGION must be set explicitly for RAG_EMBEDDER=bedrock — "
+                "an unset value lets boto3 discover a region, and Bedrock model "
+                "access is granted per region"
+            )
         return BedrockEmbedder(
-            model_id=os.getenv("RAG_BEDROCK_MODEL", _DEFAULT_BEDROCK_MODEL),
-            region=os.getenv("AWS_REGION"),
+            model_id=os.getenv("RAG_BEDROCK_MODEL", "").strip()
+            or _DEFAULT_BEDROCK_MODEL,
+            region=region,
         )
     raise ValueError(f"RAG_EMBEDDER={name!r} is not one of ('tfidf', 'bedrock').")
 
@@ -170,6 +400,10 @@ def make_embedder():
 @dataclass
 class RunResult:
     verdicts: list[FileVerdict]
+    # path -> the name that is safe to print for it. Under manifest admission a
+    # filename is graded by nothing, so it is never echoed: report, CLI and log
+    # lines all read through this map (see `corpus_doc_id`).
+    display_names: dict[str, str]
     n_chunks: int
     cache_hits: int
     cache_misses: int
@@ -179,6 +413,15 @@ class RunResult:
     report_path: Path
     report_text: str
     embedder_signature: str
+    # A provider backend runs cacheless (see cache_enabled), so cache_hits/misses
+    # are both 0 no matter how much was embedded and cannot describe the run. The
+    # provider counters below are what the post-run report reads in that mode;
+    # `caching` says which pair is meaningful rather than leaving a reader to
+    # infer it from two zeros.
+    caching: bool
+    provider_calls: int
+    provider_retries: int
+    provider_input_tokens: int
 
 
 def calibrate_threshold(
@@ -204,7 +447,31 @@ def calibrate_threshold(
     return min(candidates, key=lambda c: (errors(c[0]), -c[1]))[0]
 
 
-def run(base: Path = Path(".")) -> RunResult:
+def run(
+    base: Path = Path("."),
+    gold_path: Path | None = None,
+    manifest_path: Path | None = None,
+) -> RunResult:
+    """Gate, ingest, embed, retrieve, report.
+
+    `gold_path` names a gold set outside the repository. The client's questions
+    cannot be committed — her limits forbid retaining question text, and this
+    repository is a public fork — so they are read from the working directory
+    that already holds her corpus. Omitted, the committed set is used and
+    behaviour is unchanged.
+
+    `manifest_path` names a checksum manifest declaring the approved POLICY corpus,
+    with names relative to `base` (`policies/X.md`) — the same shape a supplied
+    delivery's own `shasum -a 256` output already has, so it is usable verbatim
+    rather than transcribed. Admission then comes from that declaration instead of
+    the lowercase-slug convention, which is how a corpus whose filenames are not
+    slugs is indexed without renaming it and invalidating its checksums.
+
+    The manifest governs `policies/` only. `kb_dump/` keeps its own pinned
+    exception (`_LEGACY_DUMP_SHA256`); a policy manifest must not turn the legacy
+    dump into an unlisted-file abort.
+    """
+
     # Scan EVERY file under the corpus roots, recursively and regardless of
     # extension. scan_file reads known text/JSON formats and refuses unknown or
     # non-UTF-8 ones (fail closed), so a new customers.csv or a copied text dump
@@ -223,6 +490,21 @@ def run(base: Path = Path(".")) -> RunResult:
         _corpus_files(base / "policies") + _corpus_files(base / "kb_dump")
     )
 
+    manifest = None
+    if manifest_path is not None:
+        try:
+            manifest = load_corpus_manifest(manifest_path)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"corpus manifest unusable: {exc}") from None
+        problems = audit_corpus_against_manifest(base, manifest, subtree="policies")
+        if problems:
+            # Abort rather than index the listed subset: a directory that does not
+            # match its manifest is not the corpus that was approved, and a report
+            # over part of it would read as a report over all of it.
+            raise RuntimeError(
+                "policy corpus does not match its manifest: " + "; ".join(problems)
+            )
+
     # A filename is committed corpus metadata — an input surface too. A file with
     # clean CONTENT but PII in its name (policies/Jane-Doe-330-90-5512.md) would
     # pass scan_file, then its path is written into the report and its stem
@@ -231,12 +513,38 @@ def run(base: Path = Path(".")) -> RunResult:
     # raw name is never echoed to logs or artifacts. unsafe_corpus_path_reason
     # covers both the PII-shape check and the lowercase-slug convention (see its
     # docstring); policy_retrieval reuses the same function at runtime.
-    path_reasons = [unsafe_corpus_path_reason(p.relative_to(base)) for p in candidates]
+    # The manifest covers the policy corpus only; every other root keeps the
+    # naming convention.
+    path_reasons = [
+        unsafe_corpus_path_reason(
+            p.relative_to(base),
+            base=base,
+            manifest=(
+                manifest
+                if manifest is not None
+                and p.relative_to(base).parts[:1] == ("policies",)
+                else None
+            ),
+        )
+        for p in candidates
+    ]
     pii_paths = [i for i, r in enumerate(path_reasons) if r == "pii"]
     if pii_paths:
         raise RuntimeError(
             f"corpus file path(s) at position(s) {pii_paths} contain PII in their "
             "names — rename them (paths are not echoed here)"
+        )
+    not_approved = [
+        i
+        for i, r in enumerate(path_reasons)
+        if r in {"not-in-manifest", "manifest-digest-mismatch"}
+    ]
+    if not_approved:
+        # Reachable even after a clean audit: the audit compares sets, this
+        # re-checks each file's content at the moment it is about to be read.
+        raise RuntimeError(
+            f"corpus path(s) at position(s) {not_approved} are not approved by the "
+            "manifest (path not echoed here)"
         )
     unsafe_names = [i for i, r in enumerate(path_reasons) if r == "non-slug"]
     if unsafe_names:
@@ -249,14 +557,39 @@ def run(base: Path = Path(".")) -> RunResult:
     verdicts = [scan_file(p) for p in candidates]
     cache_path = base / "rag_eval" / ".cache" / "embeddings.json"
 
+    # Every place a corpus file is NAMED downstream — the report's hygiene table,
+    # main()'s refusal lines, the chunk ids below — reads this map rather than the
+    # path. Same manifest scoping as `path_reasons` above: the declaration governs
+    # the policy corpus only, so every other root keeps the slug convention, whose
+    # names ARE graded and stay readable.
+    display_names = {}
+    doc_ids = {}
+    for v in verdicts:
+        rel = Path(v.path).relative_to(base)
+        scoped = (
+            manifest
+            if manifest is not None and rel.parts[:1] == ("policies",)
+            else None
+        )
+        doc_ids[v.path] = corpus_doc_id(rel, scoped)
+        # A display name is NOT a doc id. Without a manifest the slug convention
+        # has graded the path, so the report keeps the readable full path while
+        # the doc id stays the bare stem — the stem is what collides across
+        # directories, and the duplicate-id abort below depends on it doing so.
+        display_names[v.path] = (
+            doc_ids[v.path] if scoped is not None else rel.as_posix()
+        )
+
     # THE GATE (spec D2.4): only gate-passed markdown reaches the chunker.
     chunks: list[Chunk] = []
     for v in verdicts:
         if v.passed and v.path.endswith(".md"):
-            chunks.extend(chunk_markdown(v.path))
+            chunks.extend(chunk_markdown(v.path, doc_id=doc_ids[v.path]))
     # Recursive discovery can surface two docs with the same stem in different
     # folders → same doc# id prefix. The chunker guards collisions within one
     # file; guard across files here so the gold-set id contract still holds.
+    # Under a manifest the ids are digest-derived, so a collision means two
+    # listed files with identical content rather than a stem clash.
     ids = [c.chunk_id for c in chunks]
     dupes = sorted({cid for cid in ids if ids.count(cid) > 1})
     if dupes:
@@ -284,7 +617,8 @@ def run(base: Path = Path(".")) -> RunResult:
     # EVERY string field, not just the query. Fail closed HERE, before any
     # embedder/cache side effect, and identify offenders by position only —
     # never echo a field value (the id itself could be the PII).
-    gold = json.loads(GOLD_PATH.read_text(encoding="utf-8"))["queries"]
+    gold_source = gold_path or GOLD_PATH
+    gold = json.loads(gold_source.read_text(encoding="utf-8"))["queries"]
     # Schema-harden first: lock the structured fields to machine shapes so they
     # cannot smuggle free-text PII (a name hidden in an id or an expected entry),
     # and reject unknown keys so a future free-text field cannot appear that the
@@ -323,6 +657,63 @@ def run(base: Path = Path(".")) -> RunResult:
             )
         if "note" in q and not isinstance(q["note"], str):
             raise RuntimeError(f"gold query at position {i} has a non-string 'note'")
+        topic = q.get("topic")
+        if topic is not None and topic not in TOPIC_CODES and topic != UNMAPPED:
+            # A code the officer channel cannot emit is a case the product cannot
+            # be asked. Scoring it would report coverage that does not exist, so
+            # the loader refuses rather than inventing a bucket.
+            raise RuntimeError(
+                f"gold query at position {i} has a 'topic' outside the officer "
+                f"vocabulary — allowed values are {sorted(TOPIC_CODES)} "
+                f"or {UNMAPPED!r}"
+            )
+        outcome_class = q.get("outcome_class")
+        # isinstance first: a JSON array/object value is unhashable, and testing
+        # it against the frozenset raises a raw TypeError instead of the schema
+        # error every other malformed field here fails with.
+        if outcome_class is not None and (
+            not isinstance(outcome_class, str) or outcome_class not in _OUTCOME_CLASSES
+        ):
+            raise RuntimeError(
+                f"gold query at position {i} has an unknown 'outcome_class' "
+                f"— allowed values are {sorted(_OUTCOME_CLASSES)}"
+            )
+        # `no_match` and `unanswerable` state the same fact. Allowing them to
+        # disagree would score an abstention case on rank of an expected chunk it
+        # does not have, or score a retrieval case on staying below the
+        # threshold — either way silently, and only in the class whose whole
+        # purpose is proving abstention works.
+        if outcome_class is not None:
+            if (outcome_class == "no_match") != bool(q.get("unanswerable")):
+                raise RuntimeError(
+                    f"gold query at position {i} sets outcome_class and "
+                    "'unanswerable' inconsistently — 'no_match' requires "
+                    "unanswerable true, and every other class requires it false "
+                    "or absent"
+                )
+
+        # The class says what a case is FOR; `expected` is what scores it. Left
+        # free to disagree, a scored class with no expected chunk is unhittable:
+        # it scores incorrect however retrieval behaves, and its empty expected
+        # cell reads as the abstention case in the very table added to make a
+        # class-level failure visible (report.py now labels that cell by class
+        # too). Resolve the class the way QueryEval.__post_init__ does, so a
+        # set that omits the field is held to the same rule.
+        resolved = outcome_class or ("no_match" if q.get("unanswerable") else "answer")
+        if resolved == "no_match" and expected:
+            raise RuntimeError(
+                f"gold query at position {i} resolves to outcome_class "
+                "'no_match' but carries 'expected' chunk ids — an abstention "
+                "case is scored on staying below the threshold and must leave "
+                "'expected' empty"
+            )
+        if resolved != "no_match" and not expected:
+            raise RuntimeError(
+                f"gold query at position {i} resolves to outcome_class "
+                f"'{resolved}' but names no 'expected' chunk ids — every class "
+                "except 'no_match' is scored on retrieval rank and must name at "
+                "least one expected chunk"
+            )
 
     # Then screen the remaining free text (query/note) for self-identifying PII.
     dirty = [
@@ -331,7 +722,7 @@ def run(base: Path = Path(".")) -> RunResult:
     if dirty:
         raise RuntimeError(
             f"gold queries at position(s) {dirty} contain PII and must be "
-            "sanitized (rag_eval/gold_queries.json) — no field values are echoed"
+            f"sanitized ({gold_source}) — no field values are echoed"
         )
     # scan_text is label-gated for names; also refuse a probable person name in
     # free text, which would otherwise be embedded (Bedrock) and printed to the
@@ -344,21 +735,33 @@ def run(base: Path = Path(".")) -> RunResult:
     if named:
         raise RuntimeError(
             f"gold queries at position(s) {named} contain a probable person name "
-            "and must use synthetic ids/placeholders (rag_eval/gold_queries.json) "
+            f"and must use synthetic ids/placeholders ({gold_source}) "
             "— no field values are echoed"
         )
 
     embedder = make_embedder()
+    # Both decisions read the embedder itself, so they cannot disagree with the
+    # backend that actually makes the calls.
+    refuse_traced_provider_run(embedder)
     embedder.fit([c.text for c in chunks])
     cache = EmbeddingCache(cache_path)
+    caching = cache_enabled(embedder)
+    if not caching:
+        # A provider backend runs cacheless: the vectors are content-derived and
+        # the client excluded retention. Purge anything a prior TF-IDF run left,
+        # so "no retention" is a state on disk rather than a claim about this run.
+        cache_path.unlink(missing_ok=True)
     index = InMemoryIndex()
     try:
         for c in chunks:
             index.add(
                 c.chunk_id,
-                cache.get_or_embed(embedder.signature, c.text, embedder.embed),
+                cache.get_or_embed(embedder.signature, c.text, embedder.embed)
+                if caching
+                else embedder.embed(c.text),
             )
-        cache.save()
+        if caching:
+            cache.save()
     except Exception:
         # A partial/failed embed run (e.g. a Bedrock timeout mid-loop) must not
         # leave the prior cache — which may hold vectors for a now-removed or
@@ -385,25 +788,43 @@ def run(base: Path = Path(".")) -> RunResult:
             unanswerable=bool(q.get("unanswerable")),
             retrieved=retrieved[q["id"]],
             threshold=threshold,
+            topic=q.get("topic", UNMAPPED),
+            outcome_class=q.get("outcome_class"),
         )
         for q in gold
     ]
 
     agg = aggregate(evals)
+    # Read the counters AFTER the gold-query embeds above: a provider run embeds
+    # every indexed chunk and every gold query, and both are provider calls the
+    # client's report has to account for. TF-IDF carries no such counters.
+    provider_calls = getattr(embedder, "calls", 0)
+    provider_retries = getattr(embedder, "retries", 0)
+    provider_input_tokens = getattr(embedder, "input_tokens", 0)
     report_text = report_mod.build(
         verdicts=verdicts,
+        display_names=display_names,
         n_chunks=len(chunks),
         cache_hits=cache.hits,
         cache_misses=cache.misses,
+        caching=caching,
+        provider_calls=provider_calls,
+        provider_retries=provider_retries,
+        provider_input_tokens=provider_input_tokens,
         threshold=threshold,
         evals=evals,
         agg=agg,
         embedder_signature=embedder.signature,
     )
     report_path = base / "rag_eval" / "eval_report.md"
+    # Created explicitly: this directory used to exist only as a side effect of
+    # EmbeddingCache.save() writing its parent, so a cacheless provider run —
+    # which is the graded configuration — reached this line with no directory.
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report_text, encoding="utf-8")
     return RunResult(
         verdicts=verdicts,
+        display_names=display_names,
         n_chunks=len(chunks),
         cache_hits=cache.hits,
         cache_misses=cache.misses,
@@ -413,20 +834,39 @@ def run(base: Path = Path(".")) -> RunResult:
         report_path=report_path,
         report_text=report_text,
         embedder_signature=embedder.signature,
+        caching=caching,
+        provider_calls=provider_calls,
+        provider_retries=provider_retries,
+        provider_input_tokens=provider_input_tokens,
     )
 
 
-def main(base: Path = Path(".")) -> None:
-    result = run(base=base)
+def main(
+    base: Path = Path("."),
+    gold_path: Path | None = None,
+    manifest_path: Path | None = None,
+) -> None:
+    result = run(base=base, gold_path=gold_path, manifest_path=manifest_path)
     refused = [v for v in result.verdicts if not v.passed]
     print(f"gate: {len(result.verdicts)} files scanned, {len(refused)} refused")
     for v in refused:
-        print(f"  REFUSED {v.path}: {v.counts()}")
+        # Named through display_names, never the raw path: a manifest-admitted
+        # filename is graded by nothing and can itself be the identifier.
+        print(f"  REFUSED {result.display_names.get(v.path, v.path)}: {v.counts()}")
     print(f"embedder: {result.embedder_signature}")
-    print(
-        f"embeddings: {result.n_chunks} chunks, "
-        f"{result.cache_misses} embedded this run, {result.cache_hits} from cache"
-    )
+    if result.caching:
+        print(
+            f"embeddings: {result.n_chunks} chunks, "
+            f"{result.cache_misses} embedded this run, {result.cache_hits} from cache"
+        )
+    else:
+        # Cacheless provider run: the cache counters are structurally 0 here, so
+        # printing them would report a no-op for a run that embedded everything.
+        print(
+            f"embeddings: {result.n_chunks} chunks, {result.provider_calls} provider "
+            f"calls this run ({result.provider_retries} retries, "
+            f"{result.provider_input_tokens} input tokens), cache disabled"
+        )
     print(f"threshold: {result.threshold:.4f} (calibrated, see report)")
     print(f"report: {result.report_path}")
 
@@ -440,9 +880,41 @@ def main(base: Path = Path(".")) -> None:
             "new PII committed to the repo:"
         )
         for v in unexpected:
-            print(f"  {v.path}: {v.counts()}")
+            print(f"  {result.display_names.get(v.path, v.path)}: {v.counts()}")
         raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Retrieval eval harness (gate -> ingest -> embed -> report)."
+    )
+    parser.add_argument(
+        "--base",
+        type=Path,
+        default=Path("."),
+        help="working directory holding policies/ and receiving rag_eval/ outputs",
+    )
+    parser.add_argument(
+        "--gold",
+        type=Path,
+        default=None,
+        help=(
+            "gold query set to score, in the committed set's schema. Defaults to "
+            "rag_eval/gold_queries.json. Use it to score a question set that "
+            "must not be committed."
+        ),
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help=(
+            "checksum manifest (shasum -a 256) declaring the approved policy "
+            "corpus, names relative to --base (policies/X.md). Without it the "
+            "lowercase-slug naming convention governs admission."
+        ),
+    )
+    args = parser.parse_args()
+    main(base=args.base, gold_path=args.gold, manifest_path=args.manifest)

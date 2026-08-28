@@ -6,9 +6,15 @@ model never sees that text — the loop feeds it only the status code and the sc
 decision 3), which is why nothing here is shaped for a prompt.
 
 Everything fails closed to an abstention: an unimportable `rag_eval`, no corpus, a corpus
-file the ADR 0007 hygiene scan refuses, an unset or malformed threshold, an empty query, or a
-best match below the threshold all return `PolicyAnswer(status="policy_abstain", ...)`. An officer then reads "no policy
+file the ADR 0007 hygiene scan refuses, an unset or malformed threshold, an empty query, an
+embedder that cannot be built or called, or a best match below the threshold all return
+`PolicyAnswer(status="policy_abstain", ...)`. An officer then reads "no policy
 match", which is honest; a fabricated or unvouched-for quotation would not be.
+
+"Everything" is load-bearing, not a summary: retrieval is an optional assistant tool, so no
+failure in it may reach the officer's request as a 500 (`assistant.entry`, app/main.py, would
+also attach the exception string to the span). Every call into `rag_eval` from here is
+guarded.
 
 The index is built once per process from `rag_eval` (importable in the container since card
 G2a) and kept in memory — 9 chunks, exact cosine (ADR 0007 rule 6, debt D16).
@@ -22,7 +28,13 @@ try:
     from rag_eval.chunker import chunk_markdown
     from rag_eval.hygiene import scan_file
     from rag_eval.index import InMemoryIndex
-    from rag_eval.run import make_embedder, unsafe_corpus_path_reason
+    from rag_eval.run import (
+        audit_corpus_against_manifest,
+        corpus_doc_id,
+        load_corpus_manifest,
+        make_embedder,
+        unsafe_corpus_path_reason,
+    )
 except ImportError as exc:
     # `rag_eval` is repo-root, and card G2a puts it in the IMAGE (copied to /app/rag_eval,
     # WORKDIR /app) — it does not put it on the sys.path of every checkout. A bare
@@ -152,7 +164,85 @@ def _load_corpus() -> list:
     """
     chunks = []
     base = corpus_dir()
-    for path in sorted(base.glob("*.md")):
+    manifest = None
+    if config.POLICY_CORPUS_MANIFEST:
+        # Fail closed on every manifest problem: an unreadable or malformed
+        # declaration, or a corpus that does not match it, yields no corpus and
+        # therefore an abstention. Indexing the listed subset of a mismatched
+        # directory would serve a different corpus than the one approved, which
+        # is worse than answering "no policy match".
+        try:
+            manifest = load_corpus_manifest(Path(config.POLICY_CORPUS_MANIFEST))
+        except (OSError, ValueError) as exc:
+            log.warning(
+                "policy corpus manifest unusable, indexing nothing: %s", exc
+            )
+            return []
+        problems = audit_corpus_against_manifest(base, manifest)
+        if problems:
+            log.warning(
+                "policy corpus does not match its manifest, indexing nothing: %s",
+                "; ".join(problems),
+            )
+            return []
+    if manifest is not None:
+        # The audit compares path SETS; it never reads content. Re-check every
+        # approved entry's digest here, at the moment the corpus is about to be
+        # read — `rag_eval.run` does exactly this after its own clean audit, and
+        # aborts the run. It is also the ONLY place a non-markdown entry is
+        # verified at all, since the walk below is markdown-only: a listed .txt
+        # mutated after approval would otherwise leave the corpus looking
+        # approved. A corpus that no longer matches its declaration is not the
+        # corpus that was approved, so this refuses all of it rather than
+        # skipping the offending file and serving the rest.
+        unapproved = [
+            reason
+            for name in manifest
+            if (
+                reason := unsafe_corpus_path_reason(
+                    Path(name), base=base, manifest=manifest
+                )
+            )
+            is not None
+        ]
+        if unapproved:
+            log.warning(
+                "policy corpus does not match its manifest on content, indexing "
+                "nothing: %s of %s approved entries (%s) — names withheld, an "
+                "unapproved name can itself be the identifier",
+                len(unapproved),
+                len(manifest),
+                ", ".join(sorted(set(unapproved))),
+            )
+            return []
+
+        # The audit grades every file the manifest lists; the loader only chunks
+        # markdown. An approved file in another format therefore audits clean and
+        # is then never indexed — the same silent coverage hole a flat walk
+        # created for subdirectories. Say so: an officer getting "no policy
+        # match" on approved content otherwise has nothing to read. Count only,
+        # never the names — a manifest can list a filename this path never ran
+        # `scan_text` over, and the name itself can be the borrower data.
+        unindexable = sum(1 for name in manifest if not name.endswith(".md"))
+        if unindexable:
+            log.warning(
+                "policy corpus manifest approves %s file(s) this loader cannot "
+                "index (not .md), which are not retrievable (names withheld)",
+                unindexable,
+            )
+
+    # Recursive ONLY under a manifest, to match the walk that declaration is
+    # graded by: `audit_corpus_against_manifest` uses rglob (as does
+    # `rag_eval.run`'s own discovery), so a flat glob would let an approved file
+    # in a subdirectory audit clean and then never be indexed — retrieval
+    # abstaining on approved content with nothing reporting a refusal.
+    #
+    # Without a manifest there is no audit to match, and the corpus arrives over
+    # a bind mount an operator controls. Descending there would newly serve
+    # whatever sits in a subdirectory — a draft, an archived copy — verbatim to
+    # an officer as policy, admitted by nothing but its filename. Stay flat.
+    walk = base.rglob("*.md") if manifest is not None else base.glob("*.md")
+    for path in sorted(walk):
         # The hygiene gate below scans CONTENT only. A file mounted with clean
         # content but an unsafe NAME (jane-doe-123-45-6789.md) would still pass
         # it, then leak identity through the officer-visible chunk id (doc =
@@ -160,7 +250,8 @@ def _load_corpus() -> list:
         # CI-time scan never sees this bind-mounted copy, so re-check the path
         # here with the same function rag_eval.run applies to the committed
         # corpus (rag_eval/run.py::run).
-        reason = unsafe_corpus_path_reason(path.relative_to(base))
+        rel = path.relative_to(base)
+        reason = unsafe_corpus_path_reason(rel, base=base, manifest=manifest)
         if reason is not None:
             # The filename itself is the flagged problem — unlike the branches
             # below, path.name is not safe to log here.
@@ -170,25 +261,31 @@ def _load_corpus() -> list:
                 reason,
             )
             continue
+        # Named by doc id from here down, never `path.name`: under a manifest the
+        # filename is admitted on its digest and graded by nothing — `scan_text`
+        # is label-gated, so a bare person name passes it — so the name must not
+        # reach a log line any more than it reaches a chunk id. Without a
+        # manifest the doc id is the stem the slug convention already graded.
+        doc_id = corpus_doc_id(rel, manifest)
         try:
             verdict = scan_file(path)
         except OSError as exc:
             log.warning(
-                "policy corpus file unreadable, skipped: %s (%s)", path.name, exc
+                "policy corpus file unreadable, skipped: %s (%s)", doc_id, exc
             )
             continue
         if not verdict.passed:
             log.warning(
                 "policy corpus file REFUSED by the hygiene gate, not indexed: %s (%s)",
-                path.name,
+                doc_id,
                 verdict.counts(),
             )
             continue
         try:
-            chunks.extend(chunk_markdown(path))
+            chunks.extend(chunk_markdown(path, doc_id=doc_id))
         except (OSError, ValueError) as exc:
             log.warning(
-                "policy corpus file not chunkable, skipped: %s (%s)", path.name, exc
+                "policy corpus file not chunkable, skipped: %s (%s)", doc_id, exc
             )
     return chunks
 
@@ -197,11 +294,61 @@ def _build_index():
     chunks = _load_corpus()
     if not chunks:
         return None
-    embedder = make_embedder()
-    embedder.fit([c.text for c in chunks])
-    index = InMemoryIndex()
-    for chunk in chunks:
-        index.add(chunk.chunk_id, embedder.embed(chunk.text))
+    # Checked BEFORE any embedder work: it needs no vectors, and on the Bedrock
+    # backend every chunk below is a billed provider call for a corpus this is
+    # about to refuse anyway.
+    #
+    # Two documents sharing a filename stem (different directories, or two
+    # manifest-approved spellings differing only by case) emit identical chunk
+    # ids, because the chunker lowercases the stem. InMemoryIndex keeps both
+    # entries while the id->text map keeps one, so search would score one
+    # chunk's vector and return the other chunk's text — the wrong policy under
+    # a citation that looks legitimate. `rag_eval.run` aborts the run on this;
+    # the service's equivalent is to index nothing, which abstains.
+    ids = [c.chunk_id for c in chunks]
+    duplicates = sorted({cid for cid in ids if ids.count(cid) > 1})
+    if duplicates:
+        log.warning(
+            "policy corpus has duplicate chunk ids, indexing nothing: %s "
+            "— two documents share a filename stem",
+            duplicates,
+        )
+        return None
+    try:
+        embedder = make_embedder()
+        embedder.fit([c.text for c in chunks])
+        index = InMemoryIndex()
+        for chunk in chunks:
+            index.add(chunk.chunk_id, embedder.embed(chunk.text))
+    except Exception as exc:
+        # ONE guard over the whole build, deliberately: `make_embedder` reads
+        # RAG_EMBEDDER and AWS_REGION (both wired through docker-compose.yml)
+        # and raises on an unknown backend name or a region that was never
+        # configured, while the per-chunk `embed` below is a provider call on
+        # the Bedrock backend and fails on absent, expired or rotated
+        # credentials. Guarding only the first two missed that loop:
+        # `BedrockEmbedder.fit` is a no-op that just sets the signature, so the
+        # FIRST network call is inside the loop, and a container smoke with a
+        # real region and no credentials raised
+        # `ClientError(IncompleteSignatureException)` out of `search()`.
+        #
+        # None of it is an unhealthy service — retrieval is an optional
+        # assistant tool, so it abstains, exactly as an unset threshold and an
+        # absent harness already do. Unguarded, the exception left `search()`,
+        # crossed `assistant.entry` (app/main.py, which attaches
+        # `str(exception)` to the span) and became a 500 on the officer's
+        # request.
+        #
+        # The message is safe to log: it is config text or a provider fault, and
+        # the only input in scope here is gate-passed corpus text an officer may
+        # already read. The model-supplied query is NOT in scope — see
+        # `search()` for the embed that holds one, which logs the type alone.
+        log.warning(
+            "policy retrieval disabled: embedder unavailable (%s: %s)",
+            type(exc).__name__,
+            exc,
+        )
+        return None
     log.info("policy corpus indexed: %s chunks from %s", len(chunks), corpus_dir())
     return index, embedder, {c.chunk_id: c.text for c in chunks}
 
@@ -246,7 +393,22 @@ def search(query: str) -> PolicyAnswer:
         )
         return abstain(NO_CORPUS)
     index, embedder, texts = state
-    hits = index.search(embedder.embed(query), k=1)
+    try:
+        vector = embedder.embed(query)
+    except Exception as exc:
+        # On the Bedrock backend this is a provider call holding the
+        # model-authored query. Log the exception TYPE only: a fault that echoes
+        # the input it was handed would put that free text in the log, and then
+        # -- raised -- on the `assistant.entry` span too. Abstaining keeps both
+        # promises at once (the query never leaves this process, and a provider
+        # fault is an abstention rather than a 500).
+        log.warning(
+            "policy retrieval abstained: query embedding failed (%s) — message "
+            "withheld, it can carry the model-authored query",
+            type(exc).__name__,
+        )
+        return abstain(NO_CORPUS)
+    hits = index.search(vector, k=1)
     if not hits:
         return abstain(NO_CORPUS)
     chunk_id, score = hits[0]

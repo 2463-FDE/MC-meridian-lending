@@ -63,11 +63,24 @@ def test_full_run_over_real_corpus(real_corpus: Path):
     # expected chunk in the top 5.
     assert all(e.correct for e in result.evals if not e.unanswerable)
 
+    # The by-topic report the client asked for has to survive a real run. The
+    # axis shipped with `topic` on no committed case, so every case took the
+    # `unmapped` default and the table rendered a single `unmapped` row covering
+    # all twelve — present in code, absent from the output she is sent.
+    assert "| Topic | Cases | Correct |" in report
+    assert "| `credit_decisioning` | 2 |" in report
+    assert "| `fee_schedule` | 2 |" in report
+    # `unmapped` is reported as a count under the table, never as a topic row.
+    assert "| `unmapped` |" not in report
+    assert "2 case(s) carry `unmapped`" in report
+
 
 def test_no_raw_pii_in_report_or_cache(real_corpus: Path):
     result = run(base=real_corpus)
     sensitive: set[str] = set()
-    for line in (real_corpus / "kb_dump" / "applications.jsonl").read_text().splitlines():
+    for line in (
+        (real_corpus / "kb_dump" / "applications.jsonl").read_text().splitlines()
+    ):
         if not line.strip():
             continue
         record = json.loads(line)
@@ -87,3 +100,60 @@ def test_second_run_reembeds_nothing_on_real_corpus(real_corpus: Path):
     second = run(base=real_corpus)
     assert second.cache_misses == 0
     assert "nothing re-embedded" in second.report_text
+
+
+# Retrieval-quality floors. These are pinned MEASUREMENTS of this corpus under the
+# deterministic TF-IDF embedder, not aspirations — same posture tila-vectors-gate takes
+# toward its expectations. A value moving in EITHER direction is a deliberate re-pin.
+#
+# `test_full_run_over_real_corpus` above already floors k=5: `all(e.correct ...)` is
+# hit@5 == 1.00, because QueryEval.correct is hits[max(K_VALUES)]. That is the WEAKEST
+# of the three. A ranking collapse that pushes every expected chunk from rank 1 to rank 5
+# leaves it green while hit@1 falls 0.90 -> 0.00 and MRR falls 0.95 -> 0.20. These are the
+# ranking floors it cannot see, and the reason the gate could not tell a healthy index
+# from a barely-working one.
+_FLOOR_HIT_AT_1 = 0.90
+_FLOOR_HIT_AT_3 = 1.00
+_FLOOR_MRR = 0.95
+_FLOOR_UNANSWERABLE_CORRECT = 1
+
+# The DENOMINATOR is pinned too, not just the rates. A rate floor computed over a gold
+# set trimmed to one easy query reports 1.00 and measures nothing — the same "audit the
+# list, not only the entries on it" failure `spec_diff_gate.sh` shipped. Growing the gold
+# set is expected to fail here: that forces the new query's effect on every floor to be
+# looked at once, deliberately, instead of diluting them silently.
+_GOLD_ANSWERABLE = 10
+_GOLD_UNANSWERABLE = 2
+
+
+def test_retrieval_quality_floor(real_corpus: Path):
+    """The gate fails when ranking quality regresses, not only when retrieval breaks.
+
+    Floors are `>=` against exact literals. The values are deterministic (TF-IDF over a
+    fixed corpus), and any float representation edge lands on the failing side of a `>=`,
+    which is the safe direction for a gate: a spurious red is investigated, a spurious
+    green is not.
+
+    Only `q12-off-corpus` is expected to abstain correctly. `q11-why-6012-denied` retrieves
+    a process chunk above threshold and is scored WRONG on purpose (report Data-gaps): it
+    is answerable from the decision record, not the corpus, so the floor is 1 of 2 rather
+    than 2 of 2. Raising it is the D16/answerability work, not a tuning exercise.
+    """
+    result = run(base=real_corpus)
+    agg = result.agg
+
+    # The floors are calibrated to ONE backend. A swap to Bedrock/Titan measures
+    # differently (hit@1 0.90 -> 0.70, MRR 0.95 -> 0.85 on this same corpus), so a silent
+    # default change must not be read as a quality regression — or the reverse.
+    # The digest after the colon is a corpus hash and moves whenever `policies/` is
+    # edited, so only the family is pinned.
+    assert result.embedder_signature.startswith("tfidf-v1:")
+
+    assert (agg.n_answerable, agg.n_unanswerable) == (
+        _GOLD_ANSWERABLE,
+        _GOLD_UNANSWERABLE,
+    )
+    assert agg.hit_at_k[1] >= _FLOOR_HIT_AT_1
+    assert agg.hit_at_k[3] >= _FLOOR_HIT_AT_3
+    assert agg.mrr >= _FLOOR_MRR
+    assert agg.unanswerable_correct >= _FLOOR_UNANSWERABLE_CORRECT

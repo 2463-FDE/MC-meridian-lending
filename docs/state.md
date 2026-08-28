@@ -8,12 +8,17 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (fb8924f)` — fb8924f 2026-08-26 Merge pull request #94 from 2463-FDE/fix/kb-freshness-merge-ref
+Base: `origin/main (2525f96)` — 2525f96 2026-08-27 Merge pull request #99 from 2463-FDE/feat/rag-eval-topic-axis
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #99 | `2525f96` | 2026-08-27 | Merge pull request #99 from 2463-FDE/feat/rag-eval-topic-axis |
+| #98 | `916f9ee` | 2026-08-27 | Merge pull request #98 from 2463-FDE/feat/rag-eval-gold-set-v2 |
+| #97 | `eaeadad` | 2026-08-27 | Merge pull request #97 from 2463-FDE/fix/rag-eval-titan-controls |
+| #96 | `e573401` | 2026-08-27 | Merge pull request #96 from 2463-FDE/fix/policy-corpus-admission |
+| #95 | `9aeb618` | 2026-08-27 | Merge pull request #95 from 2463-FDE/test/rag-eval-quality-floor |
 | #94 | `fb8924f` | 2026-08-26 | Merge pull request #94 from 2463-FDE/fix/kb-freshness-merge-ref |
 | #93 | `71f6f84` | 2026-08-26 | Merge pull request #93 from 2463-FDE/feat/root-span-outcome |
 | #92 | `1eec439` | 2026-08-26 | Merge pull request #92 from 2463-FDE/fix/cvv-deletion |
@@ -151,7 +156,6 @@ A job is BLOCKING unless its body carries `continue-on-error` or `|| true`.
 - **BLOCKING** — `kyc-enforcement-gate`
 - **BLOCKING** — `kyc-persistence-gate`
 - **BLOCKING** — `payment-idempotency-gate`
-- **BLOCKING** — `assistant-telemetry-gate`
 - **BLOCKING** — `no-sad-gate`
 - **BLOCKING** — `tila-vectors-gate`
 - **BLOCKING** — `reconciliation-gate`
