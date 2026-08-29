@@ -8,12 +8,14 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (8fa35fb)` — 8fa35fb 2026-08-28 Merge pull request #107 from 2463-FDE/feat/rag-eval-prohibited-conclusion
+Base: `origin/main (01f8cc1)` — 01f8cc1 2026-08-29 Merge pull request #109 from 2463-FDE/feat/rag-eval-prohibited-conclusion
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #109 | `01f8cc1` | 2026-08-29 | Merge pull request #109 from 2463-FDE/feat/rag-eval-prohibited-conclusion |
+| #108 | `4471bc4` | 2026-08-28 | Merge pull request #108 from 2463-FDE/feat/rag-eval-conclusion-fields |
 | #107 | `8fa35fb` | 2026-08-28 | Merge pull request #107 from 2463-FDE/feat/rag-eval-prohibited-conclusion |
 | #106 | `108100f` | 2026-08-28 | Merge pull request #106 from 2463-FDE/fix/rag-eval-summary-freeze |
 | #105 | `be796f0` | 2026-08-28 | Merge pull request #105 from 2463-FDE/feat/rag-eval-two-verdicts |
