@@ -46,6 +46,12 @@ services/payment-service/app/redactor.py => adr/0006-logging-redaction-strategy.
 # --- Week 2: RAG corpus hygiene ---------------------------------------------
 rag_eval => adr/0007-rag-corpus-hygiene.md
 
+# The evaluator is its own decision, not corpus hygiene: 0007 governs what may
+# be admitted to the corpus, 0022 governs sending that admitted text to a
+# generative model under S-5's narrow exception. Mapped to the module rather
+# than to `rag_eval`, which already belongs to 0007 above.
+rag_eval/evaluator.py => adr/0022-offline-evaluator-for-the-support-test.md
+
 # --- Week 3: decisioning assistant ------------------------------------------
 services/decision-service/app => docs/spec-decision-assistant-week3.md
 services/decision-service/app => adr/0009-decisioning-assistant-design.md
