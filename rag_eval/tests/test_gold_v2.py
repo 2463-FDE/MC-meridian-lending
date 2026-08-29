@@ -439,3 +439,92 @@ def test_report_does_not_label_a_scored_case_unanswerable():
 
     assert "q-scored" in text
     assert "*(unanswerable)*" not in text
+
+
+# --- the delivered shape is transcribed, not loaded ---
+#
+# `--gold` takes the committed set's schema: ONE JSON object shaped
+# {"queries": [...]}. The client's delivery is line-delimited JSON, and the
+# camelCase aliases exist so a set transcribed FROM it keeps her column names.
+# Handed the delivered file directly, the loader used to raise a bare
+# json.JSONDecodeError ("Extra data") or KeyError('queries') — stdlib exceptions
+# naming the parser, not the contract the operator missed. Every other
+# gold-schema violation raises a RuntimeError that says what was expected, and so
+# does the sibling operator-input reader, load_corpus_manifest. This was the one
+# input surface that did not.
+
+
+def test_delivered_jsonl_is_refused_with_the_expected_shape(tmp_path: Path):
+    # Multi-row JSONL, carrying her camelCase negative target: it must never
+    # reach the alias logic, because the container is wrong first.
+    base = _corpus(tmp_path)
+    gold = tmp_path / "gold.jsonl"
+    gold.write_text(
+        json.dumps(
+            {
+                "id": "q-late-fee",
+                "query": "what is the late fee",
+                "expected": ["fees#late-fee"],
+                "prohibitedUnsupportedConclusion": "Any invented cutoff.",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "id": "q-late-fee-2",
+                "query": "when is the late fee assessed",
+                "expected": ["fees#late-fee"],
+                "prohibitedUnsupportedConclusion": "A catch-all denial script.",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError) as exc:
+        run_mod.run(base=base, gold_path=gold)
+
+    msg = str(exc.value)
+    assert '{"queries": [...]}' in msg
+    assert "transcribed" in msg
+    # Positional only: her question text must not be echoed into the error.
+    assert "late fee" not in msg
+    assert "invented cutoff" not in msg
+
+
+def test_single_row_jsonl_is_refused_rather_than_raising_keyerror(tmp_path: Path):
+    # One row parses as valid JSON, so the old failure was KeyError('queries').
+    base = _corpus(tmp_path)
+    gold = tmp_path / "gold.jsonl"
+    gold.write_text(
+        json.dumps(
+            {
+                "id": "q-late-fee",
+                "query": "what is the late fee",
+                "expected": ["fees#late-fee"],
+                "prohibitedUnsupportedConclusion": "Any invented cutoff.",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError) as exc:
+        run_mod.run(base=base, gold_path=gold)
+
+    msg = str(exc.value)
+    assert "no top-level 'queries'" in msg
+    assert "late fee" not in msg
+
+
+def test_queries_that_is_not_a_list_is_refused(tmp_path: Path):
+    # Same container cell: enumerate() over a dict or a string would walk keys
+    # or characters and report a per-position schema error instead.
+    base = _corpus(tmp_path)
+    gold = tmp_path / "gold.json"
+    gold.write_text(json.dumps({"queries": {"q-late-fee": {}}}), encoding="utf-8")
+
+    with pytest.raises(RuntimeError) as exc:
+        run_mod.run(base=base, gold_path=gold)
+
+    assert "'queries' that is not a list" in str(exc.value)
