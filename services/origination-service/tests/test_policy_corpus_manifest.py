@@ -35,9 +35,7 @@ def _corpus(tmp_path: Path, names=(NAME,)) -> tuple[Path, dict[str, str]]:
 
 def _manifest(tmp_path: Path, entries: dict[str, str]) -> Path:
     mf = tmp_path / "CORPUS-SHA256SUMS.txt"
-    mf.write_text(
-        "".join(f"{d}  {n}\n" for n, d in entries.items()), encoding="utf-8"
-    )
+    mf.write_text("".join(f"{d}  {n}\n" for n, d in entries.items()), encoding="utf-8")
     return mf
 
 
@@ -130,6 +128,106 @@ def test_existing_lowercase_corpus_still_loads(tmp_path: Path, monkeypatch):
     assert policy_retrieval._load_corpus()
 
 
+# --- One manifest file must admit the corpus for both callers --------------
+# `rag_eval.run`'s pre-admission audit (the client's whole-package delivery
+# check) reads entries as `policies/X.md`; this runtime audits directly
+# against the policy corpus directory, so it has always read entries as
+# bare `X.md`. A client's own checksum file — the artifact this control
+# exists to admit VERBATIM — arrives in the first form. Requiring a human to
+# strip the prefix before it reaches POLICY_CORPUS_MANIFEST is exactly the
+# manual-transcription risk manifest admission was built to avoid.
+
+
+def test_a_base_relative_manifest_is_accepted_unedited(tmp_path: Path, monkeypatch):
+    base, digests = _corpus(tmp_path)
+    prefixed = {f"policies/{n}": d for n, d in digests.items()}
+    _configure(monkeypatch, base, _manifest(tmp_path, prefixed))
+
+    chunks = policy_retrieval._load_corpus()
+
+    assert chunks
+    doc_id = corpus_doc_id(Path(NAME), digests)
+    assert all(c.chunk_id.startswith(f"{doc_id}#") for c in chunks)
+
+
+def test_a_base_relative_manifest_ignores_a_sibling_subtree(
+    tmp_path: Path, monkeypatch
+):
+    # The client's whole-package manifest also lists files outside the policy
+    # corpus (kb_dump, its own checksum-file name). Those entries are out of
+    # scope for this admission and must not make an otherwise-clean corpus
+    # look unapproved, the same reasoning `subtree` scoping already applies
+    # on the rag_eval side.
+    base, digests = _corpus(tmp_path)
+    prefixed = {f"policies/{n}": d for n, d in digests.items()}
+    prefixed["kb_dump/unrelated.md"] = "0" * 64
+    _configure(monkeypatch, base, _manifest(tmp_path, prefixed))
+
+    chunks = policy_retrieval._load_corpus()
+
+    assert chunks
+
+
+class _RecordingLog:
+    """Captures what the module logs. `logging_config.get_logger` sets
+    `propagate = False`, so `caplog` reports nothing for a line that WAS logged —
+    see `test_policy_retrieval.py`'s copy of this same recorder."""
+
+    def __init__(self):
+        self.lines = []
+
+    def _record(self, msg, *args):
+        self.lines.append(msg % args if args else msg)
+
+    warning = info = _record
+
+
+def test_a_mixed_convention_manifest_fails_closed_not_silently(
+    tmp_path: Path, monkeypatch
+):
+    # A bare entry with no subtree qualifier at all, alongside a policies/
+    # -prefixed one, is not a sibling subtree like kb_dump/ -- when a file by
+    # that exact name actually sits in the corpus directory, it is
+    # indistinguishable from an already-narrowed approval an operator forgot
+    # to convert when appending a new entry in the other convention. Keeping
+    # only the prefixed half would silently drop that approval from the
+    # audited set while the file stays on disk, so the corpus is refused
+    # anyway ("unlisted file") but for a cause the log never names. This must
+    # fail closed AND say why, not just fail closed.
+    base, digests = _corpus(tmp_path)
+    (base / "fee_schedule.md").write_text(BODY, encoding="utf-8")
+    mixed = {f"policies/{n}": d for n, d in digests.items()}
+    mixed["fee_schedule.md"] = "1" * 64
+    _configure(monkeypatch, base, _manifest(tmp_path, mixed))
+    recorder = _RecordingLog()
+    monkeypatch.setattr(policy_retrieval, "log", recorder)
+
+    chunks = policy_retrieval._load_corpus()
+
+    assert chunks == []
+    assert "mixes corpus-relative" in "\n".join(recorder.lines)
+
+
+def test_a_base_relative_manifest_ignores_a_top_level_package_file(
+    tmp_path: Path, monkeypatch
+):
+    # The client's whole-package delivery also carries top-level package
+    # metadata beside `policies/` -- its own checksum file's name, or a
+    # PACKAGE-INVENTORY.txt -- that names no file in the policy corpus
+    # directory at all. That bare entry cannot be a narrowed corpus-relative
+    # approval (there is no corpus file it could be approving), so it must be
+    # dropped as out of scope, the same as a `kb_dump/`-qualified sibling,
+    # rather than refusing the whole corpus as a mixed convention.
+    base, digests = _corpus(tmp_path)
+    prefixed = {f"policies/{n}": d for n, d in digests.items()}
+    prefixed["PACKAGE-INVENTORY.txt"] = "0" * 64
+    _configure(monkeypatch, base, _manifest(tmp_path, prefixed))
+
+    chunks = policy_retrieval._load_corpus()
+
+    assert chunks
+
+
 # --- The audited set and the indexed set must be the same set -------------
 # `audit_corpus_against_manifest` walks the corpus recursively (rag_eval/run.py),
 # and so does the harness's own discovery, so a manifest-approved file in a
@@ -161,9 +259,7 @@ def test_manifest_approved_nested_document_is_indexed(tmp_path: Path, monkeypatc
     )
 
 
-def test_manifest_approved_nested_document_is_retrievable(
-    tmp_path: Path, monkeypatch
-):
+def test_manifest_approved_nested_document_is_retrievable(tmp_path: Path, monkeypatch):
     base, digests = _nested_corpus(tmp_path)
     _configure(monkeypatch, base, _manifest(tmp_path, digests))
     monkeypatch.setattr(config, "POLICY_RETRIEVAL_MIN_SCORE", "0.01")
@@ -236,9 +332,7 @@ def test_byte_identical_approved_twins_index_nothing(tmp_path: Path, monkeypatch
     assert policy_retrieval._build_index() is None
 
 
-def test_no_manifest_does_not_descend_into_subdirectories(
-    tmp_path: Path, monkeypatch
-):
+def test_no_manifest_does_not_descend_into_subdirectories(tmp_path: Path, monkeypatch):
     # The recursive walk exists to match what the manifest audit grades. Without
     # a manifest nothing is audited, and the corpus arrives over an operator's
     # bind mount — so a draft or an archived copy parked in a subdirectory must

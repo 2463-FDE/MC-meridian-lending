@@ -122,6 +122,65 @@ def abstain(reason: str, score: float = 0.0) -> PolicyAnswer:
 _lock = threading.Lock()
 _index_state = None  # (InMemoryIndex, embedder, {chunk_id: text}) once built
 
+# `rag_eval.run`'s pre-admission audit (the client's whole-package delivery
+# check) reads manifest entries as `policies/X.md`, matched against the
+# delivered package root. This runtime audits directly against the policy
+# corpus directory and has always read entries as bare `X.md`. A client's own
+# checksum file — the artifact manifest admission exists to admit VERBATIM —
+# arrives in the first form, so requiring a human to strip the prefix before
+# it reaches POLICY_CORPUS_MANIFEST is exactly the manual-transcription risk
+# this control was built to avoid.
+_MANIFEST_SUBTREE_PREFIX = "policies/"
+
+
+def _corpus_relative_manifest(manifest: dict[str, str], base: Path) -> dict[str, str]:
+    """Accept a manifest in either convention without a manual edit.
+
+    If any entry carries the `policies/` prefix, the manifest is a
+    whole-package listing: every prefixed entry is stripped to corpus-relative
+    and a sibling subtree entry (`kb_dump/x.md` — it names its own subtree, so
+    it cannot be mistaken for ours) is dropped as out of scope for this
+    corpus. A manifest with no prefixed entries is already corpus-relative and
+    passes through unchanged — the pre-existing convention, still exercised by
+    every manifest fixture that predates this function.
+
+    A bare entry with no subtree qualifier at all (`fee_schedule.md`)
+    alongside a `policies/`-prefixed one is ambiguous ONLY when a file by that
+    exact name actually sits in the policy corpus directory (`base`): that is
+    indistinguishable from an already-narrowed corpus-relative approval an
+    operator forgot to convert when appending a new entry in the other
+    convention. Silently keeping only the prefixed half would then drop that
+    approval's entry from the audited set without dropping the file from
+    disk, which the existing "unlisted file" refusal reports as if the file
+    were never approved at all — true, but for the wrong reason, and every
+    other entry in the manifest is refused right along with it. Raise instead
+    so the failure names the actual cause.
+
+    A bare entry that names no file in the corpus directory cannot be that —
+    there is no corpus file it could be narrowing an approval for. It is
+    package-level metadata (`PACKAGE-INVENTORY.txt`, the checksum file's own
+    name) sitting beside the `policies/` subtree in a whole-package delivery,
+    exactly like a `kb_dump/`-qualified sibling, so it is dropped the same
+    way rather than refusing the whole corpus.
+    """
+    prefixed = {
+        name[len(_MANIFEST_SUBTREE_PREFIX) :]: digest
+        for name, digest in manifest.items()
+        if name.startswith(_MANIFEST_SUBTREE_PREFIX)
+    }
+    if not prefixed:
+        return manifest
+    ambiguous = sorted(
+        name for name in manifest if "/" not in name and (base / name).is_file()
+    )
+    if ambiguous:
+        raise ValueError(
+            f"manifest mixes corpus-relative and {_MANIFEST_SUBTREE_PREFIX}-prefixed "
+            f"entries: {len(ambiguous)} entries have no subtree qualifier at all "
+            "(names withheld — an unapproved name can itself be the identifier)"
+        )
+    return prefixed
+
 
 def corpus_dir() -> Path:
     """The corpus directory: configured, else the mount, else the checkout.
@@ -173,10 +232,9 @@ def _load_corpus() -> list:
         # is worse than answering "no policy match".
         try:
             manifest = load_corpus_manifest(Path(config.POLICY_CORPUS_MANIFEST))
+            manifest = _corpus_relative_manifest(manifest, base)
         except (OSError, ValueError) as exc:
-            log.warning(
-                "policy corpus manifest unusable, indexing nothing: %s", exc
-            )
+            log.warning("policy corpus manifest unusable, indexing nothing: %s", exc)
             return []
         problems = audit_corpus_against_manifest(base, manifest)
         if problems:
@@ -270,9 +328,7 @@ def _load_corpus() -> list:
         try:
             verdict = scan_file(path)
         except OSError as exc:
-            log.warning(
-                "policy corpus file unreadable, skipped: %s (%s)", doc_id, exc
-            )
+            log.warning("policy corpus file unreadable, skipped: %s (%s)", doc_id, exc)
             continue
         if not verdict.passed:
             log.warning(
