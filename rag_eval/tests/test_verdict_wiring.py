@@ -279,11 +279,15 @@ def test_a_row_without_a_literal_takes_the_model_conclusion(tmp_path, monkeypatc
     assert result.evals[0].conclusion_verdict == UNSUPPORTED
 
 
-def test_an_over_long_rationale_is_truncated_not_raised(tmp_path, monkeypatch):
+def test_an_over_long_rationale_is_never_persisted(tmp_path, monkeypatch):
     """QueryEval refuses an over-long rationale (S-10).
 
-    Losing a whole graded case to a model that wrote one sentence too many would
-    spend a sample S-7 will not give back, so the call site truncates.
+    Truncating at the call site would still write the first
+    RATIONALE_MAX_CHARS of the model's text into the report -- exactly the
+    passage-leak S-10 exists to stop, since the harness cannot tell a
+    retrieved passage from ordinary prose. The call site must not pass any of
+    the over-long text through: it downgrades to human_review with a fixed,
+    content-free rationale instead.
     """
     fake = FakeEvaluator(
         CaseVerdicts(
@@ -294,7 +298,39 @@ def test_an_over_long_rationale_is_truncated_not_raised(tmp_path, monkeypatch):
         )
     )
     result = _run(tmp_path, monkeypatch, [_row("q01")], evaluator=fake)
-    assert len(result.evals[0].rationale) == RATIONALE_MAX_CHARS
+    e = result.evals[0]
+    assert e.rationale == "evaluator rationale exceeded retention limit"
+    assert e.conclusion_verdict == HUMAN_REVIEW  # no literal -> no mechanical verdict
+    assert e.summary_verdict == HUMAN_REVIEW
+    assert e.prohibited_verdict == HUMAN_REVIEW
+    assert "x" * 10 not in e.rationale
+
+
+def test_an_over_long_rationale_keeps_a_literal_row_mechanical(tmp_path, monkeypatch):
+    """A literal-decided conclusion does not depend on the model's rationale.
+
+    S-6: the mechanical check already decided this axis before the model was
+    ever called, so an over-long rationale on the same case must not overwrite
+    it with human_review.
+    """
+    fake = FakeEvaluator(
+        CaseVerdicts(
+            conclusion=UNSUPPORTED,
+            summary=SUPPORTED,
+            prohibited=AVOIDED,
+            rationale="x" * (RATIONALE_MAX_CHARS + 50),
+        )
+    )
+    result = _run(
+        tmp_path,
+        monkeypatch,
+        [_row("q01", support_literal="30 days")],
+        evaluator=fake,
+    )
+    e = result.evals[0]
+    assert e.conclusion_verdict == SUPPORTED  # mechanical, untouched
+    assert e.summary_verdict == HUMAN_REVIEW
+    assert e.rationale == "evaluator rationale exceeded retention limit"
 
 
 def test_a_human_review_verdict_survives_the_wiring(tmp_path, monkeypatch):

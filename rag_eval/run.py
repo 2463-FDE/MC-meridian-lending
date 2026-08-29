@@ -26,6 +26,7 @@ from rag_eval.evaluator import BedrockEvaluator, GradingCase
 from rag_eval.hygiene import FileVerdict, scan_file, scan_text
 from rag_eval.index import InMemoryIndex
 from rag_eval.metrics import (
+    HUMAN_REVIEW,
     K_VALUES,
     NOT_EVALUATED,
     RATIONALE_MAX_CHARS,
@@ -1343,16 +1344,22 @@ def run(
                 prohibited_conclusion=q.get("prohibited_conclusion") or "",
             )
         )
+        rationale = " ".join(verdicts.rationale.split())
+        if len(rationale) > RATIONALE_MAX_CHARS:
+            # QueryEval refuses an over-long rationale because truncating it
+            # would still persist the first RATIONALE_MAX_CHARS of a retrieved
+            # passage (S-10). Do not pass the model's text through at all --
+            # downgrade the model-derived axes to human_review with a fixed,
+            # content-free rationale instead of leaking any of it.
+            conclusion = mechanical if mechanical != NOT_EVALUATED else HUMAN_REVIEW
+            return (
+                conclusion,
+                HUMAN_REVIEW,
+                HUMAN_REVIEW,
+                "evaluator rationale exceeded retention limit",
+            )
         conclusion = mechanical if mechanical != NOT_EVALUATED else verdicts.conclusion
-        # Truncated here rather than raising: QueryEval refuses an over-long
-        # rationale, and losing a whole graded case to a model that wrote one
-        # sentence too many would spend a sample S-7 will not give back.
-        return (
-            conclusion,
-            verdicts.summary,
-            verdicts.prohibited,
-            verdicts.rationale[:RATIONALE_MAX_CHARS],
-        )
+        return (conclusion, verdicts.summary, verdicts.prohibited, rationale)
 
     evals = []
     for q in gold:
