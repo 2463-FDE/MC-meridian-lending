@@ -15,6 +15,7 @@ import pytest
 
 from rag_eval.evaluator import CaseVerdicts
 from rag_eval.metrics import (
+    ASSERTED,
     AVOIDED,
     HUMAN_REVIEW,
     NOT_EVALUATED,
@@ -277,6 +278,67 @@ def test_a_row_without_a_literal_takes_the_model_conclusion(tmp_path, monkeypatc
     fake = FakeEvaluator()
     result = _run(tmp_path, monkeypatch, [_row("q01")], evaluator=fake)
     assert result.evals[0].conclusion_verdict == UNSUPPORTED
+
+
+def test_a_row_with_no_support_targets_is_never_sent_to_the_model(
+    tmp_path, monkeypatch
+):
+    """A legacy/retrieval-only row carries no support-test field at all.
+
+    n_paired == 0 is a permitted gold set (rag_eval/run.py's n_paired check),
+    so a judged run can still see a row with none of expected_conclusion,
+    displayed_summary_id or prohibited_conclusion. Calling the evaluator
+    anyway would grade summary/prohibited against an empty-string target and
+    report a real verdict for an axis that was never asked about -- the
+    evaluator must not be called at all, and every axis must read
+    not_evaluated.
+    """
+    fake = FakeEvaluator()
+    legacy_row = {
+        "id": "q01",
+        "query": "notification deadline",
+        "expected": [ANCHOR],
+        "topic": "adverse_action",
+    }
+    result = _run(tmp_path, monkeypatch, [legacy_row], evaluator=fake)
+    e = result.evals[0]
+    assert e.conclusion_verdict == NOT_EVALUATED
+    assert e.summary_verdict == NOT_EVALUATED
+    assert e.prohibited_verdict == NOT_EVALUATED
+    assert e.rationale == ""
+    assert fake.cases == [], "evaluator.grade() must not be called for a targetless row"
+
+
+def test_a_row_with_only_a_prohibited_target_grades_only_that_axis(
+    tmp_path, monkeypatch
+):
+    """prohibited_conclusion is independent of the expected/displayed_summary_id pair.
+
+    A row can carry a prohibited target with no support pair at all -- the
+    call is still needed for the prohibited axis, but conclusion and summary
+    must not pick up the model's answer for axes that had no target.
+    """
+    fake = FakeEvaluator(
+        CaseVerdicts(
+            conclusion=SUPPORTED,
+            summary=SUPPORTED,
+            prohibited=ASSERTED,
+            rationale="because.",
+        )
+    )
+    row = {
+        "id": "q01",
+        "query": "notification deadline",
+        "expected": [ANCHOR],
+        "topic": "adverse_action",
+        "prohibited_conclusion": "There is no deadline.",
+    }
+    result = _run(tmp_path, monkeypatch, [row], evaluator=fake)
+    e = result.evals[0]
+    assert e.conclusion_verdict == NOT_EVALUATED
+    assert e.summary_verdict == NOT_EVALUATED
+    assert e.prohibited_verdict == ASSERTED  # the only axis this row asked about
+    assert len(fake.cases) == 1
 
 
 def test_an_over_long_rationale_is_never_persisted(tmp_path, monkeypatch):

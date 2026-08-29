@@ -1337,9 +1337,24 @@ def run(
         stands and the model's answer for that axis is discarded. Those rows are
         still graded on summary and prohibited, which no literal covers -- so
         they do reach the model, and the ADR says so.
+
+        Each of the three axes is held at NOT_EVALUATED unless its own target
+        field is present on this row: a legacy or retrieval-only gold row
+        carries none of the three, and grading it anyway would call the model
+        against an empty-string target and record whatever it guessed as a
+        real verdict. `expected_conclusion` and `displayed_summary_id` always
+        co-occur per row (the loader enforces the pair), but
+        `prohibited_conclusion` is independent, so a row can need the model
+        for one axis and not another.
         """
-        if evaluator is None:
+        has_expected = "expected_conclusion" in q
+        has_summary = "displayed_summary_id" in q
+        has_prohibited = "prohibited_conclusion" in q
+        needs_conclusion = mechanical == NOT_EVALUATED and has_expected
+
+        if evaluator is None or not (needs_conclusion or has_summary or has_prohibited):
             return mechanical, NOT_EVALUATED, NOT_EVALUATED, ""
+
         summary_id = (q.get("displayed_summary_id") or "").strip().lower()
         verdicts = evaluator.grade(
             GradingCase(
@@ -1358,15 +1373,25 @@ def run(
             # passage (S-10). Do not pass the model's text through at all --
             # downgrade the model-derived axes to human_review with a fixed,
             # content-free rationale instead of leaking any of it.
-            conclusion = mechanical if mechanical != NOT_EVALUATED else HUMAN_REVIEW
+            conclusion = (
+                mechanical
+                if mechanical != NOT_EVALUATED
+                else (HUMAN_REVIEW if needs_conclusion else NOT_EVALUATED)
+            )
             return (
                 conclusion,
-                HUMAN_REVIEW,
-                HUMAN_REVIEW,
+                HUMAN_REVIEW if has_summary else NOT_EVALUATED,
+                HUMAN_REVIEW if has_prohibited else NOT_EVALUATED,
                 "evaluator rationale exceeded retention limit",
             )
-        conclusion = mechanical if mechanical != NOT_EVALUATED else verdicts.conclusion
-        return (conclusion, verdicts.summary, verdicts.prohibited, rationale)
+        conclusion = (
+            mechanical
+            if mechanical != NOT_EVALUATED
+            else (verdicts.conclusion if needs_conclusion else NOT_EVALUATED)
+        )
+        summary = verdicts.summary if has_summary else NOT_EVALUATED
+        prohibited = verdicts.prohibited if has_prohibited else NOT_EVALUATED
+        return (conclusion, summary, prohibited, rationale)
 
     evals = []
     for q in gold:
