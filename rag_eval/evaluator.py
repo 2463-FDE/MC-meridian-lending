@@ -221,19 +221,23 @@ class BedrockEvaluator:
             }
         )
 
-    def _invoke(self, case: GradingCase) -> str:
-        """One call, retried at most once and only for a technical failure."""
+    def _invoke(self, case: GradingCase):
+        """One call, retried at most once and only for a technical failure.
+
+        Retrying covers reaching the provider at all -- a client/transport
+        exception from `invoke_model` itself. Parsing what comes back is
+        deliberately NOT in this loop: a malformed envelope is a reply that
+        arrived, the same as a malformed inner text, and S-7 allows no retry
+        for a bad result whichever layer the badness is in. Both parse
+        failures land in `grade()` so both are refused the same way.
+        """
         body = self._body(case)
         last: Exception | None = None
         for attempt in range(_MAX_ATTEMPTS):
             self.calls += 1
             try:
-                response = self._client.invoke_model(modelId=self.model_id, body=body)
-                return json.loads(response["body"].read())["content"][0]["text"]
+                return self._client.invoke_model(modelId=self.model_id, body=body)
             except Exception as exc:
-                # Reaching the provider at all is the technical half; a reply that
-                # arrives and is merely wrong never lands here, because parsing
-                # happens in grade(). S-7 allows no retry for a bad result.
                 last = exc
                 if attempt + 1 < _MAX_ATTEMPTS:
                     self.retries += 1
@@ -252,14 +256,17 @@ class BedrockEvaluator:
         # and letting a caller retry around an exception is the same second sample
         # by another route.
         self._graded.add(case.query_id)
-        text = self._invoke(case)
+        response = self._invoke(case)
         try:
+            text = json.loads(response["body"].read())["content"][0]["text"]
             payload = json.loads(text)
             if not isinstance(payload, dict):
                 raise ValueError("reply is not a JSON object")
-        except (ValueError, TypeError):
-            # A bad result, not a technical failure: no retry (S-7), and every
-            # axis goes to human review rather than to a graded state (S-9).
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+            # A bad result, not a technical failure: no retry (S-7), whether the
+            # envelope Bedrock wrapped the reply in is malformed or the wrong
+            # shape, or the model's own JSON text is. Every axis goes to human
+            # review rather than to a graded state (S-9).
             return CaseVerdicts(
                 conclusion=HUMAN_REVIEW,
                 summary=HUMAN_REVIEW,

@@ -175,6 +175,32 @@ def test_an_unparseable_reply_is_human_review_not_a_retry():
     assert len(ev._client.calls) == 1
 
 
+def test_a_malformed_envelope_is_human_review_with_no_retry():
+    """BR-2: the retry loop covers reaching the provider, not parsing what it
+    sent back. An outer Bedrock envelope that isn't valid JSON at all is a bad
+    RESULT the same as a malformed inner reply -- S-7 allows no retry for
+    either, and treating envelope-parsing as the technical half let a case get
+    a second, different sample through the back door."""
+    ev = _evaluator("not json", _reply())
+    out = ev.grade(_case())
+    assert out.conclusion == HUMAN_REVIEW
+    assert out.summary == HUMAN_REVIEW
+    assert out.prohibited == HUMAN_REVIEW
+    assert len(ev._client.calls) == 1
+    assert ev.retries == 0
+
+
+def test_a_wrong_shaped_envelope_is_human_review_with_no_retry():
+    """Same boundary as above, for a wrapper that IS valid JSON but not the
+    shape `grade()` expects (no `content` key) -- a KeyError/IndexError from
+    unpacking it must not read as a transport failure either."""
+    ev = _evaluator(json.dumps({"unexpected": "shape"}), _reply())
+    out = ev.grade(_case())
+    assert out.conclusion == HUMAN_REVIEW
+    assert len(ev._client.calls) == 1
+    assert ev.retries == 0
+
+
 def test_a_verdict_outside_the_allowed_states_becomes_human_review():
     """A model that invents a state must not have it counted. Defaulting an
     unknown to `unsupported` would score "we could not tell" as "wrong"."""
