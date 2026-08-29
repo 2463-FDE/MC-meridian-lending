@@ -9,6 +9,7 @@ ADR 0007 rule 4): chunks are only ever produced from gate-passed files inside
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import math
@@ -21,11 +22,13 @@ from rag_eval import report as report_mod
 from rag_eval.cache import EmbeddingCache
 from rag_eval.chunker import Chunk, _slug, chunk_markdown
 from rag_eval.embedder import BedrockEmbedder, TfidfEmbedder
+from rag_eval.evaluator import BedrockEvaluator, GradingCase
 from rag_eval.hygiene import FileVerdict, scan_file, scan_text
 from rag_eval.index import InMemoryIndex
 from rag_eval.metrics import (
     K_VALUES,
     NOT_EVALUATED,
+    RATIONALE_MAX_CHARS,
     SUPPORTED,
     UNMAPPED,
     UNSCORABLE_CLASS,
@@ -541,6 +544,129 @@ def make_embedder():
     raise ValueError(f"RAG_EMBEDDER={name!r} is not one of ('tfidf', 'bedrock').")
 
 
+# The column holding the summary an officer would actually see, and the column
+# naming the gold row it belongs to. Both come from the client's frozen package;
+# neither is derived here.
+_SUMMARY_TEXT_COLUMN = "synthetic_displayed_summary"
+# The gold set's `displayed_summary_id` holds `Q01-ACCEPTABLE-CONCLUSION`, which is
+# this column -- NOT `question_id`, whose values are `Q01`. Keying on the wrong one
+# resolves nothing while raising nothing, so the model is handed 28 empty summaries
+# and grades them. `require_displayed_summaries` below is what makes that loud.
+_SUMMARY_ID_COLUMN = "expected_conclusion_id"
+_SUMMARY_CSV_NAME = "displayed-summaries.csv"
+
+
+def load_displayed_summaries(manifest_path: Path) -> dict[str, str]:
+    """Resolve `displayed_summary_id` -> the summary text, from the frozen package.
+
+    The package was already audited against its manifest before this runs, so the
+    bytes here are the ones she approved. Only the text is taken: the CSV also
+    carries her question wording and her expected conclusion, and S-10 admits
+    neither into anything this harness keeps.
+
+    Ids are matched case-insensitively. Her package writes `Q01` and the gold set
+    writes `q01`, and a case-sensitive join would return no summary for any row --
+    every summary verdict would come back `human_review` on a pass S-7 forbids
+    re-running. Fails closed on a missing file, a missing column, a duplicate id
+    or a blank summary, because each of those silently produces the same empty
+    string that a model would then be asked to grade.
+    """
+    path = manifest_path.parent / _SUMMARY_CSV_NAME
+    try:
+        with path.open(newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+    except OSError as exc:
+        raise RuntimeError(f"displayed-summaries package unreadable: {exc}") from None
+    if not rows:
+        raise RuntimeError(f"displayed-summaries package has no rows: {path.name}")
+    missing = {_SUMMARY_ID_COLUMN, _SUMMARY_TEXT_COLUMN} - set(rows[0])
+    if missing:
+        raise RuntimeError(
+            f"displayed-summaries package is missing column(s) "
+            f"{sorted(missing)} in {path.name}"
+        )
+    summaries: dict[str, str] = {}
+    for row in rows:
+        key = (row.get(_SUMMARY_ID_COLUMN) or "").strip().lower()
+        text = " ".join((row.get(_SUMMARY_TEXT_COLUMN) or "").split())
+        if not key:
+            raise RuntimeError(f"displayed-summaries row has a blank id in {path.name}")
+        if key in summaries:
+            raise RuntimeError(
+                f"displayed-summaries package declares {key!r} twice -- "
+                "which of the two an officer sees is undefined"
+            )
+        if not text:
+            raise RuntimeError(
+                f"displayed-summaries row {key!r} has an empty summary -- "
+                "grading an empty target would report a verdict about nothing"
+            )
+        summaries[key] = text
+    return summaries
+
+
+def require_displayed_summaries(gold: list, summaries: dict[str, str]) -> None:
+    """Every gold row must resolve to a summary, or the run stops.
+
+    An unresolved id yields an empty string, and an empty string is a target the
+    evaluator will still grade -- so the failure is a full set of verdicts about
+    nothing, on a pass S-7 does not allow us to repeat. Raised before the embedder
+    is built, so a provider run does not pay for embeddings it cannot use.
+
+    Offenders are reported by gold id, never by summary id: the ids are hers and
+    an id is a value like any other.
+    """
+    if not summaries:
+        return
+    # A row that declares no summary id has no summary target, and its summary
+    # verdict stays `not_evaluated` -- reported as neither a pass nor a failure
+    # (S-9). Only a DECLARED id that resolves to nothing is the silent failure.
+    unresolved = [
+        q.get("id", "?")
+        for q in gold
+        if (sid := (q.get("displayed_summary_id") or "").strip().lower())
+        and sid not in summaries
+    ]
+    if unresolved:
+        raise RuntimeError(
+            f"{len(unresolved)} gold row(s) have no displayed summary in the "
+            f"frozen package: {', '.join(sorted(unresolved))}. Grading an empty "
+            "summary would report a verdict about nothing."
+        )
+
+
+def make_evaluator():
+    """Pick the grading backend from ``RAG_JUDGE`` (default ``none``).
+
+    ``none`` is the default and returns nothing: the keyless TF-IDF path, the
+    blocking gate and every dry run stay free of a model call, and a graded pass
+    has to be asked for rather than fallen into. ``bedrock`` builds the offline
+    evaluator (ADR 0022). An unknown value fails loud, the same as
+    ``make_embedder`` -- silently grading with a backend nobody asked for would
+    spend the one pass S-7 allows.
+
+    Blank counts as unset, for the same compose reason ``make_embedder`` documents.
+    """
+    name = os.getenv("RAG_JUDGE", "").strip() or "none"
+    if name == "none":
+        return None
+    if name == "bedrock":
+        # Validated before the client is built, exactly as the embedder does it:
+        # region discovery is excluded, and Bedrock model access is per region.
+        region = os.getenv("AWS_REGION", "").strip()
+        if not region:
+            raise ValueError(
+                "AWS_REGION must be set explicitly for RAG_JUDGE=bedrock -- "
+                "an unset value lets boto3 discover a region, and Bedrock model "
+                "access is granted per region"
+            )
+        model_id = os.getenv("RAG_JUDGE_MODEL", "").strip()
+        return BedrockEvaluator(
+            region=region, **({"model_id": model_id} if model_id else {})
+        )
+    raise ValueError(f"RAG_JUDGE={name!r} is not one of ('none', 'bedrock').")
+
+
 @dataclass
 class RunResult:
     verdicts: list[FileVerdict]
@@ -698,6 +824,18 @@ def run(
                 "displayed-summaries package does not match its manifest: "
                 + "; ".join(summaries_problems)
             )
+
+    # Loaded only after the audit above, never before: the point of the audit is
+    # that nothing reads a summaries file that drifted from what she approved.
+    displayed_summaries = (
+        load_displayed_summaries(displayed_summaries_manifest_path)
+        if displayed_summaries_manifest_path is not None
+        else {}
+    )
+    # Built here rather than at the grading loop, so a misconfigured judge fails
+    # before a provider run has embedded anything. On the graded pass those embeds
+    # are billed calls, and S-7 gives one attempt at the whole run.
+    evaluator = make_evaluator()
 
     # Scan EVERY file under the corpus roots, recursively and regardless of
     # extension. scan_file reads known text/JSON formats and refuses unknown or
@@ -1102,6 +1240,7 @@ def run(
             "— no field values are echoed"
         )
 
+    require_displayed_summaries(gold, displayed_summaries)
     embedder = make_embedder()
     # Both decisions read the embedder itself, so they cannot disagree with the
     # backend that actually makes the calls.
@@ -1173,26 +1312,71 @@ def run(
                 return SUPPORTED
         return UNSUPPORTED
 
-    evals = [
-        QueryEval(
-            query_id=q["id"],
-            query=q["query"],
-            expected=q.get("expected", []),
-            unanswerable=bool(q.get("unanswerable")),
-            retrieved=retrieved[q["id"]],
-            threshold=threshold,
-            topic=q.get("topic", UNMAPPED),
-            outcome_class=q.get("outcome_class"),
-            conclusion_verdict=_support_verdict(q, retrieved[q["id"]]),
-            # The displayed summary describes a passage rather than asserting a
-            # literal, so no mechanical check applies. It stays NOT_EVALUATED
-            # until the evaluator lands -- reported as such, never as a pass.
-            expected_conclusion=q.get("expected_conclusion"),
-            displayed_summary_id=q.get("displayed_summary_id"),
-            prohibited_conclusion=q.get("prohibited_conclusion"),
+    def _passages(ranked) -> list[str]:
+        """The chunks this run actually retrieved, in rank order.
+
+        The same set the mechanical check reads, for the same reason: a
+        conclusion that is true of a chunk the run never surfaced is not
+        supported BY THE RUN.
+        """
+        return [chunk_text.get(cid, "") for cid, _ in ranked[: max(K_VALUES)]]
+
+    def _graded(q, mechanical: str) -> tuple[str, str, str, str]:
+        """Grade one case, or leave every axis untouched when no judge is configured.
+
+        S-6 is read as the conclusion axis only (ADR 0022): where a
+        `support_literal` already decided the conclusion, the mechanical verdict
+        stands and the model's answer for that axis is discarded. Those rows are
+        still graded on summary and prohibited, which no literal covers -- so
+        they do reach the model, and the ADR says so.
+        """
+        if evaluator is None:
+            return mechanical, NOT_EVALUATED, NOT_EVALUATED, ""
+        summary_id = (q.get("displayed_summary_id") or "").strip().lower()
+        verdicts = evaluator.grade(
+            GradingCase(
+                query_id=q["id"],
+                question=q["query"],
+                passages=_passages(retrieved[q["id"]]),
+                expected_conclusion=q.get("expected_conclusion") or "",
+                displayed_summary=displayed_summaries.get(summary_id, ""),
+                prohibited_conclusion=q.get("prohibited_conclusion") or "",
+            )
         )
-        for q in gold
-    ]
+        conclusion = mechanical if mechanical != NOT_EVALUATED else verdicts.conclusion
+        # Truncated here rather than raising: QueryEval refuses an over-long
+        # rationale, and losing a whole graded case to a model that wrote one
+        # sentence too many would spend a sample S-7 will not give back.
+        return (
+            conclusion,
+            verdicts.summary,
+            verdicts.prohibited,
+            verdicts.rationale[:RATIONALE_MAX_CHARS],
+        )
+
+    evals = []
+    for q in gold:
+        mechanical = _support_verdict(q, retrieved[q["id"]])
+        conclusion, summary, prohibited, rationale = _graded(q, mechanical)
+        evals.append(
+            QueryEval(
+                query_id=q["id"],
+                query=q["query"],
+                expected=q.get("expected", []),
+                unanswerable=bool(q.get("unanswerable")),
+                retrieved=retrieved[q["id"]],
+                threshold=threshold,
+                topic=q.get("topic", UNMAPPED),
+                outcome_class=q.get("outcome_class"),
+                conclusion_verdict=conclusion,
+                summary_verdict=summary,
+                prohibited_verdict=prohibited,
+                rationale=rationale,
+                expected_conclusion=q.get("expected_conclusion"),
+                displayed_summary_id=q.get("displayed_summary_id"),
+                prohibited_conclusion=q.get("prohibited_conclusion"),
+            )
+        )
 
     agg = aggregate(evals)
     # Read the counters AFTER the gold-query embeds above: a provider run embeds

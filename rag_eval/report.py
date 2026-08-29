@@ -309,9 +309,10 @@ def _support_section(agg: Aggregate) -> list[str]:
         ]
         if stat.counts.get(NOT_EVALUATED):
             lines += [
-                f"{stat.counts[NOT_EVALUATED]} case(s) are not evaluated: no mechanical "
-                "check applies and the evaluator is not built. They are neither a "
-                "pass nor a failure, and must not be read as either.",
+                f"{stat.counts[NOT_EVALUATED]} case(s) are not evaluated: no "
+                "mechanical check applies and the evaluator did not run on this "
+                "pass. They are neither a pass nor a failure, and must not be "
+                "read as either.",
                 "",
             ]
     lines += _verdicts_by_topic_table(agg)
