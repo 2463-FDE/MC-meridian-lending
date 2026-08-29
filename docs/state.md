@@ -8,7 +8,7 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (108100f)` — 108100f 2026-08-28 Merge pull request #106 from 2463-FDE/fix/rag-eval-summary-freeze
+Base: `origin/main (93437e2)` — 93437e2 2026-08-28 chore(kb): regenerate docs/state.md
 
 ## Merged pull requests
 
