@@ -8,12 +8,14 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (01f8cc1)` — 01f8cc1 2026-08-29 Merge pull request #109 from 2463-FDE/feat/rag-eval-prohibited-conclusion
+Base: `origin/main (588e7bd)` — 588e7bd 2026-08-29 Merge pull request #111 from 2463-FDE/feat/rag-eval-evaluator
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #111 | `588e7bd` | 2026-08-29 | Merge pull request #111 from 2463-FDE/feat/rag-eval-evaluator |
+| #110 | `3fb4738` | 2026-08-29 | Merge pull request #110 from 2463-FDE/feat/rag-eval-verdict-reporting |
 | #109 | `01f8cc1` | 2026-08-29 | Merge pull request #109 from 2463-FDE/feat/rag-eval-prohibited-conclusion |
 | #108 | `4471bc4` | 2026-08-28 | Merge pull request #108 from 2463-FDE/feat/rag-eval-conclusion-fields |
 | #107 | `8fa35fb` | 2026-08-28 | Merge pull request #107 from 2463-FDE/feat/rag-eval-prohibited-conclusion |
@@ -143,8 +145,9 @@ Base: `origin/main (01f8cc1)` — 01f8cc1 2026-08-29 Merge pull request #109 fro
 - `adr/0019-policy-retrieval-on-the-assistant-loop.md`
 - `adr/0020-atomic-payment-application.md`
 - `adr/0021-agent-framework-and-root-trace.md`
+- `adr/0022-offline-evaluator-for-the-support-test.md`
 
-Count: 21. The next free number is one past the highest above.
+Count: 22. The next free number is one past the highest above.
 
 ## CI jobs
 
