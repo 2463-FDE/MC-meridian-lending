@@ -360,7 +360,7 @@ def test_assistant_route_surfaces_the_rate_limit(monkeypatch):
     def _tripped(user_id):
         raise HTTPException(status_code=429, detail="assistant rate limit exceeded")
 
-    monkeypatch.setattr(main.rate_limit, "check_assistant_rate_limit", _tripped)
+    monkeypatch.setattr(main.rate_limit, "check_llm_rate_limit", _tripped)
     app.dependency_overrides[main.get_llm_client] = lambda: _client(FINAL_DENY)[0]
     try:
         tc = TestClient(app, raise_server_exceptions=False)

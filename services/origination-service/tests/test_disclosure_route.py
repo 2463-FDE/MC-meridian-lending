@@ -248,6 +248,26 @@ def test_requires_passing_kyc(client, monkeypatch):
     assert client.post("/applications/1/disclosure", headers=OFFICER).status_code == 409
 
 
+def test_disclosure_route_surfaces_the_rate_limit(client, monkeypatch):
+    """RL-001 (PR review): this route invokes Bedrock (via the coordinator's
+    _assemble/_narrate steps) but never called the limiter -- an authenticated
+    officer had unbounded calls through it. Wiring only, mirrors
+    test_assistant_route_surfaces_the_rate_limit; the counting/window logic itself
+    is unit-tested in test_rate_limit.py and exercised for real (11 route calls) in
+    test_summary_route.py -- this route's FakeAdapter is scripted for exactly one
+    assemble+narrate pair, so it cannot drive 11 real successful runs itself."""
+    from fastapi import HTTPException
+
+    _stub_db(monkeypatch)
+
+    def _tripped(user_id):
+        raise HTTPException(status_code=429, detail="assistant rate limit exceeded")
+
+    monkeypatch.setattr(main.rate_limit, "check_llm_rate_limit", _tripped)
+    response = client.post("/applications/1/disclosure", headers=OFFICER)
+    assert response.status_code == 429
+
+
 class TestGatherBindsServerSide:
     def test_terms_come_from_the_stored_application_and_policy(self, monkeypatch):
         """The caller supplies an id and nothing else. Accepting caller terms here would

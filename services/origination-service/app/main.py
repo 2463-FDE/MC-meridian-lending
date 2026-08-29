@@ -135,7 +135,7 @@ def assistant_decide(
     and appending a second regulated event. Absent = explicit re-decision.
     """
     authz.require_officer(x_user_role)
-    rate_limit.check_assistant_rate_limit(x_user_id)
+    rate_limit.check_llm_rate_limit(x_user_id)
     # Client ask (2026-08-12 governance §5). The client scoped the block to "the one route
     # that runs a decision", having seen only POST /applications/{id}/decision -- but the
     # score tool below performs the same regulated decision and appends the same
@@ -175,7 +175,7 @@ def assistant_explain(
     abstention. The officer is told their topic does not exist instead.
     """
     authz.require_officer(x_user_role)
-    rate_limit.check_assistant_rate_limit(x_user_id)
+    rate_limit.check_llm_rate_limit(x_user_id)
     if policy_topic is not None and policy_topic not in policy_retrieval.POLICY_TOPICS:
         raise HTTPException(
             status_code=422,
@@ -191,6 +191,7 @@ def assistant_explain(
 def summarize_application(
     app_id: int,
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     client: ClaudeClient = Depends(get_llm_client),
 ):
     """Officer triage summary of an application via the loan-summary LLM prompt.
@@ -207,6 +208,7 @@ def summarize_application(
     unavailable" — no `fallback=`, one success shape, the UI says "unavailable" off the 503.
     """
     authz.require_officer(x_user_role)
+    rate_limit.check_llm_rate_limit(x_user_id)
     payload = applications.summary_payload(app_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="application not found")
@@ -221,6 +223,7 @@ def summarize_application(
 def generate_disclosure(
     app_id: int,
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     client: ClaudeClient = Depends(get_llm_client),
 ):
     """Generate the TILA disclosure for an approved application (ADR 0012, spec D4).
@@ -248,6 +251,7 @@ def generate_disclosure(
     stopped it.
     """
     authz.require_officer(x_user_role)
+    rate_limit.check_llm_rate_limit(x_user_id)
     kyc_gate.require_kyc_passed(app_id)
 
     coordinator = disclosure_coordinator.build_coordinator(client)
