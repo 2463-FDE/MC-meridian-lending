@@ -30,10 +30,22 @@ import os
 from dataclasses import dataclass
 
 from rag_eval.metrics import (
+    ASSERTED,
+    AVOIDED,
     HUMAN_REVIEW,
-    PROHIBITED_STATES,
-    VERDICT_STATES,
+    SUPPORTED,
+    UNSUPPORTED,
 )
+
+# The states an evaluator REPLY may claim for itself. Narrower than
+# VERDICT_STATES/PROHIBITED_STATES on purpose: NOT_EVALUATED is the absence of a
+# grade, set by the harness before any call and moved only by a check that
+# actually ran (S-9) -- it is not a verdict a model can hand back. Accepting it
+# here would let a provider reply of "not_evaluated" read as "the evaluator did
+# not run" instead of the graded-but-inconclusive case it actually is, and S-7's
+# one bounded pass means that case can never be re-graded to tell the two apart.
+_REPLY_VERDICT_STATES = (SUPPORTED, UNSUPPORTED, HUMAN_REVIEW)
+_REPLY_PROHIBITED_STATES = (AVOIDED, ASSERTED, HUMAN_REVIEW)
 
 # The client's approved generator, pinned to a dated version. Not an alias: S-7
 # gives one bounded pass, and a model that moves under the run cannot be reported,
@@ -257,13 +269,13 @@ class BedrockEvaluator:
         rationale = payload.get("rationale")
         return CaseVerdicts(
             conclusion=_state_or_human_review(
-                payload.get("conclusion_verdict"), VERDICT_STATES
+                payload.get("conclusion_verdict"), _REPLY_VERDICT_STATES
             ),
             summary=_state_or_human_review(
-                payload.get("summary_verdict"), VERDICT_STATES
+                payload.get("summary_verdict"), _REPLY_VERDICT_STATES
             ),
             prohibited=_state_or_human_review(
-                payload.get("prohibited_verdict"), PROHIBITED_STATES
+                payload.get("prohibited_verdict"), _REPLY_PROHIBITED_STATES
             ),
             # One line (S-10). The length cap lives on the receiving field so
             # there is one limit rather than two that can drift.

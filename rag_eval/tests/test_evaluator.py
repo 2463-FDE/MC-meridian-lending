@@ -187,6 +187,19 @@ def test_a_verdict_outside_the_allowed_states_becomes_human_review():
     assert out.prohibited == AVOIDED
 
 
+def test_a_provider_returned_not_evaluated_becomes_human_review():
+    """NOT_EVALUATED is the harness's absence-of-grade state (S-9), set before any
+    call and moved only by a check that actually ran. A model that hands the
+    literal back must not have it pass through as if it were a legitimate
+    verdict -- that would make the absence state reachable through provider
+    output, and S-7's one bounded pass means the case can never be re-graded to
+    tell the two apart."""
+    ev = _evaluator(_reply(conclusion="not_evaluated", prohibited="not_evaluated"))
+    out = ev.grade(_case())
+    assert out.conclusion == HUMAN_REVIEW
+    assert out.prohibited == HUMAN_REVIEW
+
+
 def test_a_support_state_on_the_prohibited_axis_is_refused():
     """`supported` is not in PROHIBITED_STATES. Accepting it would silently
     record the opposite of the finding."""

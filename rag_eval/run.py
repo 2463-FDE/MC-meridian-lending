@@ -340,17 +340,23 @@ _ALLOWED_GOLD_KEYS = {
 # scan_text still covers them for labelled PII.
 _ANCHOR_KEYS = frozenset({"source_document", "source_heading"})
 
-# The person-name heuristic guards text that gets embedded (sent to the provider)
-# and printed verbatim into the report. `prohibited_conclusion` is neither: only
-# the query is embedded, and S-10's retention allowlist permits counts, ids, the
-# source-section reference and one rationale line — no conclusion text — so a
-# test asserts the field never reaches the report. Without this exemption her own
-# wording refuses the run: `Credit Manager` and `Credit Policy Schedule` are
-# Title-Case runs, and `If Meridian ...` is a sentence-initial capital followed by
-# the lender's bare name, which the `Meridian Lending` allowlist entry cannot
-# cover because the allowlist is phrase replacement. Adding entries does not close
-# that, and loosening the regex to skip sentence-initial capitals would stop the
-# guard seeing a real applicant name at the start of a sentence.
+# The person-name heuristic guards text that gets embedded (sent to the retrieval
+# provider) and printed verbatim into the report. Neither field is printed to the
+# report — S-10's retention allowlist permits counts, ids, the source-section
+# reference and one rationale line, no conclusion text, and a test asserts that —
+# but `rag_eval/evaluator.py`'s BedrockEvaluator DOES now send both fields to the
+# judge model, so "sent to a provider" is no longer true of the query alone. That
+# provider-bound send has no name/PII guard of its own; exercise impact is
+# bounded today by the committed synthetic gold set (no real name/address in
+# either field), but a future gold row is not mechanically stopped from carrying
+# one. Without this exemption from the free-text heuristic below, her own
+# wording refuses the run regardless: `Credit Manager` and `Credit Policy
+# Schedule` are Title-Case runs, and `If Meridian ...` is a sentence-initial
+# capital followed by the lender's bare name, which the `Meridian Lending`
+# allowlist entry cannot cover because the allowlist is phrase replacement.
+# Adding entries does not close that, and loosening the regex to skip
+# sentence-initial capitals would stop the guard seeing a real applicant name at
+# the start of a sentence.
 # `scan_text` still covers this field for labelled PII.
 _UNECHOED_TEXT_KEYS = frozenset({"prohibited_conclusion", "expected_conclusion"})
 
