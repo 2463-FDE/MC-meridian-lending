@@ -17,10 +17,10 @@ retrieval alone. Her prohibited conclusion is graded as a third axis.
 
 Two of those three axes have nothing that can grade them. The harness already
 performs a mechanical support check: where a gold row carries a `support_literal`
-("30 days", "25 months"), the run matches that
-string against the passages it actually retrieved. Two of 28 rows carry one.
+("30 days", "12 CFR 1002.9", "25 months", "36 percent"), the run matches that
+string against the passages it actually retrieved. Four of 28 rows carry one.
 A displayed summary describes a passage rather than asserting a literal, and her
-prohibited conclusion is prose. So without a judgement step the report shows 26
+prohibited conclusion is prose. So without a judgement step the report shows 24
 of 28 conclusion verdicts, 28 of 28 summary verdicts and 28 of 28 prohibited
 verdicts as `not_evaluated` — the deliverable measures retrieval and nothing
 else, while claiming a scope that includes the support test.
