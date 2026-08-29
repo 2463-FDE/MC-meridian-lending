@@ -186,7 +186,8 @@ def test_a_mixed_convention_manifest_fails_closed_not_silently(
     tmp_path: Path, monkeypatch
 ):
     # A bare entry with no subtree qualifier at all, alongside a policies/
-    # -prefixed one, is not a sibling subtree like kb_dump/ -- it is
+    # -prefixed one, is not a sibling subtree like kb_dump/ -- when a file by
+    # that exact name actually sits in the corpus directory, it is
     # indistinguishable from an already-narrowed approval an operator forgot
     # to convert when appending a new entry in the other convention. Keeping
     # only the prefixed half would silently drop that approval from the
@@ -194,6 +195,7 @@ def test_a_mixed_convention_manifest_fails_closed_not_silently(
     # anyway ("unlisted file") but for a cause the log never names. This must
     # fail closed AND say why, not just fail closed.
     base, digests = _corpus(tmp_path)
+    (base / "fee_schedule.md").write_text(BODY, encoding="utf-8")
     mixed = {f"policies/{n}": d for n, d in digests.items()}
     mixed["fee_schedule.md"] = "1" * 64
     _configure(monkeypatch, base, _manifest(tmp_path, mixed))
@@ -204,6 +206,26 @@ def test_a_mixed_convention_manifest_fails_closed_not_silently(
 
     assert chunks == []
     assert "mixes corpus-relative" in "\n".join(recorder.lines)
+
+
+def test_a_base_relative_manifest_ignores_a_top_level_package_file(
+    tmp_path: Path, monkeypatch
+):
+    # The client's whole-package delivery also carries top-level package
+    # metadata beside `policies/` -- its own checksum file's name, or a
+    # PACKAGE-INVENTORY.txt -- that names no file in the policy corpus
+    # directory at all. That bare entry cannot be a narrowed corpus-relative
+    # approval (there is no corpus file it could be approving), so it must be
+    # dropped as out of scope, the same as a `kb_dump/`-qualified sibling,
+    # rather than refusing the whole corpus as a mixed convention.
+    base, digests = _corpus(tmp_path)
+    prefixed = {f"policies/{n}": d for n, d in digests.items()}
+    prefixed["PACKAGE-INVENTORY.txt"] = "0" * 64
+    _configure(monkeypatch, base, _manifest(tmp_path, prefixed))
+
+    chunks = policy_retrieval._load_corpus()
+
+    assert chunks
 
 
 # --- The audited set and the indexed set must be the same set -------------
