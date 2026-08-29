@@ -96,6 +96,13 @@ class QueryEval:
     # NOT_EVALUATED: her prohibition is prose and carries no literal for the
     # mechanical check to match, so nothing here grades it.
     prohibited_verdict: str = NOT_EVALUATED
+    # The three gold targets themselves, carried through so the evaluator has
+    # something to grade against. `_UNECHOED_TEXT_KEYS` in run.py governs these:
+    # never embedded, never printed into the report (report.py reads only the
+    # verdict fields above).
+    expected_conclusion: str | None = None
+    displayed_summary_id: str | None = None
+    prohibited_conclusion: str | None = None
     hits: dict[int, bool] = field(init=False)
     reciprocal_rank: float = field(init=False)
     correct: bool = field(init=False)

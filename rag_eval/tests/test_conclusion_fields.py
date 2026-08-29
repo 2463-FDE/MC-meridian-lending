@@ -207,6 +207,20 @@ def test_the_conclusion_text_is_never_embedded(tmp_path: Path, monkeypatch) -> N
     assert not any("Credit Manager" in t for t in seen)
 
 
+def test_the_target_fields_land_on_the_eval(tmp_path: Path) -> None:
+    """BR-1: a row can validate clean while the values never reach QueryEval.
+
+    Loading and normalizing the pair is not enough -- the evaluator grades
+    QueryEval instances, so the normalized text has to survive construction.
+    """
+    base = _corpus(tmp_path)
+    gold = _gold(base, [_pair()])
+    result = run_mod.run(base=base, gold_path=gold)
+    e = result.evals[0]
+    assert e.expected_conclusion == HER_CONCLUSION_PROSE
+    assert e.displayed_summary_id == "Q01-ACCEPTABLE-CONCLUSION"
+
+
 def test_an_empty_conclusion_is_refused(tmp_path: Path) -> None:
     """A blank string is not a conclusion; it would grade as coverage it lacks."""
     base = _corpus(tmp_path)

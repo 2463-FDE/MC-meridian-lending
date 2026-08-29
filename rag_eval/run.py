@@ -1146,6 +1146,9 @@ def run(
             # The displayed summary describes a passage rather than asserting a
             # literal, so no mechanical check applies. It stays NOT_EVALUATED
             # until the evaluator lands -- reported as such, never as a pass.
+            expected_conclusion=q.get("expected_conclusion"),
+            displayed_summary_id=q.get("displayed_summary_id"),
+            prohibited_conclusion=q.get("prohibited_conclusion"),
         )
         for q in gold
     ]

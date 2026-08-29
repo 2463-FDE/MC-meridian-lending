@@ -86,6 +86,14 @@ def test_gold_accepts_her_camelcase_prohibited_conclusion(tmp_path: Path) -> Non
     assert result.evals[0].prohibited_verdict == NOT_EVALUATED
 
 
+def test_the_prohibited_text_lands_on_the_eval(tmp_path: Path) -> None:
+    """BR-1: validated then dropped before QueryEval construction."""
+    base = _corpus(tmp_path)
+    gold = _gold(base, [_case(prohibited_conclusion=HER_PROHIBITED_PROSE)])
+    result = run_mod.run(base=base, gold_path=gold)
+    assert result.evals[0].prohibited_conclusion == HER_PROHIBITED_PROSE
+
+
 def test_her_prohibited_prose_does_not_trip_the_person_name_guard(
     tmp_path: Path,
 ) -> None:
