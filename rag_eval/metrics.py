@@ -103,11 +103,29 @@ class QueryEval:
     expected_conclusion: str | None = None
     displayed_summary_id: str | None = None
     prohibited_conclusion: str | None = None
+    # The evaluator's one line of reasoning (S-8, S-10). Empty until it exists —
+    # nothing else may write here, because the retention allowlist admits this
+    # field on the strength of a human having reviewed it. Normalized to a single
+    # line and length-capped in __post_init__: S-10 says one line, and a limit
+    # that is only intended is not a control (C-7).
+    rationale: str = ""
     hits: dict[int, bool] = field(init=False)
     reciprocal_rank: float = field(init=False)
     correct: bool = field(init=False)
 
     def __post_init__(self) -> None:
+        # One line, S-10. Collapse first so a paragraph cannot pass the cap by
+        # spending its length on newlines, then REFUSE an overlong one rather
+        # than truncating: truncation still writes the first 240 characters of a
+        # leaked passage into the report, which is the breach the cap exists to
+        # stop. A refusal costs one case; a leak costs the retention allowlist.
+        self.rationale = " ".join(self.rationale.split())
+        if len(self.rationale) > RATIONALE_MAX_CHARS:
+            raise ValueError(
+                f"rationale for {self.query_id!r} is {len(self.rationale)} "
+                f"characters, over the {RATIONALE_MAX_CHARS}-character limit -- "
+                "S-10 allows one line, and a longer one can carry passage text"
+            )
         if self.outcome_class is None:
             self.outcome_class = "no_match" if self.unanswerable else "answer"
         ids = [cid for cid, _ in self.retrieved]
@@ -141,6 +159,14 @@ class QueryEval:
         return self.outcome_class != UNSCORABLE_CLASS
 
 
+# S-10 allows the evaluator one rationale line per case. A cap only means
+# something if a retrieved passage cannot fit inside it -- her chunks average
+# ~475 characters, so a limit at or above that would admit one whole. This is
+# deliberately about a third of that: long enough for a reason, too short to
+# carry the passage the reason is about.
+RATIONALE_MAX_CHARS = 240
+
+
 @dataclass
 class TopicStat:
     """One topic's own count and score, so no topic hides inside a pooled mean."""
@@ -171,6 +197,27 @@ class SupportStat:
 
 
 @dataclass
+class TopicVerdicts:
+    """One topic's three verdict rates, kept apart the way the pooled ones are.
+
+    S-4 requires the report broken out by topic rather than pooled, and once the
+    support verdicts are inside the graded result that applies to them too --
+    `TopicStat` above covers retrieval only. Three separate stats, never summed:
+    S-1 forbids merging the two support targets, and the prohibited axis has the
+    opposite polarity from both.
+
+    `n` counts the topic's cases over ALL evals, matching the pooled verdict
+    stats. It is therefore not `TopicStat.n`, which drops unscorable cases -- a
+    `clarification` case has no retrieval target but still has a conclusion.
+    """
+
+    n: int
+    conclusion: SupportStat
+    summary: SupportStat
+    prohibited: SupportStat
+
+
+@dataclass
 class Aggregate:
     n_answerable: int
     n_unanswerable: int
@@ -186,6 +233,10 @@ class Aggregate:
     summary_verdicts: SupportStat
     # The negative target, on its own axis and never added to the two above.
     prohibited_verdicts: SupportStat
+    # The same three, split per officer topic (S-4: by topic, not pooled).
+    # Insertion-ordered, and keyed over ALL evals rather than scorable ones —
+    # see TopicVerdicts.
+    verdicts_by_topic: dict[str, TopicVerdicts]
 
 
 def _support_stat(values, states=VERDICT_STATES) -> SupportStat:
@@ -226,8 +277,27 @@ def aggregate(evals: list[QueryEval]) -> Aggregate:
         cstat = by_class.setdefault(str(e.outcome_class), ClassStat(n=0, correct=0))
         cstat.n += 1
         cstat.correct += int(e.correct)
+    # Per-topic verdicts run over ALL evals, not `scorable`, so this split and
+    # the pooled stats below describe the same population. A `clarification`
+    # case has no retrieval target but still has a conclusion to grade, and a
+    # split that dropped it would disagree with the pooled figure beside it.
+    by_topic_evals: dict[str, list[QueryEval]] = {}
+    for e in evals:
+        by_topic_evals.setdefault(e.topic, []).append(e)
+    verdicts_by_topic = {
+        topic: TopicVerdicts(
+            n=len(group),
+            conclusion=_support_stat(e.conclusion_verdict for e in group),
+            summary=_support_stat(e.summary_verdict for e in group),
+            prohibited=_support_stat(
+                (e.prohibited_verdict for e in group), PROHIBITED_STATES
+            ),
+        )
+        for topic, group in by_topic_evals.items()
+    }
     return Aggregate(
         by_topic=by_topic,
+        verdicts_by_topic=verdicts_by_topic,
         n_unmapped=sum(1 for e in scorable if e.topic == UNMAPPED),
         n_unscorable=sum(1 for e in evals if not e.scorable),
         # Over ALL evals, not just scorable ones: a support verdict is about the

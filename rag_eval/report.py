@@ -314,6 +314,89 @@ def _support_section(agg: Aggregate) -> list[str]:
                 "pass nor a failure, and must not be read as either.",
                 "",
             ]
+    lines += _verdicts_by_topic_table(agg)
+    return lines
+
+
+def _rate_cell(stat) -> str:
+    """One target's rate for one topic, with the denominator it was taken over.
+
+    A bare `0.00` and a bare `n/a` look alike in a table and mean opposite
+    things -- nothing graded versus everything graded wrong -- so the graded
+    count travels with the rate rather than sitting in a separate column.
+    """
+    if stat.rate is None:
+        return "n/a (0 graded)"
+    return f"{stat.rate:.2f} ({stat.n_graded} graded)"
+
+
+def _verdicts_by_topic_table(agg: Aggregate) -> list[str]:
+    """The three targets again, split per officer topic (S-4).
+
+    S-4 keeps all eight topics in scope and asks for the report **by topic, not
+    pooled**. Three columns, never one: the same S-1 rule that forbids a merged
+    support number forbids a merged per-topic one, and the prohibited column
+    carries the opposite polarity from the two beside it -- its rate is
+    `avoided`, so high is good there for a different reason.
+
+    `unmapped` is excluded from the table and reported beneath it as a count,
+    the same treatment the retrieval table gives it: a row beside real topics
+    would read as coverage the closed officer vocabulary does not have.
+    """
+    mapped = {n: v for n, v in agg.verdicts_by_topic.items() if n != UNMAPPED}
+    if not mapped:
+        return []
+    lines = [
+        "### By topic",
+        "",
+        "Rates are per target and never combined. The prohibited column scores "
+        "`avoided`, not `supported` -- a high number there means the run stayed "
+        "off the conclusion she prohibited.",
+        "",
+        "| Topic | Cases | Expected conclusion | Displayed summary | Prohibited |",
+        "|-------|-------|---------------------|-------------------|------------|",
+    ]
+    for name, v in mapped.items():
+        lines.append(
+            f"| `{name}` | {v.n} | {_rate_cell(v.conclusion)} | "
+            f"{_rate_cell(v.summary)} | {_rate_cell(v.prohibited)} |"
+        )
+    unmapped = agg.verdicts_by_topic.get(UNMAPPED)
+    if unmapped:
+        lines += [
+            "",
+            f"**{unmapped.n} case(s) carry `unmapped`** and are outside the table "
+            "above. No code in the closed officer vocabulary expresses them, so "
+            "they cannot be asked through the product; their verdicts are counted "
+            "in the pooled totals above but score no topic.",
+        ]
+    lines.append("")
+    return lines
+
+
+def _rationale_section(evals: list[QueryEval]) -> list[str]:
+    """The evaluator's one line per case, for the cases that have one.
+
+    S-10's retention allowlist admits case id, topic, source-section reference,
+    the verdicts and one rationale line. Nothing produces a rationale until the
+    evaluator lands, so this section is omitted entirely rather than printing a
+    column of blanks that would read as an evaluator that ran and said nothing.
+    """
+    rated = [e for e in evals if e.rationale]
+    if not rated:
+        return []
+    lines = [
+        "## Evaluator rationales",
+        "",
+        "One line per graded case (S-8, S-10). Case id and topic only -- no "
+        "conclusion text, no summary text, no passage.",
+        "",
+        "| Case | Topic | Rationale |",
+        "|------|-------|-----------|",
+    ]
+    for e in rated:
+        lines.append(f"| `{e.query_id}` | `{e.topic}` | {e.rationale} |")
+    lines.append("")
     return lines
 
 
@@ -472,5 +555,6 @@ def build(
         false_confident,
     )
     lines += _support_section(agg)
+    lines += _rationale_section(evals)
     lines += _data_gaps_section(evals, verdicts, display_names)
     return "\n".join(lines)
