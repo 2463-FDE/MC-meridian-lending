@@ -86,6 +86,41 @@ def load_corpus_manifest(path: Path) -> dict[str, str]:
     return entries
 
 
+def _load_gold_queries(path: Path) -> list:
+    """Read a gold set: ONE JSON document shaped `{"queries": [...]}`.
+
+    The client's delivery is line-delimited JSON, and a gold set is transcribed
+    into this shape rather than read from it — which is what `_GOLD_KEY_ALIASES`
+    exists for, so the transcription keeps her camelCase column names instead of
+    renaming them. Handed the delivered file directly, `json.loads` raises
+    `Extra data` on a multi-row file and the subscript raises `KeyError` on a
+    one-row file: stdlib exceptions that name the parser rather than the contract
+    the operator missed. Say the expected shape instead.
+
+    Never echo file content in these messages — a gold set is her question text.
+    A path and a line number are positional, and the same thing the other
+    operator-input reader (`load_corpus_manifest`) already reports.
+    """
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"gold set {path} is not one JSON document (parse error at line "
+            f'{exc.lineno}) — expected a single object shaped {{"queries": [...]}}. '
+            "Line-delimited JSON, one object per line as the delivery ships, has "
+            "to be transcribed into that shape first"
+        ) from exc
+    if not isinstance(doc, dict) or "queries" not in doc:
+        raise RuntimeError(
+            f"gold set {path} has no top-level 'queries' — expected a single "
+            'object shaped {"queries": [...]}'
+        )
+    queries = doc["queries"]
+    if not isinstance(queries, list):
+        raise RuntimeError(f"gold set {path} has a 'queries' that is not a list")
+    return queries
+
+
 def audit_corpus_against_manifest(
     base: Path,
     manifest: dict[str, str],
@@ -805,7 +840,7 @@ def run(
     # actually exist, not against the ids a gold set hoped for.
     chunk_ids = {c.chunk_id for c in chunks}
     gold_source = gold_path or GOLD_PATH
-    gold = json.loads(gold_source.read_text(encoding="utf-8"))["queries"]
+    gold = _load_gold_queries(gold_source)
     # Schema-harden first: lock the structured fields to machine shapes so they
     # cannot smuggle free-text PII (a name hidden in an id or an expected entry),
     # and reject unknown keys so a future free-text field cannot appear that the
