@@ -693,6 +693,13 @@ class RunResult:
     provider_calls: int
     provider_retries: int
     provider_input_tokens: int
+    # Judge provenance (ADR 0022): "none" means no LLM call was made at all,
+    # so the report renders the original zero-LLM-calls sentence; "bedrock"
+    # means every eval row's conclusion/summary/prohibited axes may have gone
+    # through a real Bedrock call and the report must say so.
+    judge_backend: str
+    judge_model: str | None
+    judge_calls: int
 
 
 def corpus_signature(chunks: list[Chunk]) -> str:
@@ -1385,6 +1392,10 @@ def run(
             )
         )
 
+    judge_backend = "none" if evaluator is None else "bedrock"
+    judge_model = None if evaluator is None else getattr(evaluator, "model_id", None)
+    judge_calls = getattr(evaluator, "calls", 0)
+
     agg = aggregate(evals)
     # Read the counters AFTER the gold-query embeds above: a provider run embeds
     # every indexed chunk and every gold query, and both are provider calls the
@@ -1420,6 +1431,9 @@ def run(
         corpus_signature=corpus_signature(chunks),
         wrong_abstain=_wrong_abstain,
         false_confident=_false_confident,
+        judge_backend=judge_backend,
+        judge_model=judge_model,
+        judge_calls=judge_calls,
     )
     report_path = base / "rag_eval" / "eval_report.md"
     # Created explicitly: this directory used to exist only as a side effect of
@@ -1443,6 +1457,9 @@ def run(
         provider_calls=provider_calls,
         provider_retries=provider_retries,
         provider_input_tokens=provider_input_tokens,
+        judge_backend=judge_backend,
+        judge_model=judge_model,
+        judge_calls=judge_calls,
     )
 
 
