@@ -395,7 +395,8 @@ def _rationale_section(evals: list[QueryEval]) -> list[str]:
         "|------|-------|-----------|",
     ]
     for e in rated:
-        lines.append(f"| `{e.query_id}` | `{e.topic}` | {e.rationale} |")
+        rationale = e.rationale.replace("\\", "\\\\").replace("|", "\\|")
+        lines.append(f"| `{e.query_id}` | `{e.topic}` | {rationale} |")
     lines.append("")
     return lines
 

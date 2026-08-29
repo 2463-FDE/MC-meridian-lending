@@ -362,3 +362,26 @@ def test_the_rationale_section_carries_only_allowlisted_fields():
     assert "`adverse_action`" in section
     assert "SECRET CONCLUSION TEXT" not in section
     assert "SECRET PROHIBITED TEXT" not in section
+
+
+def test_a_pipe_in_the_rationale_does_not_add_a_table_cell():
+    """A rationale containing a literal pipe must not widen the rendered row --
+    it has to stay one row of three cells, matching the header."""
+    from rag_eval.report import _rationale_section
+
+    evals = [
+        _eval(
+            "q1",
+            "adverse_action",
+            conclusion=SUPPORTED,
+            summary=SUPPORTED,
+            prohibited=AVOIDED,
+            rationale="matches deadline | extra cell",
+        ),
+    ]
+    section = "\n".join(_rationale_section(evals))
+    row = next(line for line in section.splitlines() if line.startswith("| `q1`"))
+    # 4 structural delimiters for 3 cells, plus the one escaped pipe inside the
+    # rationale text itself -- 5 literal "|" characters, never a 4th cell.
+    assert row.count("|") == 5
+    assert "matches deadline \\| extra cell" in row
