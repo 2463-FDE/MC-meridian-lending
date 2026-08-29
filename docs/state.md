@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (93437e2)` — 93437e2 2026-08-28 chore(kb): regenerate docs/state.md
+Base: `origin/main (8fa35fb)` — 8fa35fb 2026-08-28 Merge pull request #107 from 2463-FDE/feat/rag-eval-prohibited-conclusion
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #107 | `8fa35fb` | 2026-08-28 | Merge pull request #107 from 2463-FDE/feat/rag-eval-prohibited-conclusion |
 | #106 | `108100f` | 2026-08-28 | Merge pull request #106 from 2463-FDE/fix/rag-eval-summary-freeze |
 | #105 | `be796f0` | 2026-08-28 | Merge pull request #105 from 2463-FDE/feat/rag-eval-two-verdicts |
 | #104 | `95d7858` | 2026-08-28 | Merge pull request #104 from 2463-FDE/fix/rag-eval-threshold-provenance |
