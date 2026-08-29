@@ -26,6 +26,7 @@ from . import (
     intake,
     kyc_gate,
     policy_retrieval,
+    rate_limit,
 )
 from .llm import ClaudeClient, load_llm_config
 from .llm.config import harden_trace_client
@@ -134,6 +135,7 @@ def assistant_decide(
     and appending a second regulated event. Absent = explicit re-decision.
     """
     authz.require_officer(x_user_role)
+    rate_limit.check_assistant_rate_limit(x_user_id)
     # Client ask (2026-08-12 governance §5). The client scoped the block to "the one route
     # that runs a decision", having seen only POST /applications/{id}/decision -- but the
     # score tool below performs the same regulated decision and appends the same
@@ -152,6 +154,7 @@ def assistant_explain(
     app_id: int,
     policy_topic: str | None = Query(default=None),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     client: ClaudeClient = Depends(get_llm_client),
 ):
     """Explain an EXISTING decision from the persisted record (ADR 0009 §5 amendment).
@@ -172,6 +175,7 @@ def assistant_explain(
     abstention. The officer is told their topic does not exist instead.
     """
     authz.require_officer(x_user_role)
+    rate_limit.check_assistant_rate_limit(x_user_id)
     if policy_topic is not None and policy_topic not in policy_retrieval.POLICY_TOPICS:
         raise HTTPException(
             status_code=422,

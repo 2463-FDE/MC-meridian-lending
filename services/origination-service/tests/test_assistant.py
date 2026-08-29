@@ -347,6 +347,39 @@ def test_assistant_requires_officer_role(monkeypatch):
         app.dependency_overrides.clear()
 
 
+def test_assistant_route_surfaces_the_rate_limit(monkeypatch):
+    # Wiring only: the limiter's own counting/window logic is unit-tested in
+    # test_rate_limit.py. This proves both routes actually call it, after the
+    # officer-role gate, and surface its 429 rather than swallowing it.
+    from fastapi import HTTPException
+    from fastapi.testclient import TestClient
+
+    from app import main
+    from app.main import app
+
+    def _tripped(user_id):
+        raise HTTPException(status_code=429, detail="assistant rate limit exceeded")
+
+    monkeypatch.setattr(main.rate_limit, "check_assistant_rate_limit", _tripped)
+    app.dependency_overrides[main.get_llm_client] = lambda: _client(FINAL_DENY)[0]
+    try:
+        tc = TestClient(app, raise_server_exceptions=False)
+        assert (
+            tc.post(
+                "/assistant/decisions/42", headers={"X-User-Role": "underwriter"}
+            ).status_code
+            == 429
+        )
+        assert (
+            tc.get(
+                "/assistant/decisions/42", headers={"X-User-Role": "underwriter"}
+            ).status_code
+            == 429
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+
 # --- Adversarial-review fixes (teeth 2026-07-15) ------------------------------------
 
 
