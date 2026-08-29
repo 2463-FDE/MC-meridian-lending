@@ -138,18 +138,38 @@ def _corpus_relative_manifest(manifest: dict[str, str]) -> dict[str, str]:
 
     If any entry carries the `policies/` prefix, the manifest is a
     whole-package listing: every prefixed entry is stripped to corpus-relative
-    and everything else (a sibling subtree, the manifest's own listing of
-    itself) is dropped as out of scope for this corpus. A manifest with no
-    prefixed entries is already corpus-relative and passes through unchanged
-    — the pre-existing convention, still exercised by every manifest fixture
-    that predates this function.
+    and a sibling subtree entry (`kb_dump/x.md` — it names its own subtree, so
+    it cannot be mistaken for ours) is dropped as out of scope for this
+    corpus. A manifest with no prefixed entries is already corpus-relative and
+    passes through unchanged — the pre-existing convention, still exercised by
+    every manifest fixture that predates this function.
+
+    A bare entry with no subtree qualifier at all (`fee_schedule.md`)
+    alongside a `policies/`-prefixed one is not a sibling subtree — it is
+    indistinguishable from an already-narrowed corpus-relative approval an
+    operator forgot to convert when appending a new entry in the other
+    convention. Silently keeping only the prefixed half would drop that
+    approval's entry from the audited set without dropping the file from
+    disk, which the existing "unlisted file" refusal reports as if the file
+    were never approved at all — true, but for the wrong reason, and every
+    other entry in the manifest is refused right along with it. Raise instead
+    so the failure names the actual cause.
     """
     prefixed = {
         name[len(_MANIFEST_SUBTREE_PREFIX) :]: digest
         for name, digest in manifest.items()
         if name.startswith(_MANIFEST_SUBTREE_PREFIX)
     }
-    return prefixed if prefixed else manifest
+    if not prefixed:
+        return manifest
+    ambiguous = sorted(name for name in manifest if "/" not in name)
+    if ambiguous:
+        raise ValueError(
+            f"manifest mixes corpus-relative and {_MANIFEST_SUBTREE_PREFIX}-prefixed "
+            f"entries: {len(ambiguous)} entries have no subtree qualifier at all "
+            "(names withheld — an unapproved name can itself be the identifier)"
+        )
+    return prefixed
 
 
 def corpus_dir() -> Path:
@@ -202,10 +222,10 @@ def _load_corpus() -> list:
         # is worse than answering "no policy match".
         try:
             manifest = load_corpus_manifest(Path(config.POLICY_CORPUS_MANIFEST))
+            manifest = _corpus_relative_manifest(manifest)
         except (OSError, ValueError) as exc:
             log.warning("policy corpus manifest unusable, indexing nothing: %s", exc)
             return []
-        manifest = _corpus_relative_manifest(manifest)
         problems = audit_corpus_against_manifest(base, manifest)
         if problems:
             log.warning(

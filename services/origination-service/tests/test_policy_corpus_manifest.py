@@ -168,6 +168,44 @@ def test_a_base_relative_manifest_ignores_a_sibling_subtree(
     assert chunks
 
 
+class _RecordingLog:
+    """Captures what the module logs. `logging_config.get_logger` sets
+    `propagate = False`, so `caplog` reports nothing for a line that WAS logged —
+    see `test_policy_retrieval.py`'s copy of this same recorder."""
+
+    def __init__(self):
+        self.lines = []
+
+    def _record(self, msg, *args):
+        self.lines.append(msg % args if args else msg)
+
+    warning = info = _record
+
+
+def test_a_mixed_convention_manifest_fails_closed_not_silently(
+    tmp_path: Path, monkeypatch
+):
+    # A bare entry with no subtree qualifier at all, alongside a policies/
+    # -prefixed one, is not a sibling subtree like kb_dump/ -- it is
+    # indistinguishable from an already-narrowed approval an operator forgot
+    # to convert when appending a new entry in the other convention. Keeping
+    # only the prefixed half would silently drop that approval from the
+    # audited set while the file stays on disk, so the corpus is refused
+    # anyway ("unlisted file") but for a cause the log never names. This must
+    # fail closed AND say why, not just fail closed.
+    base, digests = _corpus(tmp_path)
+    mixed = {f"policies/{n}": d for n, d in digests.items()}
+    mixed["fee_schedule.md"] = "1" * 64
+    _configure(monkeypatch, base, _manifest(tmp_path, mixed))
+    recorder = _RecordingLog()
+    monkeypatch.setattr(policy_retrieval, "log", recorder)
+
+    chunks = policy_retrieval._load_corpus()
+
+    assert chunks == []
+    assert "mixes corpus-relative" in "\n".join(recorder.lines)
+
+
 # --- The audited set and the indexed set must be the same set -------------
 # `audit_corpus_against_manifest` walks the corpus recursively (rag_eval/run.py),
 # and so does the harness's own discovery, so a manifest-approved file in a
