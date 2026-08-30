@@ -374,6 +374,22 @@ def _scan_json_value(value) -> list[Finding]:
 def scan_file(path: str | Path) -> FileVerdict:
     path = Path(path)
     suffix = path.suffix.lower()
+
+    # The filename is part of the document. Her acceptance set says so outright
+    # (`acceptance/no-borrower-data-boundary.jsonl`, FIX-NEG-BORROWER-FILENAME):
+    # "Filename itself is borrower-data-like. Entire document must be excluded
+    # even if body were otherwise clean." A body-only scan admits such a file, and
+    # the name then travels onward -- `_slug` derives every chunk id from it, so
+    # the identifier reaches the index, the report and the retrieved-chunk ids.
+    #
+    # Refused before the body is read: the document is excluded whole, so the body
+    # findings would add nothing an operator can act on differently. The sample is
+    # the suffix, never the name -- the name is the identifier being refused.
+    if scan_text(path.name):
+        return FileVerdict(
+            str(path), False, [Finding("filename-pii", suffix or "(none)")]
+        )
+
     try:
         raw = path.read_bytes()
     except OSError:

@@ -1518,9 +1518,13 @@ def main(
     refused = [v for v in result.verdicts if not v.passed]
     print(f"gate: {len(result.verdicts)} files scanned, {len(refused)} refused")
     for v in refused:
-        # Named through display_names, never the raw path: a manifest-admitted
-        # filename is graded by nothing and can itself be the identifier.
-        print(f"  REFUSED {result.display_names.get(v.path, v.path)}: {v.counts()}")
+        # Named through safe_display_name, never the raw path: a
+        # manifest-admitted filename is graded by nothing and can itself be
+        # the identifier, and a filename-pii finding means the path itself
+        # (or its manifest-scoped display name) is the disclosure.
+        print(
+            f"  REFUSED {report_mod.safe_display_name(v, result.display_names)}: {v.counts()}"
+        )
     print(f"embedder: {result.embedder_signature}")
     if result.caching:
         print(
@@ -1548,7 +1552,9 @@ def main(
             "new PII committed to the repo:"
         )
         for v in unexpected:
-            print(f"  {result.display_names.get(v.path, v.path)}: {v.counts()}")
+            print(
+                f"  {report_mod.safe_display_name(v, result.display_names)}: {v.counts()}"
+            )
         raise SystemExit(1)
 
 
