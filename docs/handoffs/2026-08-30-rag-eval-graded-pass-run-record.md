@@ -60,7 +60,7 @@ Report copied out of the packet before cleanup: `docs/rag-eval-graded-pass-repor
 | packet | `<packet>`, 18 files, manifest-verified |
 | gold set | `gold_v2.json` — 28 rows, 8 topics |
 | displayed summaries | `<summaries>`, own manifest |
-| documents admitted | 6 scanned, 0 refused |
+| candidate files scanned | 6, 0 refused — the hygiene gate's file count, not a document count. Only gate-passed markdown is chunked, and the 66 chunks match the five-document measurement in `2026-08-27-fix-policy-corpus-admission.md`, so the sixth contributed none. It is not named: the harness's per-file hygiene table stayed inside the packet. Carry the admitted document ids next run |
 | chunks indexed | 66 |
 
 ## 4. Providers, cost, provenance
