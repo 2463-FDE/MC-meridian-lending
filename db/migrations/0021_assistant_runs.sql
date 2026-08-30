@@ -62,14 +62,21 @@ CREATE TABLE IF NOT EXISTS assistant_runs (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT ck_assistant_runs_task
         CHECK (task IN ('decision', 'explain')),
-    -- Every code _run_assistant can record. never_decisioned is the half of the old
+    -- Every code the service can record. never_decisioned is the half of the old
     -- single `not_found` that means the application EXISTS but carries no decision
     -- record; fusing the two made a broken-link spike and an asked-too-early spike one
     -- number with opposite remedies.
+    --
+    -- The last three are refused in the ROUTE bodies ABOVE the loop
+    -- (main._refused_before_loop) and never reach _run_assistant's translation, so the
+    -- first eight are not the whole set. A code missing here is not a rejected write an
+    -- operator sees: services/origination-service/app/assistant_runs.py swallows the
+    -- violation by design, leaving a span, an answer for the officer, and no row.
     CONSTRAINT ck_assistant_runs_refusal_code
         CHECK (refusal_code IS NULL OR refusal_code IN (
             'not_found', 'never_decisioned', 'assistant_refused', 'llm_unavailable',
-            'kyc_blocked', 'refused', 'idempotency_conflict', 'downstream_unavailable'
+            'kyc_blocked', 'refused', 'idempotency_conflict', 'downstream_unavailable',
+            'self_decision', 'idempotency_key_too_long', 'unknown_policy_topic'
         )),
     -- A row is either a served answer or a refusal, never ambiguously both -- so a
     -- refusal can never be read as "outcome unknown". Keyed on http_status and NOT on
@@ -204,7 +211,9 @@ BEGIN
          'checkrefusal_codeisnullorrefusal_code=anyarray[''not_found''::text,'
          '''never_decisioned''::text,''assistant_refused''::text,'
          '''llm_unavailable''::text,''kyc_blocked''::text,''refused''::text,'
-         '''idempotency_conflict''::text,''downstream_unavailable''::text]'),
+         '''idempotency_conflict''::text,''downstream_unavailable''::text,'
+         '''self_decision''::text,''idempotency_key_too_long''::text,'
+         '''unknown_policy_topic''::text]'),
         ('ck_assistant_runs_refusal_matches_status',
          'checkhttp_status=200=refusal_codeisnull')
       ) AS e(conname, expected)

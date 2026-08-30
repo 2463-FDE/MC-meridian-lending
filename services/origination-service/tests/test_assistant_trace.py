@@ -723,3 +723,153 @@ def test_the_entry_span_promotes_counts_and_codes_but_no_content(spans, tools):
     assert result["summary"] not in values
     assert result["application_id"] not in values
     assert result["trace_id"] not in values
+
+
+# --- refusals raised in the ROUTE, above `_run_assistant` -------------------------
+#
+# `_run_assistant` opens the entry span, so three post-authz business refusals in the
+# route bodies above it produced no trace at all: the self-decision block, an overlong
+# Idempotency-Key, and an unlisted policy_topic. Each is now raised through
+# `main._refused_before_loop`, which opens the same `assistant.entry` root with its own
+# enum code.
+#
+# `require_officer` and `check_llm_rate_limit` stay OUTSIDE the span deliberately, and
+# `test_authz_and_rate_limit_refusals_stay_untraced` below pins that: a span opened
+# before the rate limiter would let an unauthorized caller mint trace volume.
+
+
+@pytest.fixture
+def route_refusal(monkeypatch):
+    """Neutralize everything the route touches except the refusal under test."""
+    monkeypatch.setattr(main.authz, "require_officer", lambda role: None)
+    monkeypatch.setattr(main.rate_limit, "check_llm_rate_limit", lambda uid: None)
+    monkeypatch.setattr(main.authz, "deny_self_decision", lambda *a, **k: None)
+    monkeypatch.setattr(main.assistant_runs, "record", lambda **kw: None)
+
+    def _never(*args, **kwargs):
+        raise AssertionError("the loop ran; the refusal was supposed to precede it")
+
+    monkeypatch.setattr(assistant, "run", _never)
+
+
+def test_the_self_decision_block_is_traced(spans, route_refusal, monkeypatch):
+    def _blocked(app_id, role, uid):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "a decision cannot be run by the applicant's own account; "
+                "another officer must decision this application"
+            ),
+        )
+
+    monkeypatch.setattr(main.authz, "deny_self_decision", _blocked)
+
+    with pytest.raises(HTTPException) as raised:
+        main.assistant_decide(
+            42,
+            idempotency_key=None,
+            x_user_role="underwriter",
+            x_user_id="u-1",
+            client=_client(),
+        )
+
+    assert raised.value.status_code == 403
+    assert len(spans) == 1
+    entry = spans[0]
+    assert entry.name == "assistant.entry"
+    assert entry.metadata["task"] == "decision"
+    assert entry.metadata["http_status"] == 403
+    assert entry.metadata["refusal"] == "self_decision"
+    assert entry.exception is None, (
+        f"{entry.exception!r} crossed the entry span; trace() would ship str(exc)"
+    )
+
+
+def test_an_overlong_idempotency_key_is_traced(spans, route_refusal):
+    with pytest.raises(HTTPException) as raised:
+        main.assistant_decide(
+            42,
+            idempotency_key="k" * 65,
+            x_user_role="underwriter",
+            x_user_id="u-1",
+            client=_client(),
+        )
+
+    assert raised.value.status_code == 400
+    assert len(spans) == 1
+    assert spans[0].metadata["refusal"] == "idempotency_key_too_long"
+    assert spans[0].metadata["http_status"] == 400
+    assert spans[0].exception is None
+
+
+def test_an_unlisted_policy_topic_is_traced(spans, route_refusal):
+    with pytest.raises(HTTPException) as raised:
+        main.assistant_explain(
+            42,
+            policy_topic="not_a_real_topic",
+            x_user_role="underwriter",
+            x_user_id="u-1",
+            client=_client(),
+        )
+
+    assert raised.value.status_code == 422
+    assert len(spans) == 1
+    entry = spans[0]
+    assert entry.metadata["task"] == "explain"
+    assert entry.metadata["refusal"] == "unknown_policy_topic"
+    # The rejected topic is the officer's own input and never reaches the span: the
+    # message names the vocabulary, the span names the code.
+    assert "not_a_real_topic" not in json.dumps(entry.metadata)
+
+
+def test_no_route_refusal_span_carries_an_identifier(spans, route_refusal):
+    """Same rule the entry span already holds: no app_id, no user id, no key material."""
+    with pytest.raises(HTTPException):
+        main.assistant_decide(
+            42,
+            idempotency_key="Z" * 65,
+            x_user_role="underwriter",
+            x_user_id="user-9001",
+            client=_client(),
+        )
+
+    blob = json.dumps(spans[0].metadata)
+    for identifier in ("42", "user-9001", "ZZZ"):
+        assert identifier not in blob, f"{identifier} reached the span"
+
+
+@pytest.mark.parametrize(
+    "attr,exc",
+    [
+        ("require_officer", HTTPException(status_code=403, detail="officer required")),
+        (
+            "check_llm_rate_limit",
+            HTTPException(status_code=429, detail="rate limited"),
+        ),
+    ],
+)
+def test_authz_and_rate_limit_refusals_stay_untraced(
+    spans, route_refusal, monkeypatch, attr, exc
+):
+    """Deliberate, not an oversight. These two run before the span opens because they are
+    the controls standing between an arbitrary caller and this service: tracing them would
+    hand whoever can reach the port a lever on trace volume, and the rate limiter is the
+    thing that stops it. A refusal here is visible in the log, not in LangSmith."""
+    module = main.authz if attr == "require_officer" else main.rate_limit
+
+    def _refuse(*args, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(module, attr, _refuse)
+
+    with pytest.raises(HTTPException) as raised:
+        main.assistant_decide(
+            42,
+            idempotency_key=None,
+            x_user_role="borrower",
+            x_user_id="u-1",
+            client=_client(),
+        )
+
+    assert raised.value.status_code == exc.status_code
+    assert spans == [], f"an unauthorized caller minted {[s.name for s in spans]}"

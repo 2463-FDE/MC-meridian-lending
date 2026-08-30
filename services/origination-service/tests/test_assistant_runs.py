@@ -11,7 +11,9 @@ not what the loop decides; driving a real loop would test the loop again and mak
 cases depend on adapter scripting.
 """
 
+import re
 import uuid
+from pathlib import Path
 
 import httpx
 import pytest
@@ -223,3 +225,116 @@ def test_a_wrongly_typed_field_is_dropped_rather_than_written(
     _serve(monkeypatch, result)
     main._run_assistant(42, None, "decision")
     assert _row(rows)[field] is None
+
+
+# --- refusals raised in the ROUTE, above `_run_assistant` -------------------------
+#
+# `main._refused_before_loop` writes its own row for the three business refusals decided
+# in the route bodies above the loop: the self-decision block, an overlong
+# Idempotency-Key, and an unlisted policy_topic. Their codes are NOT the codes
+# `_run_assistant` translates, and `record()` swallows a constraint violation by design —
+# so a code the CHECK does not admit yields a span, a 4xx for the officer, and no row.
+
+INIT_SQL = (
+    Path(__file__).resolve().parents[3] / "db" / "init" / "001_schema.sql"
+).read_text()
+MAIN_PY = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text()
+
+
+def _admitted_codes() -> set[str]:
+    """The refusal codes the shipped CHECK constraint actually accepts.
+
+    Read out of the DDL rather than restated here: a hand-copied list agrees with itself
+    while the column rejects the value, which is the exact failure being tested.
+    """
+    tail = INIT_SQL[INIT_SQL.index("CONSTRAINT ck_assistant_runs_refusal_code") :]
+    listed = tail[tail.index("IN (") + 4 : tail.index("))")]
+    codes = set(re.findall(r"'([a-z_]+)'", listed))
+    assert codes, "could not read the refusal-code list out of the init DDL"
+    return codes
+
+
+@pytest.fixture
+def route_refusal(monkeypatch):
+    """Neutralize everything the route touches except the refusal under test.
+
+    `assistant_runs.record` is deliberately NOT stubbed. The `rows` fixture replaces the
+    database underneath the real writer instead, so what is asserted is the row the
+    shipped code builds — a stubbed writer accepts every code, including one the
+    constraint rejects.
+    """
+    monkeypatch.setattr(main.authz, "require_officer", lambda role: None)
+    monkeypatch.setattr(main.authz, "deny_self_decision", lambda *a, **k: None)
+
+    def _never(*a, **k):
+        raise AssertionError("the loop ran; the refusal was supposed to precede it")
+
+    monkeypatch.setattr(assistant, "run", _never)
+
+
+def test_the_self_decision_block_is_recorded(rows, route_refusal, monkeypatch):
+    def _blocked(app_id, role, uid):
+        raise HTTPException(
+            status_code=403,
+            detail="another officer must decision this application",
+        )
+
+    monkeypatch.setattr(main.authz, "deny_self_decision", _blocked)
+    with pytest.raises(HTTPException) as raised:
+        main.assistant_decide(
+            42, idempotency_key=None, x_user_role="underwriter",
+            x_user_id="u-1", client=None,
+        )
+    assert raised.value.status_code == 403
+    row = _row(rows)
+    assert row["refusal_code"] == "self_decision"
+    assert row["refusal_code"] in _admitted_codes()
+    assert row["http_status"] == 403
+    assert row["task"] == "decision"
+    # Decided before any work starts, so a measured value would report the cost of the
+    # check itself as request latency.
+    assert row["latency_ms"] == 0
+
+
+def test_an_overlong_idempotency_key_is_recorded(rows, route_refusal):
+    with pytest.raises(HTTPException) as raised:
+        main.assistant_decide(
+            42, idempotency_key="k" * 65, x_user_role="underwriter",
+            x_user_id="u-1", client=None,
+        )
+    assert raised.value.status_code == 400
+    row = _row(rows)
+    assert row["refusal_code"] == "idempotency_key_too_long"
+    assert row["refusal_code"] in _admitted_codes()
+    assert row["http_status"] == 400
+
+
+def test_an_unlisted_policy_topic_is_recorded(rows, route_refusal):
+    with pytest.raises(HTTPException) as raised:
+        main.assistant_explain(
+            42, policy_topic="not_a_real_topic", x_user_role="underwriter",
+            x_user_id="u-1", client=None,
+        )
+    assert raised.value.status_code == 422
+    row = _row(rows)
+    assert row["refusal_code"] == "unknown_policy_topic"
+    assert row["refusal_code"] in _admitted_codes()
+    assert row["task"] == "explain"
+    # The rejected value is the officer's own free text and reaches no column.
+    assert "not_a_real_topic" not in [v for v in row.values() if isinstance(v, str)]
+
+
+def test_no_route_refusal_writes_a_code_the_constraint_rejects():
+    """The class, not the three instances above.
+
+    A refusal added to a route later — with no test of its own — still has to be a code
+    the column admits, or its row is discarded by a write that never raises.
+    """
+    codes = set(re.findall(r'code="([a-z_]+)"', MAIN_PY))
+    assert len(codes) >= 3, (
+        "the _refused_before_loop call sites changed shape; this scan now reads nothing"
+    )
+    assert codes <= _admitted_codes(), (
+        f"refused above the loop but not admitted by the CHECK: "
+        f"{sorted(codes - _admitted_codes())}"
+    )

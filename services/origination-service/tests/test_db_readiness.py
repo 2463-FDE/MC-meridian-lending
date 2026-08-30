@@ -129,7 +129,8 @@ ASSISTANT_RUNS_CHECK_DEF = (
     "check(((refusal_code is null) or (refusal_code = any (array['not_found'::text,"
     "'never_decisioned'::text,'assistant_refused'::text,'llm_unavailable'::text,"
     "'kyc_blocked'::text,'refused'::text,'idempotency_conflict'::text,"
-    "'downstream_unavailable'::text]))))"
+    "'downstream_unavailable'::text,'self_decision'::text,"
+    "'idempotency_key_too_long'::text,'unknown_policy_topic'::text]))))"
 )
 ASSISTANT_RUNS_CHECK_DEFS = {
     "ck_assistant_runs_task": (
