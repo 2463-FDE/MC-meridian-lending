@@ -8,7 +8,7 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (3eb6bc9)` — 3eb6bc9 2026-08-30 Merge pull request #123 from 2463-FDE/feat/llm-token-metadata
+Base: `origin/main (7c6c50c)` — 7c6c50c 2026-08-30 chore(kb): regenerate docs/state.md after merging main
 
 ## Merged pull requests
 
