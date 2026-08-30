@@ -27,6 +27,7 @@ from rag_eval.metrics import (
     AVOIDED,
     HUMAN_REVIEW,
     SUPPORTED,
+    UNSUPPORTED,
 )
 
 
@@ -93,6 +94,85 @@ def test_a_well_formed_reply_becomes_three_verdicts_and_one_line():
         prohibited=AVOIDED,
         rationale="Names the 30-day deadline.",
     )
+
+
+def test_a_fenced_reply_still_grades():
+    """Haiku 4.5 wraps its JSON in a markdown fence despite the prompt saying
+    "Return ONE JSON object and nothing else". Observed live on 2026-08-30 in the
+    Phase B smoke: a bare json.loads raised, every axis went to human_review, and
+    a graded pass would have reported nothing on all 28 cases. Fakes never showed
+    it -- they return bare JSON because that is what the test author wrote."""
+    verdicts = {
+        "conclusion_verdict": SUPPORTED,
+        "summary_verdict": SUPPORTED,
+        "prohibited_verdict": AVOIDED,
+        "rationale": "Names the 30-day deadline.",
+    }
+    fenced = "```json\n" + json.dumps(verdicts, indent=2) + "\n```"
+    ev = _evaluator(json.dumps({"content": [{"type": "text", "text": fenced}]}))
+    out = ev.grade(_case())
+    assert out == CaseVerdicts(
+        conclusion=SUPPORTED,
+        summary=SUPPORTED,
+        prohibited=AVOIDED,
+        rationale="Names the 30-day deadline.",
+    )
+
+
+def test_a_fence_with_no_language_tag_still_grades():
+    verdicts = {
+        "conclusion_verdict": UNSUPPORTED,
+        "summary_verdict": HUMAN_REVIEW,
+        "prohibited_verdict": ASSERTED,
+        "rationale": "The passages do not reach it.",
+    }
+    fenced = "```\n" + json.dumps(verdicts) + "\n```\n"
+    ev = _evaluator(json.dumps({"content": [{"type": "text", "text": fenced}]}))
+    out = ev.grade(_case())
+    assert out.conclusion == UNSUPPORTED
+    assert out.summary == HUMAN_REVIEW
+    assert out.prohibited == ASSERTED
+
+
+def test_a_reply_with_prose_around_the_object_still_grades():
+    """The fence is one shape of the same defect. S-7 gives one bounded pass, so
+    the parser tolerates a JSON object embedded in text generally rather than the
+    single shape that happened to appear in one smoke call."""
+    verdicts = {
+        "conclusion_verdict": SUPPORTED,
+        "summary_verdict": UNSUPPORTED,
+        "prohibited_verdict": AVOIDED,
+        "rationale": "Only the deadline is stated.",
+    }
+    text = "Here is the grading:\n" + json.dumps(verdicts) + "\nLet me know if you need more."
+    ev = _evaluator(json.dumps({"content": [{"type": "text", "text": text}]}))
+    out = ev.grade(_case())
+    assert out.conclusion == SUPPORTED
+    assert out.summary == UNSUPPORTED
+    assert out.prohibited == AVOIDED
+    assert out.rationale == "Only the deadline is stated."
+
+
+def test_a_reply_with_no_json_object_at_all_is_human_review():
+    ev = _evaluator(
+        json.dumps({"content": [{"type": "text", "text": "I cannot grade this."}]})
+    )
+    out = ev.grade(_case())
+    assert out.conclusion == HUMAN_REVIEW
+    assert out.summary == HUMAN_REVIEW
+    assert out.prohibited == HUMAN_REVIEW
+
+
+def test_a_fence_around_something_that_is_not_json_is_still_human_review():
+    """Stripping the fence must not turn genuine garbage into a graded state."""
+    ev = _evaluator(
+        json.dumps({"content": [{"type": "text", "text": "```json\nnot json\n```"}]})
+    )
+    out = ev.grade(_case())
+    assert out.conclusion == HUMAN_REVIEW
+    assert out.summary == HUMAN_REVIEW
+    assert out.prohibited == HUMAN_REVIEW
+    assert len(ev._client.calls) == 1
 
 
 def test_the_request_pins_the_client_approved_model_and_zero_temperature():
