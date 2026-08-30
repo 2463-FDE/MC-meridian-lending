@@ -301,6 +301,19 @@ def test_past_applications_gap_names_the_file_through_display_names() -> None:
     )
 
 
+def test_past_applications_gap_withholds_a_filename_pii_name_too() -> None:
+    """Same escape as the hygiene table: a filename-pii finding here must not
+    fall back to the raw path even with no display-name map supplied.
+    """
+    text = _report(
+        [_eval("q1", "What is the late fee?", unanswerable=False, top=0.5)],
+        66,
+        verdicts=_refused_applications("filename-pii"),
+    )
+    assert "kb_dump/applications.jsonl" not in text
+    assert "withheld" in text
+
+
 @pytest.mark.parametrize("n_chunks", [8, 11, 18, 80])
 def test_calibration_note_reads_correctly_for_any_corpus_size(n_chunks: int) -> None:
     """The corpus size is interpolated, so no wording may assume its first digit.

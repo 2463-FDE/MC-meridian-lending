@@ -469,7 +469,7 @@ def _data_gaps_section(
         # identifier under manifest admission, and the finding breakdown is a fact
         # about this run. The previous wording ("SSN/PAN/DOB in five of six
         # records, raw EIN in the sixth") describes one fixture and no other.
-        name = display_names.get(refused_applications.path, refused_applications.path)
+        name = safe_display_name(refused_applications, display_names)
         counts = refused_applications.counts()
         count_str = ", ".join(f"{t}: {n}" for t, n in sorted(counts.items())) or "—"
         lines += [
