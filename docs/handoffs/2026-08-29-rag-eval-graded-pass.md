@@ -16,7 +16,7 @@ there was rejected: the objects would still sit in a clone whose `origin` is tha
 fork, and one stray push refspec publishes them irrecoverably. That repository has no
 remote and must not be given one.
 
-Supersedes `2026-08-28-rag-eval-titan-pass.md` for sequencing; that file keeps the
+Supersedes `docs/handoffs/2026-08-28-rag-eval-titan-pass.md` for sequencing; that file keeps the
 setup detail (steps 1–10) and `docs/rag-eval-run-pipeline.md` keeps the pipeline. Both are
 siblings in `handoffs/`.
 

@@ -51,7 +51,7 @@ Credential in `AWS_BEARER_TOKEN_BEDROCK`, env var only, never a file.
 otherwise). Both manifests passed, so the summaries audit was exercised.
 
 Console log: `graded-pass-20260830-111157.log`.
-Report copied out of the packet before cleanup: `graded-pass-report-2026-08-30.md`.
+Report copied out of the packet before cleanup: `docs/rag-eval-graded-pass-report-2026-08-30.md`.
 
 ## 3. Inputs
 
@@ -236,7 +236,7 @@ indexing, not publishing.
   rates never pooled, S-6 stated as conclusion-axis-only, calling region disclosed,
   the `human_review` bucket enumerated with §7's explanation, the negative-control
   gap and the single-case-topic fragility both named.
-- **Project memory** — `rag-eval-graded-pass-state.md` still says `origin/main` is
+- **Project memory** — the project-memory entry for this pass still says `origin/main` is
   `7399e8a` with #116 the only thing open. Now `e5f6ea7`, #116/#117/#119 merged,
   pass complete.
 - **Deferred, unchanged:** ADR 0019 vocabulary-gap amendment; ADR 0007 rule 6.
@@ -245,8 +245,8 @@ indexing, not publishing.
 
 | file | what |
 |---|---|
-| `graded-pass-report-2026-08-30.md` | the run's own report, copied out before cleanup |
+| `docs/rag-eval-graded-pass-report-2026-08-30.md` | the run's own report, copied out before cleanup |
 | `graded-pass-20260830-111157.log` | console summary of the pass |
-| `rehearsal-report-2026-08-29.md` | fake-judge rehearsal, NOT a deliverable |
+| `rehearsal-report-2026-08-29.md` (held outside this repository) | fake-judge rehearsal, NOT a deliverable |
 | `smoke_bedrock_judge.py` | Phase B contract test, raw-payload assertions |
 | `rehearse_fake_judge.py` | the free rehearsal |
