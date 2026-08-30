@@ -163,7 +163,9 @@ _ASSISTANT_RUNS_CHECKS = {
         "CHECK (((refusal_code IS NULL) OR (refusal_code = ANY (ARRAY["
         "'not_found'::text, 'never_decisioned'::text, 'assistant_refused'::text, "
         "'llm_unavailable'::text, 'kyc_blocked'::text, 'refused'::text, "
-        "'idempotency_conflict'::text, 'downstream_unavailable'::text]))))"
+        "'idempotency_conflict'::text, 'downstream_unavailable'::text, "
+        "'self_decision'::text, 'idempotency_key_too_long'::text, "
+        "'unknown_policy_topic'::text]))))"
     ),
     "ck_assistant_runs_refusal_matches_status": _normalize_constraint_def(
         "CHECK (((http_status = 200) = (refusal_code IS NULL)))"
