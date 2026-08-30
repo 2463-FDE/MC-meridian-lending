@@ -407,6 +407,19 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
                     return False, "schema_not_ready:" + conname
                 if _normalize_constraint_def(str(row[0] or "")) != expected_def:
                     return False, "schema_not_ready:" + conname + ":definition"
+            # Append-only guarantee (D20, migration 0022): audit_logs is written from
+            # applications.py's INSERTs, so a volume that predates the trigger would
+            # accept those writes fine while UPDATE/DELETE on the "audit" trail stayed
+            # silently unguarded -- /health would read healthy over exactly the gap
+            # this rung exists to name. to_regclass, not table-name string matching:
+            # the check must name the SAME table the writer resolves to (search_path).
+            cur.execute(
+                "SELECT 1 FROM pg_trigger "
+                "WHERE tgrelid = to_regclass('audit_logs') "
+                "AND tgname = 'trg_audit_logs_append_only'"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:trg_audit_logs_append_only"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__

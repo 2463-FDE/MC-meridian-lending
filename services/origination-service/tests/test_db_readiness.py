@@ -737,6 +737,37 @@ def test_probe_fails_when_disclosure_document_body_is_not_ready(monkeypatch, con
     assert err == "schema_not_ready:disclosures.document_body"
 
 
+class _AuditLogsTriggerMissingCursor(_FakeCursor):
+    """Every rung before it answers ready (inherited); the audit_logs append-only trigger
+    (D20, migration 0022) alone is absent -- the volume predates it, so applications.py's
+    INSERTs into audit_logs succeed while UPDATE/DELETE stays silently unguarded."""
+
+    def fetchone(self):
+        if "trg_audit_logs_append_only" in self._last:
+            return None
+        return super().fetchone()
+
+
+class _AuditLogsTriggerMissingConn:
+    def cursor(self):
+        return _AuditLogsTriggerMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_audit_logs_append_only_trigger_is_not_ready(monkeypatch):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _AuditLogsTriggerMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:trg_audit_logs_append_only"
+
+
 def test_probe_false_when_database_url_unset(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", "")
     ok, err = config.database_reachable()
