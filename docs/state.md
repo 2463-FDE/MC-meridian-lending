@@ -8,12 +8,15 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (588e7bd)` — 588e7bd 2026-08-29 Merge pull request #111 from 2463-FDE/feat/rag-eval-evaluator
+Base: `origin/main (e13aa9b)` — e13aa9b 2026-08-29 Merge pull request #114 from 2463-FDE/feat/rag-eval-verdict-wiring
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #114 | `e13aa9b` | 2026-08-29 | Merge pull request #114 from 2463-FDE/feat/rag-eval-verdict-wiring |
+| #112 | `b7b720d` | 2026-08-29 | Merge pull request #112 from 2463-FDE/fix/policy-corpus-manifest-paths |
+| #113 | `f23e036` | 2026-08-29 | Merge pull request #113 from 2463-FDE/fix/assistant-rate-limit |
 | #111 | `588e7bd` | 2026-08-29 | Merge pull request #111 from 2463-FDE/feat/rag-eval-evaluator |
 | #110 | `3fb4738` | 2026-08-29 | Merge pull request #110 from 2463-FDE/feat/rag-eval-verdict-reporting |
 | #109 | `01f8cc1` | 2026-08-29 | Merge pull request #109 from 2463-FDE/feat/rag-eval-prohibited-conclusion |
