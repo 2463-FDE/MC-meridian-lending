@@ -268,6 +268,9 @@ jobs:
     # Both must be ${VAR:-default} in docker-compose.yml so a real deploy's .env/host value wins;
     # the local http relaxation lives in docker-compose.demo.yml only. This job BLOCKS -- no
     # continue-on-error -- so a future edit that re-pins a literal in the base file fails CI.
+    # It also asserts no committed compose file publishes a DATASTORE port to the host (D21):
+    # an open 6379 hands over live officer sessions and raw resume-continuation tokens, which
+    # is the one thing origination hashes before it will store it in Postgres.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -303,6 +306,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: no committed compose file publishes a datastore port to the host
+        # D21. The Postgres half is a credentialed bypass of the gateway trust boundary --
+        # one shared schema, so a direct connection is the whole platform. The REDIS half
+        # needs no credential at all: the base file runs redis with no `requirepass` and
+        # REDIS_URL carries no auth, while the gateway stores two BEARER credentials there
+        # (services/gateway/app/auth.py) -- `session:{token}` holds a live admin/underwriter
+        # session and `resume:{sid}` holds the RAW continuation token that authorizes the
+        # money-moving routes. Postgres stores that same token only as a keyed digest
+        # (origination-service/app/authz.py::hash_token), so an open 6379 undoes a control
+        # that was built on purpose. The test keys on the PRESENCE of a `ports:` key in the
+        # postgres/redis service block rather than on its value, so a flow sequence
+        # (`ports: ["5432:5432"]`) or long syntax cannot slip past a value regex, and it
+        # fails closed if either service is ever renamed -- every case below is scoped by
+        # service NAME, so a rename would otherwise leave it vacuously green.
+        # Its own install line, per the kyc-persistence-gate lesson: this step
+        # must not pass on a package an unrelated earlier step installed.
+        run: |
+          pip install pytest
+          python -m pytest scripts/tests/test_compose_datastore_ports.py -q
       - name: demo override's boot claims match what boot actually checks
         # test_llm_startup.py's two compose assertions are the reason this step exists:
         # one pins the runtime behaviour (provider=bedrock with NO AWS credential boots

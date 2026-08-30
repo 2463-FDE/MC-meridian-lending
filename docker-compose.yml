@@ -7,8 +7,15 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-meridian}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set — copy .env.example to .env and set it (no committed default; see docs/security-remediation-2026-07.md)}
       POSTGRES_DB: ${POSTGRES_DB:-meridian}
-    ports:
-      - "5432:5432"
+    # Internal-only (D21): NOT host-published. Publishing 5432 puts the ONE shared
+    # database a credential away from anyone on the host/LAN, underneath the gateway
+    # trust boundary and underneath every app-layer authz check — all 7 services read
+    # and write this schema directly, so a direct connection is the whole platform.
+    # Reachable service-to-service by name on the compose network; `expose` documents
+    # the container port without publishing it. For a psql session use
+    # `docker compose exec postgres psql ...`, which is what `make seed` already does.
+    expose:
+      - "5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
@@ -20,8 +27,17 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    # Internal-only (D21), and this half needs no credential at all: the image runs
+    # without `requirepass` and REDIS_URL carries no auth, so a reachable 6379 is an
+    # open read. What lives here is not derived cache — the gateway stores two BEARER
+    # credentials in it (services/gateway/app/auth.py): `session:{token}` holds a live
+    # admin/underwriter session, and `resume:{sid}` holds the RAW continuation token
+    # that authorizes the money-moving routes. Postgres stores that token only as a
+    # keyed digest for exactly this reason (origination-service/app/authz.py::
+    # hash_token); the digest buys nothing while the raw copy sits behind an open
+    # port. Use `docker compose exec redis redis-cli` for a local session.
+    expose:
+      - "6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
