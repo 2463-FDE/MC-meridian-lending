@@ -3,10 +3,29 @@
 **Audience:** Dana (VP Lending Ops, Meridian) · **Sent:** 2026-08-26 · **Answered:** 2026-08-26
 
 **Status: SENT and ANSWERED — both flows APPROVED, with operating limits.** Her reply is
-transcribed below and verbatim on `docs/client-asks-originals`. She also confirmed the
-manager-escalation correction and set an ordered precondition: **fix filename validation first**.
-**No Titan call has been made yet.** Three of her limits conflict with current code — see
-"Constraint register" below; two need answering before the run.
+transcribed below. The as-sent email and the verbatim reply have landed on the
+`docs/client-asks-originals` branch under this same filename, in commit `4514563`
+(2026-08-26). That branch is local-only and deliberately unpushed, so inside this repository
+as published, the transcription below is the authoritative record and there is nothing here
+to check it against. She also confirmed the manager-escalation correction and set an ordered
+precondition: **fix filename validation first**.
+
+Three of her limits conflicted with the code as it stood on 2026-08-26 — see
+"Constraint register" below; two of them needed answering before the run.
+
+> **Currency note, 2026-08-30 — the run has since happened.** This is the pre-run log, and
+> everything below is historical: the limits are the standard the graded pass was held to,
+> not open work still gating it. The pass ran on 2026-08-30 against `origin/main` =
+> `e5f6ea7` and its results are final, so "no Titan call has been made yet" was true when
+> this was written and is not true now. The filename precondition she ordered first was met
+> before the run, in PR #116 (`64f4871`). The two retention questions in "The retention
+> conflict" below were closed by removing the retention rather than by her answer: the
+> report and run record state that no prompt, passage or model response is retained and
+> that the embedding cache is disabled on the provider path, so no content-derived vectors
+> reach disk. For the asks that came out of the run see
+> `docs/client-asks-2026-08-30-graded-pass-results.md`; for the measured results and the
+> full run envelope see `docs/rag-eval-graded-pass-report-2026-08-30.md` and
+> `docs/handoffs/2026-08-30-rag-eval-graded-pass-run-record.md`.
 
 **Follows** `docs/client-asks-2026-08-25-policy-corpus.md` — that file holds the original five asks
 and her scoped approval. This one is the return round: two approvals we need, and the two
