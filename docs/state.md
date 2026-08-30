@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (3eb6bc9)` — 3eb6bc9 2026-08-30 Merge pull request #123 from 2463-FDE/feat/llm-token-metadata
+Base: `origin/main (ffc05a7)` — ffc05a7 2026-08-30 Merge pull request #121 from 2463-FDE/docs/rag-eval-graded-pass
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #121 | `ffc05a7` | 2026-08-30 | Merge pull request #121 from 2463-FDE/docs/rag-eval-graded-pass |
 | #123 | `3eb6bc9` | 2026-08-30 | Merge pull request #123 from 2463-FDE/feat/llm-token-metadata |
 | #125 | `21f498e` | 2026-08-30 | Merge pull request #125 from 2463-FDE/fix/password-hash-audit-trail |
 | #124 | `ddfb8c4` | 2026-08-30 | Merge pull request #124 from 2463-FDE/fix/datastore-port-exposure |
