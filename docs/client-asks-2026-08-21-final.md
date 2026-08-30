@@ -3,13 +3,23 @@
 **Audience:** Dana (VP Lending Ops, Meridian) · **Written:** 2026-08-21 ·
 **Cycle:** code freeze **Wednesday 2026-09-02** (moved from Friday 2026-08-28 by the 2026-08-21 program email), handoff Friday 2026-09-04 · **Status: DRAFT, unsent.**
 
+**Currency check, 2026-08-30 — still unsent, and Q1 through Q4 are all still open.** This
+document is *not* superseded by the later working logs on this branch. Three of them record
+exchanges that were sent and answered — `docs/client-asks-2026-08-25-policy-corpus.md`,
+`docs/client-asks-2026-08-26-gate0-data-path.md` and
+`docs/client-asks-2026-08-30-graded-pass-results.md` — but every one of them is about the
+policy corpus, the Gate 0 data path or the graded evaluation pass. None of them raises the
+reconciliation alert recipient, the double-charge refund, the fingerprint's treatment of the
+card security code, or the same-day repeat charge. Q1 through Q4 have never been put to her.
+
 **Assumption this document is built on: this is the last cycle.** That changes the test for
 including a question. Until now the test was "does this block work before freeze"; anything else
 was parked to the next cycle. There is no next cycle to park to, so the test becomes **"will anyone
 ever ask this again."** Section 4 exists only because of that, and it is the section that would
 have been deferred under the old test.
 
-**Read first:** `docs/client-asks-2026-08-17-asked-vs-mapped.md` — what in her 08-17 reply is her
+**Read first (off this branch):** `docs/client-asks-2026-08-17-asked-vs-mapped.md`, which is on
+the local `docs/client-asks` branch and on neither this branch nor `main` — what in her 08-17 reply is her
 instruction and what is our inference. Items 3 and 4 below come straight out of it.
 
 ---
@@ -54,9 +64,10 @@ settled while the recipient half sat in no table at all.
 
 **What it blocks:** nothing in code, everything in effect. The control fires on the 500 minor units
 she set and exits so a cron can escalate, but the runbook's cron example mails `ops@example.com`, a
-placeholder — docs/runbook.md:168 **on `main`**, whose line 208 also states outright that no
-recipient is configured. Un-backticked and branch-qualified because this branch carries an older
-135-line runbook in which those lines do not exist. It detects correctly and reports to nobody.
+placeholder — docs/runbook.md line 213 as of commit `956b3f6`, whose line 253 also states outright
+that no recipient is configured. Cited against a commit rather than against `main`, because a line
+number on a moving branch stops pointing at the sentence it was written for. This branch carries
+the identical runbook. It detects correctly and reports to nobody.
 
 **Stated fallback if she has no preference:** email to a shared Finance Ops mailbox — what the cron
 example already does, and it needs nothing built.
@@ -123,7 +134,8 @@ itself, under the index that already exists — which is exactly the decision he
 instruction, *"every writer is bound the same way regardless of which route it came in on"*, is
 therefore **not yet satisfied by the shipped rung**, and reading it the weak way (a database
 constraint rather than application logic) would let us call it done while the second handler keeps
-double-charging. See `docs/client-answers-2026-08-17-payment-integrity.md` (G3) for the
+double-charging. See `docs/client-answers-2026-08-17-payment-integrity.md` (G3), also on the local
+`docs/client-asks` branch rather than this one or `main`, for the
 strong-versus-weak reading.
 
 **If the answer is "never legitimate,"** binding it is strictly correct and cheap.

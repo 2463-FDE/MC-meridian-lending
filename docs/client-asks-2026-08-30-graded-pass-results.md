@@ -5,8 +5,8 @@
 **Status: DRAFTED, NOT SENT.** The evaluation pass ran on 2026-08-30 and the results
 are final. The email-fence copy and the report itself are held outside this repository
 (they carry her packet paths, her case ids and her corpus structure, and this is a
-public fork). Four asks below come out of the run; three of them are decisions only she
-can make.
+public fork). Five asks below come out of the run, and every one of them is a decision
+only she can make.
 
 ## Context she needs to have the asks make sense
 
@@ -38,9 +38,10 @@ for her to find:
 
 ## Notes for whoever picks this up
 
-- Ask 5 is the one with a real engineering consequence: the threshold is a single
-  number bound to one (corpus, embedding model) pair, and it must be re-derived
-  whenever either side moves. It is not portable and should never be copied forward.
+- Ask 5 is hers to answer, and it is the one with a real engineering consequence: the
+  threshold is a single number bound to one (corpus, embedding model) pair, and it must
+  be re-derived whenever either side moves. It is not portable and should never be
+  copied forward. It is awaiting her answer like the other four, not incidental to them.
 - Asks 2 and 3 travel together. Raising the cap without a second pass changes nothing
   about this run's numbers; a second pass without raising the cap would lose the same
   five questions again.

@@ -45,18 +45,18 @@ around it.
 
 Three of her exclusions, confirmed against code rather than asserted:
 
-- **No region probing** — `AWS_REGION` set explicitly. `.env.example:142` documents a us-east-1
+- **No region probing** — `AWS_REGION` set explicitly. the `AWS_REGION` block in `.env.example` documents a us-east-1
   default on the bedrock path; that becomes required rather than defaulted.
 - **No fallback models** — `make_embedder` raises on an unrecognised `RAG_EMBEDDER` rather than
   substituting a backend. One gap to close: an *unset* value silently selects TF-IDF, which under a
   Titan-calibrated threshold is wrong in a way nobody sees. Making that fail closed turns her
   requirement into a property.
-- **No new credentials** — reuses the existing server-side setup (`docker-compose.yml:56-59`,
+- **No new credentials** — reuses the existing server-side setup (`docker-compose.yml`,
   already plumbed for the LLM Bedrock provider).
 
 ## Answers to her two questions
 
-**Approved corpus boundary.** `POLICY_CORPUS_DIR` (`services/origination-service/app/config.py:420`)
+**Approved corpus boundary.** `POLICY_CORPUS_DIR` (`services/origination-service/app/config.py`)
 points retrieval at exactly one directory. Set to the packet's `policies/`, the indexed corpus **is**
 the approved packet: our two existing `policies/*.md` are excluded and nothing outside can be picked
 up. Her scope note specifies the two exclusion fixtures sit *"outside the approved policy
@@ -82,7 +82,7 @@ demonstrated as a passing result that means less than it looks like.
 
 ## Volunteered defect — why it is in the email
 
-Our own `_SAFE_FILENAME` rule (`rag_eval/run.py:40`, lowercase-only) currently rejects **all five**
+Our own `_SAFE_FILENAME` rule (`rag_eval/run.py`, lowercase-only) currently rejects **all five**
 of her documents as `non-slug`, so `_load_corpus` skips every one and the corpus is empty. A Titan
 run would have produced a working-looking system answering "no policy match" to everything, silently
 — `log.warning` only. Ours to fix.
@@ -144,15 +144,15 @@ _The email body for this section is held outside this repository with the other 
 
 | Her limit | Current code | Status |
 |---|---|---|
-| Fix filename validation **first** | `_SAFE_FILENAME` (`rag_eval/run.py:40`) is lowercase-only; all five documents refused | **ordered precondition** |
+| Fix filename validation **first** | `_SAFE_FILENAME` (`rag_eval/run.py`) is lowercase-only; all five documents refused | **ordered precondition** |
 | Corpus = exactly the five files, non-empty, excludes our samples and both fixtures | `POLICY_CORPUS_DIR` gives the boundary; nothing asserts it | build the assertion |
 | **Preserve the verified checksums unchanged** | settles the filename question: **renaming her files is forbidden**, so the regex must change | decided |
 | No more than **two attempts per item** | `BedrockEmbedder` sets no `botocore.config.Config`; boto3's default retry count exceeds two | **CONFLICT — must pin `max_attempts`** |
 | One full pass, plus one correction rerun | the product path re-embeds the whole corpus **per process** (`_build_index()` does not use `EmbeddingCache`); every restart is another full pass | **CONFLICT — see below** |
-| No retention of query text, questions, retrieved content | `report.py:74,137` write query text verbatim into `eval_report.md`; `run.py:353,361` write `rag_eval/.cache/embeddings.json` | **CONFLICT — must resolve before the run** |
+| No retention of query text, questions, retrieved content | two sites in `rag_eval/report.py` write query text verbatim into `eval_report.md`, and two in `rag_eval/run.py` write `rag_eval/.cache/embeddings.json` | **CONFLICT — must resolve before the run** |
 | No retention of raw provider errors | `BedrockEmbedder.embed` has no `except`; a botocore error propagates and may be logged verbatim upstream | **CONFLICT — must wrap** |
 | No fallback model | `make_embedder` raises on an unknown backend. Gap: an **unset** value silently selects TF-IDF | close D-10 |
-| Existing model, configured region, server-side credentials, current permissions | `AWS_REGION` explicit (no probing), creds already plumbed at `docker-compose.yml:56-59`, no new grants | satisfied |
+| Existing model, configured region, server-side credentials, current permissions | `AWS_REGION` explicit (no probing), creds already plumbed at `docker-compose.yml`, no new grants | satisfied |
 | No more than $1 total Titan cost | ~66 chunks + 28 questions + 8 topic queries ≈ 25k tokens — orders of magnitude under $1. Not the binding constraint; report the actual | satisfied |
 | Manager-escalation: text only, no routing | nothing routes, notifies, or records an escalation | **confirmed correct by her** |
 
@@ -185,12 +185,12 @@ confirm three of them in the post-run report, so they are commitments, not nicet
 ahead of the threshold work:
 
 1. **"AWS region is explicitly configured"** — compose passes `AWS_REGION: ${AWS_REGION:-}`, and
-   `.env.example:142` documents a us-east-1 default on the bedrock path. Make it required.
+   the `AWS_REGION` block in `.env.example` documents a us-east-1 default on the bedrock path. Make it required.
 2. **"no fallback models are used"** — an unset `RAG_EMBEDDER` silently selects TF-IDF. Fail closed
    (D-10). This is a correction to a stated claim.
 3. **"Retrieval is limited to the five policy files"** — `POLICY_CORPUS_DIR` is not set in compose
    and nothing asserts the contents.
 4. **"The query comes from a fixed set of policy topics"** — `search_policy` takes model-authored
-   free text (`assistant.py:355`). Either send the topic code as the query, or correct the
+   free text (`assistant.py`). Either send the topic code as the query, or correct the
    representation with her. Her approval mirrors our wording and separately forbids "free-form
    searches", so this is a representation question, not a preference.

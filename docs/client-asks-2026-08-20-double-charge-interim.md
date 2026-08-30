@@ -6,7 +6,10 @@
 **Send status — corrected 2026-08-21. Both asks are still unsent, and "email 2" no longer exists
 as a thing to send.** Asks 14 and 15 remain rows in the ask table of
 `docs/client-asks-2026-08-13-consolidated.md`, which is still the single place to read what is
-outstanding; this document holds their reasoning and the original handoff copy.
+outstanding — but that file is deliberately off this branch: it lives on the local
+`docs/client-asks` branch (commit `ba07f2a`) and is on neither this branch nor `main`. The ask
+register that does ship on both is `docs/client-qa-register.md`, and it is the one to read from a
+fresh clone. This document holds their reasoning and the original handoff copy.
 
 **The recommendation below this line is void.** It read *"send email 2 now, carrying all five
 asks."* Three of those five — the export source, the print-and-mail vendor and the policy corpus —
@@ -64,10 +67,12 @@ cut-off half became ask 2 and was answered on 08-14. **The recipient half is in 
 no stated-assumption list, and no deferral row.** It is not in the 0-of-3 count for a reason
 that has nothing to do with priority.
 
-**What it blocks.** Nothing in code. Everything in effect. `docs/runbook.md:168` mails
-`ops@example.com`, a placeholder. The control detects correctly, exits non-zero, and reports
-to nobody. On this branch the runbook now says so where the placeholder appears, because a
-runbook that shows an address implies someone reads it.
+**What it blocks.** Nothing in code. Everything in effect. The cron example in
+`docs/runbook.md` mails `ops@example.com`, a placeholder — line 213 as of commit `956b3f6`,
+cited against a commit rather than a branch so the number keeps pointing at the line it was
+written for. The control detects correctly, exits non-zero, and reports to nobody. The runbook
+says so at line 253 of the same commit, where the placeholder appears, because a runbook that
+shows an address implies someone reads it.
 
 **What we need:** a distribution list or a named owner, a time of day, and a channel. Email
 to a shared mailbox is the assumption if she has no preference — it is what the cron example

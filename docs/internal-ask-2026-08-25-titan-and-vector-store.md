@@ -10,7 +10,7 @@ is ours to do.
 ## Correction on record
 
 An earlier note in this session said the Bedrock embedding backend was unpushed and had to merge
-first. **Wrong — it is on `main`**, commit `1a985fa`, `rag_eval/embedder.py:115`. That came from a
+first. **Wrong — it is on `main`**, commit `1a985fa`, `rag_eval/embedder.py`. That came from a
 stale memory entry (`rag-eval-bedrock-backend`, "4 commits unpushed"), which should be corrected.
 Nothing needs merging before the Titan switch.
 
@@ -21,9 +21,9 @@ Titan is mandated, so `RAG_EMBEDDER=bedrock` becomes the product configuration.
 | # | Item | State |
 |---|------|-------|
 | 1 | `RAG_EMBEDDER` + `RAG_BEDROCK_MODEL` into the origination env block | **Missing.** Not in `docker-compose.yml`; `make_embedder()` reads `os.getenv("RAG_EMBEDDER", "tfidf")` and compose passes nothing, so the running stack can only ever get TF-IDF |
-| 2 | AWS credentials reaching origination-service | **Already plumbed** — `docker-compose.yml:56-59` passes `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BEARER_TOKEN_BEDROCK` for the LLM Bedrock provider. Reuse, add nothing |
+| 2 | AWS credentials reaching origination-service | **Already plumbed** — `docker-compose.yml` passes `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BEARER_TOKEN_BEDROCK` for the LLM Bedrock provider. Reuse, add nothing |
 | 3 | `boto3` | Present transitively via `anthropic[bedrock]==0.116.0`. **Pin it explicitly** — a money-adjacent path should not depend on another package's extra |
-| 4 | Re-calibrate `POLICY_RETRIEVAL_MIN_SCORE` | **Required.** `0.1609` was calibrated for TF-IDF; `.env.example:176` says so in as many words. Re-run `python3 -m rag_eval.run` and use what it prints |
+| 4 | Re-calibrate `POLICY_RETRIEVAL_MIN_SCORE` | **Required.** `0.1609` was calibrated for TF-IDF; `.env.example` says so in as many words, on the `POLICY_RETRIEVAL_MIN_SCORE` line itself. Re-run `python3 -m rag_eval.run` and use what it prints |
 | 5 | CI | **No change.** `BedrockEmbedder` accepts an injected client and tests leave `RAG_EMBEDDER` unset, so the suite stays keyless. Do not flip the default |
 | 6 | ADR | The embedder was recorded as a toggle with a TF-IDF default; a mandate is a decision record. **Next free number is 0021** — confirm against open PRs before taking it |
 
@@ -48,12 +48,16 @@ is not blocked at the point where measurements say go.
 |---|----------|------------------------|
 | 1 | `psycopg2` into `rag_eval` | The harness has zero DB dependencies today and runs in CI with no services and no credentials. That property ends permanently |
 | 2 | `postgres:16-alpine` → `pgvector/pgvector:pg16` | Same major, existing `pgdata` volume carries over, no dump/restore. But this is the one database all seven services share (ADR 0002) — one retrieval feature changing the estate's base image should be a decision, not a side effect |
-| 3 | Amend ADR 0007 rule 6 | Rule 6 states the harness keeps no persistent chunk store. A vector store puts corpus prose in the shared database permanently, and the ADR treats embedded text as recoverable — so this needs a real privacy review and a purge path, mirroring `run.py:272` |
+| 3 | Amend ADR 0007 rule 6 | Rule 6 states the harness keeps no persistent chunk store. A vector store puts corpus prose in the shared database permanently, and the ADR treats embedded text as recoverable — so this needs a real privacy review and a purge path, mirroring the `cache_path.unlink` purge in `rag_eval/run.py` |
 
-**Also true and easy to miss:** no job in `.github/workflows/ci.yml` runs a Postgres service.
-`migration-numbering-gate`'s own comment says so. Testing pgvector properly means adding one;
-faking it leaves migration SQL unexecuted, which is exactly how a migration that could not parse
-merged earlier this month.
+**Correction, 2026-08-30 — this section previously said no job in `.github/workflows/ci.yml`
+runs a Postgres service, and attributed that to `migration-numbering-gate`'s own comment. Both
+halves are wrong.** Two jobs run one: `assistant-telemetry-gate` and `no-sad-gate`, each on
+`postgres:16`. `migration-numbering-gate` says nothing about Postgres; the claim came from a
+stale comment in `ci.yml` that has since been corrected on `main`. What still holds is the
+consequence: neither existing service carries pgvector, so testing it properly means changing an
+image rather than adding a service, and faking it leaves migration SQL unexecuted — which is
+exactly how a migration that could not parse merged earlier this month.
 
 **Numbers that argue against building early:** 1024 dims × 4 bytes = 4KB per chunk; 1,000 chunks
 is about 4MB. Do **not** create an HNSW or IVFFlat index — under roughly 10k rows a sequential
