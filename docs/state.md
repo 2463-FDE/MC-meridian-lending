@@ -8,12 +8,14 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (7c6c50c)` — 7c6c50c 2026-08-30 chore(kb): regenerate docs/state.md after merging main
+Base: `origin/main (a6c38b5)` — a6c38b5 2026-08-30 Merge pull request #122 from 2463-FDE/docs/debt-rationale-cap
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #122 | `a6c38b5` | 2026-08-30 | Merge pull request #122 from 2463-FDE/docs/debt-rationale-cap |
+| #121 | `ffc05a7` | 2026-08-30 | Merge pull request #121 from 2463-FDE/docs/rag-eval-graded-pass |
 | #123 | `3eb6bc9` | 2026-08-30 | Merge pull request #123 from 2463-FDE/feat/llm-token-metadata |
 | #125 | `21f498e` | 2026-08-30 | Merge pull request #125 from 2463-FDE/fix/password-hash-audit-trail |
 | #124 | `ddfb8c4` | 2026-08-30 | Merge pull request #124 from 2463-FDE/fix/datastore-port-exposure |

@@ -557,6 +557,27 @@ columns and the ledger stay open.
 
 ---
 
+## Graded evaluation pass 2026-08-30 — new entry
+
+### D36: The evaluator's rationale cap silently discards verdicts, and reads as a formatting constant
+
+*(Carded 2026-08-30 from the first graded pass run against a real provider. The cap is not new
+and the discard is deliberate — what was missing is any record that it costs verdicts, and at
+what rate. `RATIONALE_MAX_CHARS = 240` reads as a formatting nicety; it is a grading outcome.)*
+
+| Field | Value |
+|---|---|
+| **ID** | D36 |
+| **Finding** | The evaluator returns one rationale line per case, capped at 240 characters (S-10: one line, no passage text retained). When a reply exceeds it, `run.py` does **not** truncate — truncating would still persist the first 240 characters of a retrieved passage — so it downgrades every model-derived axis for that case to `human_review` and substitutes a fixed string. The refusal is correct. What is undocumented is its cost: on the first graded pass, **5 of 28 cases lost their model verdicts this way**, and the loss is invisible in the rates, because `human_review` counts in neither the numerator nor the denominator (S-9). A reader of the report sees a bucket that looks like evaluator uncertainty and is actually a length limit. |
+| **Location** | `rag_eval/metrics.py:167` (`RATIONALE_MAX_CHARS = 240`), enforced in `QueryEval.__post_init__` (`:122-127`); the downgrade is `rag_eval/run.py:1379-1396`. The system prompt asks for "under 200 characters" (`rag_eval/evaluator.py`), which is a third number, and neither binds the model. |
+| **Trigger** | Any graded run whose judge writes past 240 characters. Measured on the 28-case pass: of the 23 rationales that survived, the minimum was 125 characters, the **median 189, and the maximum exactly 240**, with three more inside 20 characters of the limit. The model writes to the boundary, so this is systematic rather than a tail event — a longer passage set or a wordier model moves the loss rate up, with no signal that it has. |
+| **Risk** | **Medium.** Nothing is corrupted and nothing incorrect is reported: the axes that survive are correctly graded, and the discard is the fail-closed behaviour S-10 requires. The risk is interpretive and it lands outside the codebase — a report whose `human_review` bucket is read as "the corpus was ambiguous" when it means "our limit was too low" invites the wrong remediation. It is worse under a one-pass constraint (ADR 0022 S-7): a lost verdict cannot be re-graded without the client's authorisation, so the loss is permanent for that pass. |
+| **Attribution** | **Self-inflicted, and half deliberate.** The cap and the discard-over-truncate choice are both correct and both ours. What was not decided is the *value*: 240 was set as a retention limit without measuring what a real judge writes. The tests to that point graded the *guard* with author-written fakes — either comfortably under the cap or a deliberate overrun — so they pin what happens at the boundary while saying nothing about where a real judge lands relative to it. Same shape as the fenced-JSON defect found in the same session (fixed in PR #119) — a fake cannot show you what a real reply looks like. |
+| **Mitigation Path** | Three parts, in order. (1) **Make the loss visible**: the run summary and report already state judge backend, model id and call count — add the count of cases downgraded by the cap, so a graded run cannot report a `human_review` bucket without saying how much of it is this. That is the part worth doing regardless of the rest, and the only part still owed a regression test — the discard is pinned already (see Status); the count is not. (2) **Reconcile the three numbers**: the prompt says 200, the cap says 240, the model obeys neither. Either raise the cap to a measured ceiling or constrain the reply — but a length instruction the model ignores is not a control, so prefer the cap. (3) **Re-grade the affected cases** only with the client's authorisation, since S-7 allows one bounded pass per case. |
+| **Status** | Open; carded 2026-08-30 from the pass that measured it. Not started. The fail-closed behaviour itself is already pinned, and by the blocking `rag-eval-gate`, which runs the whole `rag_eval/tests` directory: `rag_eval/tests/test_verdict_reporting.py:229` asserts `QueryEval` refuses an over-long rationale instead of truncating it, and `rag_eval/tests/test_verdict_wiring.py:344` asserts the call site keeps none of the text — it substitutes the fixed retention-limit rationale and downgrades every model-derived axis to `human_review`. A revert to truncation turns both red, so no regression test is owed for the discard. What nothing pins is the *cost*: no test and no output counts the cases the cap downgraded, which is why a `human_review` bucket still cannot be attributed. That is the open work, and it is mitigation part (1). |
+
+---
+
 ## Week 1 Actions
 
 ✓ **D1:** Documented; flagged for rotation (Week 2).  
