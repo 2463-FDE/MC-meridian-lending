@@ -104,6 +104,9 @@ _FIXTURES = {
         'x-pg: &pg\n  ports: ["5432:5432"]\n'
         "services:\n  postgres:\n    <<: *pg\n    image: x\n"
     ),
+    # Compose's own merge tag: `yaml.safe_load` refuses it outright, which would make this
+    # blocking gate a traceback rather than a verdict.
+    "override tag": 'services:\n  postgres:\n    image: x\n    ports: !override ["5432:5432"]\n',
     # Same class, whole-service alias rather than a merge.
     "service alias": (
         'x-pg: &pg\n  image: x\n  ports: ["5432:5432"]\nservices:\n  postgres: *pg\n'
@@ -153,3 +156,32 @@ def test_a_datastore_using_extends_is_refused(tmp_path):
         encoding="utf-8",
     )
     assert checker.unresolvable(path) == ["postgres"]
+
+
+def test_a_reset_tag_does_not_crash_the_loader(tmp_path):
+    """`!reset` is the other Compose merge tag. It still counts as published — a reset is
+    only meaningful over a base that published the port, which this gate already refuses —
+    but it must produce that verdict, not a ConstructorError."""
+    path = tmp_path / "docker-compose.yml"
+    path.write_text(
+        "services:\n  postgres:\n    ports: !reset null\n", encoding="utf-8"
+    )
+    # Graded on presence: a tagged scalar comes back as raw text (PyYAML applies no
+    # implicit resolution under an explicit tag), and the value is not what this asks.
+    assert "postgres" in checker.published(path)
+
+
+def test_a_file_that_is_not_a_mapping_yields_no_services(tmp_path):
+    """Fail closed through the rename check rather than raising AttributeError on `.get`."""
+    path = tmp_path / "docker-compose.yml"
+    path.write_text("- not\n- a mapping\n", encoding="utf-8")
+    assert checker.services(path) == {}
+
+
+def test_an_unparseable_file_is_refused_by_name(tmp_path):
+    path = tmp_path / "docker-compose.yml"
+    path.write_text("services:\n---\nservices:\n", encoding="utf-8")
+    with pytest.raises(
+        ValueError, match="cannot prove the datastore ports are unpublished"
+    ):
+        checker.services(path)
