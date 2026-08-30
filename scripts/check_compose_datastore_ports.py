@@ -25,6 +25,19 @@ exposes it (`host`), hides where it listens (`service:`/`container:`), or is the
 omitting the key already gives (`bridge`, `none`, `default`). Keying on the presence of the
 key keeps one rule instead of a value allowlist that has to stay correct.
 
+Nor is `network_mode` the last of them. A top-level network with `driver: macvlan` gives
+the datastore its own address on the physical LAN — "anyone on host/LAN", which is D21's
+own wording — while the service carries neither `ports` nor `network_mode`, and an
+`external: true` network is created outside this file so nothing here can prove what it
+is. `unprovable_networks()` refuses both and accepts the default driver, so declaring a
+private `backend` network and putting the datastores on it still passes: a rule that
+refused `networks:` outright would refuse better segmentation than this repo has today,
+and an unsatisfiable rule gets switched off rather than fixed.
+
+All of which is graded over the files Compose would actually read — see `compose_files()`,
+whose earlier `docker-compose*.yml` glob left `compose.yaml` (Compose's FIRST-choice
+default name) entirely ungraded.
+
 PyYAML performs the same resolution Compose does for anchors/aliases/merge keys, which is
 why the gate reads the loaded mapping rather than the file's lines. What it does NOT
 resolve is `extends:` (Compose reads another file/service for that), so a datastore
@@ -67,17 +80,30 @@ def _unknown_tag(loader, tag_suffix, node):
 _ComposeLoader.add_multi_constructor("!", _unknown_tag)
 
 
+_COMPOSE_GLOBS = (
+    "docker-compose*.yml",
+    "docker-compose*.yaml",
+    "compose*.yml",
+    "compose*.yaml",
+)
+
+
 def compose_files(root: Path) -> list[Path]:
-    return sorted(root.glob("docker-compose*.yml"))
+    """Every committed file Compose would read, not just the one spelling in use here.
 
-
-def services(path: Path) -> dict[str, dict]:
-    """{service name: resolved mapping} — anchors, aliases and `<<` merges applied.
-
-    A service whose body is not a mapping (empty, or a scalar) yields {} so callers can
-    treat every entry uniformly; the name still registers, which is what the rename check
-    grades.
+    Compose's default file names are `compose.yaml`, `compose.yml`, `docker-compose.yaml`
+    and `docker-compose.yml`, IN THAT PRECEDENCE ORDER — a committed `compose.yaml`
+    is read INSTEAD of `docker-compose.yml`, not alongside it. A glob of
+    `docker-compose*.yml` alone leaves the three other spellings (and every
+    `*.override.*` of them) ungraded, and the rename check cannot notice: it unions
+    across graded files, so `postgres` found in `docker-compose.yml` keeps it green
+    while an ungraded `compose.yaml` publishes 5432.
     """
+    return sorted({path for pattern in _COMPOSE_GLOBS for path in root.glob(pattern)})
+
+
+def _document(path: Path) -> dict:
+    """The resolved top-level mapping, or {} for a file that is not one."""
     try:
         document = (
             yaml.load(path.read_text(encoding="utf-8"), Loader=_ComposeLoader) or {}
@@ -87,7 +113,18 @@ def services(path: Path) -> dict[str, dict]:
             f"{path.name}: not parseable as YAML, so this gate cannot prove the datastore "
             f"ports are unpublished — fix the file or teach this module to read it: {error}"
         ) from error
-    block = document.get("services") or {} if isinstance(document, dict) else {}
+    return document if isinstance(document, dict) else {}
+
+
+def services(path: Path) -> dict[str, dict]:
+    """{service name: resolved mapping} — anchors, aliases and `<<` merges applied.
+
+    A service whose body is not a mapping (empty, or a scalar) yields {} so callers can
+    treat every entry uniformly; the name still registers, which is what the rename check
+    grades.
+    """
+    block = _document(path).get("services") or {}
+    block = block if isinstance(block, dict) else {}
     return {
         str(name): (body if isinstance(body, dict) else {})
         for name, body in block.items()
@@ -124,6 +161,56 @@ def network_modes(path: Path, names=DATASTORES) -> dict[str, object]:
         for name in names
         if "network_mode" in found.get(name, {})
     }
+
+
+def _joined_networks(body: dict) -> list[str]:
+    """The network names a service body joins. Compose accepts a list or a mapping."""
+    joined = body.get("networks")
+    if isinstance(joined, dict):
+        return [str(name) for name in joined]
+    if isinstance(joined, list):
+        return [str(name) for name in joined]
+    if isinstance(joined, str):
+        return [joined]
+    return []
+
+
+def unprovable_networks(path: Path, names=DATASTORES) -> dict[str, str]:
+    """{datastore name: why the network it joins is not provably a private bridge}.
+
+    `network_mode` is not the only way off the compose network. A top-level network with
+    `driver: macvlan` (or `ipvlan`) gives the container its own address on the physical
+    LAN, which is precisely the "anyone on host/LAN" reachability D21 is about, and the
+    datastore carries no `ports` and no `network_mode` while doing it. `external: true`
+    is the same problem one level of indirection out: the network is created outside this
+    file, so nothing here can prove it is not the host or a LAN bridge.
+
+    Only the default driver is accepted, so the normal hardening move — declaring a
+    private `backend` network and putting the datastores on it — still passes. A rule
+    that refused `networks:` outright would refuse better segmentation than the file has
+    today, and an unsatisfiable rule gets switched off rather than fixed.
+    """
+    found = services(path)
+    block = _document(path).get("networks") or {}
+    declared = block if isinstance(block, dict) else {}
+
+    offenders: dict[str, str] = {}
+    for name in names:
+        for joined in _joined_networks(found.get(name, {})):
+            definition = declared.get(joined)
+            if joined not in declared:
+                reason = f"joins undeclared network {joined!r}"
+            elif not isinstance(definition, dict):
+                reason = f"network {joined!r} has no readable definition"
+            elif definition.get("external"):
+                reason = f"network {joined!r} is external, so its driver is unknowable"
+            elif "driver" in definition and str(definition["driver"]) != "bridge":
+                reason = f"network {joined!r} uses driver {definition['driver']!r}"
+            else:
+                continue
+            offenders[name] = reason
+            break
+    return offenders
 
 
 def unresolvable(path: Path, names=DATASTORES) -> list[str]:

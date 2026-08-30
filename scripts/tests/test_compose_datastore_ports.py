@@ -26,6 +26,10 @@ these services should carry instead.
 graded datastore by the same presence rule: `host` puts the process in the host's network
 namespace (listening on 5432/6379 there with no `ports:` entry needed or accepted), and
 `service:x`/`container:x` put it in a namespace whose publishing this module cannot see.
+A `driver: macvlan` or `external: true` network is the third route — a LAN address of the
+datastore's own, carrying neither key — and is refused while the default driver is not, so
+a private `backend` network still passes. All of it is graded over every file name Compose
+would read, `compose.yaml` included, not only `docker-compose*.yml`.
 """
 
 import sys
@@ -95,6 +99,25 @@ def test_no_datastore_service_sets_a_network_mode(path: Path):
         + "\nRemove the key; `host` listens in the host namespace and `service:`/"
         "`container:` hides where it listens. Use `expose:` and reach it with "
         "`docker compose exec`."
+    )
+
+
+@pytest.mark.parametrize("path", _compose_files(), ids=lambda p: p.name)
+def test_no_datastore_service_joins_an_unprovable_network(path: Path):
+    """Third way off the compose network, after `ports` and `network_mode`: a top-level
+    network with `driver: macvlan` puts the datastore on the physical LAN under its own
+    address — D21's own "anyone on host/LAN" — while the service carries neither key. An
+    `external: true` network is created outside this file, so its driver is unknowable."""
+    offenders = [
+        f"{path.name}: {name} -> {reason}"
+        for name, reason in checker.unprovable_networks(path).items()
+    ]
+    assert not offenders, (
+        "a datastore joins a network this file cannot prove is a private bridge "
+        "(D21):\n  "
+        + "\n  ".join(offenders)
+        + "\nDeclare the network in this file with the default driver, or leave the "
+        "datastore on the project's default network."
     )
 
 
@@ -204,6 +227,106 @@ def test_a_datastore_on_the_compose_network_is_not_flagged(tmp_path):
         encoding="utf-8",
     )
     assert not checker.network_modes(path)
+
+
+_NETWORK_FIXTURES = {
+    # A LAN address of its own, with no `ports` and no `network_mode` anywhere.
+    "macvlan": (
+        "networks:\n  lan:\n    driver: macvlan\n"
+        "services:\n  postgres:\n    image: x\n    networks: [lan]\n"
+    ),
+    "ipvlan": (
+        "networks:\n  lan:\n    driver: ipvlan\n"
+        "services:\n  postgres:\n    image: x\n    networks:\n      - lan\n"
+    ),
+    # Created outside this file: nothing here can prove what it is.
+    "external": (
+        "networks:\n  lan:\n    external: true\n"
+        "services:\n  postgres:\n    image: x\n    networks: [lan]\n"
+    ),
+    "external legacy mapping": (
+        "networks:\n  lan:\n    external:\n      name: host\n"
+        "services:\n  postgres:\n    image: x\n    networks: [lan]\n"
+    ),
+    # Mapping form of the service's own `networks` key, not a list.
+    "mapping form": (
+        "networks:\n  lan:\n    driver: macvlan\n"
+        "services:\n  postgres:\n    image: x\n    networks:\n      lan:\n"
+        "        aliases: [db]\n"
+    ),
+    # Declared nowhere in this file, so its driver is equally unknowable.
+    "undeclared": "services:\n  postgres:\n    image: x\n    networks: [lan]\n",
+}
+
+
+@pytest.mark.parametrize(
+    "form", sorted(_NETWORK_FIXTURES), ids=lambda f: f.replace(" ", "-")
+)
+def test_every_network_that_is_not_a_private_bridge_is_caught(tmp_path, form):
+    path = tmp_path / "docker-compose.yml"
+    path.write_text(_NETWORK_FIXTURES[form], encoding="utf-8")
+    assert checker.unprovable_networks(path), (
+        f"a network written as {form!r} is not detected — this gate would pass a compose "
+        "file whose datastore is reachable from the host or the LAN"
+    )
+
+
+_HONEST_NETWORKS = {
+    "no networks key": "services:\n  postgres:\n    image: x\n",
+    "declared, default driver": (
+        "networks:\n  backend: {}\nservices:\n  postgres:\n    image: x\n"
+        "    networks: [backend]\n"
+    ),
+    "declared, driver bridge": (
+        "networks:\n  backend:\n    driver: bridge\n"
+        "services:\n  postgres:\n    image: x\n    networks: [backend]\n"
+    ),
+    "external false": (
+        "networks:\n  backend:\n    external: false\n"
+        "services:\n  postgres:\n    image: x\n    networks: [backend]\n"
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "form", sorted(_HONEST_NETWORKS), ids=lambda f: f.replace(" ", "-")
+)
+def test_a_private_bridge_network_is_not_flagged(tmp_path, form):
+    """Both directions. Declaring a private `backend` network and putting the datastores
+    on it is BETTER segmentation than this repo has today; a rule that refused it would be
+    unsatisfiable and would get switched off rather than fixed."""
+    path = tmp_path / "docker-compose.yml"
+    path.write_text(_HONEST_NETWORKS[form], encoding="utf-8")
+    assert not checker.unprovable_networks(path)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "compose.yaml",
+        "compose.yml",
+        "compose.override.yaml",
+        "docker-compose.yaml",
+        "docker-compose.override.yml",
+    ],
+)
+def test_every_file_compose_would_read_is_graded(tmp_path, name):
+    """Compose's default file names are compose.yaml, compose.yml, docker-compose.yaml and
+    docker-compose.yml, in that PRECEDENCE order — a committed `compose.yaml` is read
+    INSTEAD of `docker-compose.yml`. A `docker-compose*.yml` glob left the other three
+    spellings ungraded, and the rename check could not notice: it unions across graded
+    files, so `postgres` in docker-compose.yml kept it green while the ungraded file
+    published 5432."""
+    (tmp_path / name).write_text(
+        'services:\n  postgres:\n    image: x\n    ports: ["5432:5432"]\n',
+        encoding="utf-8",
+    )
+    graded = checker.compose_files(tmp_path)
+    assert [p.name for p in graded] == [name], (
+        f"{name} is not graded — Compose reads it, so a datastore port published there "
+        "would never be seen"
+    )
+    assert checker.published(graded[0])
 
 
 @pytest.mark.parametrize(

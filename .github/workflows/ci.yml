@@ -325,8 +325,13 @@ jobs:
         # a datastore, because `host` puts the process in the HOST network namespace --
         # listening on 5432/6379 there with no `ports:` key needed or accepted, which a
         # ports-only rule passes green -- while `service:`/`container:` hide which namespace
-        # publishes it; and it fails closed if either service is ever renamed -- every case
-        # is scoped by service NAME, so a rename would otherwise leave it vacuously green.
+        # publishes it; it refuses a datastore joining a network this file cannot prove is
+        # a private bridge (`driver: macvlan` is a LAN address of its own, `external: true`
+        # is created elsewhere), while accepting the default driver so a private `backend`
+        # network stays possible; it grades EVERY file name Compose reads, including
+        # `compose.yaml`, which takes precedence over `docker-compose.yml`; and it fails
+        # closed if either service is ever renamed -- every case is scoped by service NAME,
+        # so a rename would otherwise leave it vacuously green.
         # Its own install line, per the kyc-persistence-gate lesson: this step
         # must not pass on a package an unrelated earlier step installed.
         run: |
