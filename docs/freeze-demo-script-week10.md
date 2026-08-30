@@ -61,6 +61,13 @@ docker compose -f docker-compose.yml -f docker-compose.demo.yml \
 # 3. The real preflight: ONE explain call carrying a policy topic. This is the only check
 #    that exercises LLM_ENABLED, the AWS credential, the embedder, the corpus, the
 #    manifest and the threshold together — in the same order the room will.
+#    Pick the application FIRST, and open this same id in §2 — preflighting one application
+#    and demoing another proves nothing about the run the room watches. 6013 is seeded
+#    `decided` with all four CIP fields verified (`db/init/002_seed.sql`), so it satisfies
+#    the KYC-gated score tool; 6012 is the other seeded denial, 4471/5582/6011/6014 the
+#    approvals. A `record_status` of `recorded` below is the confirmation.
+APP_ID=6013
+
 TOKEN=$(curl -s -X POST localhost:8000/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"username":"underwriter","password":"password"}' \
@@ -98,7 +105,8 @@ identical to a healthy stack:
 | `404` / `never_decisioned` | the chosen `$APP_ID` has no decision record, or KYC never passed — the score tool is KYC-gated and fails closed |
 | everything green but no run in LangSmith | `LANGSMITH_TRACING` / `LANGSMITH_API_KEY` not exported. The §2 step-4 trace walk dead-ends in front of the client |
 
-Pick `$APP_ID` now and run the preflight against **that** application, not a different one.
+To demo a different application, change `APP_ID` above and re-run the whole preflight against
+it — the checks say nothing about an application they were not run on.
 
 **Provenance gap, stated rather than discovered in the room.** The `0.1609` the demo runs on
 is the only one of the three whose derivation is not in the tree: it is generated into
@@ -116,7 +124,10 @@ not after.
 
 ## 2. Happy path
 
-1. Portal → log in as `underwriter` → Underwriting → open any submitted application.
+1. Portal → log in as `underwriter` → Underwriting → open the **decisioned** application the
+   §1a preflight ran against — `APP_ID`, 6013 by default. Not any submitted application:
+   submitted is the weaker condition, and a submitted-but-undecisioned id lands on the
+   `404` / `never_decisioned` row of the §1a table, in the room.
 2. **AI decisioning assistant** panel → select a policy topic from the new dropdown (e.g.
    `debt_to_income`) → **Explain**.
 3. Point at the rendered result:
