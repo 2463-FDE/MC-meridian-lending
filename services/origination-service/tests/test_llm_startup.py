@@ -57,6 +57,10 @@ class _FakeCursor:
                 if "conname = '" + conname + "'" in last:
                     return (definition,)
             return (READABLE_DOB_CONSTRAINT_DEF,)
+        if "pg_trigger" in last:
+            # The D20 audit_logs rung reads tgenabled, not a bare 1: 'O' (origin) is
+            # what an enforcing trigger carries on a fully-migrated volume.
+            return ("O",)
         return (1,)
 
     def fetchall(self):

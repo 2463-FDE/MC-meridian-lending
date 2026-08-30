@@ -1,7 +1,9 @@
 -- Meridian Lending — seed data
 
 -- Staff + one borrower login. password_hash is sha256('password') for every seeded user
--- (Halcyon shipped them all with the same demo password and never forced a reset).
+-- (Halcyon shipped them all with the same demo password and never forced a reset) --
+-- kept in this legacy format on purpose so a fresh volume exercises the D27 rehash-on-
+-- login path (services/gateway/app/auth.py) rather than only ever seeing new-format rows.
 INSERT INTO users (username, password_hash, role, display_name, applicant_id) VALUES
   ('admin',       '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8', 'admin',       'Dana Whitfield (VP Lending Ops)', NULL),
   ('underwriter', '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8', 'underwriter', 'Sam Okafor (Underwriting)',       NULL),
@@ -77,7 +79,9 @@ INSERT INTO payments (loan_id, pan, amount, method, created_at) VALUES
   (6011, NULL, 432.18, 'ach', '2026-06-03 08:00:00');
 
 -- "audit" entries that are really app logging, not an actor->action->time control trail.
+-- detail below is masked the way PiiRedactor renders a PAN (D20) -- the seed must not
+-- itself be the plaintext-PAN exposure this table's append-only trigger exists to guard.
 INSERT INTO audit_logs (actor, action, detail) VALUES
-  ('system', 'payment', 'charge req pan=4111111111111111 amount=250.00'),
+  ('system', 'payment', 'charge req pan=••••••••••••1111 (PAN) amount=250.00'),
   ('rep_jordan', 'waive_fee', 'loan 5582 waived 35.00'),
   ('system', 'decision', 'app 6012 deny');
