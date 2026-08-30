@@ -617,8 +617,10 @@ def require_displayed_summaries(gold: list, summaries: dict[str, str]) -> None:
     Offenders are reported by gold id, never by summary id: the ids are hers and
     an id is a value like any other.
     """
-    if not summaries:
-        return
+    # No early return on an empty `summaries`: that shape also covers the
+    # manifest being omitted entirely, which is not the same as no row
+    # needing one -- a declared id must still resolve, package or no package.
+    #
     # A row that declares no summary id has no summary target, and its summary
     # verdict stays `not_evaluated` -- reported as neither a pass nor a failure
     # (S-9). Only a DECLARED id that resolves to nothing is the silent failure.
@@ -1248,7 +1250,15 @@ def run(
             "— no field values are echoed"
         )
 
-    require_displayed_summaries(gold, displayed_summaries)
+    # Skipped only when NEITHER a package was supplied NOR a judge is
+    # configured: a retrieval-only fixture that declares displayed_summary_id
+    # but never grades anything (no manifest, no RAG_JUDGE) predates the
+    # support test and must keep loading unchanged. A judge configured with
+    # no package, or a package that doesn't cover a declared row, both still
+    # enforce -- the first is the missing-manifest case this check exists to
+    # catch, the second is validated regardless of whether grading runs.
+    if evaluator is not None or displayed_summaries:
+        require_displayed_summaries(gold, displayed_summaries)
     embedder = make_embedder()
     # Both decisions read the embedder itself, so they cannot disagree with the
     # backend that actually makes the calls.
@@ -1417,9 +1427,14 @@ def run(
             )
         )
 
-    judge_backend = "none" if evaluator is None else "bedrock"
-    judge_model = None if evaluator is None else getattr(evaluator, "model_id", None)
+    # Derived from calls made, not from whether a backend is configured: a
+    # judge can be configured and never called (every gold row targetless),
+    # and that run made zero LLM calls same as no judge at all.
     judge_calls = getattr(evaluator, "calls", 0)
+    judge_backend = "none" if judge_calls == 0 else "bedrock"
+    judge_model = (
+        None if judge_backend == "none" else getattr(evaluator, "model_id", None)
+    )
 
     agg = aggregate(evals)
     # Read the counters AFTER the gold-query embeds above: a provider run embeds

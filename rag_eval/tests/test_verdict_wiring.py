@@ -477,3 +477,64 @@ def test_coverage_is_checked_before_the_embedder_is_built(tmp_path, monkeypatch)
             ),
         )
     assert built == []
+
+
+def test_a_declared_summary_id_with_no_package_at_all_is_an_error():
+    """`--displayed-summaries-manifest` omitted entirely, not just missing this
+    id -- `displayed_summaries` is `{}`, and that must be treated the same as
+    "declared but unresolved", not as "no row needs one". The early-return
+    version of `require_displayed_summaries` let this row through silently,
+    reaching `_graded()` with `displayed_summary=""` -- a judged run grading
+    the summary axis against an empty target for every row, the exact
+    silent-false-complete this coverage check exists to kill.
+    """
+    with pytest.raises(RuntimeError, match="q01"):
+        require_displayed_summaries([_row("q01")], {})
+
+
+def test_a_judged_run_with_no_summaries_manifest_at_all_is_an_error(
+    tmp_path, monkeypatch
+):
+    """Same failure at the `run()` boundary: a judge is configured (a real
+    RAG_JUDGE=bedrock pass) and the operator forgot
+    --displayed-summaries-manifest entirely, not just gave the wrong id. Must
+    stop before the embedder is built (S-7: a provider run's embeds are
+    billed calls).
+
+    A retrieval-only run with no judge configured at all must NOT trip this
+    -- see test_conclusion_fields.py's pre-support-test fixtures, which
+    declare displayed_summary_id but never supply a package or a judge.
+    """
+    built = []
+    monkeypatch.setattr("rag_eval.run.make_evaluator", lambda: FakeEvaluator())
+    monkeypatch.setattr(
+        "rag_eval.run.make_embedder", lambda: built.append(1) or pytest.fail("built")
+    )
+    mf = _corpus(tmp_path)
+    with pytest.raises(RuntimeError, match="q01"):
+        run(
+            base=tmp_path,
+            gold_path=_gold(tmp_path, [_row("q01")]),
+            manifest_path=mf,
+        )
+    assert built == []
+
+
+def test_a_targetless_gold_set_does_not_claim_a_graded_pass(tmp_path, monkeypatch):
+    """RAG_JUDGE=bedrock but every gold row is legacy/retrieval-only: the
+    evaluator exists but `_graded()` never calls it, so `judge_calls` stays 0.
+    `judge_backend` must not say "bedrock" for a pass that made zero calls --
+    the report would then read "graded by bedrock, 0 LLM call(s)", which
+    describes a completed judged pass over rows nobody sent to the model.
+    """
+    fake = FakeEvaluator()
+    legacy_row = {
+        "id": "q01",
+        "query": "notification deadline",
+        "expected": [ANCHOR],
+        "topic": "adverse_action",
+    }
+    result = _run(tmp_path, monkeypatch, [legacy_row], evaluator=fake)
+    assert fake.cases == []
+    assert result.judge_calls == 0
+    assert result.judge_backend == "none"
