@@ -25,7 +25,7 @@ re-measured on this gold set.
 
 | | |
 |---|---|
-| Documents admitted | 6 scanned, 0 refused by the content and filename checks |
+| Candidate files scanned | 6, 0 refused by the content and filename checks. This is the hygiene gate's file count, not a document count: only gate-passed markdown reaches the chunker, and the 66 passages below match the five-document measurement recorded on 2026-08-27, so the sixth candidate contributed none |
 | Passages indexed | 66 |
 | Embedding model | `amazon.titan-embed-text-v2:0`, 1024 dimensions |
 | Embedding calls | 94 (66 passages + 28 questions), 0 retries, 6,644 input tokens |
