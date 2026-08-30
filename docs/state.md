@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (d0812fe)` — d0812fe 2026-08-30 Merge pull request #128 from 2463-FDE/docs/client-asks-working-logs
+Base: `origin/main (2213c67)` — 2213c67 2026-08-30 Merge pull request #129 from 2463-FDE/docs/log-aggregation
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #129 | `2213c67` | 2026-08-30 | Merge pull request #129 from 2463-FDE/docs/log-aggregation |
 | #128 | `d0812fe` | 2026-08-30 | Merge pull request #128 from 2463-FDE/docs/client-asks-working-logs |
 | #127 | `f66cc41` | 2026-08-30 | Merge pull request #127 from 2463-FDE/docs/rag-eval-handoff-pointers |
 | #120 | `62ce9a2` | 2026-08-30 | Merge pull request #120 from 2463-FDE/docs/client-asks |
