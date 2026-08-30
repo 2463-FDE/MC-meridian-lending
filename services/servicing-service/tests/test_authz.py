@@ -9,6 +9,7 @@ admit staff or the owning borrower, denied as 404 so a serial id cannot be probe
 existence.
 """
 
+import uuid
 from datetime import date
 
 import pytest
@@ -17,6 +18,22 @@ from fastapi.testclient import TestClient
 
 from app import authz, config, reconciliation
 from app.main import app
+
+
+# The charge route now fails closed on an unready schema (D13a: a volume that skipped
+# migration 0020 still holds every stored CVV, and the NULLABLE legacy column lets the
+# capture insert succeed anyway). These cases have no database at all, so the probe would
+# refuse every request and grade nothing but the guard. The guard itself is graded in
+# test_no_sad.py (unmigrated volume) and test_db_readiness.py (the rungs).
+@pytest.fixture(autouse=True)
+def _schema_ready(monkeypatch):
+    monkeypatch.setattr(config, "database_reachable", lambda *a, **k: (True, None))
+
+
+# D19: the Idempotency-Key is required and client-minted (ADR 0013 Decision 1), so every
+# call into the charge path has to carry one. A fixed valid UUID keeps these cases
+# deterministic; the idempotency behaviour itself is covered by the R-vector suite.
+_IDEM_KEY = "11111111-1111-4111-8111-111111111111"
 
 
 # --- require_money_role --------------------------------------------------------
@@ -213,7 +230,7 @@ def test_apply_payment_denied_without_internal_token(monkeypatch):
 
 def test_apply_payment_allowed_with_internal_token(monkeypatch):
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
-    monkeypatch.setattr("app.balance.apply_payment", lambda *a, **k: 50.0)
+    monkeypatch.setattr("app.balance.apply_payment", lambda *a, **k: (50.0, True))
     resp = TestClient(app).post(
         "/accounts/1/apply-payment",
         json={"amount": 50.0, "payment_id": 1},
@@ -432,7 +449,11 @@ def test_post_payment_denied_for_non_owner_borrower(monkeypatch):
     resp = TestClient(app).post(
         "/payments",
         json={"loan_id": 1, "amount": 50.0},
-        headers={"X-User-Role": "borrower", "X-User-Id": "5"},
+        headers={
+            "Idempotency-Key": _IDEM_KEY,
+            "X-User-Role": "borrower",
+            "X-User-Id": "5",
+        },
     )
     assert resp.status_code == 404
 
@@ -458,7 +479,7 @@ def test_post_payment_allowed_for_owner(monkeypatch):
     monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
     monkeypatch.setattr(
         "app.payments.charge",
-        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None: {
+        lambda loan_id, pan, amount, ssn, name, method, request_id=None, **kw: {
             "loan_id": loan_id,
             "amount": amount,
             "balance": 0.0,
@@ -467,7 +488,11 @@ def test_post_payment_allowed_for_owner(monkeypatch):
     resp = TestClient(app).post(
         "/payments",
         json={"loan_id": 1, "amount": 50.0},
-        headers={"X-User-Role": "borrower", "X-User-Id": "5"},
+        headers={
+            "Idempotency-Key": _IDEM_KEY,
+            "X-User-Role": "borrower",
+            "X-User-Id": "5",
+        },
     )
     assert resp.status_code == 200
 
@@ -495,7 +520,11 @@ def test_post_payment_denied_for_underwriter_on_arbitrary_loan(monkeypatch):
     resp = TestClient(app).post(
         "/payments",
         json={"loan_id": 1, "amount": 500.0},
-        headers={"X-User-Role": "underwriter", "X-User-Id": "12"},
+        headers={
+            "Idempotency-Key": _IDEM_KEY,
+            "X-User-Role": "underwriter",
+            "X-User-Id": "12",
+        },
     )
     assert resp.status_code == 404
 
@@ -510,7 +539,7 @@ def test_post_payment_allowed_for_money_role_without_db(monkeypatch):
     monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
     monkeypatch.setattr(
         "app.payments.charge",
-        lambda loan_id, pan, cvv, amount, ssn, name, method, request_id=None: {
+        lambda loan_id, pan, amount, ssn, name, method, request_id=None, **kw: {
             "loan_id": loan_id,
             "amount": amount,
             "balance": 0.0,
@@ -519,9 +548,44 @@ def test_post_payment_allowed_for_money_role_without_db(monkeypatch):
     resp = TestClient(app).post(
         "/payments",
         json={"loan_id": 1, "amount": 50.0},
-        headers={"X-User-Role": "csr"},
+        headers={"Idempotency-Key": _IDEM_KEY, "X-User-Role": "csr"},
     )
     assert resp.status_code == 200
+
+
+# --- m1: the stored key is the canonical UUID spelling -----------------------------
+#
+# This route is a second front door onto the same payments table (D19). Same
+# reasoning as payment-service's /payments: uuid.UUID() accepts hyphenless and
+# uppercase spellings as the same UUID, but the key is stored as raw TEXT, so two
+# spellings of one UUID would claim two distinct rows and dedupe nothing.
+
+
+def test_hyphenless_and_uppercase_idempotency_keys_canonicalize_the_same(monkeypatch):
+    monkeypatch.setattr(config, "PROCESSOR_API_KEY", "sekret")
+
+    seen = []
+
+    def fake_charge(*a, idempotency_key=None, **kw):
+        seen.append(idempotency_key)
+        return {"loan_id": 1, "amount": 50.0, "balance": 0.0}
+
+    monkeypatch.setattr("app.payments.charge", fake_charge)
+
+    canonical = uuid.UUID(_IDEM_KEY)
+    spellings = [str(canonical), canonical.hex, canonical.hex.upper()]
+    for spelling in spellings:
+        resp = TestClient(app).post(
+            "/payments",
+            json={"loan_id": 1, "amount": 50.0},
+            headers={"Idempotency-Key": spelling, "X-User-Role": "csr"},
+        )
+        assert resp.status_code == 200, resp.text
+
+    assert len(set(seen)) == 1, (
+        f"every spelling of the same UUID must canonicalize to one stored key: {seen}"
+    )
+    assert seen[0] == str(canonical)
 
 
 # --- GET /loans/mine (borrower self-service lookup) -----------------------------

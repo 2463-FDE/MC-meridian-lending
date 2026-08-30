@@ -1,8 +1,10 @@
 # ADR 0015: Settlement Reconciliation as a Control, and Correlation on the Payment Span
 
 - **Status:** **Accepted** — D1 through D6 are built and merged. The exact matching key still
-  depends on migration `0017_payments_idempotency` (ADR 0013), which is not built, so matching
-  remains heuristic until that migration lands.
+  depends on `db/migrations/0018_payments_idempotency.sql` (ADR 0013 Decision 1), which **is**
+  built — schema in PR #63, capture path in PR #65, held by the blocking
+  `payment-idempotency-gate` — but only prevents the exact-retry case at capture; matching
+  remains heuristic for a processor-side duplicate or a break that predates that fix.
 - **Date:** 2026-08-12
 - **Author:** Claude Code
 - **Related:** ADR 0012 (Decimal / minor units precedent, applied here to the comparison),
@@ -10,9 +12,11 @@
   ADR 0002 (single shared database — why the job reads `payments` directly),
   ADR 0004 (the decomposition that split capture from apply across two services).
   Debt D7 (no reconciliation job), D19 (no idempotency key), D3 (lost update),
-  D2 (float money), D8 (servicing enforces no authorization).
-- **Source:** `docs/spec-observability-week7.md`,
-  `docs/client-asks-2026-08-12-observability.md`.
+  D2 (float money), D8 (servicing authz — partially mitigated by #32; maker-checker
+  still open).
+- **Source:** `docs/spec-observability-week7.md`, and
+  docs/client-asks-2026-08-12-observability.md — local-only, on the docs/client-asks branch and in
+  no checkout, so it is named un-backticked rather than linked.
 
 ---
 
@@ -50,7 +54,8 @@ service's log and no counterpart anywhere, and the caller still returns `capture
 
 Reconciliation is out of scope in `docs/spec-payments-week5.md` by that spec's own statement, so
 this decision does not overlap the payments work. It depends on it in one direction only: the
-exact matching key arrives with migration `0017_payments_idempotency`, which is not built.
+exact matching key is a schema column, `processor_ref`, added by migration
+`0018_payments_idempotency.sql` — but no capture code populates it, so it is not yet usable.
 
 ---
 
@@ -66,7 +71,7 @@ that a count differs and does not decide which row is the orphan.
 | Option | Rejected because |
 |---|---|
 | A. Compare totals, as today | This is the current state and the reason finance adjusts to the bank. It cannot answer "why", which is the entire ask. |
-| B. Match exactly on a shared reference | There is no shared reference. `payments` carries no processor reference, and no processor integration exists — `PROCESSOR_BASE_URL` is referenced by no code path. The column arrives with migration `0017`. This is the intended successor, not an option available now. |
+| B. Match exactly on a shared reference | There is no populated shared reference. `payments.processor_ref` exists as a column (migration `0018_payments_idempotency.sql`) but no capture code writes it, and no processor integration exists — `PROCESSOR_BASE_URL` is defined but called by no code path. An empty column is not an option available now. |
 | C. Match heuristically and pick a winner when counts differ | A one-to-one matcher that guesses which of two identical rows is the orphan states a fact it does not have. The report would be precise and sometimes wrong, which is worse for a control than being coarse and always right. |
 | **D. Chosen: heuristic tuple, one-to-one, abstain on ambiguity** | Answers "why" with the data that exists, and its failure mode is a break the operator must read rather than a wrong attribution the operator cannot see. |
 
@@ -195,7 +200,7 @@ table.
 
 | Option | Rejected because |
 |---|---|
-| A. Correct balances the report finds wrong | Unauthorized money movement. Servicing enforces no authorization (D8), there is no maker-checker, and the write would land on the unlocked read-modify-write that is D3 — so an automated correction races the same defect that produced the discrepancy. |
+| A. Correct balances the report finds wrong | Unauthorized money movement. Servicing enforces no authorization (D8), there is no maker-checker, and a balance correction goes through `adjust_balance`, which keeps the unlocked read-modify-write shape D3's fix removed from `apply_payment` (D32) — so an automated correction races the same class of defect that produced the discrepancy. |
 | B. Write a suggested correction for an operator to approve | Requires a table, a migration, and a review workflow. The migration would take a number from the payments sequence, which was just renumbered to `0017`–`0020`. Out of proportion to a first control. |
 | **C. Chosen: read-only, remediation stays a business action** | The $500 on loan 4471 needs a human decision about two customers, not an automated `UPDATE`. |
 
@@ -217,13 +222,20 @@ table.
 
 - **Matching is inexact and we say so.** Loans with repeating equal instalments are the common
   case in an installment portfolio, so ambiguous tuples will be routine. The report abstains
-  rather than guessing, which means some breaks require manual review until migration `0017`
-  supplies the exact key.
+  rather than guessing; migration `0018_payments_idempotency.sql` added a `processor_ref` column,
+  but no capture code populates it, so exact matching stays unavailable and ambiguous tuples
+  still require manual review.
 - **The gross break value is partly an artifact.** Labelled, but a reader who ignores the label
   can still misread it.
-- **Detection without prevention.** The report finds double charges every day until ADR 0013's
-  idempotency key ships. Communicated to the client explicitly; the risk is that "we can see it"
-  is heard as "it is fixed".
+- **Detection without prevention, for everything but the exact retry.** ADR 0013 Decision 1's
+  idempotency key (schema in PR #63, capture path in PR #65, held by the blocking
+  `payment-idempotency-gate`) stops the same client-minted key from being claimed twice, so an
+  exact retry no longer produces a duplicate charge. The report still finds every double charge
+  it did before that fix — a processor-side duplicate, a break that predates the fix, and a
+  missing `processor_ref` all stay detection-only, caught here and nowhere else. D3's lost update
+  is no longer in that list: `apply_payment` became one atomic statement in PR #77, held by the
+  blocking `atomic-apply-gate`. Communicated to the client explicitly; the risk is that "we can
+  see it" is heard as "it is fixed" for cases this fix does not cover.
 - **No schedule.** "Daily" is an operational convention plus the operator's existing cron. If
   nobody runs it, the control is a script.
 - **The report is an artifact, not a record.** Two runs a month apart cannot be compared by the
@@ -315,9 +327,9 @@ path only.
 
 | Risk | Mitigation |
 |---|---|
-| Ambiguous tuples are common in an installment portfolio, so many breaks need manual review | The report abstains rather than guessing; migration `0017`'s `processor_ref` is the named successor, and Decision 1 is written to be replaced |
+| Ambiguous tuples are common in an installment portfolio, so many breaks need manual review | The report abstains rather than guessing; migration `0018`'s `processor_ref` column is the named successor once a capture path populates it, and Decision 1 is written to be replaced |
 | A reader treats gross break value as a stable measurement | Labelled in the report itself, not only in this ADR |
-| The client hears detection as prevention | Stated in `docs/client-asks-2026-08-12-observability.md` and repeated in the runbook |
+| The client hears detection as prevention | Stated in docs/client-asks-2026-08-12-observability.md (local-only, un-backticked — see **Source** above) and repeated in the runbook. **Still the live risk, narrower than it was:** ADR 0013 Decision 1 (PR #63/#65) now prevents the exact-retry case at capture, but a processor-side duplicate, a break that predates that fix, and a missing `processor_ref` are still detection/manual-review only, and week-8 client-demo feedback names user notification and refund status as unevidenced |
 | Nobody runs the job, so the control exists on paper | Exit codes make it CI-runnable; the runbook names the invocation. A scheduler is deferred, not assumed |
 | The cut-off convention turns out to differ from ±1 day, changing every classification | The window is configuration; the client question is open and the answer changes a value |
 | Someone tightens the window and believes duplicate detection improved | Decision 2 makes duplicate detection independent of the window, and a test vector asserts invariance across both values |
@@ -340,7 +352,7 @@ that would supply it. The payments spec assumes a processor call in its ordering
 no such call exists in any code path. Recorded here because that spec does not say it.
 
 **"Reconciliation should correct what it finds."** Rejected. The correction is customer
-remediation, and the write would race D3.
+remediation, and the write would go through `adjust_balance`, which still races (D32).
 
 ---
 
@@ -354,5 +366,5 @@ per close, required, no default, so a missing value fails closed. The cut-off co
 pinned at the session and at the `load_ledger` row boundary.
 
 One decision is deliberately unchanged by those answers: matching stays heuristic, keyed on loan,
-amount and a one-day settlement tolerance, until migration `0017_payments_idempotency` supplies an
-exact key.
+amount and a one-day settlement tolerance. Migration `0018_payments_idempotency.sql` added the
+`processor_ref` column that would supply an exact key, but no capture code populates it yet.

@@ -60,13 +60,22 @@ gold query set through retrieval, and emits a markdown report.
    chunk(s), or is labeled `unanswerable` (e.g. "why was application #6012 denied?").
 5. Report computes retrieval metrics per query and aggregate: hit@k (k=1,3,5), MRR, and
    per-query retrieved-vs-expected detail.
-6. The report has a **"Data gaps"** section that explicitly states: the #6012 question is
+6. The report has a **"Data gaps"** section for a run whose gold set carries the
+   unanswerable #6012 case, and that section explicitly states: the #6012 question is
    unanswerable because `decisions(app_id, outcome)` records no reason/drivers/timestamp —
    citing table schema and the guidelines' own operational note. It must also cite the only
    trace that exists: `logs/payment-service.log:14`, an unstructured log line recording
    `adverse_action_reason="purchasing history"` — ephemeral, non-queryable, not valid Reg B
    principal-reason language, and contradicting policy (model_score=612 falls in the
    600–659 *refer* band, yet the outcome was deny).
+7. Every claim the report makes about the run is gated on that run. Each "Data gaps"
+   subsection renders only when its own subject is present — the #6012 subsection when an
+   unanswerable case asks about that application, the past-applications subsection when the
+   hygiene gate refused `kb_dump/applications.jsonl` in this run — and the section heading
+   renders only when a subsection does. Finding counts and file names come from the run's
+   verdicts, never from fixed prose. A report that explains a denial nobody asked about, or
+   asserts a refusal that never happened, states something false about its own run; the
+   report is the graded deliverable, so that is a defect in the deliverable.
 
 ### D2. Corpus Hygiene Gate (Redaction Check on Ingest)
 

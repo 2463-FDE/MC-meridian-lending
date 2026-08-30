@@ -7,10 +7,51 @@ description: Analyze and resolve review feedback against the local feature branc
 
 You take review comments and turn the valid ones into correct, implemented fixes on the current local feature branch. Comments reach you two ways: the user pastes them (pasted mode), or you fetch them read-only from a PR URL the user gives you (poll mode — see Phase 6). You NEVER write to GitHub/GitLab: no posting comments, no editing the PR, no closing/merging. The only remote call you ever make is a read (unauthenticated HTTPS GET to the GitHub REST API; gh only if the repo is private) to list a PR's comments and state in poll mode. Every comment is verified against the real local code, not against what the comment claims. You are not a yes-machine: a comment is an input to judge, not an order to obey. Some are right, some are wrong, some are stale (the code already changed), some are ambiguous. Your job is to tell them apart, act on the good ones, and push back on the bad ones with evidence from the actual code.
 
+## Spend checkpoint (hard)
+
+Measured over 76 runs: this skill's median run is 53 tool calls, but p90 is 144 and
+the worst was 254 — and the long tail is where the cost is. Cost scales with tool
+calls times context size, so the tail, not the median, is what needs a brake.
+
+- **At 80 tool calls in a single run: STOP.** Report which comments are resolved,
+  which are still open, and what the remaining work is. Ask whether to continue.
+  Do not silently push past it.
+- The checkpoint is a brake, not a ceiling. This skill edits code, adds regression
+  tests and runs `make prove` — a run that legitimately needs 120 calls should get
+  them, after the user says so.
+- **Never invoke the `teeth` skill from inside this one.** Phase 3.6 wants teeth's
+  Phase 2.5 checklist *read* — open `.claude/skills/teeth/SKILL.md`, read that
+  section, apply it. Invoking teeth costs roughly twice a whole address-pr run and
+  it happened in 29% of runs. The one exception is Phase 5.4, where the user is
+  asked and explicitly says yes.
+- Do not invoke `wrap` or `session-handoff` from inside a fix round either. They are
+  end-of-session skills; running them mid-round pays their full cost on top of this
+  one.
+- Phase 1 triage needs no budget — it already runs a median of 18 calls before the
+  first edit. Do not tighten it; the widening rule is what keeps dispositions honest.
+
+Chain completion (Phase 3.6) is **not** in scope for trimming. A partial fix
+guarantees another review round, and another round costs a whole run. Closing the
+pattern now is the cheaper path, not the more expensive one.
+
+## Worktree setup (always runs first — before Phase 0, both entry modes)
+
+Every fix round happens in a dedicated git worktree, never in the main checkout. This replaces branch-switching for this skill: it satisfies the global branch-discipline rule (never edit-then-switch) by isolating instead of switching.
+
+1. Target branch is the branch the user names when invoking the skill (pasted mode: given with the comments; poll mode: the PR's head branch, read from the API). Required — do not guess or default to whatever the main checkout happens to be on.
+2. Path convention: `.claude/worktrees/<branch-with-/-replaced-by-->` (matches EnterWorktree's own default location).
+3. Check `git worktree list` first:
+   - A worktree already at that path for that branch → reuse it: `EnterWorktree` with `path:<that path>`.
+   - No worktree yet → create one for the EXISTING branch (not a new one — `EnterWorktree` with only `name` branches fresh from origin/main, which is wrong here): run `git worktree add .claude/worktrees/<slug> <branch>` directly, then `EnterWorktree` with `path:<that path>` to switch the session into it.
+   - `git worktree add` refuses if the branch is already checked out somewhere (commonly the main checkout, if the user is currently sitting on it there). Do not force or move the other checkout yourself — report this to the user and ask whether to switch the main checkout off that branch first, or proceed in the main checkout for this one round.
+4. If EnterWorktree/ExitWorktree aren't available in this session, fall back to plain `git worktree add` + operating with `cwd` pinned to that path, and tell the user there is no auto-tracked cleanup this run.
+5. Do the rest of the skill (Phases 0–6) inside the worktree. Do not `git checkout` the target branch in the main working directory for any part of this skill.
+6. Leave the worktree in place at the end of the round (don't ExitWorktree/remove it) regardless of whether Phase 5 pushed — so a declined or partial round stays inspectable. Only remove it on explicit user request.
+
 ## Phase 0 — Gather inputs (comments are pasted, code is local)
 
 1. Take the review comments exactly as the user pasted them. Do not fetch anything from a remote. The source may be a PR, the teeth skill, Claude's own review, or hand-written — note the source per comment but treat them all as claims to verify.
-2. Identify the current local feature branch and its base (e.g. git branch --show-current, and the merge-base against the base branch main), unless the user names a different one. Default the base to main for this project; only ask if the user indicates a different base.
+2. Identify the current local feature branch (now the worktree's branch, per Worktree setup above) and its base (e.g. git branch --show-current, and the merge-base against the base branch main), unless the user names a different one. Default the base to main for this project; only ask if the user indicates a different base.
 3. Normalize the pasted comments into a numbered list so nothing is silently dropped. Every comment gets an explicit disposition by the end.
 
 ## Phase 1 — Load context from the local branch (diff first, widen only as needed)
@@ -44,7 +85,7 @@ For ACCEPT and PARTIAL items only:
 3. If the change touches a contract/interface, update all affected callers found when widening context. A half-applied fix is worse than none.
 4. Add or update tests when the comment was about a correctness or edge-case gap. A bug fix without a test that would have caught it is incomplete.
 5. After each fix, re-check pending comments — confirm this change didn't invalidate or partially resolve another.
-6. CHAIN COMPLETION (mandatory — this is what collapses review round-trips): a reviewer finding is usually one instance of a pattern, and the automated reviewer surfaces only 1–2 findings per pass, so fixing the single instance guarantees another round. Before Phase 4, run the fix through the teeth skill's "Phase 2.5 — Reviewer-preempt gauntlet" checklist (chain-completion rules, filter-bypass enumeration, standing traps) and close the WHOLE pattern in this same fix round: all sibling routes/services/legacy copies with the same shape, all cells of a guarantee matrix (entrypoints × scoping × payload binding × concurrency), the full new-field lifecycle (boundary → legacy rows → seeds → remediation → gateway reachability), the honest path a new fail-closed check might break, and CI-blocking coverage for any new security regression test. Each closed pattern-mate is in scope for the fix commit, not scope creep. For a guarantee/authz matrix, emit the filled coverage table (entrypoint × cell, ✓/✗) — an unchecked cell is the next round's finding; close it now.
+6. CHAIN COMPLETION (mandatory — this is what collapses review round-trips): a reviewer finding is usually one instance of a pattern, and the automated reviewer surfaces only 1–2 findings per pass, so fixing the single instance guarantees another round. Before Phase 4, apply (by READING that file's section — never by invoking the teeth skill; see the spend checkpoint above) the teeth skill's "Phase 2.5 — Reviewer-preempt gauntlet" checklist (chain-completion rules, filter-bypass enumeration, standing traps) and close the WHOLE pattern in this same fix round: all sibling routes/services/legacy copies with the same shape, all cells of a guarantee matrix (entrypoints × scoping × payload binding × concurrency), the full new-field lifecycle (boundary → legacy rows → seeds → remediation → gateway reachability), the honest path a new fail-closed check might break, and CI-blocking coverage for any new security regression test. Each closed pattern-mate is in scope for the fix commit, not scope creep. For a guarantee/authz matrix, emit the filled coverage table (entrypoint × cell, ✓/✗) — an unchecked cell is the next round's finding; close it now.
    NO PARTIAL-DEFER of a security chain: never fix the "state-change half" and punt the "authorization half" to an ADR while the PR is open — the reviewer re-flags the deferred cell every push (PR 7 rounds 22–24 were the same anonymous-write class deferred to ADR 0010 and re-found each round). Close the whole cell now, or if it is genuinely pre-existing brownfield debt on a route this PR only touches, fence it in the PR body with a tracking ref so it is answered once. If the user directs a partial-defer, warn that it guarantees another round.
 
 Do NOT implement REJECT, STALE, or CLARIFY items.
@@ -110,7 +151,7 @@ handled by the existing TTL path (see ledger).
 
 ## Phase 6 — Poll mode (optional: watch a PR for new review comments)
 
-Enter this phase ONLY when the user gives you a PR URL and asks to poll/watch it (e.g. "poll this PR for new comments"). Pasted mode (Phases 0–5) is unaffected. Poll mode is read-only against the remote: you fetch comments and PR state with plain HTTPS GETs, and you NEVER post, edit, close, or merge.
+Enter this phase ONLY when the user gives you a PR URL and asks to poll/watch it (e.g. "poll this PR for new comments"). Pasted mode (Phases 0–5) is unaffected. Poll mode is read-only against the remote: you fetch comments and PR state with plain HTTPS GETs, and you NEVER post, edit, close, or merge. Run Worktree setup once at the first poll cycle (the PR's head branch is the target branch) — every subsequent auto-triage cycle (6.3) reuses that same worktree.
 
 Prerequisites: none beyond network access for a public repo — the GitHub REST API serves public PR reads unauthenticated (rate limit 60 req/hour per IP; one poll is ~3 calls, so 30-minute polling stays well under it). Use `curl` against `https://api.github.com`. Only reach for `gh` (which needs auth) if a GET returns 404/403 indicating the repo is private; if so, tell the user auth is required (`gh auth login`) and stop.
 

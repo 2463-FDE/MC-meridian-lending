@@ -14,20 +14,120 @@ from dataclasses import dataclass, field
 
 K_VALUES = (1, 3, 5)
 
+# A case no officer topic can express. Defined here rather than in run.py because
+# the loader, the aggregate and the report all have to agree on the one spelling;
+# a second copy is how a bucket silently splits in two.
+UNMAPPED = "unmapped"
+
+# The one outcome class that cannot be scored on retrieval rank. The client's
+# clarification cases are ambiguous ACROSS documents by design — Q13's own
+# rationale reads "Ambiguous across Adverse Action, Loan Review, and Credit
+# cutoffs" — so they carry no single frozen anchor, in her CSV and in the
+# authoritative JSONL alike. Scoring them against one chunk would grade a case
+# on a target it was never given; folding them into `no_match` would inflate
+# the abstention class, which is the one ratio proving abstention works. They
+# are excluded from every score and reported as a count with the reason, the
+# same treatment `UNMAPPED` gets for topics: the officer channel is a closed
+# enum with free text masked at the boundary, so there is no ask-back path to
+# exercise and scoring these would report coverage the product does not have.
+UNSCORABLE_CLASS = "clarification"
+
+# The support-test verdict states. The client's correction (S-1) makes the
+# expected conclusion and the displayed summary two frozen targets graded
+# separately, so there are two of these per case and they are never merged: a run
+# that retrieves the right passage and states the wrong deadline is a different
+# failure from one that states the right deadline off the wrong passage.
+SUPPORTED = "supported"
+UNSUPPORTED = "unsupported"
+# S-9. Counts neither way. Defaulting an uncertain verdict to `UNSUPPORTED` would
+# score "we could not tell" as "the system was wrong", which she ruled out by name.
+HUMAN_REVIEW = "human_review"
+# Not a verdict — the absence of one. Every case starts here and only a check
+# that actually ran moves it, so an ungraded case can never read as a pass. The
+# design doc's rule: "a field that is loaded but unscored reads as coverage that
+# does not exist."
+NOT_EVALUATED = "not_evaluated"
+VERDICT_STATES = (SUPPORTED, UNSUPPORTED, HUMAN_REVIEW, NOT_EVALUATED)
+
+# The third grading target's own states. Her authoritative JSONL carries
+# `prohibitedUnsupportedConclusion` on every row: an explicit negative naming the
+# conclusion the run must not reach. Reusing SUPPORTED/UNSUPPORTED for it would
+# print "the prohibited conclusion is supported" in her report, which reads as the
+# opposite of the finding. A conclusion can also be unsupported without being
+# prohibited, so this is a separate axis, not a third half of the support test.
+AVOIDED = "avoided"
+ASSERTED = "asserted"
+# HUMAN_REVIEW and NOT_EVALUATED carry the same meaning here as above. The first
+# two entries are the graded pair and the first is the numerator, which is the
+# contract `_support_stat` reads — so the order is load-bearing.
+PROHIBITED_STATES = (AVOIDED, ASSERTED, HUMAN_REVIEW, NOT_EVALUATED)
+
 
 @dataclass
 class QueryEval:
     query_id: str
     query: str
-    expected: list[str]          # expected chunk_ids; empty when unanswerable
+    expected: list[str]  # expected chunk_ids; empty when unanswerable
     unanswerable: bool
     retrieved: list[tuple[str, float]]  # (chunk_id, score), ranked
     threshold: float
+    # The officer topic this case would be asked under. `unmapped` is a result,
+    # not a default to be tidied away: seven of the client's questions are
+    # servicing and collections questions and the closed officer vocabulary has
+    # no code for either, so they cannot be asked through the product at all.
+    # Seven, not the six her own needs_review set names: Q24's frozen anchor is
+    # also in SYN-POL-SERVICING-COLLECTIONS.md, which that set missed.
+    # The default is the safe answer for a directly-constructed eval, NOT the
+    # value the committed gold set relies on — every committed case names its own
+    # topic, and a test asserts it, because a set that defaults into `unmapped`
+    # wholesale collapses the per-topic report to a single row.
+    topic: str = UNMAPPED
+    # Which of the client's four outcome classes this case belongs to. Scoring
+    # is unchanged by it — `unanswerable` still decides how a case is scored —
+    # but a class-blind aggregate hides a whole class going wrong, which is the
+    # failure mode a corpus of near-identical scaffolding sections invites.
+    # Absent on the committed gold set, where it follows from `unanswerable`.
+    # Orthogonal to `topic`: one says what was asked, the other what came back.
+    outcome_class: str | None = None
+    # Two independent support verdicts, never combined into one score.
+    conclusion_verdict: str = NOT_EVALUATED
+    summary_verdict: str = NOT_EVALUATED
+    # The negative target (PROHIBITED_STATES). Only the evaluator can move it off
+    # NOT_EVALUATED: her prohibition is prose and carries no literal for the
+    # mechanical check to match, so nothing here grades it.
+    prohibited_verdict: str = NOT_EVALUATED
+    # The three gold targets themselves, carried through so the evaluator has
+    # something to grade against. `_UNECHOED_TEXT_KEYS` in run.py governs these:
+    # never embedded, never printed into the report (report.py reads only the
+    # verdict fields above).
+    expected_conclusion: str | None = None
+    displayed_summary_id: str | None = None
+    prohibited_conclusion: str | None = None
+    # The evaluator's one line of reasoning (S-8, S-10). Empty until it exists —
+    # nothing else may write here, because the retention allowlist admits this
+    # field on the strength of a human having reviewed it. Normalized to a single
+    # line and length-capped in __post_init__: S-10 says one line, and a limit
+    # that is only intended is not a control (C-7).
+    rationale: str = ""
     hits: dict[int, bool] = field(init=False)
     reciprocal_rank: float = field(init=False)
     correct: bool = field(init=False)
 
     def __post_init__(self) -> None:
+        # One line, S-10. Collapse first so a paragraph cannot pass the cap by
+        # spending its length on newlines, then REFUSE an overlong one rather
+        # than truncating: truncation still writes the first 240 characters of a
+        # leaked passage into the report, which is the breach the cap exists to
+        # stop. A refusal costs one case; a leak costs the retention allowlist.
+        self.rationale = " ".join(self.rationale.split())
+        if len(self.rationale) > RATIONALE_MAX_CHARS:
+            raise ValueError(
+                f"rationale for {self.query_id!r} is {len(self.rationale)} "
+                f"characters, over the {RATIONALE_MAX_CHARS}-character limit -- "
+                "S-10 allows one line, and a longer one can carry passage text"
+            )
+        if self.outcome_class is None:
+            self.outcome_class = "no_match" if self.unanswerable else "answer"
         ids = [cid for cid, _ in self.retrieved]
         top_score = self.retrieved[0][1] if self.retrieved else 0.0
         if self.unanswerable:
@@ -38,29 +138,182 @@ class QueryEval:
             self.reciprocal_rank = 0.0
             self.correct = not self.retrieved or top_score < self.threshold
         else:
-            self.hits = {k: any(cid in self.expected for cid in ids[:k]) for k in K_VALUES}
-            rank = next((i + 1 for i, cid in enumerate(ids) if cid in self.expected), None)
+            self.hits = {
+                k: any(cid in self.expected for cid in ids[:k]) for k in K_VALUES
+            }
+            rank = next(
+                (i + 1 for i, cid in enumerate(ids) if cid in self.expected), None
+            )
             self.reciprocal_rank = 1.0 / rank if rank else 0.0
             self.correct = self.hits[max(K_VALUES)]
+        if not self.scorable:
+            # Not a failure — an absence of a scoring target. Zeroed so a caller
+            # reading these directly cannot read a stale hit as a result.
+            self.hits = {k: False for k in K_VALUES}
+            self.reciprocal_rank = 0.0
+            self.correct = False
+
+    @property
+    def scorable(self) -> bool:
+        """Whether this case has a retrieval target it can be graded against."""
+        return self.outcome_class != UNSCORABLE_CLASS
+
+
+# S-10 allows the evaluator one rationale line per case. A cap only means
+# something if a retrieved passage cannot fit inside it -- her chunks average
+# ~475 characters, so a limit at or above that would admit one whole. This is
+# deliberately about a third of that: long enough for a reason, too short to
+# carry the passage the reason is about.
+RATIONALE_MAX_CHARS = 240
+
+
+@dataclass
+class TopicStat:
+    """One topic's own count and score, so no topic hides inside a pooled mean."""
+
+    n: int
+    correct: int
+
+
+@dataclass
+class ClassStat:
+    """One outcome class's own count and score, so no class hides in the mean."""
+
+    n: int
+    correct: int
+
+
+@dataclass
+class SupportStat:
+    """One target's verdict counts and graded rate.
+
+    S-1: never merged with another target. S-9: `human_review` counts in neither
+    `n_graded` nor `rate` — only the two graded states are.
+    """
+
+    counts: dict[str, int]  # by the target's state tuple, omitting empty states
+    n_graded: int  # the two graded states, summed
+    rate: float | None  # good / n_graded, or None ("n/a") when n_graded == 0
+
+
+@dataclass
+class TopicVerdicts:
+    """One topic's three verdict rates, kept apart the way the pooled ones are.
+
+    S-4 requires the report broken out by topic rather than pooled, and once the
+    support verdicts are inside the graded result that applies to them too --
+    `TopicStat` above covers retrieval only. Three separate stats, never summed:
+    S-1 forbids merging the two support targets, and the prohibited axis has the
+    opposite polarity from both.
+
+    `n` counts the topic's cases over ALL evals, matching the pooled verdict
+    stats. It is therefore not `TopicStat.n`, which drops unscorable cases -- a
+    `clarification` case has no retrieval target but still has a conclusion.
+    """
+
+    n: int
+    conclusion: SupportStat
+    summary: SupportStat
+    prohibited: SupportStat
 
 
 @dataclass
 class Aggregate:
     n_answerable: int
     n_unanswerable: int
-    hit_at_k: dict[int, float]       # over answerable queries
-    mrr: float                       # over answerable queries
-    unanswerable_correct: int        # count scored correct
+    hit_at_k: dict[int, float]  # over answerable queries
+    mrr: float  # over answerable queries
+    unanswerable_correct: int  # count scored correct
+    by_topic: dict[str, TopicStat]  # per officer topic, insertion-ordered
+    n_unmapped: int  # cases no officer topic can express
+    by_class: dict[str, ClassStat]  # per outcome class, insertion-ordered
+    n_unscorable: int  # cases with no retrieval target (see UNSCORABLE_CLASS)
+    # Counted per state and kept apart, because S-1 forbids one merged number.
+    conclusion_verdicts: SupportStat
+    summary_verdicts: SupportStat
+    # The negative target, on its own axis and never added to the two above.
+    prohibited_verdicts: SupportStat
+    # The same three, split per officer topic (S-4: by topic, not pooled).
+    # Insertion-ordered, and keyed over ALL evals rather than scorable ones —
+    # see TopicVerdicts.
+    verdicts_by_topic: dict[str, TopicVerdicts]
+
+
+def _support_stat(values, states=VERDICT_STATES) -> SupportStat:
+    """Verdict counts plus the graded rate, omitting states with no cases.
+
+    `states[0]` is the numerator and `states[:2]` the graded pair, so the same
+    counting serves the support targets (`supported`) and the negative target
+    (`avoided`) without either borrowing the other's polarity.
+    """
+    good, bad = states[0], states[1]
+    counts = {state: 0 for state in states}
+    for v in values:
+        counts[v] = counts.get(v, 0) + 1
+    n_graded = counts[good] + counts[bad]
+    rate = counts[good] / n_graded if n_graded else None
+    return SupportStat(
+        counts={k: n for k, n in counts.items() if n},
+        n_graded=n_graded,
+        rate=rate,
+    )
 
 
 def aggregate(evals: list[QueryEval]) -> Aggregate:
-    answerable = [e for e in evals if not e.unanswerable]
-    unanswerable = [e for e in evals if e.unanswerable]
+    # Unscorable cases leave EVERY denominator, not just hit@k: a case with no
+    # target must not dilute a rate, appear as a scored topic row, or land in
+    # the abstention count. It is reported on its own line instead.
+    scorable = [e for e in evals if e.scorable]
+    answerable = [e for e in scorable if not e.unanswerable]
+    unanswerable = [e for e in scorable if e.unanswerable]
     n = len(answerable)
+    by_topic: dict[str, TopicStat] = {}
+    by_class: dict[str, ClassStat] = {}
+    for e in scorable:
+        stat = by_topic.setdefault(e.topic, TopicStat(n=0, correct=0))
+        stat.n += 1
+        stat.correct += int(e.correct)
+        # `outcome_class` is resolved in __post_init__, so it is never None here.
+        cstat = by_class.setdefault(str(e.outcome_class), ClassStat(n=0, correct=0))
+        cstat.n += 1
+        cstat.correct += int(e.correct)
+    # Per-topic verdicts run over ALL evals, not `scorable`, so this split and
+    # the pooled stats below describe the same population. A `clarification`
+    # case has no retrieval target but still has a conclusion to grade, and a
+    # split that dropped it would disagree with the pooled figure beside it.
+    by_topic_evals: dict[str, list[QueryEval]] = {}
+    for e in evals:
+        by_topic_evals.setdefault(e.topic, []).append(e)
+    verdicts_by_topic = {
+        topic: TopicVerdicts(
+            n=len(group),
+            conclusion=_support_stat(e.conclusion_verdict for e in group),
+            summary=_support_stat(e.summary_verdict for e in group),
+            prohibited=_support_stat(
+                (e.prohibited_verdict for e in group), PROHIBITED_STATES
+            ),
+        )
+        for topic, group in by_topic_evals.items()
+    }
     return Aggregate(
+        by_topic=by_topic,
+        verdicts_by_topic=verdicts_by_topic,
+        n_unmapped=sum(1 for e in scorable if e.topic == UNMAPPED),
+        n_unscorable=sum(1 for e in evals if not e.scorable),
+        # Over ALL evals, not just scorable ones: a support verdict is about the
+        # conclusion text, which exists independently of whether the case has a
+        # retrieval target.
+        conclusion_verdicts=_support_stat(e.conclusion_verdict for e in evals),
+        summary_verdicts=_support_stat(e.summary_verdict for e in evals),
+        prohibited_verdicts=_support_stat(
+            (e.prohibited_verdict for e in evals), PROHIBITED_STATES
+        ),
         n_answerable=n,
         n_unanswerable=len(unanswerable),
-        hit_at_k={k: (sum(e.hits[k] for e in answerable) / n if n else 0.0) for k in K_VALUES},
+        hit_at_k={
+            k: (sum(e.hits[k] for e in answerable) / n if n else 0.0) for k in K_VALUES
+        },
         mrr=(sum(e.reciprocal_rank for e in answerable) / n if n else 0.0),
         unanswerable_correct=sum(e.correct for e in unanswerable),
+        by_class=by_class,
     )

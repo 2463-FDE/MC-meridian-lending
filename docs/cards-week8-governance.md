@@ -85,9 +85,13 @@ never sit on the causal path** — codes come from real attributions, the model 
 **Depends on.**
 - **G1.** Drafted wording with no channel to carry it goes nowhere. Ordering this before G1 builds
   a sentence nothing sends.
-- Policy retrieval that actually answers. `rag_eval/` is an offline evaluation harness; no
-  retrieval tool is wired into the assistant — there is no `search_policy` anywhere under
-  `services/`, and `assistant.py`'s `_TOOLS` does not carry one. That gap is its own work.
+- Policy retrieval that actually answers. **Closed 2026-08-23 (PR #64).** `search_policy` is
+  the third entry in `assistant.py`'s `_TOOLS`, backed by
+  `services/origination-service/app/policy_retrieval.py` over the committed `policies/`
+  corpus. The original wording — that `rag_eval/` was an offline harness with no retrieval
+  tool wired into the assistant — was true when this card was written and is kept in the
+  history, not here, because a dependency list that still names a closed dependency reads
+  as blocked work.
 - A compliance review queue, so a human approves wording before send — Path B in the plan, also
   unbuilt.
 
@@ -107,17 +111,35 @@ The second dependency above — policy retrieval that answers — is the plan's 
 drafted wording. Deferring it whole means the W10 handover cannot claim RAG works, which is the
 bar the weeks 7–10 arc is assessed against. So the retrieval half is split:
 
-- **G2a — the import seam. This cycle, 1–2 days.** `rag_eval/` is repo-root, origination imports
-  are `app.*` relative to the service directory, and there is no repo-wide venv, so
+**Both halves are now BUILT and on `main`** — G2a as PR #56 (`fb1fc66`) and G2b as PR #64
+(`609605b`), both 2026-08-23. Cite the merge commits, not the branch that carried them. The
+scoping below stands as written except where marked; the corrections are kept rather than
+edited away, because two of them are the reason the estimate was wrong.
+
+- **G2a — the import seam. This cycle, 1–2 days. BUILT.** `rag_eval/` is repo-root, origination
+  imports are `app.*` relative to the service directory, and there is no repo-wide venv, so
   `import rag_eval` does not resolve in the container. Closing that is the expensive half of
   retrieval and it stands alone as a commit. Do not fix it by copying modules into the service —
   that reproduces the per-service redactor duplication `redactor-drift` exists to police.
-- **G2b — `search_policy` on the assistant loop, plus the drafted wording. Next cycle.** A third
-  entry in `_TOOLS` (`services/origination-service/app/assistant.py`), backed by `rag_eval.index`,
-  declared in `app/prompts/decision_assistant.py`; loop dispatch needs no change. **0.5–1 day once
-  G2a is done**, against 4–6 for the whole thing today. Needs ADR 0016 (0014 and 0015 are taken)
-  and two design constraints settled: retrieval abstains below the score threshold, and is
-  excluded from the `task="decision"` path entirely so generation never reaches the causal path.
+  **Correction:** the cause is narrower than "no venv". Origination's build context was
+  `./services/origination-service`, so the package was outside the context and never entered
+  the image at all. The close is a repo-root context plus a `COPY`, no path plumbing. The
+  corpus needed nothing — `docker-compose.yml` has bind-mounted `./policies` read-only into
+  this service since the initial scaffold.
+- **G2b — `search_policy` on the assistant loop, plus the drafted wording. Next cycle. BUILT
+  (the retrieval half; the drafted wording stays with G1).** A third entry in `_TOOLS`
+  (`services/origination-service/app/assistant.py`), backed by `rag_eval.index`, declared in
+  `app/prompts/decision_assistant.py`. Needs **ADR 0019** (0014 through 0018 are taken — this
+  card said 0016 when 0016 and 0017 were still free, and 0018 went to the
+  double-charge interim ADR, which merges first) and two design constraints settled:
+  retrieval abstains below the score threshold, and is excluded from the `task="decision"`
+  path entirely so generation never reaches the causal path. Both are built as specified.
+  **Correction, and this is why 0.5–1 day was wrong:** loop dispatch DID need changing — it
+  passes only the application id to every tool, and `search_policy` takes a model-supplied
+  query. And the export contract refuses free text in history turns
+  (`app/llm/request_builder.py:236-238` masks any whitespace-bearing string), so retrieved
+  policy prose cannot reach the model at all. ADR 0019 resolves that by keeping the text on
+  the officer's side: the model picks the query, code quotes the corpus chunk verbatim.
 
 **Why split rather than defer or build whole.** Building all of it costs 4–6 days against a cycle
 that already owes week-7 reconciliation (6–8) and the lost-update fix; nothing fits. Deferring all

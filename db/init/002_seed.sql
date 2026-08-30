@@ -1,7 +1,9 @@
 -- Meridian Lending — seed data
 
 -- Staff + one borrower login. password_hash is sha256('password') for every seeded user
--- (Halcyon shipped them all with the same demo password and never forced a reset).
+-- (Halcyon shipped them all with the same demo password and never forced a reset) --
+-- kept in this legacy format on purpose so a fresh volume exercises the D27 rehash-on-
+-- login path (services/gateway/app/auth.py) rather than only ever seeing new-format rows.
 INSERT INTO users (username, password_hash, role, display_name, applicant_id) VALUES
   ('admin',       '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8', 'admin',       'Dana Whitfield (VP Lending Ops)', NULL),
   ('underwriter', '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8', 'underwriter', 'Sam Okafor (Underwriting)',       NULL),
@@ -64,18 +66,22 @@ INSERT INTO balances (loan_id, balance, past_due) VALUES
   (6011, 13135.64, 0),
   (6014, 49000.0, 0);
 
--- Payments: full PAN + CVV stored. 5582 has TWO rows for one retried charge (double-charge).
-INSERT INTO payments (loan_id, pan, cvv, amount, method, created_at) VALUES
-  (4471, '4111111111111111', '123', 250.00, 'card', '2026-06-01 09:14:11'),
-  (5582, '5500005555555559', '887', 410.50, 'card', '2026-06-01 09:31:04'),
-  (5582, '5500005555555559', '887', 410.50, 'card', '2026-06-01 09:31:06'),  -- duplicate
-  (4471, '340000000000009',  '4021', 99.99, 'card', '2026-06-01 11:18:45'),
-  (6011, NULL, NULL, 432.18, 'ach', '2026-06-02 08:00:00'),
-  (4471, '4111111111111111', '123', 250.00, 'card', '2026-06-03 09:00:00'),
-  (6011, NULL, NULL, 432.18, 'ach', '2026-06-03 08:00:00');
+-- Payments: full PAN stored (D13b). No CVV — migration 0020 deleted that column, and
+-- seeding SAD into a demo volume would put back exactly what the migration purges.
+-- 5582 has TWO rows for one retried charge (double-charge).
+INSERT INTO payments (loan_id, pan, amount, method, created_at) VALUES
+  (4471, '4111111111111111', 250.00, 'card', '2026-06-01 09:14:11'),
+  (5582, '5500005555555559', 410.50, 'card', '2026-06-01 09:31:04'),
+  (5582, '5500005555555559', 410.50, 'card', '2026-06-01 09:31:06'),  -- duplicate
+  (4471, '340000000000009',  99.99, 'card', '2026-06-01 11:18:45'),
+  (6011, NULL, 432.18, 'ach', '2026-06-02 08:00:00'),
+  (4471, '4111111111111111', 250.00, 'card', '2026-06-03 09:00:00'),
+  (6011, NULL, 432.18, 'ach', '2026-06-03 08:00:00');
 
 -- "audit" entries that are really app logging, not an actor->action->time control trail.
+-- detail below is masked the way PiiRedactor renders a PAN (D20) -- the seed must not
+-- itself be the plaintext-PAN exposure this table's append-only trigger exists to guard.
 INSERT INTO audit_logs (actor, action, detail) VALUES
-  ('system', 'payment', 'charge req pan=4111111111111111 amount=250.00'),
+  ('system', 'payment', 'charge req pan=••••••••••••1111 (PAN) amount=250.00'),
   ('rep_jordan', 'waive_fee', 'loan 5582 waived 35.00'),
   ('system', 'decision', 'app 6012 deny');

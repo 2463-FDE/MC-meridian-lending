@@ -37,3 +37,11 @@ config:
 # nothing behind — the fix must be COMMITTED, since a worktree checks out a ref.
 prove:
 	./scripts/prove_wt.sh $(REF)
+
+# Regenerate docs/state.md -- the mutable half of the knowledge base (base tip, merged-PR
+# ledger, ADR index, which CI jobs block). Everything on that page is read out of git, so
+# it is never hand-edited; `kb-freshness` fails the build if the committed copy drifts.
+# Durable prose stays in docs/kb.md, where `volatile-claim-lint` refuses decaying claims.
+kb:
+	./scripts/gen_state.sh
+	./scripts/check_volatile_claims.sh

@@ -87,6 +87,36 @@ def test_provider_failure_is_503_not_500(monkeypatch):
     assert resp.json()["detail"] == "summary unavailable"
 
 
+def test_the_11th_call_in_a_window_is_rate_limited(monkeypatch):
+    # RL-001 (PR review): this route invokes Bedrock but never called the limiter --
+    # an authenticated officer had unbounded calls through it. Exercises the real
+    # counting/window logic (not mocked), unlike the sibling wiring test below.
+    from app import rate_limit
+
+    monkeypatch.setattr(applications, "summary_payload", lambda app_id: dict(PAYLOAD))
+    client = _wire(monkeypatch)
+    for _ in range(rate_limit._MAX_CALLS):
+        resp = client.get("/applications/1/summary", headers=OFFICER)
+        assert resp.status_code == 200, resp.text
+    resp = client.get("/applications/1/summary", headers=OFFICER)
+    assert resp.status_code == 429
+
+
+def test_summary_route_surfaces_the_rate_limit(monkeypatch):
+    # Wiring only, mirrors test_assistant_route_surfaces_the_rate_limit.
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(applications, "summary_payload", lambda app_id: dict(PAYLOAD))
+
+    def _tripped(user_id):
+        raise HTTPException(status_code=429, detail="assistant rate limit exceeded")
+
+    monkeypatch.setattr(main.rate_limit, "check_llm_rate_limit", _tripped)
+    client = _wire(monkeypatch)
+    resp = client.get("/applications/1/summary", headers=OFFICER)
+    assert resp.status_code == 429
+
+
 # --- summary_payload: the payload the model actually receives ---
 
 _IDENTITY_KEYS = {"name", "ssn", "email", "phone", "address", "dob"}

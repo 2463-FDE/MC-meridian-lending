@@ -16,9 +16,12 @@ From the repo root:
 python3 -m rag_eval.run
 ```
 
-Writes `rag_eval/eval_report.md` (gitignored, regenerated per run) and caches
-embeddings in `rag_eval/.cache/` — a second run over an unchanged corpus
-re-embeds nothing (the run summary proves it).
+Writes `rag_eval/eval_report.md` (gitignored, regenerated per run). On the
+default TF-IDF backend the run also caches embeddings in `rag_eval/.cache/` —
+a second run over an unchanged corpus re-embeds nothing (the run summary proves
+it). A Bedrock run is cacheless: nothing is written to `rag_eval/.cache/`, every
+run re-embeds every chunk, and the summary reports provider calls, retries and
+input tokens in place of cache hits.
 
 ## What one run does
 
@@ -32,9 +35,11 @@ re-embeds nothing (the run summary proves it).
 3. **Embed** (`embedder.py`, `cache.py`) — the embedding backend behind a minimal
    `fit/embed/signature` interface, selected by `RAG_EMBEDDER` (see **Backends**).
    Default is pure-Python TF-IDF; Bedrock is the drop-in scaling backend, and
-   callers are unchanged either way. Vectors cached on disk keyed by content hash
-   (signature + text); the cache stores term-weight/float vectors only, never chunk
-   bodies or PII.
+   callers are unchanged either way. Under TF-IDF, vectors are cached on disk keyed
+   by content hash (signature + text), and the cache stores term-weight vectors
+   only, never chunk bodies or PII. Under a provider backend the cache is disabled
+   and any prior cache file is deleted at run start — the client excluded retention
+   of content-derived vectors, so a rerun re-embeds.
 4. **Retrieve + score** (`index.py`, `metrics.py`) — in-memory exact cosine index,
    rebuilt each run; hit@1/3/5 and MRR per query and aggregate over
    `gold_queries.json` (10 answerable officer questions + the #6012 trap + an
@@ -43,14 +48,19 @@ re-embeds nothing (the run summary proves it).
    calibrated unanswerable-confidence threshold and its method, and a **Data gaps**
    section: why "why was #6012 denied?" is unanswerable by design
    (`decisions(app_id, outcome)` records no reason — see ADR 0008), and the
-   false-confident-retrieval risk for a naive helper.
+   false-confident-retrieval risk for a naive helper. Every part of the report is
+   gated on the run it describes (spec D1.7): each **Data gaps** subsection renders
+   only when its own subject is in this run, the heading only when a subsection
+   does, and corpus size, file names and finding counts are read from the run's
+   own chunks and verdicts rather than written into the prose.
 
 ## Backends
 
 The embedding backend is chosen by `RAG_EMBEDDER` (default `tfidf`). All other
-stages — gate, chunker, cache, index, metrics, report — are identical across
-backends; only the vector shape differs (sparse dict vs dense list), and
-`cosine()` handles both.
+stages — gate, chunker, index, metrics, report — are identical across backends;
+only the vector shape differs (sparse dict vs dense list), and `cosine()` handles
+both. The on-disk cache is the one stage that is not: TF-IDF caches, a provider
+backend runs cacheless.
 
 | `RAG_EMBEDDER` | Backend | Deps | Auth |
 |----------------|---------|------|------|
@@ -69,8 +79,10 @@ export AWS_REGION=us-east-1                        # or your enabled region
 python3 -m rag_eval.run
 ```
 
-Switching backends changes the embedder `signature`, which cleanly invalidates
-the on-disk cache (nothing from one backend is ever compared against another).
+Switching backends changes the embedder `signature`. Switching to Bedrock deletes
+the cache file outright; switching back to TF-IDF re-embeds, because a foreign
+backend's signature never matches — nothing from one backend is ever compared
+against another.
 The confidence threshold recalibrates automatically per run and is recorded, with
 the backend signature, in the report.
 

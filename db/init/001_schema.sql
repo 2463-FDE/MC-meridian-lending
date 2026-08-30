@@ -1,12 +1,15 @@
 -- Meridian Lending — schema (Halcyon v1, extended in-place over the years)
 -- NOTE: money is stored as double precision throughout. Keeps the app code simple.
 
--- Staff + borrower logins. Passwords are sha256 hex (no salt, no bcrypt — Halcyon's
--- "we'll harden it later"). Roles: admin | underwriter | csr | borrower.
+-- Staff + borrower logins. Roles: admin | underwriter | csr | borrower.
 CREATE TABLE IF NOT EXISTS users (
     id            SERIAL PRIMARY KEY,
     username      TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,        -- sha256(password), unsalted
+    -- D27: salted PBKDF2-HMAC-SHA256 ("pbkdf2_sha256$<iterations>$<salt>$<hash>",
+    -- services/gateway/app/auth.py). A row may still hold the pre-fix bare sha256(password)
+    -- hex -- the seed does, on purpose, so a fresh volume exercises the migration path --
+    -- authenticate() rehashes it to the new format on that row's next successful login.
+    password_hash TEXT NOT NULL,
     role          TEXT NOT NULL DEFAULT 'csr',
     display_name  TEXT,
     applicant_id  INTEGER,              -- set for borrower logins
@@ -127,27 +130,82 @@ CREATE TABLE IF NOT EXISTS balances (
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
--- Payments: stores full PAN + CVV. No idempotency key. No unique charge reference.
+-- Payments: stores the full PAN (D13b, still open). The CVV column was deleted by
+-- migration 0020 (D13a / ADR 0013 Decision 2) — retaining sensitive authentication data
+-- after authorization is a flat PCI-DSS 3.2.1 prohibition, so the remediation was a
+-- deletion of the values and the column, not merely ceasing to write it. Do not
+-- reintroduce it. Carries an idempotency key as of migration 0018 (D19 / ADR 0013
+-- Decision 1) — a retried POST no longer charges twice.
 CREATE TABLE IF NOT EXISTS payments (
     id          SERIAL PRIMARY KEY,
     loan_id     INTEGER REFERENCES loans(id),
-    pan         TEXT,                 -- full PAN stored
-    cvv         TEXT,                 -- CVV stored (SAD — flat PCI prohibition)
-    amount      DOUBLE PRECISION NOT NULL,  -- money as float
+    pan         TEXT,                 -- full PAN stored (D13b)
+    amount      DOUBLE PRECISION NOT NULL,  -- money as float (D2, left alone here)
     method      TEXT DEFAULT 'card',
-    created_at  TIMESTAMPTZ DEFAULT now()
-    -- no idempotency_key, no unique(charge_ref)
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    -- D19 (migration 0018). Kept in step with db/migrations/0018_payments_idempotency.sql;
+    -- test_payments_idempotency_ddl_parity compares the two declarations.
+    idempotency_key           TEXT,        -- client-minted, retired to NULL past its window
+    idempotency_expires_at    TIMESTAMPTZ, -- stamped at insert; the window is a column, not
+                                           -- an index predicate (now() is not immutable)
+    request_fingerprint       TEXT,        -- distinguishes a genuine replay from a reused
+                                           -- key carrying a different payload (422)
+    status      TEXT NOT NULL DEFAULT 'captured',  -- 'captured' is what every pre-0018 row
+                                           -- factually is; only a terminal row releases its key
+    processor_idempotency_key TEXT,        -- per-ROW, deliberately NOT the client's key: the
+                                           -- two retention windows must not couple
+    processor_ref             TEXT,
+    amount_minor              BIGINT,      -- integer minor units for what this design adds
+                                           -- (ADR 0012 precedent); `amount` above stays float
+    updated_at                TIMESTAMPTZ
 );
 
--- "audit" log: an ordinary, mutable table. Rows can be UPDATE/DELETE-d. Not append-only.
+-- D3 (migration 0019 / ADR 0020). The append-only record of which payment moved which
+-- balance. `balances.balance` is a single mutable column with no history, so before this
+-- table there was no fact anywhere saying a given payment had been applied — the apply was
+-- inferred from an HTTP status. UNIQUE (payment_id) is what makes a replay a no-op instead
+-- of a second credit, and the row commits in the SAME transaction as the balance UPDATE.
+-- Kept byte-identical to db/migrations/0019_payment_applications.sql;
+-- test_payment_applications_ddl_parity compares the two declarations.
+CREATE TABLE IF NOT EXISTS payment_applications (
+    id           SERIAL PRIMARY KEY,
+    loan_id      INTEGER NOT NULL REFERENCES loans(id),
+    payment_id   INTEGER NOT NULL UNIQUE REFERENCES payments(id),
+    amount_minor BIGINT NOT NULL,        -- integer minor units, the amount of record
+                                         -- (ADR 0012); balances.balance stays float (D2)
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- "audit" log (D20): append-only, enforced by trigger below. deleted_at predates the
+-- trigger and is now inert -- any UPDATE it would need is blocked the same as every
+-- other UPDATE -- kept rather than dropped because nothing in this change touches column
+-- shape, only mutability.
 CREATE TABLE IF NOT EXISTS audit_logs (
     id          SERIAL PRIMARY KEY,
     actor       TEXT,
     action      TEXT,
     detail      TEXT,
-    deleted_at  TIMESTAMPTZ,        -- soft-delete column on an "audit" trail
+    deleted_at  TIMESTAMPTZ,
     created_at  TIMESTAMPTZ DEFAULT now()
 );
+
+-- Append-only enforced at the database (D20), mirroring decision_events below: the
+-- audit trail must survive application bugs and ad-hoc SQL, not just code convention.
+CREATE OR REPLACE FUNCTION audit_logs_append_only() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'audit_logs is append-only (D20): % blocked', TG_OP;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_audit_logs_append_only ON audit_logs;
+CREATE TRIGGER trg_audit_logs_append_only
+    BEFORE UPDATE OR DELETE ON audit_logs
+    FOR EACH ROW EXECUTE FUNCTION audit_logs_append_only();
+
+-- Row-level triggers do not fire on TRUNCATE; block it explicitly.
+DROP TRIGGER IF EXISTS trg_audit_logs_no_truncate ON audit_logs;
+CREATE TRIGGER trg_audit_logs_no_truncate
+    BEFORE TRUNCATE ON audit_logs
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_logs_append_only();
 
 -- ADR 0009 / ADR 0008: append-only decision-event record. `decisions` above remains the
 -- mutable current-state pointer; this is the system of record for Reg B adverse action.
@@ -167,7 +225,7 @@ CREATE INDEX IF NOT EXISTS idx_decision_events_app ON decision_events(app_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_decision_events_request
     ON decision_events (app_id, request_id) WHERE request_id IS NOT NULL;
 
--- Append-only enforced at the database (contrast audit_logs above, which is mutable).
+-- Append-only enforced at the database (audit_logs above got the same guarantee, D20).
 CREATE OR REPLACE FUNCTION decision_events_append_only() RETURNS trigger AS $$
 BEGIN
     RAISE EXCEPTION 'decision_events is append-only (ADR 0009): % blocked', TG_OP;
@@ -184,10 +242,28 @@ CREATE TRIGGER trg_decision_events_no_truncate
     BEFORE TRUNCATE ON decision_events
     FOR EACH STATEMENT EXECUTE FUNCTION decision_events_append_only();
 
--- A few indexes added over time for the servicing dashboard. (No idempotency index on
--- payments — there is no idempotency key to index. No reason/driver columns on decisions.)
+-- A few indexes added over time for the servicing dashboard. (No reason/driver columns
+-- on decisions.)
 CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
 CREATE INDEX IF NOT EXISTS idx_payments_loan ON payments(loan_id);
+
+-- D19 / ADR 0013 Decision 1. The double-charge guarantee lives HERE, not in a service:
+-- two handlers write payments (payment-service and servicing-service, debt D23) and a
+-- support engineer with psql is a third, so a check in application code protects one
+-- writer and not the others.
+--
+-- Both indexes are PARTIAL. That is load-bearing twice over: pre-migration rows carry a
+-- NULL key and must stay valid, and retiring an expired key (setting it back to NULL on a
+-- terminal row) drops that row out of the index so the value can be claimed again.
+--
+-- Every insert against these must spell the predicate in its conflict target —
+-- `ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL` — or Postgres cannot
+-- infer the arbiter and raises at runtime, disabling the control on first use. Vector
+-- R-DDL runs the shipped SQL string against a real Postgres for exactly this reason.
+CREATE UNIQUE INDEX IF NOT EXISTS payments_idempotency_key_uniq
+  ON payments (idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS payments_processor_idempotency_key_uniq
+  ON payments (processor_idempotency_key) WHERE processor_idempotency_key IS NOT NULL;
 
 -- One current offer per application: makes offer generation idempotent so a double-click /
 -- timeout-retry / concurrent POST cannot persist duplicate regulated TILA/Reg-Z disclosures
@@ -365,3 +441,77 @@ LEFT JOIN disclosures d       ON d.offer_id = o.id
 LEFT JOIN decision_events de  ON de.id = o.decision_event_id
 LEFT JOIN decision_events dde ON dde.id = d.decision_event_id
 LEFT JOIN applications app    ON app.id = o.app_id;
+
+-- >>> assistant_runs DDL (init/migration parity block -- byte-identical in both files)
+-- Assistant run telemetry. One row per officer assistant request that reached the entry
+-- span (services/origination-service/app/main.py), refused or served.
+--
+-- WHY A TABLE AND NOT THE TRACE. The spans are content-free by design, and `trace()` is a
+-- no-op unless LANGSMITH_TRACING is set. LangSmith can therefore answer "what did this one
+-- run do" but never "what fraction of runs refused last week": its population is whatever
+-- happened to be exported. This row is written either way, which is what makes an
+-- aggregate over it honest.
+--
+-- application_id CARRIES NO FOREIGN KEY, deliberately. `not_found` refusals are exactly
+-- the rows whose id references nothing, so a FK could only reject those rows or null the
+-- column -- and a run of requests against ids that do not exist is itself the signal
+-- (a broken officer link, or id enumeration). Same shape as
+-- applications.submitted_by_user_id. This is telemetry, not a regulated artifact: ADR
+-- 0012's FK-as-provenance governs the decision -> offer -> disclosure chain, and there is
+-- no append-only trigger here for that same reason (contrast decision_events).
+--
+-- NO FREE TEXT, and refusal_code is CHECK-constrained rather than bare TEXT on purpose.
+-- The entry span's own comment records why: httpx.HTTPStatusError's message embeds the
+-- request URL (which embeds app_id) and an LLMError can carry raw provider text, so an
+-- unconstrained column invites `str(exc)` and reintroduces precisely what that span
+-- strips before export.
+CREATE TABLE IF NOT EXISTS assistant_runs (
+    id                  BIGSERIAL PRIMARY KEY,
+    -- LangSmith's own run id. Opaque outside this database, so it carries none of the
+    -- exposure the omitted application_id/request_id do on the spans themselves.
+    trace_id            TEXT NOT NULL,
+    application_id      INTEGER NOT NULL,
+    task                TEXT NOT NULL,
+    policy_topic        TEXT,
+    http_status         INTEGER NOT NULL,
+    refusal_code        TEXT,
+    -- Served-run columns. NULL on a refusal, and NULL individually when _charted() left
+    -- the key off because the result did not carry it.
+    outcome             TEXT,
+    record_status       TEXT,
+    policy_band         TEXT,
+    narration_validated BOOLEAN,
+    policy_citations    INTEGER,
+    policy_searches     INTEGER,
+    latency_ms          INTEGER NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ck_assistant_runs_task
+        CHECK (task IN ('decision', 'explain')),
+    -- Every code the service can record. never_decisioned is the half of the old
+    -- single `not_found` that means the application EXISTS but carries no decision
+    -- record; fusing the two made a broken-link spike and an asked-too-early spike one
+    -- number with opposite remedies.
+    --
+    -- The last three are refused in the ROUTE bodies ABOVE the loop
+    -- (main._refused_before_loop) and never reach _run_assistant's translation, so the
+    -- first eight are not the whole set. A code missing here is not a rejected write an
+    -- operator sees: services/origination-service/app/assistant_runs.py swallows the
+    -- violation by design, leaving a span, an answer for the officer, and no row.
+    CONSTRAINT ck_assistant_runs_refusal_code
+        CHECK (refusal_code IS NULL OR refusal_code IN (
+            'not_found', 'never_decisioned', 'assistant_refused', 'llm_unavailable',
+            'kyc_blocked', 'refused', 'idempotency_conflict', 'downstream_unavailable',
+            'self_decision', 'idempotency_key_too_long', 'unknown_policy_topic'
+        )),
+    -- A row is either a served answer or a refusal, never ambiguously both -- so a
+    -- refusal can never be read as "outcome unknown". Keyed on http_status and NOT on
+    -- `outcome`: _charted() omits outcome when the result does not carry it, so an
+    -- outcome-keyed constraint would reject a legitimately served row and lose it. The
+    -- control flow guarantees this form -- refusal is None if and only if the response
+    -- is 200.
+    CONSTRAINT ck_assistant_runs_refusal_matches_status
+        CHECK ((http_status = 200) = (refusal_code IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_assistant_runs_created ON assistant_runs(created_at);
+CREATE INDEX IF NOT EXISTS idx_assistant_runs_app ON assistant_runs(application_id);
+-- <<< assistant_runs DDL

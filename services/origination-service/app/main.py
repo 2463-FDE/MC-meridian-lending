@@ -7,23 +7,29 @@ LOS->LSS boarding seam. Read paths (list/detail) use SQLAlchemy; the older write
 
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from langsmith.run_helpers import trace
 from pydantic import BaseModel
 
 from . import (
     assistant,
+    assistant_runs,
     authz,
     clients,
     config,
     disclosure_coordinator,
     intake,
     kyc_gate,
+    policy_retrieval,
+    rate_limit,
 )
 from .llm import ClaudeClient, load_llm_config
+from .llm.config import harden_trace_client
 from .llm.errors import LLMError
 from .logging_config import get_logger
 from .routers import applications, offers
@@ -39,6 +45,12 @@ def _llm_enabled() -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Claim the LangSmith singleton before anything can trace through it. The agent loop
+    # runs inside langgraph, and a framework tracer exports the graph state it is handed
+    # — which carries the model's prose and the model-authored policy query. Done
+    # unconditionally, and before the client exists: the cost is one object when tracing
+    # is off, and the failure it prevents is a span that cannot be un-posted.
+    harden_trace_client()
     # Validate the LLM config at boot when the feature is enabled, so a deploy that
     # is missing CLAUDE_API_KEY (provider=anthropic) or carries an invalid CLAUDE_*
     # value fails loud at startup — not silently on the first customer summary.
@@ -123,15 +135,32 @@ def assistant_decide(
     and appending a second regulated event. Absent = explicit re-decision.
     """
     authz.require_officer(x_user_role)
+    rate_limit.check_llm_rate_limit(x_user_id)
     # Client ask (2026-08-12 governance §5). The client scoped the block to "the one route
     # that runs a decision", having seen only POST /applications/{id}/decision -- but the
     # score tool below performs the same regulated decision and appends the same
     # decision_events record, so gating only that route would leave the finding open
     # through this panel. The read-only GET (explain) never scores and stays open.
-    authz.deny_self_decision(app_id, x_user_role, x_user_id)
+    try:
+        authz.deny_self_decision(app_id, x_user_role, x_user_id)
+    except HTTPException as exc:
+        # Re-raised through the tracer so the block is one traced root with its own code
+        # instead of a refusal with no trace. `exc.detail` is authz's own fixed string
+        # (`app/authz.py`), officer-facing already and carrying no identifier.
+        _refused_before_loop(
+            app_id=app_id,
+            task="decision",
+            code="self_decision",
+            status=exc.status_code,
+            detail=exc.detail,
+        )
     if idempotency_key is not None and len(idempotency_key) > 64:
-        raise HTTPException(
-            status_code=400, detail="Idempotency-Key must be at most 64 characters"
+        _refused_before_loop(
+            app_id=app_id,
+            task="decision",
+            code="idempotency_key_too_long",
+            status=400,
+            detail="Idempotency-Key must be at most 64 characters",
         )
     return _run_assistant(app_id, client, "decision", idempotency_key or None)
 
@@ -139,7 +168,9 @@ def assistant_decide(
 @app.get("/assistant/decisions/{app_id}")
 def assistant_explain(
     app_id: int,
+    policy_topic: str | None = Query(default=None),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     client: ClaudeClient = Depends(get_llm_client),
 ):
     """Explain an EXISTING decision from the persisted record (ADR 0009 §5 amendment).
@@ -147,15 +178,41 @@ def assistant_explain(
     Read-only: never scores, so asking about an application cannot trigger a fresh
     credit pull. Legacy outcomes (pre-record, e.g. #6012) are answered honestly as
     unrecoverable, distinct from 404 never-decisioned.
+
+    `policy_topic` is optional and is the officer's only channel into policy retrieval
+    (ADR 0019). A CODE from a closed vocabulary, never a question: the redaction boundary
+    masks free text, so a typed question reaches the model as a placeholder and changes
+    nothing. Absent means no policy lookup, which is the read this route has always
+    served -- adding the parameter takes nothing away from a caller that omits it.
+
+    An unlisted code is refused HERE with the vocabulary in the message, rather than
+    passed down to be masked at the boundary: a masked topic produces a run that looks
+    like a policy question nobody could match, which is indistinguishable from a genuine
+    abstention. The officer is told their topic does not exist instead.
     """
     authz.require_officer(x_user_role)
-    return _run_assistant(app_id, client, "explain")
+    rate_limit.check_llm_rate_limit(x_user_id)
+    if policy_topic is not None and policy_topic not in policy_retrieval.POLICY_TOPICS:
+        # The rejected value is NOT passed to the span: it is officer-typed free text,
+        # and the closed vocabulary is what a trace reader needs, not the miss.
+        _refused_before_loop(
+            app_id=app_id,
+            task="explain",
+            code="unknown_policy_topic",
+            status=422,
+            detail=(
+                "unknown policy_topic; choose one of: "
+                + ", ".join(policy_retrieval.POLICY_TOPICS)
+            ),
+        )
+    return _run_assistant(app_id, client, "explain", policy_topic=policy_topic)
 
 
 @app.get("/applications/{app_id}/summary")
 def summarize_application(
     app_id: int,
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     client: ClaudeClient = Depends(get_llm_client),
 ):
     """Officer triage summary of an application via the loan-summary LLM prompt.
@@ -172,6 +229,7 @@ def summarize_application(
     unavailable" — no `fallback=`, one success shape, the UI says "unavailable" off the 503.
     """
     authz.require_officer(x_user_role)
+    rate_limit.check_llm_rate_limit(x_user_id)
     payload = applications.summary_payload(app_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="application not found")
@@ -186,6 +244,7 @@ def summarize_application(
 def generate_disclosure(
     app_id: int,
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     client: ClaudeClient = Depends(get_llm_client),
 ):
     """Generate the TILA disclosure for an approved application (ADR 0012, spec D4).
@@ -213,6 +272,7 @@ def generate_disclosure(
     stopped it.
     """
     authz.require_officer(x_user_role)
+    rate_limit.check_llm_rate_limit(x_user_id)
     kyc_gate.require_kyc_passed(app_id)
 
     coordinator = disclosure_coordinator.build_coordinator(client)
@@ -412,30 +472,240 @@ def _detail(resp: httpx.Response):
         return "disclosure request refused"
 
 
+# Entry span for the officer assistant. `assistant.request` (app/assistant.py) is the
+# loop root, and it opens AFTER the request is built, the policy topic is checked, the
+# KYC gate runs and the application is fetched — so every refusal raised before that
+# point produced no trace at all, which is the gap this span closes: one root per
+# officer request that reached the assistant, refusal or not.
+#
+# Two rules hold it to the CONTENT RULE in `app/assistant.py`:
+#
+#   * metadata is the task, the policy topic (a closed-vocabulary code) and an enum
+#     refusal code — never `app_id`, never `request_id`, never a provider message.
+#   * NO exception crosses the span boundary. `trace()` attaches `str(exception)` to the
+#     span it is raised through, and two of the exceptions caught below carry an
+#     application-linked string: `httpx.HTTPStatusError`'s message embeds the request
+#     URL (which embeds `app_id`), and an `LLMError` can carry raw provider text. So
+#     each one is translated to an enum inside the span and the officer-facing
+#     `HTTPException` is raised after the block exits. Re-raising in place would ship to
+#     LangSmith exactly what `app/assistant.py` and `app/llm/transport.py` strip.
+#
+# The classes caught below are every one the assistant path raises: its own
+# `ApplicationNotFound`/`AssistantError` (which `run()` also converts
+# `GraphRecursionError` into), `LLMError`, the `HTTPException` ADR 0011's KYC gate
+# refuses with, and `httpx.HTTPError` — status and transport alike, since a
+# `RequestError` is not an `HTTPStatusError` and unreachable is the same outage as 5xx.
+#
+# Residual, stated rather than implied: an exception outside those classes still crosses
+# this span (and is a 500). That is not a new exposure — it already crossed the loop root
+# inside `run()` — and the ones that can carry an application-linked string are all caught
+# here. `tests/test_trace_error_boundary.py` covers the provider side of the same rule.
+_SPAN_ENTRY = "assistant.entry"
+
+# The enums, counts and one bool the entry span promotes from a served result, so a chart
+# can group whole requests by outcome. `assistant.request` already records them one level
+# down (app/assistant.py, the `root.add_metadata` block), but LangSmith groups by ROOT-run
+# metadata, so an outcome-mix chart had to filter child runs while token cost -- which
+# rolls up -- sat on the root.
+#
+# An allowlist, never a spread: `run()` returns the officer-facing summary, the
+# `application_id` and the verbatim `policy_citations` text in the same dict, so
+# `**result` would ship all three to LangSmith and break both the CONTENT RULE in
+# `app/assistant.py` and the no-identifiers rule this span already holds. The two list
+# fields are promoted as their LENGTHS for the same reason.
+_CHARTED_CODES = ("outcome", "record_status", "policy_band", "narration_validated")
+_CHARTED_COUNTS = ("policy_citations", "policy_searches")
+
+
+def _charted(result: dict) -> dict:
+    """Non-content metadata from a served assistant result, for the entry span.
+
+    A field the result does not carry is left OFF the span rather than sent as a null,
+    the way `policy_topic` is above: the span says what happened.
+    """
+    charted = {
+        key: result[key]
+        for key in _CHARTED_CODES
+        if isinstance(result.get(key), (str, bool))
+    }
+    for key in _CHARTED_COUNTS:
+        value = result.get(key)
+        if isinstance(value, list):
+            charted[key] = len(value)
+    return charted
+
+
+def _refused_before_loop(
+    *,
+    app_id: int,
+    task: str,
+    code: str,
+    status: int,
+    detail: str,
+    policy_topic: str | None = None,
+) -> None:
+    """Trace a refusal the ROUTE raises above `_run_assistant`, then raise it.
+
+    `_run_assistant` opens `assistant.entry` and translates everything raised inside it,
+    but three post-authz business refusals are decided in the route bodies above that
+    call and so produced no trace at all: the self-decision block (ADR 0010 / the
+    2026-08-12 governance ask), an over-long `Idempotency-Key`, and an unlisted
+    `policy_topic`. Each is a real officer-visible outcome, and "refused before we
+    started" is exactly the case a trace is read to explain.
+
+    Opening the span here rather than moving the checks down keeps `authz` and the
+    `policy_topic` vocabulary at the route, where a reviewer looks for them. The cost is
+    that `_SPAN_ENTRY` has two call sites; the tests assert both produce the same root
+    name and the same metadata keys.
+
+    Holds the two rules `_SPAN_ENTRY` already holds (see the comment above it):
+
+    * Metadata is the task, the closed-vocabulary policy topic and an enum refusal code.
+      Never `app_id`, never the user id, never the rejected key or topic value -- the
+      officer's own input is echoed in the `detail` they receive, not onto the span.
+    * The `HTTPException` is raised AFTER the span closes, so `trace()` never attaches
+      `str(exception)` to it.
+
+    NOT used for `require_officer` or `check_llm_rate_limit`. Those two stand between an
+    arbitrary caller and this service, and a span opened before them would make trace
+    volume something an unauthorized caller controls -- with the rate limiter, the
+    control that would otherwise bound it, sitting behind the thing it is meant to bound.
+    Their refusals stay in the log only, and a test pins that.
+    """
+    with trace(
+        name=_SPAN_ENTRY,
+        run_type="chain",
+        metadata={
+            "task": task,
+            **({"policy_topic": policy_topic} if policy_topic else {}),
+            "http_status": status,
+            "refusal": code,
+        },
+    ) as entry:
+        trace_id = str(entry.trace_id)
+    assistant_runs.record(
+        trace_id=trace_id,
+        application_id=app_id,
+        task=task,
+        policy_topic=policy_topic,
+        http_status=status,
+        refusal_code=code,
+        charted={},
+        # Zero, not a measured span: the refusal is decided before any work starts, so a
+        # timed value here would report the cost of the check itself as request latency
+        # and skew every percentile the served rows carry.
+        latency_ms=0,
+    )
+    raise HTTPException(status_code=status, detail=detail)
+
+
 def _run_assistant(
-    app_id: int, client: ClaudeClient, task: str, request_id: str | None = None
+    app_id: int,
+    client: ClaudeClient,
+    task: str,
+    request_id: str | None = None,
+    policy_topic: str | None = None,
 ):
-    try:
-        return assistant.run(app_id, client, task, request_id)
-    except assistant.ApplicationNotFound:
-        raise HTTPException(status_code=404, detail="application not found")
-    except assistant.AssistantError as exc:
-        log.error("assistant failed for app_id=%s: %s", app_id, exc)
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except LLMError as exc:
-        log.error("assistant LLM failure for app_id=%s: %s", app_id, type(exc).__name__)
-        raise HTTPException(status_code=503, detail="assistant unavailable") from exc
-    except httpx.HTTPStatusError as exc:
-        if exc.response is not None and exc.response.status_code == 409:
-            # Reused idempotency key with changed inputs — a conflict, not an outage.
-            raise HTTPException(
-                status_code=409,
-                detail="Idempotency-Key reused with different decision inputs",
-            ) from exc
-        # The score tool's downstream refusal (e.g. decision-service failing closed
-        # on bureau or record write) surfaces as service-unavailable, not a 500.
-        log.error("assistant downstream failure for app_id=%s: %s", app_id, exc)
-        raise HTTPException(status_code=503, detail="decisioning unavailable") from exc
+    with trace(
+        name=_SPAN_ENTRY,
+        run_type="chain",
+        metadata={
+            "task": task,
+            **({"policy_topic": policy_topic} if policy_topic else {}),
+        },
+    ) as entry:
+        # (status, enum refusal code, officer-facing detail, cause) or None on success.
+        refusal = None
+        started = time.monotonic()
+        try:
+            result = assistant.run(app_id, client, task, request_id, policy_topic)
+        except assistant.ApplicationNeverDecisioned as exc:
+            # BEFORE its parent, or the subclass never matches. Same 404 and the same
+            # officer-facing detail as `not_found`: what changes is the recorded code,
+            # because "the id is not a real application" and "it is real and has not been
+            # decisioned yet" are one number today with opposite remedies.
+            refusal = (404, "never_decisioned", "application not found", exc)
+        except assistant.ApplicationNotFound as exc:
+            refusal = (404, "not_found", "application not found", exc)
+        except assistant.AssistantError as exc:
+            log.error("assistant failed for app_id=%s: %s", app_id, exc)
+            refusal = (502, "assistant_refused", str(exc), exc)
+        except LLMError as exc:
+            log.error(
+                "assistant LLM failure for app_id=%s: %s", app_id, type(exc).__name__
+            )
+            refusal = (503, "llm_unavailable", "assistant unavailable", exc)
+        except HTTPException as exc:
+            # ADR 0011's KYC gate refuses through the score tool with an `HTTPException`
+            # (`app/kyc_gate.py::_block`) rather than one of the assistant's own classes,
+            # so its status and detail are already officer-facing and pass through
+            # unchanged. Its 409 is a different refusal from the idempotency conflict
+            # below and carries its own code, so a trace does not read one as the other.
+            code = "kyc_blocked" if exc.status_code == 409 else "refused"
+            log.error("assistant refused for app_id=%s: %s", app_id, exc.status_code)
+            refusal = (exc.status_code, code, exc.detail, exc)
+        except httpx.HTTPError as exc:
+            # `HTTPError`, not `HTTPStatusError`: a transport failure reaching
+            # decision-service (`httpx.ConnectError`, `httpx.ReadTimeout` — all
+            # `httpx.RequestError`, which carries no `response`) is the same outage as
+            # that service answering 5xx, and refusing the same way keeps it out of the
+            # untranslated 500 path that crosses this span.
+            response = getattr(exc, "response", None)
+            if response is not None and response.status_code == 409:
+                # Reused idempotency key with changed inputs — a conflict, not an outage.
+                refusal = (
+                    409,
+                    "idempotency_conflict",
+                    "Idempotency-Key reused with different decision inputs",
+                    exc,
+                )
+            else:
+                # The score tool's downstream refusal (e.g. decision-service failing
+                # closed on bureau or record write) surfaces as service-unavailable,
+                # not a 500.
+                log.error("assistant downstream failure for app_id=%s: %s", app_id, exc)
+                refusal = (
+                    503,
+                    "downstream_unavailable",
+                    "decisioning unavailable",
+                    exc,
+                )
+        latency_ms = int((time.monotonic() - started) * 1000)
+        # `entry.trace_id` rather than `result["trace_id"]`: the same trace either way
+        # (`assistant.request` opens inside this span), but it is also populated on the
+        # refusal path, where no result exists — and populated when tracing is off, since
+        # tracing off means "do not ship spans", not "do not build them".
+        trace_id = str(entry.trace_id)
+        if refusal is None:
+            charted = _charted(result)
+            entry.add_metadata({"http_status": 200, **charted})
+            assistant_runs.record(
+                trace_id=trace_id,
+                application_id=app_id,
+                task=task,
+                policy_topic=policy_topic,
+                http_status=200,
+                refusal_code=None,
+                charted=charted,
+                latency_ms=latency_ms,
+            )
+            return result
+        status, code, detail, cause = refusal
+        entry.add_metadata({"http_status": status, "refusal": code})
+        assistant_runs.record(
+            trace_id=trace_id,
+            application_id=app_id,
+            task=task,
+            policy_topic=policy_topic,
+            http_status=status,
+            refusal_code=code,
+            charted={},
+            latency_ms=latency_ms,
+        )
+    # Outside the span on purpose — see the second rule above. The chained `cause` stays
+    # for the local traceback, which is inside the client boundary and goes through the
+    # redacting formatter; it is the span export that must not see it.
+    raise HTTPException(status_code=status, detail=detail) from cause
 
 
 class BoardIn(BaseModel):

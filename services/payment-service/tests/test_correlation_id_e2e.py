@@ -30,6 +30,10 @@ from fastapi.testclient import TestClient
 
 from app import payments as pay
 
+# D19: the Idempotency-Key is required and client-minted (ADR 0013 Decision 1).
+_IDEM_KEY = "11111111-1111-4111-8111-111111111111"
+
+
 SERVICING_DIR = Path(__file__).resolve().parents[2] / "servicing-service"
 
 FIELDS = re.compile(
@@ -65,7 +69,9 @@ def _wire_cross_service(monkeypatch, servicing_main):
     real log.info run for real -- not a stub asserting the header shape."""
     monkeypatch.setattr(pay, "INTERNAL_SERVICE_TOKEN", "sekret")
     monkeypatch.setattr(servicing_main.config, "INTERNAL_SERVICE_TOKEN", "sekret")
-    monkeypatch.setattr(servicing_main.balance, "apply_payment", lambda *a, **k: 450.0)
+    monkeypatch.setattr(
+        servicing_main.balance, "apply_payment", lambda *a, **k: (450.0, True)
+    )
     monkeypatch.setattr(pay.db, "query", lambda *a, **k: [{"id": 7}])
 
     class _Wrapped:
@@ -106,7 +112,12 @@ def test_generated_id_lands_verbatim_on_servicings_real_log_line(monkeypatch):
     pay_lines = _capture(monkeypatch, pay.log)
     svc_lines = _capture(monkeypatch, servicing_main.log)
 
-    result = pay.charge(loan_id=1, pan="4111111111111111", cvv="123", amount=50.0)
+    result = pay.charge(
+        loan_id=1,
+        pan="4111111111111111",
+        amount=50.0,
+        idempotency_key=_IDEM_KEY,
+    )
 
     pay_ids = _ids(pay_lines)
     svc_ids = _ids(svc_lines)
@@ -129,9 +140,9 @@ def test_supplied_id_lands_verbatim_on_servicings_real_log_line(monkeypatch):
     result = pay.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         request_id="abc123",
+        idempotency_key=_IDEM_KEY,
     )
 
     assert result["request_id"] == "abc123"
@@ -152,9 +163,9 @@ def test_pii_shaped_id_never_reaches_servicings_real_log_line(monkeypatch):
     result = pay.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         request_id=hostile,
+        idempotency_key=_IDEM_KEY,
     )
 
     assert result["request_id"] != hostile

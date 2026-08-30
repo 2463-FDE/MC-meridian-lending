@@ -12,10 +12,22 @@ untraceable.
 
 import re
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import balance, config, main
 from app.main import app
+
+
+# The charge route now fails closed on an unready schema (D13a: a volume that skipped
+# migration 0020 still holds every stored CVV, and the NULLABLE legacy column lets the
+# capture insert succeed anyway). These cases have no database at all, so the probe would
+# refuse every request and grade nothing but the guard. The guard itself is graded in
+# test_no_sad.py (unmigrated volume) and test_db_readiness.py (the rungs).
+@pytest.fixture(autouse=True)
+def _schema_ready(monkeypatch):
+    monkeypatch.setattr(config, "database_reachable", lambda *a, **k: (True, None))
+
 
 FIELDS = re.compile(
     r"request_id=(?P<request_id>\S+) "
@@ -44,8 +56,14 @@ def _capture_log(monkeypatch):
 
 def _stub_db_query(sql, params=None):
     """Stand in for app.db.query over a one-row balances table, so the real
-    balance.apply_payment runs (not a mock that would hide its own logging)."""
+    balance.apply_payment runs (not a mock that would hide its own logging).
+
+    Since D3 the apply is one statement (WITH ... UPDATE ... RETURNING) that answers
+    with the row it wrote, so the stub answers in that shape: an eligible $50 payment
+    against an opening $500."""
     upper = sql.upper()
+    if "PAYMENT_APPLICATIONS" in upper and upper.strip().startswith("WITH"):
+        return [{"loan_id": 1, "balance": 450.0, "amount_minor": 5000}]
     if upper.strip().startswith("SELECT"):
         return [{"balance": 500.0}]
     return []
@@ -57,7 +75,7 @@ def _apply(monkeypatch, headers):
     lines = _capture_log(monkeypatch)
     resp = TestClient(app).post(
         "/accounts/1/apply-payment",
-        json={"amount": 50.0, "payment_id": 7},
+        json={"payment_id": 7},
         headers={"X-Internal-Service": "sekret", **headers},
     )
     assert resp.status_code == 200
@@ -157,6 +175,8 @@ def test_balance_apply_payment_own_log_line_carries_the_span(monkeypatch):
     monkeypatch.setattr(config, "INTERNAL_SERVICE_TOKEN", "sekret")
 
     def fake_query(sql, params=None):
+        if "payment_applications" in sql and sql.strip().startswith("WITH"):
+            return [{"loan_id": 1, "balance": 450.0, "amount_minor": 5000}]
         if sql.strip().startswith("SELECT balance"):
             return [{"balance": 500.0}]
         return []
@@ -169,7 +189,7 @@ def test_balance_apply_payment_own_log_line_carries_the_span(monkeypatch):
 
     resp = TestClient(app).post(
         "/accounts/1/apply-payment",
-        json={"amount": 50.0, "payment_id": 7},
+        json={"payment_id": 7},
         headers={"X-Internal-Service": "sekret", "X-Request-Id": "abc123"},
     )
     assert resp.status_code == 200

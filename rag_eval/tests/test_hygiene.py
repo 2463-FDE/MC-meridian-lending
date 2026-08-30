@@ -834,3 +834,71 @@ def test_valid_utf8_with_accents_still_scanned(tmp_path):
     verdict = scan_file(p)
     assert not verdict.passed
     assert "ssn" in verdict.counts()  # decoded fine, PII detected
+
+
+# --- the filename is part of the document (client acceptance FIX-NEG-BORROWER-FILENAME)
+
+
+CLEAN_POLICY_BODY = (
+    "# Records Retention\n\n## Retention period\n\n"
+    "Retain application records for 25 months after the date of notification.\n"
+)
+
+
+def test_a_borrower_shaped_filename_is_refused_even_with_a_clean_body(tmp_path):
+    """Her acceptance set requires whole-document exclusion on the NAME alone.
+
+    `acceptance/no-borrower-data-boundary.jsonl` item FIX-NEG-BORROWER-FILENAME:
+    "Filename itself is borrower-data-like. Entire document must be excluded even
+    if body were otherwise clean." A body-only scan admits this file, and the name
+    then travels with every chunk id derived from it.
+    """
+    path = tmp_path / "PLACEHOLDER-PERSON-ALPHA-ssn-000-00-0000.md"
+    path.write_text(CLEAN_POLICY_BODY, encoding="utf-8")
+    verdict = scan_file(path)
+    assert not verdict.passed, verdict.findings
+
+
+def test_the_refusal_names_the_filename_as_the_cause(tmp_path):
+    """A body finding and a name finding are different operator problems.
+
+    Redacting the body of a file whose NAME is the offender fixes nothing, so the
+    verdict has to say which one tripped.
+    """
+    path = tmp_path / "PLACEHOLDER-PERSON-ALPHA-ssn-000-00-0000.md"
+    path.write_text(CLEAN_POLICY_BODY, encoding="utf-8")
+    assert "filename-pii" in scan_file(path).counts()
+
+
+def test_filename_pii_refusal_withholds_the_name_from_the_report(tmp_path):
+    """The refusal masks the sample to the suffix, but FileVerdict.path still
+    carries the raw borrower-shaped name so `corpus_doc_id`/chunk ids can be
+    derived from it. The report must not put that name back on screen when a
+    caller renders without a manifest-scoped safe display name — that would
+    make the refusal path itself the disclosure.
+    """
+    path = tmp_path / "PLACEHOLDER-PERSON-ALPHA-ssn-000-00-0000.md"
+    path.write_text(CLEAN_POLICY_BODY, encoding="utf-8")
+    verdict = scan_file(path)
+    report = "\n".join(_hygiene_section([verdict]))
+    assert "PLACEHOLDER-PERSON-ALPHA-ssn-000-00-0000" not in report
+
+
+def test_an_ordinary_policy_filename_still_passes(tmp_path):
+    """Guards the other direction: an ordinary policy filename must keep passing.
+
+    A name check that refuses a real corpus file is worse than none at all.
+    (The 18 packet files and the repo's own policies/ were checked by hand
+    against this same check — none trip — but that check isn't repeated here.)
+    """
+    path = tmp_path / "SYN-POL-ADVERSE-ACTION.md"
+    path.write_text(CLEAN_POLICY_BODY, encoding="utf-8")
+    assert scan_file(path).passed
+
+
+def test_a_clean_name_with_a_dirty_body_is_still_refused_on_the_body(tmp_path):
+    """The name check adds a reason; it must not replace the body scan."""
+    path = tmp_path / "SYN-POL-ADVERSE-ACTION.md"
+    path.write_text("Applicant SSN 123-45-6789 on file.\n", encoding="utf-8")
+    counts = scan_file(path).counts()
+    assert "ssn" in counts and "filename-pii" not in counts

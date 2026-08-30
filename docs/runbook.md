@@ -15,7 +15,11 @@ make down                # stop everything
 
 - Portal: http://localhost:3000
 - Gateway + OpenAPI docs: http://localhost:8000/docs
-- Postgres: localhost:5432 (`meridian` / see `.env`)
+- Postgres: **not published to the host** (D21a). Open a session inside the network with
+  `docker compose exec postgres psql -U meridian -d meridian` — the credential is in `.env`.
+- Redis: **not published to the host** (D21b). Use `docker compose exec redis redis-cli`. It
+  runs with no `requirepass`, and it holds live session tokens and raw resume-continuation
+  tokens, so treat anything that reaches it as holding officer credentials.
 - The DB auto-seeds from `db/init/*.sql` on first `up` (fresh volume only).
 
 To re-apply the curated seed without recreating the volume:
@@ -108,6 +112,47 @@ term, monthly_debt, employment_years, or SSN) returns **409** rather than a stal
     committed production secret.
   - Rotating it invalidates in-flight fingerprints, so a retry mid-rotation may 409 (fails
     safe — never a stale decision).
+
+### Purging the stored CVV (migration 0020, D13a)
+
+Retaining sensitive authentication data after authorization is a flat PCI-DSS 3.2.1
+prohibition, so this migration deletes the values and the column rather than stopping the
+writes. Both charge handlers stopped writing it in the same change, and **both services
+refuse to serve while the column is still present**: their readiness probe reports
+`schema_not_ready:payments.cvv_present`, `/health` is unhealthy and a charge returns 503.
+That is deliberate — the alternative is serving over a schema holding prohibited data.
+
+```bash
+docker compose exec -T postgres psql -U meridian -d meridian \
+  -f - < db/migrations/0020_payments_drop_cvv.sql
+```
+
+Two operational facts before you run it:
+
+- **It takes an ACCESS EXCLUSIVE lock.** The final `VACUUM FULL payments` is what actually
+  destroys the old row versions; while it runs, `payments` is unreadable and unwritable,
+  so charges fail for the duration. Run it in a maintenance window, or use
+  `pg_repack -t payments` instead of that statement, which reaches the same place online.
+- **Do not wrap the file in a transaction.** `VACUUM` cannot run inside a transaction
+  block, so `psql -1` or a surrounding `BEGIN` makes it fail.
+
+Verify, in this order — the column being gone does not prove the values are:
+
+```bash
+# 1. the column is gone (this is what the readiness rung checks)
+docker compose exec -T postgres psql -U meridian -d meridian -c \
+  "SELECT column_name FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'payments' AND column_name = 'cvv';"   # expect 0 rows
+
+# 2. both services came back healthy
+curl -s localhost:8006/health; curl -s localhost:8002/health
+```
+
+**What this does not purge, and who owns it:** WAL segments, replicas, and any backup
+taken before the rewrite still contain the CVV values. That is a retention action on the
+operator side, not a schema change — `docs/debt-log.md` D13 tracks it under "Not covered".
+The PAN column is untouched and stays open as D13b.
 
 ### Month-end reconciliation
 
@@ -238,10 +283,13 @@ who owns that refund is an open question and not a gap in this runbook.
   ```
 
   See `docs/debt-log.md` D24.
-- **Payment retries.** The processor occasionally times out; clients retry. `payment-service`
-  has no idempotency key, so retried payments insert a second row and apply twice (the second
-  `apply-payment` call posts again). We field "double charge" support tickets a few times a
-  month. (No fix yet — moved with the code into `payment-service`.)
+- **Payment retries.** The processor occasionally times out; clients retry. An exact retry
+  under the same `Idempotency-Key` is now prevented at capture — `payment-service` and
+  `servicing-service` both claim the key insert-first against a partial unique index before
+  the processor is contacted (D19, PR #63 schema + PR #65 claim path), held by the blocking
+  `payment-idempotency-gate`. Still not prevented: a processor-side duplicate, or any break
+  from before the fix — reconciliation is what catches those, not this control. See
+  `docs/debt-log.md` D19.
 - **Decision/disclosure/KYC stalls block applicants.** Origination calls these over
   synchronous HTTP with no timeout or retry. If `decision-service`'s credit pull hangs, the
   applicant-facing origination request hangs with it. Watch `decision-service` latency when
@@ -257,12 +305,57 @@ who owns that refund is an open question and not a gap in this runbook.
   who adjusts a balance until it "looks right" changes nothing this job reads. Detecting
   that needs the actor/before/after record the week-6 ledger work specifies. The two
   controls are complementary; neither substitutes for the other.
-- **Logs contain card + SSN data.** `payment-service` logs full PAN/CVV/SSN at INFO to
-  `logs/payment-service.log` (and origination still logs full PII at intake). Do not ship
-  these logs to a third-party aggregator until redaction is added.
-- **Secrets are in the repo.** `.env` is committed and the services' `config.py` hardcode
-  fallbacks — including Experian/core-banking keys in `decision-service` and the processor
-  key in `payment-service`. Rotate before any real go-live. (Long-standing TODO.)
+- **Redaction ships; the log files written before it do not.** New log lines are redacted:
+  `PiiRedactor` (ADR 0006) merged in PR #2 (`1f89ac1`) and runs in all 7 services, held
+  identical by the blocking `redactor-drift` job and covered by the blocking
+  `redaction-tests` job, and origination's intake logs an allowlist of fields rather than
+  the payload, so the redactor is a backstop there rather than the only control. What is
+  still unsafe is history: any `logs/payment-service.log` or `logs/origination-service.log`
+  written before that merge still holds plaintext PAN/CVV/SSN, and nothing has audited or
+  deleted them. Do not ship pre-redaction log files to a third-party aggregator, and do not
+  assume rotation has trimmed them — no rotating handler is configured, so D5's
+  retention/audit rows are still open.
+- **Secrets are purged from the tree, not rotated.** The committed `.env` and the hardcoded
+  `config.py` fallbacks are gone from `main` — PR #4 (`ed2cb35`, 2026-07-10) — and the
+  blocking `secret-scan` job fails on the literals and on a tracked `.env`; every key now
+  reads `os.getenv(..., "")` with no committed default. **The keys themselves are still live
+  and still owed a rotation:** the Experian and core-banking keys and the `payment-service`
+  processor key remain in git history and wherever they were already used, so a purge
+  removed them from the tree and nothing more. Rotate before any real go-live (D1, open).
+
+## Backup and recovery
+
+**There is no backup or recovery procedure. This section exists to say so, not to describe one.**
+Week-8 client-demo feedback recorded this as a baseline to capture; the honest baseline is that no
+value exists to report. Nothing below is a target, an RPO, or an RTO — none has been agreed.
+
+**What exists.** One Docker named volume, `pgdata`, mounted at `/var/lib/postgresql/data`
+(`docker-compose.yml:13`, declared at `:227`). `make seed` re-applies `db/init/002_seed.sql`, which
+restores *demo* rows and nothing a borrower ever touched. That is the whole of it.
+
+**What does not exist**, verified by search rather than assumed — the repo contains no `pg_dump`,
+`pg_basebackup`, or `pgbackrest` invocation in any script, Makefile target, or compose file, and no
+file whose name mentions backup or restore:
+
+- No scheduled dump, no WAL archiving, no replica.
+- No restore procedure and no restore drill, so recovery time is unmeasured, not merely unstated.
+- No retention or destruction policy for whatever backups the client already holds.
+- No encryption-at-rest statement for backup media.
+
+**Why this is a control question and not only an operations one.** `docs/debt-log.md` D13 records
+that WAL segments, replicas, and any backup taken before a card-data rewrite still contain
+cardholder data, and that historical card tokens are not recoverable — re-tokenizing the back book
+is its own migration. D5's mitigation path carries an explicit "audit all existing backups;
+re-encrypt or delete any containing plaintext PII" row, and **that row is open**: the redactor
+stops new plaintext PAN/CVV/SSN reaching logs, but it does nothing to files written before it
+merged, or to a database backup where the PAN is a stored column rather than a log line. So a
+restore is currently also a re-introduction of the exact data two blocking CI jobs exist to keep
+out.
+
+**Open, and owned by the client.** Who takes backups of the production database today, on what
+schedule, where they are stored, and whether any predate the card-data work. Until Lending Ops
+answers, this platform can state only what it does itself, which is nothing. Do not present a
+backup posture in a demo — say this section's first line instead.
 
 ## Tests
 

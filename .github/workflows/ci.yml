@@ -233,6 +233,11 @@ jobs:
     # Phase B, PR #7). These tests live in test_proxy_methods.py, which the `backend` job
     # runs under continue-on-error/|| true, so a reopened leak would stay green. This job
     # MUST block -- no continue-on-error, no `|| true`.
+    #
+    # test_auth.py (D27) rides the same job rather than a new one: password hashing is the
+    # other half of "who is this session," and the `backend` matrix's || true tolerance
+    # would otherwise let a reverted salt/rehash pass silently, same as the header-strip gap
+    # above.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -243,7 +248,21 @@ jobs:
         run: |
           cd services/gateway
           pip install -r requirements.txt pytest
-          python -m pytest tests/test_proxy_methods.py -q
+          python -m pytest tests/test_proxy_methods.py tests/test_auth.py -q
+
+  compose-hardening-gate-tests:
+    # BLOCKING, like doc-path-lint-tests / spec-diff-gate-tests. Hermetic — each
+    # case writes a throwaway compose fixture in $TMPDIR — so it asserts the
+    # LLM_TRACE_CONTENT check's own logic, never the state of the real compose
+    # files. The load-bearing case is `interpolation defaulting to true fails`:
+    # the check this replaces accepted ANY `${...}` form regardless of its
+    # default, so that exact line passed CI while exporting prompts and raw
+    # provider responses to LangSmith for anyone who ran the file.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check_compose_trace_flag.sh tests
+        run: ./scripts/test_check_compose_trace_flag.sh
 
   compose-hardening-gate:
     # The resume-cookie flow (ADR 0010 Phase B, PR #7) depends on two gateway settings that
@@ -254,6 +273,9 @@ jobs:
     # Both must be ${VAR:-default} in docker-compose.yml so a real deploy's .env/host value wins;
     # the local http relaxation lives in docker-compose.demo.yml only. This job BLOCKS -- no
     # continue-on-error -- so a future edit that re-pins a literal in the base file fails CI.
+    # It also asserts no committed compose file publishes a DATASTORE port to the host (D21):
+    # an open 6379 hands over live officer sessions and raw resume-continuation tokens, which
+    # is the one thing origination hashes before it will store it in Postgres.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -269,6 +291,72 @@ jobs:
             exit 1
           fi
           echo "OK: resume-cookie CORS/Secure config is deployment-overridable in base compose."
+      - name: no committed compose file enables LLM_TRACE_CONTENT
+        # LLM_TRACE_CONTENT=true puts the prompt (system, messages), the raw provider
+        # response (text) and the validated body (result) on the LangSmith spans. The
+        # freeze trace requirement forbids retaining prompts and responses outright, and
+        # ADR 0005's boundary is what keeps applicant data off a third-party sink -- so
+        # the flag is a deliberate, non-production debugging act by whoever exports it in
+        # their own shell, never a property of a file anyone can inherit. Today the base
+        # file interpolates it (${LLM_TRACE_CONTENT:-false}), .env.example keeps the line
+        # commented, and the demo override sets only the two non-secret provider-selection
+        # keys (CLAUDE_PROVIDER, AWS_REGION) and no trace or content key. This asserts that,
+        # in EVERY committed compose file including the demo override -- the base-file-only
+        # scope of the step above is wrong for this key, because the demo override is
+        # exactly where a "make the trace readable on stage" edit would land. Only a
+        # literal false or an interpolation whose OWN default is false is safe -- an
+        # interpolation defaulting to true or to nothing must fail too, see
+        # scripts/check_compose_trace_flag.sh.
+        run: ./scripts/check_compose_trace_flag.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: no committed compose file publishes a datastore port to the host
+        # D21. The Postgres half is a credentialed bypass of the gateway trust boundary --
+        # one shared schema, so a direct connection is the whole platform. The REDIS half
+        # needs no credential at all: the base file runs redis with no `requirepass` and
+        # REDIS_URL carries no auth, while the gateway stores two BEARER credentials there
+        # (services/gateway/app/auth.py) -- `session:{token}` holds a live admin/underwriter
+        # session and `resume:{sid}` holds the RAW continuation token that authorizes the
+        # money-moving routes. Postgres stores that same token only as a keyed digest
+        # (origination-service/app/authz.py::hash_token), so an open 6379 undoes a control
+        # that was built on purpose. The test grades the RESOLVED config (PyYAML applies the
+        # same anchor/alias/merge-key resolution Compose does) rather than the source text,
+        # because an anchored `x-pg: &pg {ports: [..]}` merged in with `<<: *pg` publishes
+        # 5432 with no `ports:` line anywhere in the service block. It keys on the PRESENCE
+        # of the resolved `ports` key rather than on its value, so a flow sequence or long
+        # syntax cannot slip past a value regex; it refuses a datastore using `extends:`,
+        # which is the one construct the loader cannot follow; it refuses `network_mode` on
+        # a datastore, because `host` puts the process in the HOST network namespace --
+        # listening on 5432/6379 there with no `ports:` key needed or accepted, which a
+        # ports-only rule passes green -- while `service:`/`container:` hide which namespace
+        # publishes it; it refuses a datastore joining a network this file cannot prove is
+        # a private bridge (`driver: macvlan` is a LAN address of its own, `external: true`
+        # is created elsewhere), while accepting the default driver so a private `backend`
+        # network stays possible; it grades EVERY file name Compose reads, including
+        # `compose.yaml`, which takes precedence over `docker-compose.yml`; and it fails
+        # closed if either service is ever renamed -- every case is scoped by service NAME,
+        # so a rename would otherwise leave it vacuously green.
+        # Its own install line, per the kyc-persistence-gate lesson: this step
+        # must not pass on a package an unrelated earlier step installed.
+        run: |
+          pip install pytest pyyaml
+          python -m pytest scripts/tests/test_compose_datastore_ports.py -q
+      - name: demo override's boot claims match what boot actually checks
+        # test_llm_startup.py's two compose assertions are the reason this step exists:
+        # one pins the runtime behaviour (provider=bedrock with NO AWS credential boots
+        # clean -- load_llm_config validates CLAUDE_API_KEY only on the anthropic path and
+        # BedrockAdapter builds its SDK client lazily), the other pins the demo override's
+        # comment so it cannot tell an operator that `compose up` proves the credential.
+        # The file also runs in the `backend` matrix job, which is continue-on-error +
+        # `|| true` -- so without this step a comment that promises a boot-time credential
+        # check could regress on a green build, and the operator finds out in the room.
+        # Its own install line, per the kyc-persistence-gate lesson: this step must not
+        # pass on a package an unrelated earlier step installed.
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_llm_startup.py -q
 
   kyc-enforcement-gate:
     # ADR 0011 is a compliance control: a regulated decision, an offer, and loan boarding
@@ -278,12 +366,8 @@ jobs:
     # reopened gap would stay green. This job MUST block -- no continue-on-error, no
     # `|| true`.
     #
-    # The gate only holds if kyc-service actually persists a kyc_checks row for every
-    # successful KYC response: test_kyc_persistence.py proves /kyc/check fails closed (503)
-    # when the insert fails instead of reporting a pass with no row, and that a partial /
-    # entity request (no dob/ssn) persists a pass/fail row rather than 422-ing into a
-    # phantom "KYC unavailable". Runs under the continue-on-error backend job too, so it
-    # blocks here.
+    # The other half of the control -- that kyc-service actually persists a kyc_checks row --
+    # is kyc-persistence-gate below, deliberately its own job rather than a second step here.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -295,11 +379,235 @@ jobs:
           cd services/origination-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_kyc_gate.py -q
+
+  kyc-persistence-gate:
+    # The kyc-enforcement-gate above only holds if kyc-service actually persists a kyc_checks
+    # row for every successful KYC response: test_kyc_persistence.py proves /kyc/check fails
+    # closed (503) when the insert fails instead of reporting a pass with no row, and that a
+    # partial / entity request (no dob/ssn) persists a pass/fail row rather than 422-ing into
+    # a phantom "KYC unavailable". Runs under the continue-on-error backend job too, so it
+    # blocks here. No continue-on-error, no `|| true`.
+    #
+    # Its OWN job, not a second step on kyc-enforcement-gate, because steps in one job share a
+    # Python environment: as a trailing step it ran after origination-service's requirements
+    # were installed, and test_kyc_persistence.py's five `TestClient` uses need httpx, which
+    # kyc-service did not pin. The step passed on a dependency no manifest in its own service
+    # declared -- a gate green for a reason unrelated to what it asserts. A separate runner
+    # installs services/kyc-service/requirements.txt and nothing else, so the pin is
+    # load-bearing and CI itself is the regression test for it: drop the pin and this job
+    # errors at collection.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: kyc-service persistence + boundary-contract tests
         run: |
           cd services/kyc-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_kyc_persistence.py -q
+
+  payment-idempotency-gate:
+    # D19: a retried POST /payments used to insert a second payments row and charge the
+    # card again (measured 2026-08-02: one $100 intent sent eight ways captured $800.00).
+    # The control is a PARTIAL unique index plus an insert-first claim against it, and it
+    # is exactly the class of money-math test the `backend` matrix runs under
+    # continue-on-error + `|| true` -- which is how the 4.5pp APR defect survived. So it
+    # blocks here. No continue-on-error, no `|| true`.
+    #
+    # Three suites, one runner:
+    #   test_idempotency_vectors.py  the D1 behaviour table (R1/R2/R3/R3b/R6/R6c/R7) plus
+    #                                the 2026-08-02 reproduction inverted. R3c is
+    #                                xfail(strict) and MUST stay red -- it goes green only
+    #                                when D4b adds bank_token, and strict makes an
+    #                                unexpected pass a failure rather than a silent win.
+    #   test_payments_idempotency_ddl.py  the init DDL and migration 0018 declare the same
+    #                                columns and indexes, so a fresh volume and an upgraded
+    #                                one cannot end up with different schemas.
+    #   test_idempotency_parity.py   the claim block has not drifted between the two charge
+    #                                handlers (debt D23), same duty redactor-drift carries.
+    #
+    # test_idempotency_ddl_live.py (R-DDL/R-DDL2) is NOT run here: it needs a real Postgres
+    # and SKIPS without one, and a gate whose vectors skip is a gate reporting success for
+    # a path it verified nothing on. Run it against a live database before merge; the
+    # services job below has no Postgres attached.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: payment-service idempotency vectors + DDL parity
+        run: |
+          cd services/payment-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_idempotency_vectors.py \
+                           tests/test_payments_idempotency_ddl.py -q
+      - name: servicing-service second-handler parity
+        run: |
+          cd services/servicing-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_idempotency_parity.py -q
+
+  assistant-telemetry-gate:
+    # Production evals for the officer assistant (migration 0021). One assistant_runs row
+    # per officer request is what gives any rate about the assistant a denominator: the
+    # spans are content-free by design and `trace()` is a no-op unless LANGSMITH_TRACING
+    # is set, so LangSmith's population is whatever happened to be exported.
+    #
+    # A regression here is SILENT, which is why it needs a blocking job rather than the
+    # `backend` matrix. `assistant_runs.record` swallows every failure on purpose -- a
+    # telemetry fault must never 500 an officer's answer -- so a broken write path, a
+    # dropped column, or an unapplied migration produces working requests, a healthy
+    # response, and no rows at all. Nothing fails. The reports simply get quieter, and a
+    # quiet report reads like a good week.
+    #
+    # These suites also run in the `backend` matrix job, which is continue-on-error with
+    # `python -m pytest -q || true`, so they cannot hold anything there. Same precedent as
+    # tila-vectors-gate, reconciliation-gate, atomic-apply-gate and no-sad-gate. This job
+    # MUST block -- no continue-on-error, no `|| true`.
+    #
+    # Why these files:
+    # test_assistant_runs.py       the row is written at the ENTRY span, where refusals
+    #                              are translated -- inside assistant.run() it would
+    #                              record successes only. Also the never_decisioned split:
+    #                              a subclass caught in the wrong order silently refiles
+    #                              every never-decisioned run as not_found.
+    # test_assistant_runs_ddl.py   the init DDL and the migration declare one table; drift
+    #                              between them means a fresh volume and a migrated volume
+    #                              disagree about what may be stored.
+    # test_db_readiness.py         the rung is wired into database_reachable(). Only this
+    #                              suite proves an unmigrated volume reports unhealthy end
+    #                              to end -- and it is the ONLY thing that reports the
+    #                              swallowed write at all.
+    # test_migration_0021_live.py  against a real Postgres. Text vectors cannot answer
+    #                              whether the file runs twice, whether the guard fires on
+    #                              a table CREATE TABLE IF NOT EXISTS would have accepted,
+    #                              or whether the CHECKs reject the rows they claim to. A
+    #                              constraint nobody has watched refuse a row is a comment.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci_only_not_a_real_secret
+          POSTGRES_DB: meridian
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: origination-service assistant_runs write path, DDL parity, readiness rung
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_assistant_runs.py \
+                           tests/test_assistant_runs_ddl.py \
+                           tests/test_db_readiness.py -q
+      - name: migration 0021 against a real Postgres
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:ci_only_not_a_real_secret@localhost:5432/meridian
+          # No skip path in CI. A skipped pytest exits 0, so without this a typo'd DSN, a
+          # postgres service that never came up, or a missing psycopg2 would leave this
+          # BLOCKING gate green having verified nothing about the migration.
+          REQUIRE_LIVE_DB: "1"
+        run: |
+          cd services/origination-service
+          python -m pytest tests/test_migration_0021_live.py -q
+
+  no-sad-gate:
+    # D13a / ADR 0013 Decision 2. payments.cvv stored sensitive authentication data.
+    # PCI-DSS 3.2.1 prohibits retaining SAD after authorization outright -- no retention
+    # window, no compensating control -- so the remediation is a deletion of the values
+    # and the column, and a regression here reintroduces prohibited data rather than
+    # breaking an assertion.
+    #
+    # These vectors ran ONLY in the `backend` matrix job, which is continue-on-error with
+    # `python -m pytest -q || true`. A control whose test inherits `|| true` is not a
+    # control. Same precedent as tila-vectors-gate, reconciliation-gate and
+    # atomic-apply-gate. This job MUST block -- no continue-on-error, no `|| true`.
+    #
+    # Both services, because the deletion has to hold in four places at once and two of
+    # them are duplicated per service (debt D23): the init DDL and the seed (a fresh
+    # volume must not create or populate the column), migration 0020 (an existing volume
+    # must NULL, DROP and then REWRITE the heap -- DROP COLUMN alone leaves every value
+    # readable in the data files), both charge handlers and both request models, and the
+    # readiness rung that refuses a volume still carrying the column.
+    #
+    # test_db_readiness.py is run too, not just test_no_sad.py: the rung is wired into
+    # database_reachable(), and test_no_sad.py calls it directly. Only the readiness suite
+    # proves an unmigrated volume actually reports unhealthy end to end.
+    #
+    # This is the one job in this file with a database behind it. It needs one: the
+    # migration is applied BY HAND, so "does this file run a second time" is a question
+    # only Postgres can answer, and every other vector here grades SQL as text. A skipped
+    # live vector inside a blocking gate would report success for a path it never ran --
+    # the failure these gates exist to prevent -- so the service container is what makes
+    # the re-runnability claim real rather than conditional.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci_only_not_a_real_secret
+          POSTGRES_DB: meridian
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: payment-service SAD deletion vectors + readiness
+        run: |
+          cd services/payment-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_no_sad.py tests/test_db_readiness.py -q
+      - name: servicing-service SAD deletion vectors + readiness
+        run: |
+          cd services/servicing-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_no_sad.py tests/test_db_readiness.py -q
+      # The redactor is the backstop for a stale caller that still puts a cvv key in a
+      # body: the column is gone, the field can still be logged. Both suites already run
+      # under the blocking redaction-tests job; this step names the dependency so nobody
+      # deletes the cvv masking as dead code now that no column feeds it.
+      - name: the log redactor still masks a cvv field
+        run: |
+          cd services/payment-service
+          python -m pytest tests/test_logging_redaction.py -q -k cvv
+      # Migration 0020 against a real Postgres: it must purge a pre-0020 volume AND run
+      # clean a second time. The operator applies these by hand with no runner, so a
+      # re-run after a partial attempt is the normal path -- an unguarded first statement
+      # aborts the file before the DROP and the VACUUM FULL that actually destroys the old
+      # row versions, and the recovery attempt then reports failure over a volume still
+      # holding every value. Its own install line, not the earlier step's: a step that
+      # runs on a package no manifest in its own service declares passes until the job is
+      # reordered (the kyc-persistence-gate precedent).
+      - name: migration 0020 re-runs clean against a real Postgres
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:ci_only_not_a_real_secret@localhost:5432/meridian
+          # No skip path in CI. A skipped pytest exits 0, so without this a typo'd DSN, a
+          # postgres service that never came up, or a missing psycopg2 would leave this
+          # BLOCKING gate green having verified nothing about the migration.
+          REQUIRE_LIVE_DB: "1"
+        run: |
+          cd services/payment-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_migration_0020_live.py -q
 
   tila-vectors-gate:
     # The disclosed APR is a regulated number with a Reg Z TOLERANCE: exceeding it is a
@@ -329,6 +637,198 @@ jobs:
           cd services/disclosure-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_tila_vectors.py tests/test_apr.py tests/test_rules.py -q
+
+  reconciliation-gate:
+    # Settlement reconciliation is the only thing that compares what the processor captured
+    # against what a loan was credited (ADR 0015). D19 now prevents the exact-retry case at
+    # capture: payments.idempotency_key sits under a partial unique index (#63) and both
+    # charge handlers claim it insert-first via claim_or_branch() before the processor is
+    # contacted (#65), held by the payment-idempotency-gate below. Reconciliation is still
+    # how everything else is found: a processor-side duplicate, a break that predates D19,
+    # or a payment that never reached a ledger. A regression in reconciliation is silent by
+    # construction: the report still runs, still exits 0, and still looks clean.
+    #
+    # Its 1,499-line test_reconciliation.py and the four files beside it ran ONLY in the
+    # `backend` matrix job, which is `continue-on-error: true` with `python -m pytest -q
+    # || true` (this file, the Tests step above) -- so a broken break-classifier shipped on a
+    # green build. Fourteen other control areas each hold a dedicated blocking job; this was
+    # the largest suite in the repo without one.
+    #
+    # Exactly the failure mode tila-vectors-gate exists to close, and the reason to state it
+    # twice: compute_apr was 4.5pp wrong on every loan for weeks because the money test that
+    # would have caught it inherited `|| true`. A money-math gate that inherits `|| true` is
+    # not a gate. This job MUST block -- no continue-on-error, no `|| true`.
+    #
+    # Why all five files and not just the big one:
+    #   test_reconciliation.py       the matcher, break classes, per-loan absolute vs net
+    #                                variance, and the duplicate pair found across a window
+    #                                edge -- the arithmetic a client reads off a slide.
+    #   test_reconciliation_alert.py the alert fires on the configured threshold, and ABORTS
+    #                                when the threshold is unset rather than reporting a
+    #                                clean close. Fail-closed is the control, not the alert.
+    #   test_reconcile_cli.py        exit 0 / 1 / 2 stay distinct (clean, breaks found, could
+    #                                not run) and stdout carries no report on an abort. A
+    #                                dashboard must never receive a well-formed zero from a
+    #                                run that could not read its own inputs.
+    #   test_reconciliation_utc.py   the cut-off is pinned to UTC (#47). A local-time cut-off
+    #                                silently reclassifies every row near a window boundary.
+    #   test_runbook_reconciliation.py  the documented invocation and exit codes still match
+    #                                the code, so docs/runbook.md cannot drift from the job
+    #                                an operator actually runs on their cron.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: servicing-service settlement reconciliation, alert fail-closed, and exit codes
+        run: |
+          cd services/servicing-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_reconciliation.py \
+                           tests/test_reconciliation_alert.py \
+                           tests/test_reconcile_cli.py \
+                           tests/test_reconciliation_utc.py \
+                           tests/test_runbook_reconciliation.py -q
+
+  agentic-loop-gate:
+    # The officer assistant's tool-calling loop (search_policy retrieval, decision-record
+    # lookup, native tool_use via create_agent) is the whole agentic surface named in the
+    # week10 freeze (docs/plan-freeze-agentic-week10.md). It ran only in the `backend`
+    # matrix job, which is continue-on-error + `python -m pytest -q || true`, so a regression
+    # in any interlock below ships on a green build -- the same failure mode tila-vectors-gate
+    # and reconciliation-gate exist to close for their own surfaces. This job MUST block --
+    # no continue-on-error, no `|| true`.
+    #
+    # Five interlocks the loop swap (#76) preserved, each with a test in this list. Four
+    # live in the tool closures and are covered by test_assistant.py; the fifth is PT-001,
+    # added by #71 and covered by test_policy_topic.py:
+    #   single-score cache          two score_application calls in one turn would fire two
+    #                                regulated decision_events
+    #   explain-path substitution   a score on an explain-only turn is a billable credit pull
+    #                                nobody asked for
+    #   query strip                 the model-authored search_policy query must never ride
+    #                                into persisted history -- this failed silently once
+    #                                (a pydantic ModelPrivateAttr masked the comparison) and
+    #                                was caught only because a test asserted the outbound
+    #                                CompletionRequest, not the seam's intent
+    #   step exhaustion as refusal  create_agent's recursion limit must map to a refusal
+    #                                (404/422/502/503), not an unmapped 500
+    #   single search per run       PT-001: search_policy is honoured at most once, so a
+    #                                model cannot compound retrieval calls or citations;
+    #                                the second call is served the first answer. Its other
+    #                                half is the same rule read backwards -- a policy_topic
+    #                                run that reaches `final` having never searched is
+    #                                refused in code, because that answer is
+    #                                indistinguishable from one that searched and abstained
+    #
+    # test_assistant.py            the loop, and the first four interlocks above
+    # test_assistant_trace.py      the root trace span shape and the no-identifiers content
+    #                               rule (enum codes, integers, booleans, retrieval scores and
+    #                               chunk ids only -- never application_id or request_id)
+    # test_policy_retrieval.py     search_policy retrieval and the fail-closed score threshold
+    # test_policy_corpus_manifest.py  manifest admission of a supplied corpus: the set the
+    #                               manifest audit walks is the set the loader indexes, and a
+    #                               chunk-id collision between two approved documents indexes
+    #                               nothing rather than serving one document's text under the
+    #                               other's citation
+    # test_policy_topic.py         the closed 8-code policy_topic vocabulary; a free-text
+    #                               question is masked before the model sees it. Also
+    #                               interlock 5 (PT-001), both halves: a second search is
+    #                               served from cache, and an unsearched policy final is
+    #                               refused
+    # test_prompt_contracts.py     tool_choice is asserted PRESENT now that create_agent binds
+    #                               tools -- this file used to assert its absence
+    # test_chat_model.py           MeridianChatModel / bind_tools, now wired into the loop
+    # test_agentic_loop.py         create_agent integration: the swapped run() path
+    # test_native_script.py        native tool_use blocks end to end; text-only tool calls
+    #                               are refused
+    # test_tool_schemas.py         CompletionRequest.tools / Completion.tool_calls / the
+    #                               _redacted_turn content-block rule
+    # test_injection_resistance.py  every inbound channel to the model is a projection to
+    #                               enum codes, integers and code lists -- the officer's
+    #                               request, both tool results, a poisoned corpus chunk,
+    #                               the model-authored query and the model's own final.
+    #                               The freeze asks for deterministic injection-resistance
+    #                               tests; this is that file
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: origination-service agentic loop, interlocks, trace content rule, tool schemas
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_assistant.py \
+                           tests/test_assistant_trace.py \
+                           tests/test_policy_retrieval.py \
+                           tests/test_policy_corpus_manifest.py \
+                           tests/test_policy_topic.py \
+                           tests/test_prompt_contracts.py \
+                           tests/test_chat_model.py \
+                           tests/test_agentic_loop.py \
+                           tests/test_native_script.py \
+                           tests/test_tool_schemas.py \
+                           tests/test_injection_resistance.py -q
+
+  atomic-apply-gate:
+    # D3 / ADR 0020. Crediting a captured payment to a loan exactly once is the money
+    # movement this platform exists to get right, and it was wrong: the 2026-08-02 live
+    # repro captured $800.00 and credited $600.00, all eight responses 200. The fix is
+    # one statement whose UPDATE computes from the stored value, plus payment_applications
+    # with UNIQUE (payment_id).
+    #
+    # These suites ran ONLY in the `backend` matrix job, which is continue-on-error with
+    # `python -m pytest -q || true` -- CLAUDE.md names this path explicitly as able to
+    # regress on a green build. A money-math gate that inherits `|| true` is not a gate.
+    # Same precedent as tila-vectors-gate and reconciliation-gate. This job MUST block --
+    # no continue-on-error, no `|| true`.
+    #
+    # Why these files:
+    #   test_lost_update.py          the before-number. Its fixture models BOTH statement
+    #                                shapes, so reverting to the read-modify-write turns it
+    #                                red rather than making it error on an unexpected call.
+    #   test_atomic_apply.py         the amount and the loan come off the payments row, a
+    #                                replay moves nothing, and every ineligible status
+    #                                (processing, ACH submitted, NULL amount_minor, another
+    #                                loan's payment) writes nothing at all.
+    #   test_payment_applications_ddl.py  the init DDL and migration 0019 declare one table,
+    #                                byte-for-byte, and the migration RAISE EXCEPTIONs on a
+    #                                shape it did not create.
+    #   test_characterization_balance.py  pins that adjust_balance and waive_fee still hold
+    #                                the unlocked shape -- a decision, not an oversight.
+    #   payment-service tests/test_apply_via_servicing.py  the caller sends payment_id only.
+    #                                An amount back in that body is a money-creation path.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: servicing-service atomic apply, replay, and the DDL both volumes get
+        run: |
+          cd services/servicing-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_lost_update.py \
+                           tests/test_atomic_apply.py \
+                           tests/test_payment_applications_ddl.py -q
+      # Selected, not the whole file: test_characterization_balance.py also pins the
+      # ADR 0014 authorization gaps, which are still open and still red on purpose. Only
+      # the four D3 assertions belong in a blocking gate -- the apply's shape, its record,
+      # and the two mutations that deliberately keep the old shape.
+      - name: servicing-service characterization of what D3 changed and what it did not
+        run: |
+          cd services/servicing-service
+          python -m pytest tests/test_characterization_balance.py -q \
+            -k "(apply_payment or other_mutations) and not route_takes_no_caller_identity"
+      - name: payment-service sends payment_id only, and cannot retire an unapplied capture
+        run: |
+          cd services/payment-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_apply_via_servicing.py \
+                           tests/test_idempotency_vectors.py -q
 
   db-readiness-gate:
     # DB readiness is a security control: a passwordless / placeholder / stale
@@ -369,12 +869,24 @@ jobs:
           python -m pytest tests/test_decision.py -k "database_url or internal_service_token or schema" -q
 
   migration-numbering-gate:
-    # Migrations are hand-applied with no runner (compose mounts db/init/* only), so a
-    # duplicate NNNN prefix -- two feature branches each grabbing the next number -- is an
-    # operator-ordering hazard: following the numeric sequence can run a later migration before
-    # the one it depends on (e.g. a document_body ALTER before its CREATE TABLE). This branch
-    # hit exactly that with two 0011_* files. Fail the build on any collision so it surfaces at
-    # PR time, not at rollout. Blocking -- no continue-on-error, no `|| true`.
+    # Migrations are hand-applied with no runner (compose mounts db/init/* only), so this job
+    # holds the two properties an operator cannot check for themselves at rollout time: the
+    # apply ORDER is unambiguous, and each file can actually execute.
+    #
+    # Order: a duplicate NNNN prefix -- two feature branches each grabbing the next number --
+    # means following the numeric sequence can run a later migration before the one it depends
+    # on (e.g. a document_body ALTER before its CREATE TABLE). This branch hit exactly that
+    # with two 0011_* files.
+    #
+    # Executability: the DDL tests are text assertions, so 0018 merged unable to parse -- a
+    # `DO $$` body closed early by a nested `$$` literal, aborting the migration at a syntax
+    # error and skipping every verification block after it. The second step below reproduces
+    # Postgres's dollar-quote lexing rule over every SQL file in the repo, so it grades every
+    # migration without a database. Exactly one job DOES run migration SQL against a real
+    # server -- no-sad-gate, which has a postgres service and applies 0020 -- and it covers
+    # that one file only; this job stays the check that holds for all of them.
+    #
+    # Blocking -- no continue-on-error, no `|| true`.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -389,6 +901,17 @@ jobs:
             exit 1
           fi
           echo "OK: all db/migrations/ version numbers are unique."
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install pytest
+      - name: Migration SQL parses (no DO block closed by a nested dollar-quote)
+        # Same file as the D19 declaration-parity tests: it is the only place that grades
+        # 0018, and it needs nothing but pathlib + re, so it runs from the repo root with
+        # no service requirements installed. Those parity tests run here too -- they are
+        # otherwise only in the `backend` matrix, under continue-on-error + `|| true`.
+        run: python -m pytest services/payment-service/tests/test_payments_idempotency_ddl.py -q
 
   disclosure-lifecycle-gate:
     # The disclosure controls this week rests on -- delivery gating (a delivered flag over a
@@ -441,6 +964,22 @@ jobs:
           python -m pytest rag_eval/tests -q
       - name: rag_eval real-corpus smoke (refusal + no raw PII in report/cache)
         run: ./scripts/smoke_rag_eval.sh
+
+  rag-eval-import-gate:
+    # Card G2a: origination builds from the REPO ROOT so the image carries the repo-root
+    # rag_eval/ package — `import rag_eval` did not resolve in the container before that,
+    # and G2b's search_policy tool, on `main` since PR #64, is built on top of this holding
+    # and is smoked by the same script. The file assertions in
+    # test_rag_eval_seam.py also run in the `backend` job under continue-on-error/|| true,
+    # so a reverted build context would stay green there. This job MUST block — no
+    # continue-on-error, no `|| true` — and it proves the import in the built image, not in
+    # the Dockerfile text: a gate that checks only the spelling verifies nothing about the
+    # artifact that ships.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: rag_eval imports inside the origination image
+        run: ./scripts/check_rag_eval_import.sh
 
   frontend:
     runs-on: ubuntu-latest
@@ -605,5 +1144,91 @@ jobs:
       - name: No banned compliance/safety claims in the authoritative docs
         run: ./scripts/check_doc_claims.sh
 
+  volatile-claim-lint-tests:
+    # The gate below is only worth its blocking status if it can actually fail. This
+    # proves it: an open-PR claim, a freshness stamp, a tip sha, a spelled-out count and
+    # an unanchored ref each turn it red, while an anchored merge citation stays green.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Volatile-claim lint self-tests
+        run: ./scripts/test_check_volatile_claims.sh
+
+  volatile-claim-lint:
+    # BLOCKING. Third gate in the doc family and a different KIND from its two siblings:
+    # doc-path-lint asks whether a cited path exists, docs-drift refuses a curated list of
+    # known-false literals, and this one refuses a whole CLASS of sentence -- one that is
+    # true when written and false when it lands.
+    #
+    # Why a third was needed: docs/kb.md carried ~315 hand-copied derived facts, and 14 of
+    # the 25 commits that ever touched it were pure stale-fixes. A curated list cannot
+    # close that, because the author writing the decaying sentence is the same person who
+    # would have to add it to the list. Banning the shape needs nobody to notice anything.
+    #
+    # An immutable citation still passes -- "merged as #77 (ceda4e2)" names a merge commit,
+    # and a merge commit never changes. Present-tense merge state does not.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No decaying claims in the authoritative docs
+        run: ./scripts/check_volatile_claims.sh
+
+  kb-freshness-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: State generator self-tests
+        run: ./scripts/test_gen_state.sh
+
+  kb-freshness:
+    # BLOCKING. docs/state.md is the mutable half of the knowledge base -- base tip,
+    # merged-PR ledger, ADR index, which jobs in this file block -- and every line of it
+    # is read out of git by scripts/gen_state.sh. This refuses a hand edit and refuses a
+    # copy that has not absorbed its own branch base.
+    #
+    # It grades against the MERGE BASE of the branch and main, not main's tip, so a
+    # sibling PR merging does not turn every other open PR red. The fix when it fails is
+    # always the same one command: `make kb`, then commit.
+    #
+    # That insulation is only real because the checkout below pins the PR HEAD sha. The
+    # default pull_request checkout is refs/pull/N/merge -- the branch already merged
+    # with the base tip -- which makes that tip an ANCESTOR of HEAD, so `git merge-base
+    # origin/main HEAD` collapses to main's tip and the merge-base grading silently
+    # becomes tip grading. It did: #92 merging turned #93 red over a page #93 never
+    # touched. test_gen_state.sh pins both halves -- `merge ref grades against the tip`
+    # (the git behaviour) and `kb-freshness checks out the PR head sha` (this file).
+    #
+    # pull_request ONLY, and that is structural rather than a convenience. On main the
+    # merge base IS the tip, so the merge commit that lands a regenerated page becomes
+    # the base the page would have to describe -- a state no committed file can ever be
+    # in. Running it on push would leave main red between every merge and the follow-up
+    # commit, and that follow-up would re-stale the page it just fixed. The branch side
+    # is where the page is actually authored, and it is graded there.
+    # test_gen_state.sh pins this: `committing the page on main re-stales it`.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # The PR head, NOT the default merge ref -- see the note above. The page is
+          # authored on the branch, so the branch is what must be graded.
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Fetch main so a merge base exists
+        # A PR checkout has no origin/main ref by default, and the generator must abort
+        # rather than describe the wrong base -- so fetch it explicitly. No --depth here:
+        # fetch-depth: 0 above already made this a full clone, and `--depth=0` is not a
+        # valid argument ("fatal: depth 0 is not a positive number"), so passing it fails
+        # the step outright.
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+      - name: docs/state.md still matches git
+        run: ./scripts/gen_state.sh --check
+
   # GAP: no dependency audit, no SAST, no container image scan.
-  # GAP: backend tests are continue-on-error, so failing money-math tests are green.
+  # GAP: backend tests are continue-on-error, so failing money-math tests are green --
+  # EXCEPT where a dedicated blocking job runs the same file outside the matrix. The money
+  # paths carved out so far: the disclosure compute path (tila-vectors-gate), settlement
+  # reconciliation (reconciliation-gate), and the apply-payment path (atomic-apply-gate,
+  # which runs test_lost_update.py -- green since D3's fix, PR #77). Still inside the
+  # suppression, and therefore still able to regress on a green build: the remaining
+  # balance.py write paths, adjust_balance and waive_fee (D32).

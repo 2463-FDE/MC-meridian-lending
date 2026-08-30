@@ -2,7 +2,11 @@
 
 Money columns map to Float (DOUBLE PRECISION in Postgres — the float-money debt). The
 `balances` table is a single mutable balance column (no ledger). The `payments` table
-carries the full PAN + CVV (PCI debt) and has no idempotency key.
+carries the full PAN (PCI debt D13b — the CVV column was deleted by migration 0020,
+D13a). It also carries an idempotency_key column under a partial unique index (D19,
+ADR 0013 Decision 1); this class does not map it
+because the claim path writes it via raw SQL (claim_or_branch), not through this ORM
+model.
 """
 
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String
@@ -50,7 +54,6 @@ class Payment(Base):
     pan: Mapped[str | None] = mapped_column(
         String, nullable=True
     )  # full PAN stored (debt)
-    cvv: Mapped[str | None] = mapped_column(String, nullable=True)  # CVV stored (debt)
     amount: Mapped[float] = mapped_column(Float)  # money as float (debt)
     method: Mapped[str | None] = mapped_column(String, default="card")
     created_at: Mapped[str | None] = mapped_column(

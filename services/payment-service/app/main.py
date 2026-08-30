@@ -1,9 +1,14 @@
 """Payment service — FastAPI.
 
 Standalone card/ACH charge capture extracted from servicing-service. Stores the full PAN
-and CVV on the payments row, logs the full charge request (PAN/CVV/SSN) at INFO, and has
-NO idempotency key — a retried POST double-charges. The captured amount is applied to the
-loan balance by calling servicing-service over HTTP. (D2, D5, D13 — kept on purpose)
+on the payments row (D13b — open: tokenization needs a provider and a card entry surface
+this codebase does not have). It no longer stores the CVV: D13a deleted the column and the
+values (migration 0020), because PCI-DSS 3.2.1 prohibits retaining sensitive authentication
+data after authorization outright. The charge log is redacted at the construction boundary
+(D5), and the Idempotency-Key is required and arbitrated by a partial unique index, so a
+retried POST no longer double-charges (D19, ADR 0013 Decision 1). The captured amount is
+applied to the loan balance by calling servicing-service over HTTP. (D2 — float money —
+kept on purpose.)
 """
 import logging
 import os

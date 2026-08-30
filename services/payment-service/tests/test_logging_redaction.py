@@ -16,6 +16,12 @@ import pytest
 from app.logging_config import get_logger, RedactingFormatter
 from app.redactor import PiiRedactor
 
+# D19: the Idempotency-Key is required and client-minted (ADR 0013 Decision 1), so every
+# call into the charge path has to carry one. A fixed valid UUID keeps these cases
+# deterministic; the idempotency behaviour itself is covered by the R-vector suite.
+_IDEM_KEY = "11111111-1111-4111-8111-111111111111"
+
+
 
 @pytest.fixture
 def temp_log_dir():
@@ -116,7 +122,7 @@ def test_charge_log_defeats_quote_delimiter_injection():
 
     evil = '4111","x":"111111111111'  # quote + delimiter injection
     line = "POST /payments charge req=%s -> ok" % json.dumps(
-        payments._redacted_charge_req(evil, "123", "412-55-9981", 250.0, 7),
+        payments._redacted_charge_req(evil, "412-55-9981", 250.0, 7),
         ensure_ascii=False,
     )
     # No reconstructable PAN chunk survives.
@@ -172,10 +178,10 @@ def test_charge_log_never_contains_name(temp_log_dir, monkeypatch, name):
     payments.charge(
         loan_id=7,
         pan="4111111111111111",
-        cvv="123",
         amount=250.0,
         ssn="412-55-9981",
         name=name,
+        idempotency_key=_IDEM_KEY,
     )
 
     content = (Path(temp_log_dir) / "payment-service.log").read_text()
@@ -367,10 +373,10 @@ def test_charge_masks_invalid_luhn_labeled_pan(temp_log_dir, monkeypatch):
     payments.charge(
         loan_id=7,
         pan="4111111111111112",
-        cvv="123",
         amount=250.00,
         ssn="412-55-9981",
         name="Jane Doe",
+        idempotency_key=_IDEM_KEY,
     )
 
     content = (Path(temp_log_dir) / "payment-service.log").read_text()

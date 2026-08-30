@@ -8,7 +8,10 @@ compatibility of history turns.
 
 import json
 
+import httpx
 import pytest
+
+from tests.test_native_script import native_adapter
 
 from app import assistant
 from app.llm import ClaudeClient, FakeAdapter, LLMConfig
@@ -27,7 +30,7 @@ def _client(*responses):
     cfg = LLMConfig(
         api_key="test-key", max_retries=0, token_budget=20_000, max_tokens=256
     )
-    adapter = FakeAdapter(responses=list(responses))
+    adapter = native_adapter(*responses)
     return ClaudeClient(cfg, adapter=adapter), adapter
 
 
@@ -207,14 +210,29 @@ def test_tool_uses_officer_app_id_not_model_echo(tools, monkeypatch):
     assert seen == [42]  # the model cannot wander to another applicant's file
 
 
+def _turn_text(content) -> str:
+    """Every string a built turn actually carries, whatever shape it carries it in."""
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in content or []:
+        if not isinstance(block, dict):
+            continue
+        body = block.get("content")
+        parts.append(body if isinstance(body, str) else json.dumps(block.get("input")))
+    return " ".join(parts)
+
+
 def test_history_turns_survive_redaction_intact(tools):
     client, adapter = _client(TOOL_CALL, FINAL_DENY)
     assistant.run(42, client)
     # Second model call carries the tool round-trip as history; the enum vocabulary
     # must pass the fail-closed redactor unmasked or the agent would go blind.
     final_req = adapter.calls[-1]
-    history_contents = [m["content"] for m in final_req.messages[:-1]]
-    joined = " ".join(history_contents)
+    # Shape-agnostic: a turn's content is a JSON string on the JSON-action path and a
+    # list of tool_use / tool_result blocks under native tool calling. Read the payload
+    # out of either, rather than assuming the one that happens to be live.
+    joined = " ".join(_turn_text(m["content"]) for m in final_req.messages[:-1])
     assert '"deny"' in joined and '"R02"' in joined and "518" in joined
     assert "•" not in joined  # nothing in the tool round-trip was masked
 
@@ -329,6 +347,39 @@ def test_assistant_requires_officer_role(monkeypatch):
         app.dependency_overrides.clear()
 
 
+def test_assistant_route_surfaces_the_rate_limit(monkeypatch):
+    # Wiring only: the limiter's own counting/window logic is unit-tested in
+    # test_rate_limit.py. This proves both routes actually call it, after the
+    # officer-role gate, and surface its 429 rather than swallowing it.
+    from fastapi import HTTPException
+    from fastapi.testclient import TestClient
+
+    from app import main
+    from app.main import app
+
+    def _tripped(user_id):
+        raise HTTPException(status_code=429, detail="assistant rate limit exceeded")
+
+    monkeypatch.setattr(main.rate_limit, "check_llm_rate_limit", _tripped)
+    app.dependency_overrides[main.get_llm_client] = lambda: _client(FINAL_DENY)[0]
+    try:
+        tc = TestClient(app, raise_server_exceptions=False)
+        assert (
+            tc.post(
+                "/assistant/decisions/42", headers={"X-User-Role": "underwriter"}
+            ).status_code
+            == 429
+        )
+        assert (
+            tc.get(
+                "/assistant/decisions/42", headers={"X-User-Role": "underwriter"}
+            ).status_code
+            == 429
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+
 # --- Adversarial-review fixes (teeth 2026-07-15) ------------------------------------
 
 
@@ -438,6 +489,70 @@ def test_explain_never_decisioned_raises_not_found(monkeypatch):
     client, _ = _client(record_call, final)
     with pytest.raises(assistant.ApplicationNotFound):
         assistant.run(7, client, task="explain")
+
+
+def _error_response(app_id, request_id=None):
+    """A real httpx.Response so raise_for_status() produces httpx's own message --
+    which embeds the request URL -- the same way it would against a live
+    decision-service."""
+    path = f"/decisions/{app_id}/record"
+    if request_id:
+        path += f"?request_id={request_id}"
+    return httpx.Response(
+        500, request=httpx.Request("GET", f"http://decision-service{path}")
+    )
+
+
+def test_score_application_not_found_message_is_identifier_free(monkeypatch):
+    # B1 follow-up: this raises through the tool/step/root trace spans, and
+    # langsmith's trace() attaches str(exception) to the span's `error` field on
+    # exit -- so app_id in the message would leak to LangSmith the same way the
+    # root metadata dict did before B1's fix.
+    monkeypatch.setattr(assistant, "decision_request_payload", lambda app_id: None)
+    with pytest.raises(assistant.ApplicationNotFound) as exc_info:
+        assistant._score_application(918273)
+    assert "918273" not in str(exc_info.value)
+
+
+def test_explain_never_decisioned_message_is_identifier_free(monkeypatch):
+    monkeypatch.setattr(
+        assistant.clients, "get", lambda base, path: _NotFoundResponse()
+    )
+    with pytest.raises(assistant.ApplicationNotFound) as exc_info:
+        assistant._validated_final({}, 918273, "explain")
+    assert "918273" not in str(exc_info.value)
+
+
+def test_get_decision_record_error_scrubs_identifier_and_chain(monkeypatch):
+    # httpx.HTTPStatusError's own message embeds the request URL
+    # (/decisions/918273/record), so the wrapping AssistantError must not chain
+    # to it either -- `from exc` (or no `from` at all) would leave the original
+    # exception on __context__/__cause__, and traceback.format_exception (which
+    # langsmith's trace() calls on error) prints the whole chain.
+    monkeypatch.setattr(
+        assistant.clients, "get", lambda base, path: _error_response(918273)
+    )
+    with pytest.raises(assistant.AssistantError) as exc_info:
+        assistant._get_decision_record(918273)
+    exc = exc_info.value
+    assert "918273" not in str(exc)
+    assert exc.__cause__ is None
+    assert exc.__suppress_context__ is True
+
+
+def test_validated_final_record_fetch_error_scrubs_identifier_and_chain(monkeypatch):
+    monkeypatch.setattr(
+        assistant.clients,
+        "get",
+        lambda base, path: _error_response(918273, request_id="req-abc123"),
+    )
+    with pytest.raises(assistant.AssistantError) as exc_info:
+        assistant._validated_final({}, 918273, "decision", "req-abc123")
+    exc = exc_info.value
+    assert "918273" not in str(exc)
+    assert "req-abc123" not in str(exc)
+    assert exc.__cause__ is None
+    assert exc.__suppress_context__ is True
 
 
 def test_request_id_forwarded_to_decision_service(monkeypatch):

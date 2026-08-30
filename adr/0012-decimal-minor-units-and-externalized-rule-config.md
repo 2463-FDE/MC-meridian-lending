@@ -1,6 +1,6 @@
 # ADR 0012: Decimal Minor Units, Externalized Rule Config, and FK-as-Graph Provenance for TILA Disclosures
 
-- **Status:** **Proposed** — built and merged-pending on `feature/disclosure-week4` (PR #12).
+- **Status:** **Proposed** — built and merged to `main` (PR #12, `6b395cb`).
   Deliberately not *Accepted*: two client answers (APR method of record, tolerance regime) can
   still change D1/D3. Accept once Dana answers; if either answer differs from what shipped, it
   gets a superseding ADR, not an edit.

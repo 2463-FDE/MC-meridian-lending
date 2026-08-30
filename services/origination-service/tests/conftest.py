@@ -9,9 +9,21 @@ Tests that specifically exercise the refusal / fallback / rotation monkeypatch i
 
 import pytest
 
-from app import config
+from app import config, rate_limit
 
 
 @pytest.fixture(autouse=True)
 def _healthy_continuation_pepper(monkeypatch):
     monkeypatch.setattr(config, "CONTINUATION_TOKEN_KEYS", "test:test-pepper")
+
+
+@pytest.fixture(autouse=True)
+def _reset_assistant_rate_limit():
+    # In-process, module-global state (app/rate_limit.py): any test that drives an
+    # assistant route through TestClient without a distinct X-User-Id shares the
+    # "_no_user_id" bucket with every other such test in the session. Without a reset
+    # between tests, whichever test runs 11th trips the real 429 -- a cross-file,
+    # run-order-dependent flake, not a bug in the limiter itself.
+    rate_limit.reset()
+    yield
+    rate_limit.reset()

@@ -126,6 +126,42 @@ describe("underwriting detail — assistant panel", () => {
     expect(screen.queryByText(ASSISTANT_SUMMARY)).toBeNull();
   });
 
+  it("renders the trace run id and sends the selected policy_topic on Explain", async () => {
+    let seenPath = "";
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === "/los/applications/1") return APP_1;
+      if (path.startsWith("/los/assistant/decisions/1")) {
+        seenPath = path;
+        return {
+          ...assistantResultFor(1),
+          trace_id: "01a033be-67eb-7530-b9f7-b9719ec8f93e",
+          policy_citations: [
+            { chunk_id: "underwriting_guidelines#debt-to-income-dti", score: 0.5303, text: "..." },
+          ],
+        };
+      }
+      throw new Error(`unexpected GET ${path}`);
+    });
+
+    render(<UnderwritingDetailPage />);
+    await screen.findAllByText("Maria Alvarez");
+
+    fireEvent.change(screen.getByTitle(/Policy topic for Explain/), {
+      target: { value: "debt_to_income" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Explain" }));
+
+    expect(
+      await screen.findByText("01a033be-67eb-7530-b9f7-b9719ec8f93e")
+    ).toBeTruthy();
+    expect(
+      screen.getByText("underwriting_guidelines#debt-to-income-dti")
+    ).toBeTruthy();
+    expect(seenPath).toBe(
+      "/los/assistant/decisions/1?policy_topic=debt_to_income"
+    );
+  });
+
   it("drops an in-flight assistant response after the route moves to another application", async () => {
     let resolveAssistant: (value: unknown) => void = () => {};
     const pending = new Promise((resolve) => {

@@ -11,10 +11,28 @@ this identical route shape. This file closes both.
 
 import re
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import authz, balance, config, payments
 from app.main import app
+
+
+# The charge route now fails closed on an unready schema (D13a: a volume that skipped
+# migration 0020 still holds every stored CVV, and the NULLABLE legacy column lets the
+# capture insert succeed anyway). These cases have no database at all, so the probe would
+# refuse every request and grade nothing but the guard. The guard itself is graded in
+# test_no_sad.py (unmigrated volume) and test_db_readiness.py (the rungs).
+@pytest.fixture(autouse=True)
+def _schema_ready(monkeypatch):
+    monkeypatch.setattr(config, "database_reachable", lambda *a, **k: (True, None))
+
+
+# D19: the Idempotency-Key is required and client-minted (ADR 0013 Decision 1), so every
+# call into the charge path has to carry one. A fixed valid UUID keeps these cases
+# deterministic; the idempotency behaviour itself is covered by the R-vector suite.
+_IDEM_KEY = "11111111-1111-4111-8111-111111111111"
+
 
 FIELDS = re.compile(
     r"request_id=(?P<request_id>\S+) "
@@ -41,7 +59,9 @@ def _fields(lines):
 
 def _stub_charge_path(monkeypatch, insert_id=7):
     monkeypatch.setattr(payments.db, "query", lambda *a, **k: [{"id": insert_id}])
-    monkeypatch.setattr(payments.balance, "apply_payment", lambda *a, **k: 450.0)
+    monkeypatch.setattr(
+        payments.balance, "apply_payment", lambda *a, **k: (450.0, True)
+    )
 
 
 def test_no_line_claims_success_before_the_insert(monkeypatch):
@@ -56,7 +76,12 @@ def test_no_line_claims_success_before_the_insert(monkeypatch):
     lines = _capture_log(monkeypatch)
 
     try:
-        payments.charge(loan_id=1, pan="4111111111111111", cvv="123", amount=50.0)
+        payments.charge(
+            loan_id=1,
+            pan="4111111111111111",
+            amount=50.0,
+            idempotency_key=_IDEM_KEY,
+        )
     except RuntimeError:
         pass
 
@@ -76,7 +101,12 @@ def test_generated_request_id_is_one_id_shared_by_entry_and_outcome(monkeypatch)
     _stub_charge_path(monkeypatch)
     lines = _capture_log(monkeypatch)
 
-    result = payments.charge(loan_id=1, pan="4111111111111111", cvv="123", amount=50.0)
+    result = payments.charge(
+        loan_id=1,
+        pan="4111111111111111",
+        amount=50.0,
+        idempotency_key=_IDEM_KEY,
+    )
 
     ids = {p["request_id"] for p in _fields(lines)}
     assert len(ids) == 1, f"the span must share one id, got {ids}: {lines}"
@@ -95,9 +125,9 @@ def test_supplied_request_id_used_verbatim(monkeypatch):
     payments.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         request_id="abc123",
+        idempotency_key=_IDEM_KEY,
     )
 
     ids = {p["request_id"] for p in _fields(lines)}
@@ -110,7 +140,7 @@ def test_route_forwards_the_x_request_id_header_to_charge(monkeypatch):
 
     seen = {}
 
-    def fake_charge(loan_id, pan, cvv, amount, ssn, name, method, request_id=None):
+    def fake_charge(loan_id, pan, amount, ssn, name, method, request_id=None, **kwargs):
         seen["request_id"] = request_id
         return {"loan_id": loan_id, "amount": amount, "balance": 0.0}
 
@@ -119,7 +149,11 @@ def test_route_forwards_the_x_request_id_header_to_charge(monkeypatch):
     resp = TestClient(app).post(
         "/payments",
         json={"loan_id": 1, "amount": 50.0},
-        headers={"X-User-Role": "csr", "X-Request-Id": "abc123"},
+        headers={
+            "Idempotency-Key": _IDEM_KEY,
+            "X-User-Role": "csr",
+            "X-Request-Id": "abc123",
+        },
     )
 
     assert resp.status_code == 200
@@ -143,9 +177,9 @@ def test_pii_shaped_request_id_reaches_no_log_line(monkeypatch):
         payments.charge(
             loan_id=1,
             pan="4111111111111111",
-            cvv="123",
             amount=50.0,
             request_id=hostile,
+            idempotency_key=_IDEM_KEY,
         )
 
         joined = "\n".join(lines)
@@ -168,6 +202,9 @@ def test_balance_apply_payment_own_log_line_carries_the_span(monkeypatch):
     def fake_query(sql, params=None):
         if sql.strip().startswith("INSERT INTO payments"):
             return [{"id": insert_id}]
+        # The D3 apply is one statement that answers with the row it wrote.
+        if "payment_applications" in sql and sql.strip().startswith("WITH"):
+            return [{"loan_id": 1, "balance": 450.0, "amount_minor": 5000}]
         if sql.strip().startswith("SELECT balance"):
             return [{"balance": 500.0}]
         return []
@@ -182,9 +219,9 @@ def test_balance_apply_payment_own_log_line_carries_the_span(monkeypatch):
     result = payments.charge(
         loan_id=1,
         pan="4111111111111111",
-        cvv="123",
         amount=50.0,
         request_id="abc123",
+        idempotency_key=_IDEM_KEY,
     )
 
     parsed = _fields(lines)
@@ -192,4 +229,39 @@ def test_balance_apply_payment_own_log_line_carries_the_span(monkeypatch):
     assert parsed[0]["request_id"] == "abc123"
     assert parsed[0]["loan_id"] == "1"
     assert parsed[0]["payment_id"] == str(insert_id) == str(result["payment_id"])
-    assert parsed[0]["outcome"] == "captured"
+    # `applied`, not `captured`, since D3: the outcome on the mutation's own line is
+    # now derived from what the statement did (applied / already_applied) rather than
+    # passed in by the caller, which is the point of the record being the source of
+    # truth. The caller's own entry/outcome lines still say captured.
+    assert parsed[0]["outcome"] == "applied"
+
+
+def test_replay_of_a_row_captured_unapplied_by_the_other_writer_reports_zero(
+    monkeypatch,
+):
+    """B1 sibling: this route is a second writer of the SAME payments table (D23).
+
+    A row this route replays may have been captured_unapplied by payment-service's
+    handler -- `amount` is what the CARD captured, not what the balance absorbed, so
+    reporting it on a replay of an unapplied row would tell the caller money moved
+    that never did.
+    """
+    monkeypatch.setattr(
+        payments,
+        "claim_or_branch",
+        lambda *a, **k: (
+            payments.REPLAY,
+            7,
+            {"status": "captured_unapplied", "amount": 250.0},
+        ),
+    )
+
+    result = payments.charge(
+        loan_id=1,
+        pan="4111111111111111",
+        amount=250.0,
+        idempotency_key=_IDEM_KEY,
+    )
+
+    assert result["idempotency"] == payments.REPLAY
+    assert result["amount"] == 0.0

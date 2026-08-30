@@ -13,6 +13,8 @@ credentials — see `BedrockAdapter`, not `CLAUDE_API_KEY`).
 import os
 from dataclasses import dataclass, field
 
+from langsmith.run_trees import get_cached_client
+
 from .errors import LLMConfigError
 from .logging_setup import get_llm_logger
 
@@ -23,6 +25,64 @@ _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 _DEFAULT_BEDROCK_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 _PROVIDERS = ("anthropic", "bedrock")
+
+# Pinned Bedrock region. An unset AWS_REGION let boto3 resolve the region from the
+# host's ambient config, so the same commit could reach different regions on two
+# runs — the freeze requires a reproducible selection, so the literal lives here
+# and AWS_REGION only overrides it. `.env.example` documents the same value.
+_DEFAULT_BEDROCK_REGION = "us-east-1"
+# Regions where the bedrock-runtime endpoint is available (source of truth:
+# https://docs.aws.amazon.com/bedrock/latest/userguide/endpoints-region-availability.html,
+# checked 2026-08-22). An override must name a region Bedrock actually serves,
+# not merely something region-shaped — a shape-only regex (two-letter prefix +
+# hyphenated words + digit suffix) accepted a typo like "us-eats-1" or a
+# fabricated "zz-fake-1" (review finding RGN-001) and let it reach the SDK
+# instead of failing at boot. This list is NOT the general AWS region list:
+# ap-east-1 (Hong Kong) is a real AWS region but does not serve bedrock-runtime,
+# so it is deliberately absent (review finding RGN-002 — an earlier version of
+# this allowlist used the general AWS region set, which was too loose in one
+# direction and too tight in another: it admitted ap-east-1, which 400s at
+# call time, while missing ap-southeast-5/6/7 and ap-east-2, which are valid).
+# AWS adds Bedrock regions a few times a year; re-check the source above and
+# widen this set if a real Bedrock region is rejected here.
+_AWS_REGIONS = frozenset(
+    {
+        "us-east-1",
+        "us-east-2",
+        "us-west-1",
+        "us-west-2",
+        "ca-central-1",
+        "ca-west-1",
+        "eu-central-1",
+        "eu-central-2",
+        "eu-north-1",
+        "eu-south-1",
+        "eu-south-2",
+        "eu-west-1",
+        "eu-west-2",
+        "eu-west-3",
+        "ap-east-2",
+        "ap-northeast-1",
+        "ap-northeast-2",
+        "ap-northeast-3",
+        "ap-south-1",
+        "ap-south-2",
+        "ap-southeast-1",
+        "ap-southeast-2",
+        "ap-southeast-3",
+        "ap-southeast-4",
+        "ap-southeast-5",
+        "ap-southeast-6",
+        "ap-southeast-7",
+        "il-central-1",
+        "me-central-1",
+        "me-south-1",
+        "af-south-1",
+        "sa-east-1",
+        "us-gov-east-1",
+        "us-gov-west-1",
+    }
+)
 
 # Opt-in trace-content flag. OFF unless the value is exactly "true" (case-insensitive,
 # surrounding whitespace ignored) — see trace_content_enabled.
@@ -104,7 +164,7 @@ class LLMConfig:
     max_tokens: int = 1024  # response cap sent to the provider
     temperature: float = 0.0  # deterministic summaries
     token_budget: int = 20_000  # per-request ceiling; refuse if exceeded
-    aws_region: str | None = None  # bedrock only; None lets boto3 resolve it
+    aws_region: str | None = None  # bedrock only; pinned by _aws_region()
 
     def redacted(self) -> dict:
         """Config safe to log — never includes the credential."""
@@ -121,6 +181,29 @@ class LLMConfig:
 
     def __str__(self) -> str:  # never render the secret, even via str()
         return f"LLMConfig({self.redacted()})"
+
+
+def _aws_region(provider: str) -> str | None:
+    """Resolve the Bedrock region: AWS_REGION if set, else the pinned literal.
+
+    Returns None off the bedrock path — `aws_region` is bedrock-only, and carrying
+    a region on the direct-Anthropic route would report a region no call used.
+    A malformed value raises rather than reaching the SDK, because a region that
+    does not resolve fails at call time, mid-demo, instead of at boot.
+    """
+    if provider != "bedrock":
+        return None
+    raw = os.getenv("AWS_REGION", "").strip()
+    if not raw:
+        return _DEFAULT_BEDROCK_REGION
+    if raw not in _AWS_REGIONS:
+        raise LLMConfigError(
+            f"AWS_REGION={raw!r} is not a known AWS region (expected e.g. "
+            f"{_DEFAULT_BEDROCK_REGION!r}). Bedrock model access is granted per "
+            "region, so a value that merely looks region-shaped fails at boot "
+            "instead of reaching the SDK. Unset it to use the pinned default."
+        )
+    return raw
 
 
 def load_llm_config() -> LLMConfig:
@@ -233,5 +316,56 @@ def load_llm_config() -> LLMConfig:
         max_tokens=max_tokens,
         temperature=temperature,
         token_budget=token_budget,
-        aws_region=os.getenv("AWS_REGION"),
+        aws_region=_aws_region(provider),
     )
+
+
+def harden_trace_client() -> None:
+    """Make this process incapable of posting run inputs/outputs to LangSmith.
+
+    The agent loop runs inside a framework, and a framework tracer exports the state it
+    is handed: measured on this service, a traced two-step run carried the
+    model-authored policy query, the model's prose and its narration onto the spans.
+    `assistant.py`'s CONTENT RULE forbids all three, and the explicit spans were written
+    by hand precisely so a tracer would not decide what travels.
+
+    `LangChainTracer` posts through the LangSmith singleton
+    (`langchain_core.tracers.langchain.get_client -> run_trees.get_cached_client`), and
+    that singleton is built by whoever calls it FIRST, with whatever arguments they
+    pass. So this claims it at startup with content hiding on. `Client._run_transform`
+    -- the one function every ingest path goes through (`create_run`,
+    `multipart_ingest`, `batch_ingest_runs`) -- then blanks `inputs` and `outputs` while
+    leaving `extra.metadata` alone, which is where our own spans keep all their signal.
+
+    Two things this deliberately does NOT do:
+
+    - It does not hide metadata. `LANGSMITH_HIDE_METADATA=true` would blank the outcome,
+      the policy-band and the retrieval scores our spans exist to carry, so the check
+      below refuses that configuration rather than accepting a trace that shows nothing.
+    - It does not hide errors. `_hide_run_error` is passthrough, so a raised exception's
+      message still posts -- which is why the assistant and the adapter scrub identifiers
+      and provider bodies out of their exception text at the source.
+
+    A shell cannot turn this off, which is the difference between this and
+    `LLM_TRACE_CONTENT`: that flag is read from the environment and a compose gate can
+    only police the committed file.
+    """
+    client = get_cached_client(hide_inputs=True, hide_outputs=True)
+    # Private attributes because langsmith exposes no public reader for them; asserting
+    # is the point -- priming SECOND wins nothing, and a silently unhardened singleton
+    # is the failure this function exists to prevent.
+    hidden = bool(getattr(client, "_hide_inputs", False)) and bool(
+        getattr(client, "_hide_outputs", False)
+    )
+    if not hidden:
+        raise LLMConfigError(
+            "the LangSmith client was built before tracing was hardened, so run "
+            "inputs and outputs would be exported: framework spans carry the model's "
+            "prose and the model-authored policy query"
+        )
+    if getattr(client, "_hide_metadata", False):
+        raise LLMConfigError(
+            "LANGSMITH_HIDE_METADATA is set, which blanks the enum codes, retrieval "
+            "scores and outcomes the assistant spans carry — a trace that shows "
+            "nothing is not a privacy-safe trace"
+        )

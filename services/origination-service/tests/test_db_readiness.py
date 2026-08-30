@@ -117,6 +117,49 @@ READABLE_DOB_CONSTRAINT_DEF = (
 )
 
 
+# The three assistant_runs CHECKs as Postgres renders them back (`IN (...)` is stored as
+# `= ANY (ARRAY[...])`), and the columns as pg_attribute reports them: name, format_type
+# rendering, attnotnull, atthasdef. The rung compares the WHOLE definition, so the fakes
+# have to answer with the real rendering rather than a paraphrase.
+#
+# These literals are pinned here, not imported from config: a fake built from the constant
+# it is meant to model would agree with any drift. test_migration_0021_live.py compares
+# config's constants against a real freshly-migrated table, which is what proves them.
+ASSISTANT_RUNS_CHECK_DEF = (
+    "check(((refusal_code is null) or (refusal_code = any (array['not_found'::text,"
+    "'never_decisioned'::text,'assistant_refused'::text,'llm_unavailable'::text,"
+    "'kyc_blocked'::text,'refused'::text,'idempotency_conflict'::text,"
+    "'downstream_unavailable'::text,'self_decision'::text,"
+    "'idempotency_key_too_long'::text,'unknown_policy_topic'::text]))))"
+)
+ASSISTANT_RUNS_CHECK_DEFS = {
+    "ck_assistant_runs_task": (
+        "CHECK ((task = ANY (ARRAY['decision'::text, 'explain'::text])))"
+    ),
+    "ck_assistant_runs_refusal_code": ASSISTANT_RUNS_CHECK_DEF,
+    "ck_assistant_runs_refusal_matches_status": (
+        "CHECK (((http_status = 200) = (refusal_code IS NULL)))"
+    ),
+}
+ASSISTANT_RUNS_COLUMN_ROWS = [
+    ("id", "bigint", True, True),
+    ("trace_id", "text", True, False),
+    ("application_id", "integer", True, False),
+    ("task", "text", True, False),
+    ("policy_topic", "text", False, False),
+    ("http_status", "integer", True, False),
+    ("refusal_code", "text", False, False),
+    ("outcome", "text", False, False),
+    ("record_status", "text", False, False),
+    ("policy_band", "text", False, False),
+    ("narration_validated", "boolean", False, False),
+    ("policy_citations", "integer", False, False),
+    ("policy_searches", "integer", False, False),
+    ("latency_ms", "integer", True, False),
+    ("created_at", "timestamp with time zone", True, True),
+]
+
+
 class _FakeCursor:
     def __init__(self):
         self._last = ""
@@ -131,9 +174,24 @@ class _FakeCursor:
         self._last = sql
 
     def fetchone(self):
+        # Dispatch on the CONSTRAINT NAME, not on `pg_get_constraintdef` alone: there are
+        # four definition-checking rungs now, and answering them all with the dob
+        # definition made the assistant_runs rungs read a constraint that is not theirs.
+        for conname, definition in ASSISTANT_RUNS_CHECK_DEFS.items():
+            if conname in self._last:
+                return (definition,)
         if "pg_get_constraintdef" in self._last:
             return (READABLE_DOB_CONSTRAINT_DEF,)
+        if "pg_trigger" in self._last:
+            # tgenabled, not a bare 1: 'O' (origin) is what a plainly created,
+            # enforcing trigger carries.
+            return ("O",)
         return (1,)
+
+    def fetchall(self):
+        if "pg_attribute" in self._last:
+            return list(ASSISTANT_RUNS_COLUMN_ROWS)
+        return []
 
 
 class _FakeConn:
@@ -684,6 +742,106 @@ def test_probe_fails_when_disclosure_document_body_is_not_ready(monkeypatch, con
     assert err == "schema_not_ready:disclosures.document_body"
 
 
+class _AuditLogsTriggerMissingCursor(_FakeCursor):
+    """Every rung before it answers ready (inherited); the audit_logs append-only trigger
+    (D20, migration 0022) alone is absent -- the volume predates it, so applications.py's
+    INSERTs into audit_logs succeed while UPDATE/DELETE stays silently unguarded."""
+
+    def fetchone(self):
+        if "trg_audit_logs_append_only" in self._last:
+            return None
+        return super().fetchone()
+
+
+class _AuditLogsTriggerMissingConn:
+    def cursor(self):
+        return _AuditLogsTriggerMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_audit_logs_append_only_trigger_is_not_ready(monkeypatch):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _AuditLogsTriggerMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:trg_audit_logs_append_only"
+
+
+class _AuditLogsNoTruncateMissingCursor(_FakeCursor):
+    """The row-level trigger is applied but trg_audit_logs_no_truncate is not -- the
+    half of the D20 pair a row trigger cannot cover, because row-level triggers do not
+    fire on TRUNCATE. On such a volume `TRUNCATE audit_logs` still empties the trail."""
+
+    def fetchone(self):
+        if "trg_audit_logs_no_truncate" in self._last:
+            return None
+        return super().fetchone()
+
+
+class _AuditLogsNoTruncateMissingConn:
+    def cursor(self):
+        return _AuditLogsNoTruncateMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_audit_logs_no_truncate_trigger_is_not_ready(monkeypatch):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _AuditLogsNoTruncateMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:trg_audit_logs_no_truncate"
+
+
+def _audit_trigger_conn_with_tgenabled(value):
+    """A volume where both D20 triggers exist but the no-truncate one carries
+    `value` in tgenabled: 'D' is ALTER TABLE ... DISABLE TRIGGER, 'R' is ENABLE
+    REPLICA TRIGGER (fires only in replica mode). Both leave the pg_trigger row in
+    place, so a presence-only rung reads ready over a table that enforces nothing on
+    TRUNCATE for the plain session origination writes from."""
+
+    class _Cursor(_FakeCursor):
+        def fetchone(self):
+            if "trg_audit_logs_no_truncate" in self._last:
+                return (value,)
+            return super().fetchone()
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+        def close(self):
+            pass
+
+    return _Conn
+
+
+@pytest.mark.parametrize("tgenabled", ["D", "R"])
+def test_probe_fails_when_audit_logs_trigger_is_not_enforced(monkeypatch, tgenabled):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2,
+        "connect",
+        lambda *a, **k: _audit_trigger_conn_with_tgenabled(tgenabled)(),
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:trg_audit_logs_no_truncate:not_enforced"
+
+
 def test_probe_false_when_database_url_unset(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", "")
     ok, err = config.database_reachable()
@@ -810,3 +968,194 @@ def test_every_readiness_rung_exists_in_the_init_schema():
         "readiness rungs name objects absent from db/init/001_schema.sql, so a fresh "
         f"database can never report ready: {missing}"
     )
+
+
+class _AssistantRunsCursor:
+    """Every rung before assistant_runs answers ready; assistant_runs answers as
+    configured by `columns` (name -> (type, notnull, hasdef), or None for "table absent")
+    and `checks` (conname -> rendered CHECK definition, missing key = NOT VALID/absent).
+
+    The assistant_runs write is deliberately non-fatal — `assistant_runs.record` swallows
+    everything so a telemetry fault cannot 500 an officer's answer — so an unmigrated or
+    wrong-shaped volume loses every row while the request and /health both look fine.
+    These rungs are the only thing that report it, which is why they get a fake of their
+    own rather than reusing the always-ready one above.
+    """
+
+    _DEFAULT = object()  # sentinel: distinct from None, which means "table absent"
+
+    def __init__(self, columns=_DEFAULT, checks=None):
+        self._columns = (
+            {name: (typ, nn, hd) for name, typ, nn, hd in ASSISTANT_RUNS_COLUMN_ROWS}
+            if columns is self._DEFAULT
+            else columns
+        )
+        self._checks = dict(ASSISTANT_RUNS_CHECK_DEFS) if checks is None else checks
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "ck_applicants_dob_readable" in self._last:
+            return (READABLE_DOB_CONSTRAINT_DEF,)
+        if "pg_get_constraintdef" in self._last:
+            # A constraint-definition lookup, keyed on the literal conname the rung
+            # interpolates. Missing from self._checks models NOT VALID/absent (no row) --
+            # matched only by the exact `conname = '<name>'` clause, not a bare substring,
+            # so this branch can't accidentally answer for a DIFFERENT constraint.
+            for conname, definition in self._checks.items():
+                if "conname = '" + conname + "'" in self._last:
+                    return (definition,)
+            return None
+        if self._last.strip() == "SELECT to_regclass('assistant_runs')":
+            return (None,) if self._columns is None else ("assistant_runs",)
+        if "pg_trigger" in self._last:
+            # tgenabled for the D20 audit_logs pair: 'O' (origin) is an enforcing
+            # trigger. This fake models a ready volume for every rung but its own.
+            return ("O",)
+        return (1,)
+
+    def fetchall(self):
+        if "pg_attribute" not in self._last or self._columns is None:
+            return []
+        return [(name, typ, nn, hd) for name, (typ, nn, hd) in self._columns.items()]
+
+
+class _AssistantRunsConn:
+    def __init__(self, **kwargs):
+        self._kwargs = kwargs
+
+    def cursor(self):
+        return _AssistantRunsCursor(**self._kwargs)
+
+    def close(self):
+        pass
+
+
+def _probe_with(monkeypatch, **kwargs):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _AssistantRunsConn(**kwargs)
+    )
+    return config.database_reachable()
+
+
+def test_probe_fails_when_assistant_runs_is_absent(monkeypatch):
+    # A volume that never ran migration 0021: the telemetry write fails on every request
+    # and is swallowed, so nothing else in the system reports the gap.
+    ok, err = _probe_with(monkeypatch, columns=None)
+    assert ok is False
+    assert err == "schema_not_ready:assistant_runs"
+
+
+def test_probe_fails_when_a_written_column_is_missing(monkeypatch):
+    # policy_searches is one of the columns assistant_runs.record always supplies a value
+    # for. A pre-existing table missing it satisfies CREATE TABLE IF NOT EXISTS and every
+    # constraint check, then fails every INSERT — which record() swallows.
+    columns = {
+        name: (typ, nn, hd)
+        for name, typ, nn, hd in ASSISTANT_RUNS_COLUMN_ROWS
+        if name != "policy_searches"
+    }
+    ok, err = _probe_with(monkeypatch, columns=columns)
+    assert ok is False
+    assert err == "schema_not_ready:assistant_runs:policy_searches"
+
+
+def test_probe_fails_when_a_column_has_the_wrong_type(monkeypatch):
+    # `ADD COLUMN IF NOT EXISTS` swallows a same-named column of any type — a TEXT
+    # latency_ms passes a name-only rung and then fails the INSERT the same way a missing
+    # column does.
+    columns = {name: (typ, nn, hd) for name, typ, nn, hd in ASSISTANT_RUNS_COLUMN_ROWS}
+    columns["latency_ms"] = ("text", True, False)
+    ok, err = _probe_with(monkeypatch, columns=columns)
+    assert ok is False
+    assert err == "schema_not_ready:assistant_runs:latency_ms"
+
+
+def test_probe_fails_when_a_written_column_is_nullable_when_it_should_not_be(
+    monkeypatch,
+):
+    columns = {name: (typ, nn, hd) for name, typ, nn, hd in ASSISTANT_RUNS_COLUMN_ROWS}
+    columns["latency_ms"] = ("integer", False, False)
+    ok, err = _probe_with(monkeypatch, columns=columns)
+    assert ok is False
+    assert err == "schema_not_ready:assistant_runs:latency_ms"
+
+
+def test_probe_fails_when_an_extra_required_column_exists(monkeypatch):
+    # NOT NULL, no default, and outside the columns the INSERT always supplies: every row
+    # this table would accept fails, and the loop over the intended columns alone cannot
+    # see a column it never expected.
+    columns = {name: (typ, nn, hd) for name, typ, nn, hd in ASSISTANT_RUNS_COLUMN_ROWS}
+    columns["tenant_id"] = ("integer", True, False)
+    ok, err = _probe_with(monkeypatch, columns=columns)
+    assert ok is False
+    assert err == "schema_not_ready:assistant_runs:tenant_id"
+
+
+def test_probe_fails_when_the_refusal_code_check_predates_the_split(monkeypatch):
+    # The constraint is probed by DEFINITION, not by name. `CREATE TABLE IF NOT EXISTS`
+    # accepts a pre-existing table of any shape, so a hand-applied earlier attempt whose
+    # CHECK still lacks never_decisioned would satisfy a name-only rung while admitting a
+    # code set the reader does not recognise.
+    stale = "check(((refusal_code is null) or (refusal_code = any (array['not_found'::text]))))"
+    checks = dict(ASSISTANT_RUNS_CHECK_DEFS)
+    checks["ck_assistant_runs_refusal_code"] = stale
+    ok, err = _probe_with(monkeypatch, checks=checks)
+    assert ok is False
+    assert err == "schema_not_ready:ck_assistant_runs_refusal_code:definition"
+
+
+def test_probe_fails_when_the_refusal_code_check_admits_a_wider_set(monkeypatch):
+    # A substring test ("does this mention never_decisioned") would let a WIDER
+    # constraint through — one admitting a code the reader does not recognise. The rung
+    # compares the full rendered expression, so an added literal must fail it too.
+    wide = (
+        ASSISTANT_RUNS_CHECK_DEFS["ck_assistant_runs_refusal_code"][:-1] + ",'extra'))"
+    )
+    checks = dict(ASSISTANT_RUNS_CHECK_DEFS)
+    checks["ck_assistant_runs_refusal_code"] = wide
+    ok, err = _probe_with(monkeypatch, checks=checks)
+    assert ok is False
+    assert err == "schema_not_ready:ck_assistant_runs_refusal_code:definition"
+
+
+def test_probe_fails_when_the_refusal_code_check_is_not_valid(monkeypatch):
+    # `convalidated` is part of the query, so a constraint added NOT VALID returns no row
+    # at all — it enforces nothing against the rows already there.
+    checks = dict(ASSISTANT_RUNS_CHECK_DEFS)
+    del checks["ck_assistant_runs_refusal_code"]
+    ok, err = _probe_with(monkeypatch, checks=checks)
+    assert ok is False
+    assert err == "schema_not_ready:ck_assistant_runs_refusal_code"
+
+
+def test_probe_fails_when_the_task_check_is_missing(monkeypatch):
+    checks = dict(ASSISTANT_RUNS_CHECK_DEFS)
+    del checks["ck_assistant_runs_task"]
+    ok, err = _probe_with(monkeypatch, checks=checks)
+    assert ok is False
+    assert err == "schema_not_ready:ck_assistant_runs_task"
+
+
+def test_probe_fails_when_the_status_check_is_missing(monkeypatch):
+    checks = dict(ASSISTANT_RUNS_CHECK_DEFS)
+    del checks["ck_assistant_runs_refusal_matches_status"]
+    ok, err = _probe_with(monkeypatch, checks=checks)
+    assert ok is False
+    assert err == "schema_not_ready:ck_assistant_runs_refusal_matches_status"
+
+
+def test_probe_is_ready_when_the_table_and_its_checks_are_current(monkeypatch):
+    ok, err = _probe_with(monkeypatch)
+    assert (ok, err) == (True, None)

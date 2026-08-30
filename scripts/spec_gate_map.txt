@@ -46,6 +46,12 @@ services/payment-service/app/redactor.py => adr/0006-logging-redaction-strategy.
 # --- Week 2: RAG corpus hygiene ---------------------------------------------
 rag_eval => adr/0007-rag-corpus-hygiene.md
 
+# The evaluator is its own decision, not corpus hygiene: 0007 governs what may
+# be admitted to the corpus, 0022 governs sending that admitted text to a
+# generative model under S-5's narrow exception. Mapped to the module rather
+# than to `rag_eval`, which already belongs to 0007 above.
+rag_eval/evaluator.py => adr/0022-offline-evaluator-for-the-support-test.md
+
 # --- Week 3: decisioning assistant ------------------------------------------
 services/decision-service/app => docs/spec-decision-assistant-week3.md
 services/decision-service/app => adr/0009-decisioning-assistant-design.md
@@ -124,9 +130,172 @@ services/gateway/app/main.py => adr/0010-application-ownership-authorization.md
 # though ADR 0017's own maker-checker decision is Proposed, not built.
 services/origination-service/app/authz.py => adr/0017-self-decision-anonymous-submission-gap.md
 
+# --- Policy retrieval on the assistant loop ---------------------------------
+# ADR 0019 is built, and policy_retrieval.py is the module its decision is
+# about: the abstain-by-default retrieval seam whose deletion would leave the
+# assistant quoting policy from nowhere.
+services/origination-service/app/policy_retrieval.py => adr/0019-policy-retrieval-on-the-assistant-loop.md
+
 # --- Exemptions: docs with no code path whose deletion would violate them ---
 # EXEMPT: adr/0001-record-architecture-decisions.md — establishes the ADR process itself; obligates no source file.
 # EXEMPT: adr/0002-single-database-shared-schema.md — records the existing one-database constraint; no artifact whose deletion violates it (DDL numbering is covered by migration-numbering-gate).
 # EXEMPT: adr/0003-store-card-data-for-convenience.md — documents the PCI debt scheduled for removal; mapping it would require the violating code to keep existing.
 # EXEMPT: adr/0008-retrievable-decision-records.md — Accepted as a field contract only; its own Status defers the schema migration and write path, so there is no implementation to pin yet.
 # EXEMPT: docs/spec-rag-week2.md — Status is Draft, pending gate approval; not approved for build.
+
+# --- Week 8 feedback: interim handling of a double-charged borrower ---------
+# ADR 0018's decision is Proposed, but the code area it obligates is live: the
+# duplicate-suspect detector IS the whole of the interim control today, so
+# deleting it must fail this gate. Same footing as ADR 0017 above -- the ADR's
+# own build (prevention at capture, ADR 0013) is deferred to week 9, while the
+# detection it decides to keep and attribute exists on main right now.
+services/servicing-service/app/reconciliation.py => adr/0018-interim-handling-of-a-double-charged-borrower.md
+
+# --- Week 9: the atomic payment application (D3) ----------------------------
+# ADR 0020 is Accepted -- built and merged to main in PR #77 (ceda4e2). The
+# code area (balance.py) is live today, so deleting it must fail this gate.
+# ADR 0020 decides that the record of an application and the movement of the
+# balance are one statement, and that the amount and the loan come out of the
+# payments row rather than from the caller. balance.py holds that statement,
+# so the pairing names the file rather than the service directory -- a
+# directory survives deletion of the one file the ADR is about.
+#
+# db/migrations/0019_payment_applications.sql is deliberately NOT mapped, even
+# though it is on main now too: this gate requires a mapped path to EXIST, and
+# a second mapping would add nothing balance.py doesn't already cover. Deleting
+# the migration without deleting balance.py is caught at runtime instead, by
+# the readiness rung both services run against the table's definition.
+services/servicing-service/app/balance.py => adr/0020-atomic-payment-application.md
+
+# --- Week 10: the agent framework and the root trace ------------------------
+# ADR 0021 is Accepted -- built and merged to main across PRs #68, #76, #79 and
+# #80. Three code areas carry its decisions and all three exist on main today:
+# assistant.py hosts the framework agent and the five interlocks the loop swap
+# moved into the tool closures, chat_model.py is the BaseChatModel wrapper
+# that keeps transport, retry, validation and the redaction boundary in
+# app/llm/ rather than handing them to the framework -- decision 1's whole
+# point, and the reason the Claude Agent SDK was rejected -- and llm/config.py
+# holds harden_trace_client(), which decision 5 rests on: it claims the
+# LangSmith singleton at boot so the framework's own tracer cannot export graph
+# state carrying the model's prose and the model-authored policy query.
+#
+# All three are mapped rather than one, because deleting any one alone would
+# retire a distinct decision: drop assistant.py and the interlocks go with it;
+# drop chat_model.py and the framework talks to a provider directly; drop
+# llm/config.py and nothing primes the singleton before the client exists.
+#
+# What this mapping does NOT cover: the gate is a file-existence check, so it
+# catches deleting llm/config.py, not deleting harden_trace_client() from it or
+# the lifespan call in main.py that invokes it. The behaviour rung for that is
+# the blocking agentic-loop-gate, whose test_agentic_loop.py asserts the boot
+# hardening. Do not read a line here as coverage of all six decisions.
+#
+# Two more decisions live in files deliberately NOT mapped here, because a
+# mapping asserts which decision record owns a file and neither of these is
+# owned by 0021:
+#   * decision 4 (tool_choice / disable_parallel_tool_use) is in
+#     app/llm/adapter.py, which is ADR 0005's transport surface.
+#   * decision 5's outermost span, assistant.entry, moved to app/main.py with
+#     PR #85; main.py is every origination route, not this ADR's area.
+# Both are held by behaviour rungs instead -- test_prompt_contracts.py and
+# test_assistant_trace.py, under the blocking agentic-loop-gate.
+#
+# policy_retrieval.py stays mapped to ADR 0019 above, not here -- ADR 0021
+# binds the tool, ADR 0019 decides what it may return.
+services/origination-service/app/assistant.py => adr/0021-agent-framework-and-root-trace.md
+services/origination-service/app/llm/chat_model.py => adr/0021-agent-framework-and-root-trace.md
+services/origination-service/app/llm/config.py => adr/0021-agent-framework-and-root-trace.md
+
+# --- Log aggregation, retention and trace correlation -----------------------
+# docs/spec-log-aggregation.md is a spec package with no implementation behind
+# it yet, mapped rather than exempt on the same footing as weeks 5-8 above:
+# several of the code areas it obligates are live today. What this gate can do
+# for it is bounded and worth stating, because the previous version of this
+# comment claimed more: the check is EXISTENCE-only (see spec_diff_gate.sh's
+# header), so it catches DELETION of a mapped path's spec and never catches
+# DRIFT in either direction. Drift in the logging copies is redactor-drift's
+# and D2's own rung's job, not this one's.
+#
+# Mapped, one line each, every path live on main today:
+#   * the 7 logging_config.py copies (D1, D2) -- per file rather than as
+#     services/*/app, the precedent the redactor entries set at the top of this
+#     file: a directory-level line survives deletion of the one file the spec
+#     is about, and drift comparison alone reads a deleted copy as one fewer
+#     copy to check.
+#   * docker-compose.yml (D3) -- the gateway log volume the spec adds.
+#   * docs/runbook.md (D1(b) rotation arithmetic, D4(d) audit-before-collector
+#     ordering). A doc on the left is unusual here and deliberate: the runbook
+#     is where two deliverables record their output, so its existence is a real
+#     obligation of this spec, not a code area.
+#   * every inbound-route surface D5(a) obligates, one line per file. Two
+#     kinds of file, both listed, because deleting either one loses the
+#     obligation on its own:
+#     - each service's app-assembly main.py. Inbound acceptance is registered
+#       once for a whole app (a middleware or a shared dependency), not per
+#       route, so main.py is the file D5(a)'s "every inbound route" actually
+#       obligates: gateway, origination, servicing, kyc, decision, disclosure,
+#       payment. gateway's and servicing's main.py already carry ADR 0010 and
+#       ADR 0014 lines; two docs for one path is precedented by llm_client.py
+#       at the top of this file. origination's line also carries D7(b)'s
+#       run-id line.
+#     - each router module that declares routes, since a router can be deleted
+#       without main.py changing: origination applications.py and offers.py,
+#       servicing loans.py, kyc kyc.py, decision decisions.py, disclosure
+#       disclosures.py and offers.py, payment payments.py (the router module,
+#       not the charge module below).
+#   * every outbound seam D5(a) obligates: origination clients.py (the
+#     forwarding call sites; it already carries an ADR 0004 line) and
+#     payment-service payments.py, the payment->servicing hop that already
+#     sends the header. The gateway's own proxy hop lives in its main.py,
+#     listed above, so it is not a second line.
+#   * the two request_id-handling copies D5(a) names by service rather than by
+#     file: decision-service decision.py, which D5(a) names as a minting entry
+#     point (its one httpx call goes to the Experian bureau, an external party
+#     and not a sibling service, so it is mapped as a minting site and not as
+#     an outbound seam), and servicing-service payments.py, which holds a
+#     hand-copy of new_request_id while D5(a) lists servicing-service among
+#     the services that never mint. Deleting either is a D5 loss this gate
+#     should catch. servicing's payments.py already carries an ADR 0014 line;
+#     decision.py is new to this map.
+#
+# Deliberately NOT mapped, and this is not an oversight:
+#   * outbound calls to third parties: decision-service's Experian pull and
+#     origination-service's Bedrock client under app/llm/. D5(a) obligates
+#     forwarding on sibling HTTP clients, and a third party is not a sibling,
+#     so those call sites carry no forwarding obligation. decision.py is
+#     mapped above, but for its minting, not for that call.
+#   * D4's audit/purge script. It does not exist yet, and this gate fails loud
+#     on a left-hand path that resolves to nothing -- an unbuilt path is a
+#     stale entry, not a placeholder. Add the line in the PR that adds the
+#     script.
+#   * D7's trace change. app/assistant.py is mapped to ADR 0021 above, which
+#     owns the trace surface; D7(a) is deferred pending ADR 0024 (D7(e)), so
+#     the obligation is on that ADR, not on this spec, until it lands.
+services/gateway/app/logging_config.py => docs/spec-log-aggregation.md
+services/origination-service/app/logging_config.py => docs/spec-log-aggregation.md
+services/servicing-service/app/logging_config.py => docs/spec-log-aggregation.md
+services/kyc-service/app/logging_config.py => docs/spec-log-aggregation.md
+services/decision-service/app/logging_config.py => docs/spec-log-aggregation.md
+services/disclosure-service/app/logging_config.py => docs/spec-log-aggregation.md
+services/payment-service/app/logging_config.py => docs/spec-log-aggregation.md
+docker-compose.yml => docs/spec-log-aggregation.md
+docs/runbook.md => docs/spec-log-aggregation.md
+services/origination-service/app/clients.py => docs/spec-log-aggregation.md
+services/origination-service/app/main.py => docs/spec-log-aggregation.md
+services/gateway/app/main.py => docs/spec-log-aggregation.md
+services/servicing-service/app/main.py => docs/spec-log-aggregation.md
+services/kyc-service/app/main.py => docs/spec-log-aggregation.md
+services/decision-service/app/main.py => docs/spec-log-aggregation.md
+services/disclosure-service/app/main.py => docs/spec-log-aggregation.md
+services/payment-service/app/main.py => docs/spec-log-aggregation.md
+services/origination-service/app/routers/applications.py => docs/spec-log-aggregation.md
+services/origination-service/app/routers/offers.py => docs/spec-log-aggregation.md
+services/servicing-service/app/routers/loans.py => docs/spec-log-aggregation.md
+services/kyc-service/app/routers/kyc.py => docs/spec-log-aggregation.md
+services/decision-service/app/routers/decisions.py => docs/spec-log-aggregation.md
+services/disclosure-service/app/routers/disclosures.py => docs/spec-log-aggregation.md
+services/disclosure-service/app/routers/offers.py => docs/spec-log-aggregation.md
+services/payment-service/app/routers/payments.py => docs/spec-log-aggregation.md
+services/payment-service/app/payments.py => docs/spec-log-aggregation.md
+services/decision-service/app/decision.py => docs/spec-log-aggregation.md
+services/servicing-service/app/payments.py => docs/spec-log-aggregation.md

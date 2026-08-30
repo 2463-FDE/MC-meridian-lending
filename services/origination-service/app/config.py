@@ -122,6 +122,57 @@ _DOB_READABLE_EXPECTED_DEF = _normalize_constraint_def(
 )
 
 
+# The shape assistant_runs.record's INSERT requires, column by column: rendered type,
+# NOT NULL, and whether a default exists. `CREATE TABLE IF NOT EXISTS` accepts a
+# pre-existing table of ANY shape, so a table left by an earlier hand-applied attempt
+# satisfies both the migration and a name-only rung -- and then every INSERT raises
+# inside `record`, which swallows it. Nothing else in the system reports that silence.
+#
+# `id` and `created_at` are not written by the INSERT but are asserted anyway: both are
+# NOT NULL, so an omitted column with no default fails the write exactly as a missing one
+# does. Types are the `format_type` rendering, which is what pg_attribute reports.
+_ASSISTANT_RUNS_COLUMNS = {
+    "id": ("bigint", True, True),
+    "trace_id": ("text", True, False),
+    "application_id": ("integer", True, False),
+    "task": ("text", True, False),
+    "policy_topic": ("text", False, False),
+    "http_status": ("integer", True, False),
+    "refusal_code": ("text", False, False),
+    "outcome": ("text", False, False),
+    "record_status": ("text", False, False),
+    "policy_band": ("text", False, False),
+    "narration_validated": ("boolean", False, False),
+    "policy_citations": ("integer", False, False),
+    "policy_searches": ("integer", False, False),
+    "latency_ms": ("integer", True, False),
+    "created_at": ("timestamp with time zone", True, True),
+}
+
+# The expected definitions of the three assistant_runs CHECKs, written as Postgres renders
+# them back (`IN (...)` is stored as `= ANY (ARRAY[...])`, each literal cast to ::text) and
+# normalised the same way the rung normalises what it reads. Compared in FULL rather than
+# probed for a substring: a substring test answers "does this constraint mention
+# never_decisioned", which a WIDER constraint -- one admitting a code no reader recognises,
+# or admitting free text -- passes just as easily as the intended one.
+_ASSISTANT_RUNS_CHECKS = {
+    "ck_assistant_runs_task": _normalize_constraint_def(
+        "CHECK ((task = ANY (ARRAY['decision'::text, 'explain'::text])))"
+    ),
+    "ck_assistant_runs_refusal_code": _normalize_constraint_def(
+        "CHECK (((refusal_code IS NULL) OR (refusal_code = ANY (ARRAY["
+        "'not_found'::text, 'never_decisioned'::text, 'assistant_refused'::text, "
+        "'llm_unavailable'::text, 'kyc_blocked'::text, 'refused'::text, "
+        "'idempotency_conflict'::text, 'downstream_unavailable'::text, "
+        "'self_decision'::text, 'idempotency_key_too_long'::text, "
+        "'unknown_policy_topic'::text]))))"
+    ),
+    "ck_assistant_runs_refusal_matches_status": _normalize_constraint_def(
+        "CHECK (((http_status = 200) = (refusal_code IS NULL)))"
+    ),
+}
+
+
 def reset_database_probe_cache() -> None:
     """Drop the cached probe result (forces the next call to reconnect)."""
     global _probe_state
@@ -298,6 +349,96 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             )
             if cur.fetchone() is None:
                 return False, "schema_not_ready:loans.note_rate"
+            # The assistant entry span records one assistant_runs row per officer request
+            # (migration 0021). That write is deliberately non-fatal —
+            # `assistant_runs.record` swallows every failure so a telemetry problem can
+            # never 500 an officer's answer — which means a volume missing the migration
+            # loses every row while both the request and /health look fine. Silence is the
+            # failure mode this rung exists to make visible; nothing else would report it.
+            #
+            # to_regclass, not information_schema + current_schema(): the rung must ask
+            # about the SAME table the INSERT resolves to, and that resolves by
+            # search_path. Same rule as migrations 0020 and 0021.
+            cur.execute("SELECT to_regclass('assistant_runs')")
+            row = cur.fetchone()
+            if row is None or row[0] is None:
+                return False, "schema_not_ready:assistant_runs"
+            # The table resolving is not the same as the table accepting the row. Every
+            # column the INSERT names is asserted by rendered type, nullability and
+            # whether it has a default — a pre-existing table missing policy_searches, or
+            # carrying latency_ms as TEXT, satisfies `CREATE TABLE IF NOT EXISTS`, passes
+            # a name-only rung, and then fails every write into a caller that swallows the
+            # error. That is the silent-zero-rows state this rung exists to name.
+            cur.execute(
+                "SELECT a.attname, format_type(a.atttypid, a.atttypmod), "
+                "a.attnotnull, a.atthasdef "
+                "FROM pg_attribute a "
+                "WHERE a.attrelid = to_regclass('assistant_runs') "
+                "AND a.attnum > 0 AND NOT a.attisdropped"
+            )
+            found = {
+                str(r[0]): (str(r[1]), bool(r[2]), bool(r[3])) for r in cur.fetchall()
+            }
+            for column, expected in _ASSISTANT_RUNS_COLUMNS.items():
+                if found.get(column) != expected:
+                    return False, "schema_not_ready:assistant_runs:" + column
+            # An EXTRA column is harmless unless the write has to supply it: a NOT NULL
+            # column with no default that the INSERT does not name fails every row, and
+            # the expected-columns loop above cannot see it.
+            for column, (_type, notnull, hasdef) in found.items():
+                if column not in _ASSISTANT_RUNS_COLUMNS and notnull and not hasdef:
+                    return False, "schema_not_ready:assistant_runs:" + column
+            # The CHECKs are probed by DEFINITION and not by name, and in full rather than
+            # for a substring. `CREATE TABLE IF NOT EXISTS` accepts a pre-existing table of
+            # any shape, so a constraint predating the never_decisioned split — or a WIDER
+            # one admitting codes the reader will not recognise — satisfies a name-only or
+            # substring rung. `convalidated` is required too: a constraint added NOT VALID
+            # enforces nothing against the rows already there.
+            #
+            # Missing/NOT VALID and drifted are distinct reasons: the first is an
+            # unapplied migration, the second a table someone else built.
+            for conname, expected_def in _ASSISTANT_RUNS_CHECKS.items():
+                cur.execute(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conrelid = to_regclass('assistant_runs') "
+                    "AND conname = '" + conname + "' "
+                    "AND contype = 'c' AND convalidated"
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return False, "schema_not_ready:" + conname
+                if _normalize_constraint_def(str(row[0] or "")) != expected_def:
+                    return False, "schema_not_ready:" + conname + ":definition"
+            # Append-only guarantee (D20, migration 0022): audit_logs is written from
+            # applications.py's INSERTs, so a volume that predates the triggers would
+            # accept those writes fine while UPDATE/DELETE on the "audit" trail stayed
+            # silently unguarded -- /health would read healthy over exactly the gap
+            # this rung exists to name. to_regclass, not table-name string matching:
+            # the check must name the SAME table the writer resolves to (search_path).
+            #
+            # BOTH triggers of the pair, because they guard different operations and a
+            # row-level trigger does not fire on TRUNCATE: on a volume carrying only
+            # trg_audit_logs_append_only, `TRUNCATE audit_logs` still empties the trail
+            # while this rung reports ready. tgenabled is read rather than presence
+            # alone -- ALTER TABLE ... DISABLE TRIGGER leaves the pg_trigger row in
+            # place enforcing nothing, which a SELECT 1 rung cannot tell from enforced.
+            # 'O' (origin) and 'A' (always) are the two values that fire for the plain
+            # session this service writes from; 'D' is disabled and 'R' fires only in
+            # replica mode, so either one leaves the trail mutable here.
+            for trigger in (
+                "trg_audit_logs_append_only",
+                "trg_audit_logs_no_truncate",
+            ):
+                cur.execute(
+                    "SELECT tgenabled FROM pg_trigger "
+                    "WHERE tgrelid = to_regclass('audit_logs') "
+                    "AND tgname = '" + trigger + "'"
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return False, "schema_not_ready:" + trigger
+                if str(row[0]) not in ("O", "A"):
+                    return False, "schema_not_ready:" + trigger + ":not_enforced"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__
@@ -400,3 +541,50 @@ def continuation_token_keys() -> list:
 CONTINUATION_TOKEN_TTL_DAYS = int(os.getenv("CONTINUATION_TOKEN_TTL_DAYS", "7"))
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# --- Policy retrieval (ADR 0019) ---------------------------------------------
+# Minimum match score a retrieved policy chunk must reach before the assistant
+# quotes it to an officer. NO COMMITTED DEFAULT, deliberately: the value is a
+# property of the corpus and the embedder, calibrated by `rag_eval` and printed
+# in rag_eval/eval_report.md, so a number baked in here would be wrong the first
+# time either changes. Unset means every query abstains -- a policy question is
+# answered "no policy match" rather than with a chunk nobody vouched for.
+#
+# Unlike DATABASE_URL this is NOT in missing_required_secrets(): origination
+# decisions, boards and discloses without retrieval, so an unset threshold is a
+# disabled feature, not an unhealthy service. policy_retrieval logs the reason
+# once per process instead.
+POLICY_RETRIEVAL_MIN_SCORE = os.getenv("POLICY_RETRIEVAL_MIN_SCORE", "")
+
+# Corpus location. Empty means "resolve it" -- policy_retrieval finds the mount
+# (/app/policies in the container, <repo>/policies in a checkout).
+POLICY_CORPUS_DIR = os.getenv("POLICY_CORPUS_DIR", "")
+
+# Checksum manifest declaring WHICH corpus files are approved and WHAT their
+# content is, in `shasum -a 256` format with corpus-directory-relative names.
+# Set it when the corpus is a supplied packet whose filenames are not lowercase
+# slugs: admission then comes from this declaration instead of the naming
+# convention, so the files need not be renamed (which would invalidate the
+# checksums they were approved under). Unset keeps the naming convention, which
+# is what the repository's own corpus uses.
+POLICY_CORPUS_MANIFEST = os.getenv("POLICY_CORPUS_MANIFEST", "")
+
+
+def policy_retrieval_min_score() -> float | None:
+    """The configured abstain threshold, or None when unset or unusable.
+
+    A malformed value (non-numeric, negative, or above 1.0 -- cosine similarity
+    is bounded by 1) returns None rather than a guess, so a typo disables
+    retrieval instead of silently admitting every chunk (a threshold of 0 would
+    quote the worst match in the corpus for any query).
+    """
+    raw = POLICY_RETRIEVAL_MIN_SCORE.strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if value <= 0.0 or value > 1.0:
+        return None
+    return value

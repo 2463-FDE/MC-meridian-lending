@@ -12,10 +12,9 @@ deferred to the next cycle by the client, with the design fixed in that ADR — 
 record of the movement, which is the ledger ADR 0014 Decision 3 specifies.
 """
 
-import logging
-import os
+import uuid
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -64,7 +63,6 @@ def health():
 class PaymentIn(BaseModel):
     loan_id: int
     pan: Optional[str] = None
-    cvv: Optional[str] = None
     amount: float
     ssn: Optional[str] = None
     name: Optional[str] = None
@@ -74,9 +72,11 @@ class PaymentIn(BaseModel):
 @app.post("/payments")
 def post_payment(
     body: PaymentIn,
+    response: Response,
     x_user_role: Optional[str] = Header(None),
     x_user_id: Optional[str] = Header(None),
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-Id"),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     # Same class of authorization failure closed elsewhere in this file (ADR 0014
     # Decision 1): a money role (CSR/admin), or the borrower who owns the loan
@@ -92,23 +92,75 @@ def post_payment(
             status_code=503,
             detail="payment processor not configured (PROCESSOR_API_KEY unset)",
         )
-    # No idempotency key accepted or checked. Retried POST = second charge. (debt D2)
+    # D19. This route is a SECOND front door onto the same payments table (debt D23),
+    # and the client confirmed 2026-08-17 that it stays -- so it enforces the identical
+    # contract. Deduping in one handler and not the other would leave the double charge
+    # reachable through this one, which is exactly why the arbiter is a DB constraint.
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Idempotency-Key header is required (ADR 0013 Decision 1).",
+        )
+    try:
+        # Canonicalize (lowercase, hyphenated): uuid.UUID() accepts hyphenless and
+        # uppercase spellings as the same UUID, but the key is stored as raw TEXT, so
+        # two spellings of one UUID would claim two distinct rows and dedupe nothing.
+        idempotency_key = str(uuid.UUID(idempotency_key))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="Idempotency-Key must be a UUID.")
+    # Fail closed on a schema this money path cannot safely write to. /health runs these
+    # same rungs, but /health is advisory: nothing consults it before a capture, so on a
+    # volume that skipped a migration the service reports unhealthy while charges keep
+    # landing. The cvv case is the sharp one -- the legacy column is NULLABLE, so an
+    # INSERT that omits it succeeds, and the capture writes a row into a table still
+    # retaining every CVV ever stored (D13a, migration 0020). The D19 rungs matter for the
+    # same reason: without 0018's partial unique index the claim insert has no arbiter and
+    # the double-charge control is gone at the moment it is first needed.
+    #
+    # database_reachable() is TTL-cached and single-flight, so this costs one probe per
+    # 5-second window across all callers, not a Postgres connection per charge.
+    schema_ok, not_ready = config.database_reachable()
+    if not schema_ok:
+        raise HTTPException(
+            status_code=503,
+            detail=f"database not ready for capture ({not_ready})",
+        )
     # X-Request-Id enters the span here too -- this route is a second front
     # door for the same charge path as payment-service's /payments (D1(a)).
-    return payments.charge(
+    result = payments.charge(
         body.loan_id,
         body.pan,
-        body.cvv,
         body.amount,
         body.ssn,
         body.name,
         body.method,
         request_id=x_request_id,
+        idempotency_key=idempotency_key,
     )
+    if result.get("idempotency") == payments.FINGERPRINT_MISMATCH:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This Idempotency-Key was already used for a different payment. "
+                "Use a new key for a new payment."
+            ),
+        )
+    if result.get("idempotency") == payments.IN_FLIGHT:
+        raise HTTPException(
+            status_code=409,
+            detail="A payment with this Idempotency-Key is still in progress.",
+            headers={"Retry-After": "5"},
+        )
+    if result.get("idempotency") == payments.REPLAY:
+        response.headers["Idempotent-Replay"] = "true"
+    return result
 
 
 class ApplyPaymentIn(BaseModel):
-    amount: float
+    # `amount` is deliberately absent (D3 / ADR 0020, spec D3(d) property 3). The amount
+    # credited comes out of the `payments` row this id names; a caller-supplied figure was
+    # a way to credit an amount that was never captured. Removing it is a breaking change
+    # to the one caller (payment-service), which moves in the same PR.
     payment_id: int
 
 
@@ -166,17 +218,30 @@ def apply_payment(
     # reachable through the gateway on session auth alone, so without this gate a caller
     # could credit any balance with no card and no payments row — money creation, which
     # is a different problem from the authorization model (debt D8 split (a), ADR 0013).
-    # The unlocked read-modify-write (D3) and the missing waterfall (D14) are unchanged
-    # here: this commit gates the route, it does not fix the mutation.
+    # The mutation is atomic as of D3 (ADR 0020): the application record and the balance
+    # movement commit together, and the amount comes from the payments row rather than
+    # from this body. The missing waterfall (D14) is still unchanged here.
     authz.require_internal_caller(x_internal_service)
     effective_request_id = _span_request_id(x_request_id)
-    new_balance = balance.apply_payment(
-        loan_id,
-        body.amount,
-        request_id=effective_request_id,
-        payment_id=body.payment_id,
-        outcome="applied",
-    )
+    try:
+        new_balance, moved = balance.apply_payment(
+            loan_id,
+            body.payment_id,
+            request_id=effective_request_id,
+        )
+    except balance.PaymentNotApplicable as exc:
+        # 422, not 404 or 500: the request is well-formed and the caller is authorized,
+        # but this payment does not credit this loan and NOTHING was written. The one
+        # caller reads any non-2xx as "not applied" and finalizes the row
+        # captured_unapplied, which is the honest state — card charged, balance unmoved.
+        log.warning(
+            "apply-payment refused request_id=%s loan_id=%s payment_id=%s outcome=%s",
+            effective_request_id,
+            loan_id,
+            body.payment_id,
+            exc.reason,
+        )
+        raise HTTPException(status_code=422, detail=exc.reason)
     # The LSS half of the payment span. This handler logged NOTHING before, so a
     # payment crossing the seam left one line in payment-service and no
     # counterpart here at all. Logged AFTER the balance actually moves, never
@@ -187,12 +252,15 @@ def apply_payment(
         effective_request_id,
         loan_id,
         body.payment_id,
-        "applied",
+        "applied" if moved else "already_applied",
         new_balance,
     )
     return {
         "loan_id": loan_id,
-        "applied_amount": body.amount,
+        # Whether THIS call moved the balance. A replay is a 200 with moved=false: the
+        # money is on the loan, so the caller has succeeded, but it credited nothing now.
+        # The caller must not add this to a running total.
+        "moved": moved,
         "new_balance": new_balance,
     }
 
