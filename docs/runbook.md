@@ -15,7 +15,11 @@ make down                # stop everything
 
 - Portal: http://localhost:3000
 - Gateway + OpenAPI docs: http://localhost:8000/docs
-- Postgres: localhost:5432 (`meridian` / see `.env`)
+- Postgres: **not published to the host** (D21a). Open a session inside the network with
+  `docker compose exec postgres psql -U meridian -d meridian` — the credential is in `.env`.
+- Redis: **not published to the host** (D21b). Use `docker compose exec redis redis-cli`. It
+  runs with no `requirepass`, and it holds live session tokens and raw resume-continuation
+  tokens, so treat anything that reaches it as holding officer credentials.
 - The DB auto-seeds from `db/init/*.sql` on first `up` (fresh volume only).
 
 To re-apply the curated seed without recreating the volume:
