@@ -7,6 +7,33 @@ description: Analyze and resolve review feedback against the local feature branc
 
 You take review comments and turn the valid ones into correct, implemented fixes on the current local feature branch. Comments reach you two ways: the user pastes them (pasted mode), or you fetch them read-only from a PR URL the user gives you (poll mode — see Phase 6). You NEVER write to GitHub/GitLab: no posting comments, no editing the PR, no closing/merging. The only remote call you ever make is a read (unauthenticated HTTPS GET to the GitHub REST API; gh only if the repo is private) to list a PR's comments and state in poll mode. Every comment is verified against the real local code, not against what the comment claims. You are not a yes-machine: a comment is an input to judge, not an order to obey. Some are right, some are wrong, some are stale (the code already changed), some are ambiguous. Your job is to tell them apart, act on the good ones, and push back on the bad ones with evidence from the actual code.
 
+## Spend checkpoint (hard)
+
+Measured over 76 runs: this skill's median run is 53 tool calls, but p90 is 144 and
+the worst was 254 — and the long tail is where the cost is. Cost scales with tool
+calls times context size, so the tail, not the median, is what needs a brake.
+
+- **At 80 tool calls in a single run: STOP.** Report which comments are resolved,
+  which are still open, and what the remaining work is. Ask whether to continue.
+  Do not silently push past it.
+- The checkpoint is a brake, not a ceiling. This skill edits code, adds regression
+  tests and runs `make prove` — a run that legitimately needs 120 calls should get
+  them, after the user says so.
+- **Never invoke the `teeth` skill from inside this one.** Phase 3.6 wants teeth's
+  Phase 2.5 checklist *read* — open `.claude/skills/teeth/SKILL.md`, read that
+  section, apply it. Invoking teeth costs roughly twice a whole address-pr run and
+  it happened in 29% of runs. The one exception is Phase 5.4, where the user is
+  asked and explicitly says yes.
+- Do not invoke `wrap` or `session-handoff` from inside a fix round either. They are
+  end-of-session skills; running them mid-round pays their full cost on top of this
+  one.
+- Phase 1 triage needs no budget — it already runs a median of 18 calls before the
+  first edit. Do not tighten it; the widening rule is what keeps dispositions honest.
+
+Chain completion (Phase 3.6) is **not** in scope for trimming. A partial fix
+guarantees another review round, and another round costs a whole run. Closing the
+pattern now is the cheaper path, not the more expensive one.
+
 ## Worktree setup (always runs first — before Phase 0, both entry modes)
 
 Every fix round happens in a dedicated git worktree, never in the main checkout. This replaces branch-switching for this skill: it satisfies the global branch-discipline rule (never edit-then-switch) by isolating instead of switching.
@@ -58,7 +85,7 @@ For ACCEPT and PARTIAL items only:
 3. If the change touches a contract/interface, update all affected callers found when widening context. A half-applied fix is worse than none.
 4. Add or update tests when the comment was about a correctness or edge-case gap. A bug fix without a test that would have caught it is incomplete.
 5. After each fix, re-check pending comments — confirm this change didn't invalidate or partially resolve another.
-6. CHAIN COMPLETION (mandatory — this is what collapses review round-trips): a reviewer finding is usually one instance of a pattern, and the automated reviewer surfaces only 1–2 findings per pass, so fixing the single instance guarantees another round. Before Phase 4, run the fix through the teeth skill's "Phase 2.5 — Reviewer-preempt gauntlet" checklist (chain-completion rules, filter-bypass enumeration, standing traps) and close the WHOLE pattern in this same fix round: all sibling routes/services/legacy copies with the same shape, all cells of a guarantee matrix (entrypoints × scoping × payload binding × concurrency), the full new-field lifecycle (boundary → legacy rows → seeds → remediation → gateway reachability), the honest path a new fail-closed check might break, and CI-blocking coverage for any new security regression test. Each closed pattern-mate is in scope for the fix commit, not scope creep. For a guarantee/authz matrix, emit the filled coverage table (entrypoint × cell, ✓/✗) — an unchecked cell is the next round's finding; close it now.
+6. CHAIN COMPLETION (mandatory — this is what collapses review round-trips): a reviewer finding is usually one instance of a pattern, and the automated reviewer surfaces only 1–2 findings per pass, so fixing the single instance guarantees another round. Before Phase 4, apply (by READING that file's section — never by invoking the teeth skill; see the spend checkpoint above) the teeth skill's "Phase 2.5 — Reviewer-preempt gauntlet" checklist (chain-completion rules, filter-bypass enumeration, standing traps) and close the WHOLE pattern in this same fix round: all sibling routes/services/legacy copies with the same shape, all cells of a guarantee matrix (entrypoints × scoping × payload binding × concurrency), the full new-field lifecycle (boundary → legacy rows → seeds → remediation → gateway reachability), the honest path a new fail-closed check might break, and CI-blocking coverage for any new security regression test. Each closed pattern-mate is in scope for the fix commit, not scope creep. For a guarantee/authz matrix, emit the filled coverage table (entrypoint × cell, ✓/✗) — an unchecked cell is the next round's finding; close it now.
    NO PARTIAL-DEFER of a security chain: never fix the "state-change half" and punt the "authorization half" to an ADR while the PR is open — the reviewer re-flags the deferred cell every push (PR 7 rounds 22–24 were the same anonymous-write class deferred to ADR 0010 and re-found each round). Close the whole cell now, or if it is genuinely pre-existing brownfield debt on a route this PR only touches, fence it in the PR body with a tracking ref so it is answered once. If the user directs a partial-defer, warn that it guarantees another round.
 
 Do NOT implement REJECT, STALE, or CLARIFY items.
