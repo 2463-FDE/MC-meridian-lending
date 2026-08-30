@@ -227,12 +227,43 @@ services/origination-service/app/llm/config.py => adr/0021-agent-framework-and-r
 #     ordering). A doc on the left is unusual here and deliberate: the runbook
 #     is where two deliverables record their output, so its existence is a real
 #     obligation of this spec, not a code area.
-#   * origination-service's clients.py (D5(a) outbound forwarding) and main.py
-#     (D5(a) inbound route, D7(b) run-id line). clients.py already carries an
-#     ADR 0004 line; two lines for one path is precedented by llm_client.py at
-#     the top of this file.
+#   * every inbound-route surface D5(a) obligates, one line per file. Two
+#     kinds of file, both listed, because deleting either one loses the
+#     obligation on its own:
+#     - each service's app-assembly main.py. Inbound acceptance is registered
+#       once for a whole app (a middleware or a shared dependency), not per
+#       route, so main.py is the file D5(a)'s "every inbound route" actually
+#       obligates: gateway, origination, servicing, kyc, decision, disclosure,
+#       payment. gateway's and servicing's main.py already carry ADR 0010 and
+#       ADR 0014 lines; two docs for one path is precedented by llm_client.py
+#       at the top of this file. origination's line also carries D7(b)'s
+#       run-id line.
+#     - each router module that declares routes, since a router can be deleted
+#       without main.py changing: origination applications.py and offers.py,
+#       servicing loans.py, kyc kyc.py, decision decisions.py, disclosure
+#       disclosures.py and offers.py, payment payments.py (the router module,
+#       not the charge module below).
+#   * every outbound seam D5(a) obligates: origination clients.py (the
+#     forwarding call sites; it already carries an ADR 0004 line) and
+#     payment-service payments.py, the payment->servicing hop that already
+#     sends the header. The gateway's own proxy hop lives in its main.py,
+#     listed above, so it is not a second line.
+#   * the two request_id-handling copies D5(a) names by service rather than by
+#     file: decision-service decision.py, which D5(a) names as a minting entry
+#     point (its one httpx call goes to the Experian bureau, an external party
+#     and not a sibling service, so it is mapped as a minting site and not as
+#     an outbound seam), and servicing-service payments.py, which holds a
+#     hand-copy of new_request_id while D5(a) lists servicing-service among
+#     the services that never mint. Deleting either is a D5 loss this gate
+#     should catch. servicing's payments.py already carries an ADR 0014 line;
+#     decision.py is new to this map.
 #
 # Deliberately NOT mapped, and this is not an oversight:
+#   * outbound calls to third parties: decision-service's Experian pull and
+#     origination-service's Bedrock client under app/llm/. D5(a) obligates
+#     forwarding on sibling HTTP clients, and a third party is not a sibling,
+#     so those call sites carry no forwarding obligation. decision.py is
+#     mapped above, but for its minting, not for that call.
 #   * D4's audit/purge script. It does not exist yet, and this gate fails loud
 #     on a left-hand path that resolves to nothing -- an unbuilt path is a
 #     stale entry, not a placeholder. Add the line in the PR that adds the
@@ -251,3 +282,20 @@ docker-compose.yml => docs/spec-log-aggregation.md
 docs/runbook.md => docs/spec-log-aggregation.md
 services/origination-service/app/clients.py => docs/spec-log-aggregation.md
 services/origination-service/app/main.py => docs/spec-log-aggregation.md
+services/gateway/app/main.py => docs/spec-log-aggregation.md
+services/servicing-service/app/main.py => docs/spec-log-aggregation.md
+services/kyc-service/app/main.py => docs/spec-log-aggregation.md
+services/decision-service/app/main.py => docs/spec-log-aggregation.md
+services/disclosure-service/app/main.py => docs/spec-log-aggregation.md
+services/payment-service/app/main.py => docs/spec-log-aggregation.md
+services/origination-service/app/routers/applications.py => docs/spec-log-aggregation.md
+services/origination-service/app/routers/offers.py => docs/spec-log-aggregation.md
+services/servicing-service/app/routers/loans.py => docs/spec-log-aggregation.md
+services/kyc-service/app/routers/kyc.py => docs/spec-log-aggregation.md
+services/decision-service/app/routers/decisions.py => docs/spec-log-aggregation.md
+services/disclosure-service/app/routers/disclosures.py => docs/spec-log-aggregation.md
+services/disclosure-service/app/routers/offers.py => docs/spec-log-aggregation.md
+services/payment-service/app/routers/payments.py => docs/spec-log-aggregation.md
+services/payment-service/app/payments.py => docs/spec-log-aggregation.md
+services/decision-service/app/decision.py => docs/spec-log-aggregation.md
+services/servicing-service/app/payments.py => docs/spec-log-aggregation.md
