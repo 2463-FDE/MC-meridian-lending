@@ -208,14 +208,38 @@ services/origination-service/app/llm/config.py => adr/0021-agent-framework-and-r
 
 # --- Log aggregation, retention and trace correlation -----------------------
 # docs/spec-log-aggregation.md is a spec package with no implementation behind
-# it yet, mapped rather than exempt on the same footing as weeks 5-8 above: the
-# code area it obligates is live today. Each of the 7 logging_config.py copies
-# is listed on its own line, the precedent the redactor entries set at the top
-# of this file -- a drift rung catches copies that DIVERGE, this catches a copy
-# that is DELETED, which drift comparison alone reads as one fewer copy.
+# it yet, mapped rather than exempt on the same footing as weeks 5-8 above:
+# several of the code areas it obligates are live today. What this gate can do
+# for it is bounded and worth stating, because the previous version of this
+# comment claimed more: the check is EXISTENCE-only (see spec_diff_gate.sh's
+# header), so it catches DELETION of a mapped path's spec and never catches
+# DRIFT in either direction. Drift in the logging copies is redactor-drift's
+# and D2's own rung's job, not this one's.
 #
-# Named per file rather than as services/*/app, because a directory-level line
-# survives deletion of the one file the spec is about.
+# Mapped, one line each, every path live on main today:
+#   * the 7 logging_config.py copies (D1, D2) -- per file rather than as
+#     services/*/app, the precedent the redactor entries set at the top of this
+#     file: a directory-level line survives deletion of the one file the spec
+#     is about, and drift comparison alone reads a deleted copy as one fewer
+#     copy to check.
+#   * docker-compose.yml (D3) -- the gateway log volume the spec adds.
+#   * docs/runbook.md (D1(b) rotation arithmetic, D4(d) audit-before-collector
+#     ordering). A doc on the left is unusual here and deliberate: the runbook
+#     is where two deliverables record their output, so its existence is a real
+#     obligation of this spec, not a code area.
+#   * origination-service's clients.py (D5(a) outbound forwarding) and main.py
+#     (D5(a) inbound route, D7(b) run-id line). clients.py already carries an
+#     ADR 0004 line; two lines for one path is precedented by llm_client.py at
+#     the top of this file.
+#
+# Deliberately NOT mapped, and this is not an oversight:
+#   * D4's audit/purge script. It does not exist yet, and this gate fails loud
+#     on a left-hand path that resolves to nothing -- an unbuilt path is a
+#     stale entry, not a placeholder. Add the line in the PR that adds the
+#     script.
+#   * D7's trace change. app/assistant.py is mapped to ADR 0021 above, which
+#     owns the trace surface; D7(a) is deferred pending ADR 0024 (D7(e)), so
+#     the obligation is on that ADR, not on this spec, until it lands.
 services/gateway/app/logging_config.py => docs/spec-log-aggregation.md
 services/origination-service/app/logging_config.py => docs/spec-log-aggregation.md
 services/servicing-service/app/logging_config.py => docs/spec-log-aggregation.md
@@ -223,3 +247,7 @@ services/kyc-service/app/logging_config.py => docs/spec-log-aggregation.md
 services/decision-service/app/logging_config.py => docs/spec-log-aggregation.md
 services/disclosure-service/app/logging_config.py => docs/spec-log-aggregation.md
 services/payment-service/app/logging_config.py => docs/spec-log-aggregation.md
+docker-compose.yml => docs/spec-log-aggregation.md
+docs/runbook.md => docs/spec-log-aggregation.md
+services/origination-service/app/clients.py => docs/spec-log-aggregation.md
+services/origination-service/app/main.py => docs/spec-log-aggregation.md

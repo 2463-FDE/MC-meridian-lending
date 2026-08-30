@@ -130,9 +130,13 @@ D6 may choose one vendor for both or two for each.
 backup count read from `LOG_MAX_BYTES` and `LOG_BACKUP_COUNT`, both with defaults, so an
 operator changes them without a rebuild.
 
-**(b)** Retention: 30 days, the figure debt D5's own Mitigation Path already states. Rotation
-count and size are chosen to satisfy it for the observed line rate, and the arithmetic is
-recorded in `docs/runbook.md` rather than left implicit in two environment variables.
+**(b)** Retention, stated as what the mechanism actually delivers. `RotatingFileHandler` bounds
+**disk, not age**: `LOG_MAX_BYTES x (LOG_BACKUP_COUNT + 1)` is a capacity ceiling, so a traffic
+spike rolls history away in an afternoon and a quiet week keeps lines far past any stated period.
+D1 therefore sets a **capacity target**, not a retention guarantee: size the ceiling from an
+observed line rate so it holds roughly 30 days of that rate — the figure debt D5's own Mitigation
+Path states and client Q1 has not confirmed — and record the observed rate and the arithmetic in
+`docs/runbook.md` rather than leaving them implicit in two environment variables.
 
 **(c)** The `except OSError: pass` becomes a logged warning on the stream handler that is
 already installed. Silence stays the behaviour — a service must not fail to boot because a log
@@ -140,6 +144,13 @@ directory is missing — but the operator learns that file logging is off.
 
 **(d)** No change to `RedactingFormatter`, to the redactor, or to the byte sequence either one
 scans. This deliverable changes where lines go, never what they say.
+
+**(e)** What D1 does **not** deliver, named here so no later reader mistakes the capacity target
+for a retention control: an age floor ("at least 30 days is kept") or an age ceiling ("nothing
+older than 30 days survives"). Both need a time-based purge, and this spec does not build one.
+No acceptance criterion below claims an age guarantee, because none exists — R-1 and R-2 prove
+the capacity ceiling holds and nothing more. The residual carries into D6(5), where retention and
+access are decided together, and is re-asked as client Q1.
 
 ### D2. One formatter, and a drift rung that holds it
 
@@ -191,15 +202,36 @@ status stays **Mitigated** — encoded PII (debt D14) and redaction at ingest re
 ### D5. `request_id` on every hop
 
 **(a)** Extend the week-7 convention beyond the payment span: `X-Request-Id` accepted on every
-inbound route, minted as a `uuid4()` hex when absent, forwarded on every outbound call in
+inbound route and forwarded on every outbound call in
 `services/origination-service/app/clients.py` and every sibling HTTP client.
+
+Minting happens at **entry points only**, and naming which services those are is the contract,
+because minting per hop would give one request seven different ids and destroy the correlation
+D5 exists to provide.
+
+- `gateway` is the edge for every request from outside the deployment. It **mints** a `uuid4()`
+  hex when the inbound header is absent, and that single value is what every downstream hop
+  receives.
+- `payment-service` and `decision-service` **already mint** today, each the entry point of its
+  own path when reached directly — `new_request_id` at `services/payment-service/app/payments.py`
+  under `docs/spec-observability-week7.md` D1(a), which names `decision-service`'s convention as
+  the one it mirrors. D5 does **not** remove that; removing it would regress a merged week-7
+  vector.
+- `origination-service`, `servicing-service`, `kyc-service` and `disclosure-service` **never
+  mint**. Each inherits the header or has none.
+
+What D5 adds is a constraint, not a fourth behaviour: **a service that received an
+`X-Request-Id` never re-mints**, so no request ever carries two ids.
 
 **(b)** The vocabulary does not change. `docs/spec-observability-week7.md` D1(a) forbids a second
 name for the same concept; `trace_id` and `correlation_id` stay out of the tree.
 
 **(c)** Every log line on a request path carries `request_id=<value>` as a named field, and a
-service that received no header logs `request_id=-`, so an uncorrelated call is visibly
-uncorrelated rather than silently untraceable — the week-7 rule, applied everywhere.
+**non-minting** service that received no header logs `request_id=-`, so a call that bypassed the
+gateway is visibly uncorrelated rather than silently untraceable — the week-7 rule, applied
+everywhere. `-` is a value only a non-minting service can log: past D5(a) the gateway,
+`payment-service` and `decision-service` always hold an id, minted when the caller supplied none,
+so `request_id=-` on a line from any of those three is a defect, not an uncorrelated call.
 
 **(d)** Log-only, still. No column, no migration. D5 propagates the field; it does not persist
 it. The week-7 boundary holds.
@@ -228,22 +260,41 @@ A decision record, not an implementation. It must answer, at minimum:
    every filename Compose reads. Four separate escape routes have already been found and closed
    there (debt D21). The ADR budgets for that gate rather than discovering it at CI.
 5. **Retention and access.** Who may read aggregated logs, for how long, and how that squares
-   with the 30 days D1 sets on the files.
+   with D1, which sets a **capacity** target on the files and no age guarantee (D1(e)). If a
+   retention *period* is required, the aggregator is where it becomes enforceable.
 6. **Three options with rejection reasons**, per the repo's ADR standards.
 
 ### D7. Join the trace to the log
 
 **(a)** Tag the LangSmith root run with `request_id` as run metadata. Metadata is not run input
-or output, so `hide_inputs` / `hide_outputs` do not suppress it and the content boundary is
-unchanged — a `request_id` is a minted opaque identifier, not officer or borrower content.
+or output, so `hide_inputs` / `hide_outputs` do not suppress it.
+
+**This reverses a contract the tree already asserts, and that reversal — not the code — is the
+deliverable's real cost.** `services/origination-service/tests/test_assistant_trace.py`
+classifies `request_id` as a caller-linkable identifier and asserts it is absent: on the loop
+root (`test_the_root_never_carries_caller_linkable_identifiers`) and again on **every** span
+(`test_the_entry_span_never_carries_caller_linkable_identifiers`), both under the blocking
+`agentic-loop-gate`. The rule is deliberate — an earlier PII-only reading was reversed during
+PR #68's own review round — so "a minted opaque identifier is not officer or borrower content"
+is the argument D7 must *win*, not a premise it may assume. Written as-is, D7(a) turns two
+blocking assertions red.
 
 **(b)** Log the LangSmith run id on the assistant's outcome line, beside `request_id`.
 
-**(c)** The result is a two-way walk: a trace names the log lines around it, and a log line names
-the trace that produced it. Roughly fifteen lines of code, and the smallest deliverable here.
+**(c)** The goal is a two-way walk: a trace names the log lines around it, and a log line names
+the trace that produced it. **(b) alone delivers one direction** — log line to trace — and is the
+fifteen-line change this deliverable was originally scoped as. The return direction is (a), and
+it is gated by (e). D7 as a whole is therefore not the smallest deliverable in this spec; (b) is.
 
 **(d)** No-op when tracing is off. `LANGSMITH_TRACING` defaults false, and D7 must not make the
 untraced path do work or fail.
+
+**(e)** D7(a) is **deferred pending ADR 0024** and is not schedulable until it lands. Shipping it
+takes, in one PR: an ADR recording why a per-request minted identifier falls outside the
+caller-linkable class those tests draw, an update to the trace privacy rationale the tests cite,
+and a change to both assertions that names the ADR as its authority. Absent that ADR, the
+correct state of the tree is the assertions as they stand. D7(b), (c) and (d) do not depend on
+the decision and may ship first.
 
 ---
 
@@ -279,9 +330,9 @@ untraced path do work or fail.
 | A5 | `logs/gateway.log` exists on the host after `make up` and a request through the gateway | D3 |
 | A6 | The audit script reports a pattern-class count and prints no matched value | D4(a), D4(b) |
 | A7 | An inbound `X-Request-Id` reaches every downstream service unchanged | D5(a), D5(b) |
-| A8 | A call arriving with no header logs `request_id=-`, not an empty field or a fresh id | D5(c) |
+| A8 | A call with no `X-Request-Id` reaching a **non-minting** service directly (origination, servicing, kyc, disclosure) logs `request_id=-`, not an empty field and not a fresh id; the same call arriving **through the gateway** logs one gateway-minted id at every hop and no service logs `-` | D5(a), D5(c) |
 | A9 | ADR 0023 exists and answers all six questions in D6 | D6 |
-| A10 | A traced assistant run carries `request_id` in metadata, with inputs and outputs still hidden | D7(a) |
+| A10 | Until ADR 0024 lands, `test_assistant_trace.py`'s absent-identifier assertions stay green and no span carries `request_id`. After it lands, a traced assistant run carries `request_id` in metadata with inputs and outputs still hidden | D7(a), D7(e) |
 | A11 | With `LANGSMITH_TRACING=false`, D7 adds no call and no failure path | D7(d) |
 | A12 | `docs/runbook.md` states the audit-before-collector ordering | D4(d) |
 
@@ -289,7 +340,9 @@ untraced path do work or fail.
 
 ## Test Vectors
 
-### Rotation and retention
+### Rotation and capacity
+These prove the disk ceiling, which is all D1 claims. There is deliberately no age-based vector,
+because D1(e) builds no age-based control.
 - **R-1** Write `LOG_MAX_BYTES + 1` bytes to one logger; assert exactly one backup file exists.
 - **R-2** Write past `LOG_BACKUP_COUNT` rotations; assert the oldest file is gone and the count is bounded.
 - **R-3** Point `LOG_DIR` at an unwritable path; assert the service boots, the stream handler works, and a warning names the directory.
@@ -307,11 +360,12 @@ untraced path do work or fail.
 ### Correlation
 - **R-10** `POST` with `X-Request-Id: abc`; assert every service's log line for that request carries `request_id=abc`.
 - **R-11** Same call with no header; assert one id is minted at the edge and reused downstream, not re-minted per hop.
-- **R-12** A direct call to an internal service; assert `request_id=-`.
+- **R-12** A direct call to a non-minting internal service — servicing's `apply-payment`, the week-7 `V-TRACE-DIRECT` vector; assert `request_id=-`. The same direct call to `payment-service` or `decision-service` asserts a minted id, not `-`, because week-7 D1(a) makes both entry points.
+- **R-12b** A call reaching `payment-service` **with** an `X-Request-Id`; assert the supplied value is used verbatim and no second id is minted — the no-re-mint constraint D5(a) adds.
 - **R-13** A header value at and beyond the 64-character bound `decision-service` already enforces; assert the same bound, not a second convention.
 
 ### Trace join
-- **R-14** Traced assistant run; assert `request_id` is present in run metadata and that the client still reports `_hide_inputs` and `_hide_outputs` true — the assertion `test_agentic_loop.py` already makes about boot hardening.
+- **R-14** Gated on D7(e). Until ADR 0024 lands the vector is the existing one, inverted: assert no span carries `request_id`. After it lands, assert `request_id` is present in run metadata and that the client still reports `_hide_inputs` and `_hide_outputs` true — the assertion `test_agentic_loop.py` already makes about boot hardening.
 - **R-15** `LANGSMITH_TRACING=false`; assert the assistant path makes no LangSmith call and returns normally.
 
 ---
@@ -350,7 +404,7 @@ D6 is a week of work or an afternoon**, so they are asked before D6 starts rathe
 
 | # | Question | What the answer decides |
 |---|---|---|
-| Q1 | What log retention does the client's own policy require? | D1(b). The spec assumes 30 days, taken from debt D5's own Mitigation Path. A regulatory or contractual figure overrides it, and a longer one changes D1's rotation arithmetic rather than its design |
+| Q1 | What log retention does the client's own policy require? | D1(b) and D1(e). The spec sizes a capacity target for roughly 30 days, taken from debt D5's own Mitigation Path; it delivers no age guarantee. A regulatory or contractual figure overrides the number and changes the arithmetic, not the design — but a figure the client must be able to *prove* at audit turns D1(e)'s residual into an age-based purge, which is work this spec does not contain |
 | Q2 | May aggregated logs leave the client's network? | D6(1), outright. This is the question that collapses the option space: "no" removes every hosted service from consideration and makes D6 a choice among self-hosted collectors; "yes" reopens a vendor comparison and requires the data-residency position ADR 0023 has to state |
 | Q3 | Is there an existing log platform in the client's estate to target? | Whether D6 adds a datastore to this stack at all. A target that already exists removes the aggregator container, and with it the whole debt D21 surface — the `compose-hardening-gate` refusals, the four escape routes already closed there, and the reachability argument ADR 0023 would otherwise have to make. A collector shipping to an address is a far smaller change than a collector plus a store |
 | Q4 | Who may read aggregated logs, and for how long? | D6(5). Redaction lowers the stakes of the answer; it does not remove the question, because a redacted log still shows who did what to which loan and when |
@@ -365,4 +419,6 @@ by facts nobody asked for. D1–D5 proceed in the meantime and are not held behi
 ## Status
 
 Draft. D1–D5 are implementable as written. D6 gates the collector and is the next ADR (0023).
-D7 depends on nothing and may ship first.
+D7 is split: (b)–(d) depend on nothing and may ship first; (a) is deferred pending ADR 0024,
+which has to justify putting a caller-linkable identifier on a trace against the contract
+`test_assistant_trace.py` holds today.

@@ -43,8 +43,11 @@ confirmed against a real policy. If Meridian's records policy, a regulator, or a
 specifies a different period, that number wins. A longer period changes how large the files are
 allowed to get before they roll over; it does not change the design.
 
-**If unanswered:** we build to 30 days and it becomes a documented assumption rather than a
-requirement, which is the weaker position at audit.
+**If unanswered:** we size the files to hold roughly 30 days at the log rate we observe, and 30
+days becomes a documented assumption rather than a requirement, which is the weaker position at
+audit. Worth being precise about what that buys: sizing bounds disk, so a busy day can roll
+history off early and a quiet week can keep it late. A period Meridian has to *prove* at audit
+needs a scheduled deletion by age, which is a separate piece of work we have not scoped.
 
 ### Q2 — May aggregated log data leave Meridian's network?
 
