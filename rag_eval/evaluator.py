@@ -129,6 +129,35 @@ class EvaluatorProviderError(RuntimeError):
     """
 
 
+def _first_json_object(text: str):
+    """The first balanced JSON object in a reply, or None if there is none.
+
+    Haiku 4.5 wraps its object in a markdown fence even though the system prompt
+    says "Return ONE JSON object and nothing else" -- observed live on 2026-08-30
+    in the Phase B smoke, where a bare `json.loads` raised and sent every axis to
+    human_review. A fence is only one shape of that: a preamble line or a closing
+    sentence produce the same failure. S-7 allows one bounded pass, so a shape the
+    smoke did not happen to sample would blank the whole deliverable with no rerun
+    to recover it -- hence tolerating an object embedded in text, rather than
+    stripping the one wrapper we saw.
+
+    Returns None rather than raising, and None keeps a reply with no object at all
+    on the human_review path (S-9): tolerating the wrapper must never turn an
+    unusable reply into a graded state.
+    """
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(text, i)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
 def _state_or_human_review(value, allowed: tuple[str, ...]) -> str:
     """Map a returned verdict onto its own axis, or to `human_review`.
 
@@ -259,9 +288,9 @@ class BedrockEvaluator:
         response = self._invoke(case)
         try:
             text = json.loads(response["body"].read())["content"][0]["text"]
-            payload = json.loads(text)
-            if not isinstance(payload, dict):
-                raise ValueError("reply is not a JSON object")
+            payload = _first_json_object(text)
+            if payload is None:
+                raise ValueError("no JSON object in the reply")
         except (ValueError, TypeError, KeyError, IndexError, AttributeError):
             # A bad result, not a technical failure: no retry (S-7), whether the
             # envelope Bedrock wrapped the reply in is malformed or the wrong
