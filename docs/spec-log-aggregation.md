@@ -344,17 +344,21 @@ that diverge, the map catches a copy that is deleted.
 
 ## Client Questions
 
-None blocks D1–D5. Each changes a constant or scopes D6.
+Raised in `docs/client-asks-2026-08-30-log-aggregation.md`. **None blocks D1–D5** — those five
+are implementable today and each changes a constant at most. **Q2 and Q3 together decide whether
+D6 is a week of work or an afternoon**, so they are asked before D6 starts rather than during it.
 
-- **Q1** What log retention does the client's own policy require? D1(b) assumes 30 days from
-  debt D5's Mitigation Path; a regulatory answer overrides it.
-- **Q2** May aggregated logs leave the client's network? Decides D6(1) outright.
-- **Q3** Is there an existing log platform in the client's estate to target, rather than a new
-  one in this stack? A target that already exists removes D6's datastore-in-compose problem.
-- **Q4** Who may read aggregated logs? D6(5); redaction reduces the answer's stakes but does not
-  remove the question.
-- **Q5** Are the pre-redaction log files on the client's own hosts as well as in development?
-  D4's purge is a local script; the same content elsewhere needs the same treatment.
+| # | Question | What the answer decides |
+|---|---|---|
+| Q1 | What log retention does the client's own policy require? | D1(b). The spec assumes 30 days, taken from debt D5's own Mitigation Path. A regulatory or contractual figure overrides it, and a longer one changes D1's rotation arithmetic rather than its design |
+| Q2 | May aggregated logs leave the client's network? | D6(1), outright. This is the question that collapses the option space: "no" removes every hosted service from consideration and makes D6 a choice among self-hosted collectors; "yes" reopens a vendor comparison and requires the data-residency position ADR 0023 has to state |
+| Q3 | Is there an existing log platform in the client's estate to target? | Whether D6 adds a datastore to this stack at all. A target that already exists removes the aggregator container, and with it the whole debt D21 surface — the `compose-hardening-gate` refusals, the four escape routes already closed there, and the reachability argument ADR 0023 would otherwise have to make. A collector shipping to an address is a far smaller change than a collector plus a store |
+| Q4 | Who may read aggregated logs, and for how long? | D6(5). Redaction lowers the stakes of the answer; it does not remove the question, because a redacted log still shows who did what to which loan and when |
+| Q5 | Do pre-redaction log files exist on the client's own hosts, or only in development? | The scope of D4. The purge script is local; identical content elsewhere needs identical treatment, and the client is the only one who can say whether it is there |
+
+**Dependency, stated plainly:** Q2 and Q3 are prerequisites for ADR 0023, not inputs to it. Writing
+that ADR before both are answered means writing three options of which two are already excluded
+by facts nobody asked for. D1–D5 proceed in the meantime and are not held behind any answer.
 
 ---
 
