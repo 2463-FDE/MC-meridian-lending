@@ -23,8 +23,9 @@ answer live there, and it is what ADR 0014 cites. Update both when a servicing a
 ## Exchange 1 — servicing money controls
 
 **Asked:** 2026-08-08. **Answered:** 2026-08-12, in writing. **Respondent:** VP Lending Ops,
-Meridian. **Source reference:** `docs/client-asks-week6-servicing.md` on `docs/client-asks`
-(pushed); verbatim reply on `docs/client-asks-originals` (not pushed).
+Meridian. **Source reference:** `docs/client-asks-week6-servicing.md` at commit `062f408` on
+`docs/client-asks` (pushed — reachable after `git fetch origin`); verbatim reply on
+`docs/client-asks-originals`, which has no remote, so that half is the maintainer's copy only.
 Feeds `adr/0014-servicing-money-controls.md` and `docs/cards-week6-servicing.md`.
 
 | # | Question | Answer | Feeds |
@@ -45,8 +46,8 @@ Feeds `adr/0014-servicing-money-controls.md` and `docs/cards-week6-servicing.md`
 ## Exchange 2 — decisioning governance
 
 **Asked:** 2026-08-12. **Answered:** 2026-08-13, in writing. **Respondent:** VP Lending Ops,
-Meridian. **Source reference:** `docs/client-asks-2026-08-12-governance.md` on
-`docs/client-asks` (pushed).
+Meridian. **Source reference:** `docs/client-asks-2026-08-12-governance.md` at commit
+`126120c` on `docs/client-asks` (pushed — reachable after `git fetch origin`).
 Feeds `docs/spec-fair-lending-monitoring-week8.md`, `adr/0016-fair-lending-monitoring-computes-outside-the-platform.md`, `docs/cards-week8-governance.md`, `docs/model-card-decisioning-scorecard.md`.
 
 | # | Question | Answer | Feeds |
@@ -64,8 +65,8 @@ than absorbed.
 ## Exchange 3 — settlement reconciliation
 
 **Asked:** 2026-08-12. **Answered:** 2026-08-14, in writing. **Respondent:** VP Lending Ops,
-Meridian. **Source reference:** `docs/client-asks-2026-08-12-observability.md` on
-`docs/client-asks` (pushed).
+Meridian. **Source reference:** `docs/client-asks-2026-08-12-observability.md` at commit
+`126120c` on `docs/client-asks` (pushed — reachable after `git fetch origin`).
 Feeds `docs/spec-observability-week7.md` (D2, D3, D4), `adr/0015-settlement-reconciliation-as-a-control.md`, `docs/runbook.md`.
 
 | # | Question | Answer | Feeds |
@@ -79,8 +80,11 @@ Feeds `docs/spec-observability-week7.md` (D2, D3, D4), `adr/0015-settlement-reco
 ## Exchange 4 — payment integrity, card data, monitoring labels
 
 **Asked:** 2026-08-16. **Answered:** 2026-08-17, in writing. **Respondent:** VP Lending Ops,
-Meridian. **Source reference:** `docs/client-asks-2026-08-16.md` on `docs/client-asks`
-(pushed).
+Meridian. **Source reference:** `docs/client-asks-2026-08-16.md` at commit `b772bb2` on the
+`docs/client-asks` working-log branch — unpublished. That commit is not on
+`origin/docs/client-asks`, so no checkout can reach the file: after `git fetch origin`,
+`git cat-file -e b772bb2` says whether the branch has since been pushed, and while that
+fails the register's maintainer holds the only copy.
 Feeds the payment-integrity design, `adr/0013-payment-idempotency-and-tokenization.md`, `docs/spec-payments-week5.md`, `docs/spec-fair-lending-monitoring-week8.md`.
 
 | # | Question | Answer | Feeds |
