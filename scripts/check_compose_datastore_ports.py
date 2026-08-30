@@ -14,6 +14,17 @@ publishes 5432 to the host while no `ports:` key appears anywhere in the postgre
 The idiom is already in this repo (docker-compose.demo.yml defines `x-demo-internal-token`
 as an anchor), so this is a form a future edit reaches for, not a hypothetical one.
 
+`ports:` is also not the only key that puts a datastore on the host. Under
+`network_mode: host` the container shares the host's network namespace, so the postgres
+process listens on the host's 5432 directly — no `ports:` entry is needed, or even
+accepted. A rule that grades only `ports` goes green on exactly the reachability this gate
+exists to remove. `network_mode: "service:x"` / `"container:x"` are the same class one step
+removed: the listener lives in another container's namespace, whose publishing this module
+cannot see. So a graded datastore may not set `network_mode` AT ALL — every value either
+exposes it (`host`), hides where it listens (`service:`/`container:`), or is the behaviour
+omitting the key already gives (`bridge`, `none`, `default`). Keying on the presence of the
+key keeps one rule instead of a value allowlist that has to stay correct.
+
 PyYAML performs the same resolution Compose does for anchors/aliases/merge keys, which is
 why the gate reads the loaded mapping rather than the file's lines. What it does NOT
 resolve is `extends:` (Compose reads another file/service for that), so a datastore
@@ -93,6 +104,25 @@ def published(path: Path, names=DATASTORES) -> dict[str, object]:
     found = services(path)
     return {
         name: found[name]["ports"] for name in names if "ports" in found.get(name, {})
+    }
+
+
+def network_modes(path: Path, names=DATASTORES) -> dict[str, object]:
+    """{datastore name: its resolved `network_mode`} for every graded service that sets one.
+
+    Keyed on the PRESENCE of the key, like `published()`, and for the same reason: `host`
+    is a listener in the host's own namespace, `service:x` / `container:x` is a listener in
+    a namespace this module cannot grade, and every remaining value is what omitting the
+    key already does. None of them belong on a datastore, so the rule needs no taxonomy of
+    values — only the fact that one is set. That also covers the spellings `published()`
+    already survives (merge key, whole-service alias, `!override`), since both read the
+    same resolved mapping.
+    """
+    found = services(path)
+    return {
+        name: found[name]["network_mode"]
+        for name in names
+        if "network_mode" in found.get(name, {})
     }
 
 

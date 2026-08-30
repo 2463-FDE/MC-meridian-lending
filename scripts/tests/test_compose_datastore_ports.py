@@ -21,6 +21,11 @@ PRESENCE of a `ports:` key in the resolved service mapping, not on its value, so
 spelling collapses to the same check — block list, flow sequence (`ports: ["5432:5432"]`),
 long syntax, and a value inherited through an anchor. `expose:` is unaffected and is what
 these services should carry instead.
+
+`ports:` is not the only key that reaches the host, so `network_mode` is refused on a
+graded datastore by the same presence rule: `host` puts the process in the host's network
+namespace (listening on 5432/6379 there with no `ports:` entry needed or accepted), and
+`service:x`/`container:x` put it in a namespace whose publishing this module cannot see.
 """
 
 import sys
@@ -68,6 +73,28 @@ def test_no_datastore_service_publishes_a_host_port(path: Path):
         "a datastore service publishes a port to the host (D21):\n  "
         + "\n  ".join(offenders)
         + "\nUse `expose:` instead; reach the datastore with `docker compose exec`."
+    )
+
+
+@pytest.mark.parametrize("path", _compose_files(), ids=lambda p: p.name)
+def test_no_datastore_service_sets_a_network_mode(path: Path):
+    """`ports:` is not the only key that reaches the host. `network_mode: host` puts the
+    datastore process in the host's own network namespace, listening on 5432/6379 there
+    with no `ports:` entry needed or accepted — a gate reading only `ports` goes green on
+    exactly the D21 reachability it exists to remove. `service:x`/`container:x` hand the
+    listener to another container's namespace, whose publishing this module cannot see.
+    Every other value is what omitting the key already does, so the key is refused whole."""
+    offenders = [
+        f"{path.name}: {name} -> network_mode: {value!r}"
+        for name, value in checker.network_modes(path).items()
+    ]
+    assert not offenders, (
+        "a datastore service sets network_mode, so it is not on the compose network "
+        "(D21):\n  "
+        + "\n  ".join(offenders)
+        + "\nRemove the key; `host` listens in the host namespace and `service:`/"
+        "`container:` hides where it listens. Use `expose:` and reach it with "
+        "`docker compose exec`."
     )
 
 
@@ -122,6 +149,61 @@ def test_every_way_of_publishing_a_port_is_caught(tmp_path, form):
         f"a published port written as {form!r} is not detected — this gate would pass a "
         "compose file that publishes the port"
     )
+
+
+# The same hermetic treatment for `network_mode`, which reaches the host without ever
+# naming a port. Without these the rule could regress to "postgres has no network_mode
+# today" and every real-file case above would stay green, since neither committed compose
+# file sets the key at all.
+
+_NETWORK_MODE_FIXTURES = {
+    # The vector the ports rule misses entirely: no `ports:` key exists or is accepted,
+    # yet postgres listens on the host's 5432.
+    "host direct": "services:\n  postgres:\n    image: x\n    network_mode: host\n",
+    "host quoted": 'services:\n  postgres:\n    image: x\n    network_mode: "host"\n',
+    "merge key": (
+        "x-net: &net\n  network_mode: host\n"
+        "services:\n  postgres:\n    <<: *net\n    image: x\n"
+    ),
+    "service alias": (
+        "x-pg: &pg\n  image: x\n  network_mode: host\nservices:\n  postgres: *pg\n"
+    ),
+    "value alias": (
+        "x-mode: &mode host\n"
+        "services:\n  postgres:\n    image: x\n    network_mode: *mode\n"
+    ),
+    "override tag": (
+        'services:\n  postgres:\n    image: x\n    network_mode: !override "host"\n'
+    ),
+    # One namespace removed: the listener lives in another container, whose publishing
+    # this module cannot see.
+    "shared namespace": (
+        'services:\n  postgres:\n    image: x\n    network_mode: "service:gateway"\n'
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "form", sorted(_NETWORK_MODE_FIXTURES), ids=lambda f: f.replace(" ", "-")
+)
+def test_every_way_of_leaving_the_compose_network_is_caught(tmp_path, form):
+    path = tmp_path / "docker-compose.yml"
+    path.write_text(_NETWORK_MODE_FIXTURES[form], encoding="utf-8")
+    assert checker.network_modes(path), (
+        f"a network_mode written as {form!r} is not detected — this gate would pass a "
+        "compose file whose datastore listens outside the compose network"
+    )
+
+
+def test_a_datastore_on_the_compose_network_is_not_flagged(tmp_path):
+    """The satisfiable state: no `network_mode` key at all, which is what both committed
+    compose files carry. A rule nothing can satisfy gets switched off rather than fixed."""
+    path = tmp_path / "docker-compose.yml"
+    path.write_text(
+        'services:\n  postgres:\n    image: x\n    expose:\n      - "5432"\n',
+        encoding="utf-8",
+    )
+    assert not checker.network_modes(path)
 
 
 @pytest.mark.parametrize(

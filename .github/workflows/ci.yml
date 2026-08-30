@@ -321,9 +321,12 @@ jobs:
         # 5432 with no `ports:` line anywhere in the service block. It keys on the PRESENCE
         # of the resolved `ports` key rather than on its value, so a flow sequence or long
         # syntax cannot slip past a value regex; it refuses a datastore using `extends:`,
-        # which is the one construct the loader cannot follow; and it fails closed if either
-        # service is ever renamed -- every case is scoped by service NAME, so a rename would
-        # otherwise leave it vacuously green.
+        # which is the one construct the loader cannot follow; it refuses `network_mode` on
+        # a datastore, because `host` puts the process in the HOST network namespace --
+        # listening on 5432/6379 there with no `ports:` key needed or accepted, which a
+        # ports-only rule passes green -- while `service:`/`container:` hide which namespace
+        # publishes it; and it fails closed if either service is ever renamed -- every case
+        # is scoped by service NAME, so a rename would otherwise leave it vacuously green.
         # Its own install line, per the kyc-persistence-gate lesson: this step
         # must not pass on a package an unrelated earlier step installed.
         run: |

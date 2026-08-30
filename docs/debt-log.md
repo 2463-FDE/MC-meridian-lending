@@ -238,7 +238,7 @@ rows, or the safer half sets the severity for both.)*
 | **Risk** | **Medium.** Requires a credential. |
 | **Attribution** | **Pre-existing** (baseline compose). |
 | **Mitigation Path** | Drop the `ports:`, keep `expose`; reach the database with `docker compose exec postgres psql ...`, which is what `make seed` already does. |
-| **Status** | **Mitigated.** The base compose publishes no host port for postgres. Held by `scripts/tests/test_compose_datastore_ports.py` in the blocking `compose-hardening-gate`, which grades the RESOLVED config (anchors, aliases and `<<` merge keys applied, as Compose applies them) and keys on the presence of a `ports` key rather than on its value, so every spelling is covered and an inherited port cannot pass a source-text scan. See the shared residual on D21b. |
+| **Status** | **Mitigated.** The base compose publishes no host port for postgres. Held by `scripts/tests/test_compose_datastore_ports.py` in the blocking `compose-hardening-gate`, which grades the RESOLVED config (anchors, aliases and `<<` merge keys applied, as Compose applies them) and keys on the presence of a `ports` key rather than on its value, so every spelling is covered and an inherited port cannot pass a source-text scan. It refuses `network_mode` on a datastore under the same presence rule: `host` reaches 5432 through the host's own network namespace with no `ports` key at all, and `service:`/`container:` hide which namespace publishes it — a ports-only rule passes both. See the shared residual on D21b. |
 
 | Field | Value |
 |---|---|
