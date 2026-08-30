@@ -315,15 +315,19 @@ jobs:
         # session and `resume:{sid}` holds the RAW continuation token that authorizes the
         # money-moving routes. Postgres stores that same token only as a keyed digest
         # (origination-service/app/authz.py::hash_token), so an open 6379 undoes a control
-        # that was built on purpose. The test keys on the PRESENCE of a `ports:` key in the
-        # postgres/redis service block rather than on its value, so a flow sequence
-        # (`ports: ["5432:5432"]`) or long syntax cannot slip past a value regex, and it
-        # fails closed if either service is ever renamed -- every case below is scoped by
-        # service NAME, so a rename would otherwise leave it vacuously green.
+        # that was built on purpose. The test grades the RESOLVED config (PyYAML applies the
+        # same anchor/alias/merge-key resolution Compose does) rather than the source text,
+        # because an anchored `x-pg: &pg {ports: [..]}` merged in with `<<: *pg` publishes
+        # 5432 with no `ports:` line anywhere in the service block. It keys on the PRESENCE
+        # of the resolved `ports` key rather than on its value, so a flow sequence or long
+        # syntax cannot slip past a value regex; it refuses a datastore using `extends:`,
+        # which is the one construct the loader cannot follow; and it fails closed if either
+        # service is ever renamed -- every case is scoped by service NAME, so a rename would
+        # otherwise leave it vacuously green.
         # Its own install line, per the kyc-persistence-gate lesson: this step
         # must not pass on a package an unrelated earlier step installed.
         run: |
-          pip install pytest
+          pip install pytest pyyaml
           python -m pytest scripts/tests/test_compose_datastore_ports.py -q
       - name: demo override's boot claims match what boot actually checks
         # test_llm_startup.py's two compose assertions are the reason this step exists:

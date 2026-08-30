@@ -15,60 +15,29 @@ exact value `origination-service/app/authz.py::hash_token` refuses to store in t
 ("a DB read / backup / logged row then yields only a non-replayable digest"): the
 database-side control is undone by the cache-side storage the moment 6379 is reachable.
 
-Keyed on the PRESENCE of a `ports:` key in the service block, not on its value, so every
-spelling is covered — block list, flow sequence (`ports: ["5432:5432"]`), and long syntax.
-`expose:` is unaffected and is what these services should carry instead.
+Graded on the RESOLVED config, not the source text — see
+scripts/check_compose_datastore_ports.py for why a line scan is fail-open. Keyed on the
+PRESENCE of a `ports:` key in the resolved service mapping, not on its value, so every
+spelling collapses to the same check — block list, flow sequence (`ports: ["5432:5432"]`),
+long syntax, and a value inherited through an anchor. `expose:` is unaffected and is what
+these services should carry instead.
 """
 
-import re
+import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-DATASTORES = ("postgres", "redis")
+sys.path.insert(0, str(ROOT / "scripts"))
 
-_SERVICES_KEY = re.compile(r"^services:\s*$")
-# Keys may legally be quoted in YAML (`"ports":`), so both patterns accept quotes —
-# an unquoted-only pattern is a fail-open hole in a check whose whole job is to refuse.
-_SERVICE_NAME = re.compile(r"""^  ["']?([A-Za-z0-9._-]+)["']?:\s*$""")
-_PORTS_KEY = re.compile(r"""^\s+["']?ports["']?:""")
+import check_compose_datastore_ports as checker  # noqa: E402
+
+DATASTORES = checker.DATASTORES
 
 
 def _compose_files() -> list[Path]:
-    return sorted(ROOT.glob("docker-compose*.yml"))
-
-
-def _service_blocks(path: Path) -> dict[str, list[tuple[int, str]]]:
-    """{service name: [(1-based line number, text), ..]} for each 2-space-indented key
-    under a top-level `services:`. A file with no `services:` mapping yields {}."""
-    lines = path.read_text(encoding="utf-8").splitlines()
-    blocks: dict[str, list[tuple[int, str]]] = {}
-    in_services = False
-    current: str | None = None
-    for number, line in enumerate(lines, start=1):
-        if _SERVICES_KEY.match(line):
-            in_services, current = True, None
-            continue
-        if not in_services:
-            continue
-        # Any other column-0 key ends the services mapping.
-        if line and not line[0].isspace():
-            in_services, current = False, None
-            continue
-        match = _SERVICE_NAME.match(line)
-        if match:
-            current = match.group(1)
-            blocks.setdefault(current, [])
-            continue
-        # A 2-space-indented key that is NOT a bare `name:` (e.g. `x-anchor: &a "v"`)
-        # closes the current block without opening one.
-        if line.startswith("  ") and not line.startswith("   ") and line.strip():
-            current = None
-            continue
-        if current is not None and line.strip():
-            blocks[current].append((number, line))
-    return blocks
+    return checker.compose_files(ROOT)
 
 
 def test_the_datastore_services_are_still_named_what_this_test_grades():
@@ -77,7 +46,7 @@ def test_the_datastore_services_are_still_named_what_this_test_grades():
     green — the same silently-eroding coverage the spec-diff-gate map rule exists for."""
     found = set()
     for path in _compose_files():
-        found |= set(_service_blocks(path)) & set(DATASTORES)
+        found |= set(checker.services(path)) & set(DATASTORES)
     missing = sorted(set(DATASTORES) - found)
     assert not missing, (
         f"no compose file defines a service named {missing} — this test grades datastore "
@@ -92,11 +61,8 @@ def test_compose_files_are_present_to_grade():
 @pytest.mark.parametrize("path", _compose_files(), ids=lambda p: p.name)
 def test_no_datastore_service_publishes_a_host_port(path: Path):
     offenders = [
-        f"{path.name}:{number}: {name} -> {text.strip()}"
-        for name, block in _service_blocks(path).items()
-        if name in DATASTORES
-        for number, text in block
-        if _PORTS_KEY.match(text)
+        f"{path.name}: {name} -> ports: {value!r}"
+        for name, value in checker.published(path).items()
     ]
     assert not offenders, (
         "a datastore service publishes a port to the host (D21):\n  "
@@ -105,41 +71,65 @@ def test_no_datastore_service_publishes_a_host_port(path: Path):
     )
 
 
-# --- hermetic cases for the parser itself -------------------------------------
+@pytest.mark.parametrize("path", _compose_files(), ids=lambda p: p.name)
+def test_no_datastore_service_hides_its_config_behind_extends(path: Path):
+    """`extends:` pulls a mapping out of another file/service, which the loader here does
+    not follow — an inherited `ports` would be invisible and the gate would pass over a
+    published port. Refuse the construct instead of grading half a mapping."""
+    unresolvable = checker.unresolvable(path)
+    assert not unresolvable, (
+        f"{path.name}: {unresolvable} use `extends:`, so this gate cannot see their full "
+        "config and cannot prove the port is unpublished. Inline the mapping, or teach "
+        "scripts/check_compose_datastore_ports.py to resolve `extends`."
+    )
+
+
+# --- hermetic cases for the resolver itself -----------------------------------
 # The cases above grade the real compose files, so they say nothing about the
-# forms this parser must not miss. These feed it synthetic documents instead,
+# forms this resolver must not miss. These feed it synthetic documents instead,
 # mirroring compose-hardening-gate-tests' hermetic approach: without them the
-# patterns could regress to an unquoted-only or value-matching shape and every
-# case above would stay green.
+# check could regress to a source-text scan and every case above would stay green.
 
 _FIXTURES = {
-    "block list": '    ports:\n      - "5432:5432"\n',
-    "flow sequence": '    ports: ["5432:5432"]\n',
-    "long syntax": "    ports:\n      - target: 5432\n        published: 5432\n",
-    "quoted key": '    "ports":\n      - "5432:5432"\n',
-    "single-quoted key": "    'ports':\n      - \"5432:5432\"\n",
+    "block list": 'services:\n  postgres:\n    image: x\n    ports:\n      - "5432:5432"\n',
+    "flow sequence": 'services:\n  postgres:\n    image: x\n    ports: ["5432:5432"]\n',
+    "long syntax": (
+        "services:\n  postgres:\n    image: x\n    ports:\n"
+        "      - target: 5432\n        published: 5432\n"
+    ),
+    "quoted key": 'services:\n  postgres:\n    image: x\n    "ports":\n      - "5432:5432"\n',
+    # The vector a source-text scan misses: Compose resolves the merge before it reads
+    # the service, so 5432 is published with no `ports:` line in the postgres block.
+    "merge key": (
+        'x-pg: &pg\n  ports: ["5432:5432"]\n'
+        "services:\n  postgres:\n    <<: *pg\n    image: x\n"
+    ),
+    # Same class, whole-service alias rather than a merge.
+    "service alias": (
+        'x-pg: &pg\n  image: x\n  ports: ["5432:5432"]\nservices:\n  postgres: *pg\n'
+    ),
 }
 
 
 @pytest.mark.parametrize("form", sorted(_FIXTURES), ids=lambda f: f.replace(" ", "-"))
 def test_every_way_of_publishing_a_port_is_caught(tmp_path, form):
     path = tmp_path / "docker-compose.yml"
-    path.write_text(
-        "services:\n  postgres:\n    image: postgres:16-alpine\n" + _FIXTURES[form],
-        encoding="utf-8",
-    )
-    block = _service_blocks(path)["postgres"]
-    assert any(_PORTS_KEY.match(text) for _, text in block), (
-        f"a `ports:` key written as {form!r} is not detected — this parser would pass a "
+    path.write_text(_FIXTURES[form], encoding="utf-8")
+    assert checker.published(path), (
+        f"a published port written as {form!r} is not detected — this gate would pass a "
         "compose file that publishes the port"
     )
 
 
-@pytest.mark.parametrize("name", ['  postgres:\n', '  "postgres":\n', "  'postgres':\n"])
+@pytest.mark.parametrize(
+    "name", ["  postgres:\n", '  "postgres":\n', "  'postgres':\n"]
+)
 def test_a_quoted_service_name_is_still_recognised(tmp_path, name):
     path = tmp_path / "docker-compose.yml"
-    path.write_text(f"services:\n{name}    image: x\n    ports:\n      - \"5432:5432\"\n", "utf-8")
-    assert "postgres" in _service_blocks(path), (
+    path.write_text(
+        f'services:\n{name}    image: x\n    ports:\n      - "5432:5432"\n', "utf-8"
+    )
+    assert "postgres" in checker.services(path), (
         f"service key {name.strip()!r} not recognised — the datastore would go ungraded"
     )
 
@@ -149,7 +139,17 @@ def test_expose_is_not_mistaken_for_a_published_port(tmp_path):
     unsatisfiable and would get switched off rather than fixed."""
     path = tmp_path / "docker-compose.yml"
     path.write_text(
-        'services:\n  postgres:\n    image: x\n    expose:\n      - "5432"\n', encoding="utf-8"
+        'services:\n  postgres:\n    image: x\n    expose:\n      - "5432"\n',
+        encoding="utf-8",
     )
-    block = _service_blocks(path)["postgres"]
-    assert not any(_PORTS_KEY.match(text) for _, text in block)
+    assert not checker.published(path)
+
+
+def test_a_datastore_using_extends_is_refused(tmp_path):
+    """Fail closed on the one construct this resolver cannot follow."""
+    path = tmp_path / "docker-compose.yml"
+    path.write_text(
+        "services:\n  postgres:\n    extends:\n      file: base.yml\n      service: pg\n",
+        encoding="utf-8",
+    )
+    assert checker.unresolvable(path) == ["postgres"]
