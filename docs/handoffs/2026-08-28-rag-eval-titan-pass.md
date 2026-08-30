@@ -24,9 +24,11 @@ supersedes `docs/handoffs/2026-08-28-rag-eval-evaluator.md`, which is now wrong 
 places (see *Corrections* below).
 
 Setup and pipeline detail live in `docs/rag-eval-run-pipeline.md` — read it before running
-anything. **Both that file and this one are deliberately untracked**: the user's call on
-2026-08-28 is to keep them local and push after the run completes, since they carry client
-question text and packet paths into a public fork.
+anything. **Both that file and this one were held untracked until the pass completed** —
+the user's call on 2026-08-28, since the pre-run drafts carried packet paths verbatim into
+a public fork. They are tracked from 2026-08-30: the pass is done, the paths are now
+`<packet>` / `<summaries>` / `<corpus dir>` placeholders, and neither file quotes her
+question text. The inputs themselves still never enter this repository — see the header.
 
 ## What's done
 
@@ -230,11 +232,12 @@ indexing, not publishing.
   `feat/rag-eval-prohibited-conclusion` (#109) are both merged and both still exist on
   origin — delete them. The worktree at `.claude/worktrees/feat-rag-eval-conclusion-fields`
   is clean at `0501f55` and can go too.
-- **A parallel session is active on this work** and merged both PRs overnight. Re-read
-  `origin/main` before trusting any branch claim in this file, and check `git log -3` in a
-  worktree before any amend or reset.
-- `docs/client-asks` / `docs/client-asks-originals` = local-only, never pushed. Read with
-  `git show docs/client-asks:<file>` rather than switching.
+- **A parallel session was active on this work on 2026-08-29** and merged both PRs
+  overnight. Re-read `origin/main` before trusting any branch claim in this file, and check
+  `git log -3` in a worktree before any amend or reset.
+- `docs/client-asks-originals` was local-only and unpushed as of 2026-08-29.
+  `docs/client-asks` has since been pushed. Read either with `git show <branch>:<file>`
+  rather than switching.
 - 11 stashes exist. Address a stash by message, never by index.
 
 ## Debt log refs

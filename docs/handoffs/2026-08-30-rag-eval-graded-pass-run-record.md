@@ -230,15 +230,36 @@ Verified: 18 OK, no `rag_eval` directory left in the packet. Neither the packet 
 the summaries package is ever committed — public fork, and her approval covers
 indexing, not publishing.
 
+## 10a. The publication check that was actually run
+
+The header rule is asserted in every one of these files; this is the check run against it
+on 2026-08-30, rather than the assertion restated:
+
+- **Inputs.** The packet, the summaries package, the gold set and the client
+  correspondence are not added. This change adds documentation only.
+- **Paths.** Substituted for `<packet>` / `<summaries>` / `<corpus dir>`, then re-grepped
+  to confirm no absolute packet path survived.
+- **Question text.** None quoted. `run()` reads the gold set from a path outside the
+  repository precisely so it cannot be committed (`rag_eval/run.py`).
+- **Quoted client literals.** Two acceptance item ids (`FIX-NEG-BORROWER-CONTENT`,
+  `FIX-NEG-BORROWER-FILENAME`) and four `support_literal` values do appear. **All six were
+  already on `main` before this change** — the ids in `rag_eval/hygiene.py` and
+  `rag_eval/tests/test_hygiene.py`, the literals in
+  `docs/handoffs/2026-08-27-rag-eval-support-test.md`. This change is not
+  their publication event, and removing them from these files alone would not remove them
+  from the fork. Whether they should come off `main` at all is a separate repository-wide
+  question; it is not answered here.
+
 ## 11. Still open
 
-- **The client report itself** — not written. Retrieval plus the three per-topic
-  rates never pooled, S-6 stated as conclusion-axis-only, calling region disclosed,
-  the `human_review` bucket enumerated with §7's explanation, the negative-control
-  gap and the single-case-topic fragility both named.
-- **Project memory** — the project-memory entry for this pass still says `origin/main` is
-  `7399e8a` with #116 the only thing open. Now `e5f6ea7`, #116/#117/#119 merged,
-  pass complete.
+- **The client report** — written, as `docs/rag-eval-graded-pass-report-2026-08-30.md`,
+  and it ships alongside this record. It carries retrieval plus the three per-topic rates
+  never pooled, S-6 stated as conclusion-axis-only, the calling region disclosed, the
+  `human_review` bucket enumerated with §7's explanation, and the negative-control gap and
+  single-case-topic fragility both named. **Not sent to the client as of 2026-08-30.**
+- **Project memory** — as of 2026-08-30 the project-memory entry for this pass still said
+  `origin/main` was `7399e8a` with #116 the only thing open. It is `e5f6ea7`, #116/#117/#119
+  merged, pass complete.
 - **Deferred, unchanged:** ADR 0019 vocabulary-gap amendment; ADR 0007 rule 6.
 
 ## 12. Artifacts

@@ -8,13 +8,15 @@
 > the decisions and the measured results, which is what a future session needs.
 
 
-**Written 2026-08-29.** Lives in the corpus directory's own local git repository,
-never in `MC-meridian-lending` — that is a PUBLIC fork of
-`2463-FDE/meridian-lending`, and this file carries her packet paths, her acceptance
-item wording and the `support_literal` values from her gold set. A local-only branch
-there was rejected: the objects would still sit in a clone whose `origin` is that
-fork, and one stray push refspec publishes them irrecoverably. That repository has no
-remote and must not be given one.
+**Written 2026-08-29; tracked here from 2026-08-30, after the pass.** Until the pass
+ran, this file was held in the corpus directory's own local repository — that repository
+has no remote and must not be given one — because the draft carried her packet paths
+verbatim into a PUBLIC fork of `2463-FDE/meridian-lending`. Those paths are now
+`<packet>` / `<summaries>` / `<corpus dir>` placeholders. What remains quoted is two
+acceptance item ids and four `support_literal` values, and every one of those six was
+already on `main` before this file — in `rag_eval/hygiene.py` and in
+`docs/handoffs/2026-08-27-rag-eval-support-test.md`. The inputs themselves still never enter this repository — see the
+header, and the publication check in the run record, section 10a.
 
 Supersedes `docs/handoffs/2026-08-28-rag-eval-titan-pass.md` for sequencing; that file keeps the
 setup detail (steps 1–10) and `docs/rag-eval-run-pipeline.md` keeps the pipeline. Both are
@@ -45,20 +47,17 @@ What changed against the plan below:
 - **A risk this file did not anticipate did fire:** the 240-character rationale cap
   downgraded five cases to `human_review`. See the run record, section 7.
 
-## State
+## State as it stood on 2026-08-29 — historical, do not act on it
 
-- `origin/main` = `7399e8a`. Merged 2026-08-29: #112 (policy corpus manifest paths),
-  #113 (assistant rate limit), #114 (the evaluator wiring), #115 (summary provenance).
-- **PR #116 `fix/rag-eval-acceptance-fixtures` is the only thing open.** Commit
-  `7fe277c`, 365 tests, merges clean against `7399e8a`. It is the last build item
-  before the pass.
-- Everything else is on `main`: `support_literal` in the gold set, the
-  verdict/rationale carriers, the evaluator, ADR 0022, and the wiring.
+The state the plan below assumed. The state the pass actually ran on is the run record,
+section 1. Nothing here is a live claim:
 
-Verify rather than trust this block — it decays every time something merges:
-
-    git rev-parse --short origin/main
-    curl -s https://api.github.com/repos/2463-FDE/MC-meridian-lending/pulls?state=open
+- `main` was at `7399e8a`, with #112 (policy corpus manifest paths), #113 (assistant
+  rate limit), #114 (the evaluator wiring) and #115 (summary provenance) merged that day.
+- `fix/rag-eval-acceptance-fixtures` was then the last build item before the pass. It
+  merged as **#116 (`64f4871`)**; #117 and #119 followed.
+- `support_literal`, the verdict/rationale carriers, the evaluator, ADR 0022 and the
+  wiring were already on `main`.
 
 **The branch moved after the first push.** Three review-round commits landed from a
 parallel session, and all three are valid:
@@ -86,12 +85,9 @@ exclusions in `acceptance/no-borrower-data-boundary.jsonl`.
 | `FIX-NEG-BORROWER-CONTENT` | body carries borrower-data-like fields → exclude the whole document, not redact-and-keep |
 | `FIX-NEG-BORROWER-FILENAME` | filename alone is borrower-data-like → exclude even if the body is clean |
 
-**Built 2026-08-29, PR #116 open, not yet on `main`** — branch
-`fix/rag-eval-acceptance-fixtures`, commit `7fe277c`. Merges clean against
-`7399e8a`; `filename-pii` is not in `origin/main:rag_eval/hygiene.py` yet, so
-until #116 merges a run still admits a borrower-shaped filename. Re-check with
-`git show origin/main:rag_eval/hygiene.py | grep filename-pii` rather than
-trusting this line. Measured before assuming, and the two items did not behave alike:
+**Built 2026-08-29, merged as #116 (`64f4871`).** `filename-pii` is on `main` in
+`rag_eval/hygiene.py`, so a run no longer admits a borrower-shaped filename. Measured
+before assuming, and the two items did not behave alike:
 
 | item | before | after |
 |------|--------|-------|

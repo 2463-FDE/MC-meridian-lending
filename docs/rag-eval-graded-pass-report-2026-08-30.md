@@ -91,9 +91,13 @@ nothing untrue. A confidently retrieved answer to a question the corpus cannot
 support puts a wrong statement in front of an officer with nothing marking it as
 wrong — and the officer has no way to tell the two situations apart.
 
-We accepted two of the first to eliminate all five of the second. If you would
-weigh those errors differently, the threshold is the single number that moves them,
-and we can re-derive it against a stated preference.
+We accepted two of the first to eliminate all five of the second. The threshold is the
+single number that moves that trade-off, and it can be re-derived against a stated
+preference from the retrieval scores this run already captured — that costs no new
+measurement and spends no question. What it cannot do is restate the rates in section 3
+under a different threshold. Those were graded once against this gold set, every question
+is now spent, and rates under a new threshold would require a fresh gold set and a fresh
+pass.
 
 ---
 

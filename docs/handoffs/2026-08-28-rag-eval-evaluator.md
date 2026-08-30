@@ -38,13 +38,14 @@ Merged, newest last. Cite these merge commits, not a tip sha:
   loader derives the chunk id under the active admission mode; `clarification` is reported,
   not scored
 
-Proposed, not merged. Check each before relying on it:
+Proposed when this file was written on 2026-08-28; both merged 2026-08-29, as #104 and
+#105. Kept for what each one decided:
 
 - `fix/rag-eval-threshold-provenance` (head `3da0871`) — threshold tied to a content-bound
   corpus signature + embedder signature, exhaustive cutoff search, irreducible error count
 - `feat/rag-eval-two-verdicts` (head `81207cb`) — `conclusion_verdict` / `summary_verdict`,
-  four states, mechanical support check. **Neither `support_literal` nor `conclusion_verdict`
-  is on `main`** — verify before writing code against them.
+  four states, mechanical support check. Both `support_literal` and `conclusion_verdict`
+  are on `main` since those two merges.
 
 **Her corpus can only be admitted under a manifest.** All five policy filenames are non-slug,
 so `unsafe_corpus_path_reason` refuses them under the naming convention. Every run needs
@@ -160,10 +161,11 @@ filename scan) and nothing in the repo records that they were ever run.
 
 - `main` (`26d00e8`) = the client's real state. Holds the ingestion stack, the anchors, and
   `clarification` reported-not-scored. Cite `git show main:<file>`.
-- The two proposed branches above are unmerged. Confirm before relying on either.
-- `docs/client-asks` / `docs/client-asks-originals` = local-only, never pushed. Read with
-  `git show docs/client-asks:<file>` rather than switching — the tree is often held by a
-  parallel session.
+- The two branches above were unmerged on 2026-08-28; both merged 2026-08-29 as #104 and
+  #105.
+- `docs/client-asks-originals` was local-only and unpushed as of 2026-08-28.
+  `docs/client-asks` has since been pushed. Read either with `git show <branch>:<file>`
+  rather than switching — the tree is often held by a parallel session.
 
 ## Debt log refs
 
