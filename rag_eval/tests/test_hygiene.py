@@ -870,11 +870,26 @@ def test_the_refusal_names_the_filename_as_the_cause(tmp_path):
     assert "filename-pii" in scan_file(path).counts()
 
 
-def test_an_ordinary_policy_filename_still_passes(tmp_path):
-    """Guards the other direction: every name in her packet must keep passing.
+def test_filename_pii_refusal_withholds_the_name_from_the_report(tmp_path):
+    """The refusal masks the sample to the suffix, but FileVerdict.path still
+    carries the raw borrower-shaped name so `corpus_doc_id`/chunk ids can be
+    derived from it. The report must not put that name back on screen when a
+    caller renders without a manifest-scoped safe display name — that would
+    make the refusal path itself the disclosure.
+    """
+    path = tmp_path / "PLACEHOLDER-PERSON-ALPHA-ssn-000-00-0000.md"
+    path.write_text(CLEAN_POLICY_BODY, encoding="utf-8")
+    verdict = scan_file(path)
+    report = "\n".join(_hygiene_section([verdict]))
+    assert "PLACEHOLDER-PERSON-ALPHA-ssn-000-00-0000" not in report
 
-    Measured against all 18 packet files and the repo's own policies/ — none trip.
+
+def test_an_ordinary_policy_filename_still_passes(tmp_path):
+    """Guards the other direction: an ordinary policy filename must keep passing.
+
     A name check that refuses a real corpus file is worse than none at all.
+    (The 18 packet files and the repo's own policies/ were checked by hand
+    against this same check — none trip — but that check isn't repeated here.)
     """
     path = tmp_path / "SYN-POL-ADVERSE-ACTION.md"
     path.write_text(CLEAN_POLICY_BODY, encoding="utf-8")

@@ -35,6 +35,22 @@ _LOG_TRACE = (
 )
 
 
+def safe_display_name(
+    v: FileVerdict, display_names: dict[str, str] | None = None
+) -> str:
+    """Name safe to print for a verdict.
+
+    A filename-pii finding means the NAME is the offender, so even the
+    manifest-scoped safe display name (which falls back to the raw path
+    outside that scope) cannot be shown — that would make the refusal row
+    itself the disclosure the refusal exists to prevent.
+    """
+    if any(f.pii_type == "filename-pii" for f in v.findings):
+        return "(withheld — filename-pii)"
+    display_names = display_names or {}
+    return display_names.get(v.path, v.path)
+
+
 def _hygiene_section(
     verdicts: list[FileVerdict], display_names: dict[str, str] | None = None
 ) -> list[str]:
@@ -51,7 +67,7 @@ def _hygiene_section(
         samples = sorted({f.masked_sample for f in v.findings})[:3]
         sample_str = ", ".join(f"`{s}`" for s in samples) or "—"
         verdict = "PASS" if v.passed else "**REFUSED**"
-        name = display_names.get(v.path, v.path)
+        name = safe_display_name(v, display_names)
         lines.append(f"| `{name}` | {verdict} | {count_str} | {sample_str} |")
     lines += [
         "",
