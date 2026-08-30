@@ -574,6 +574,33 @@ def test_traced_fallback_tolerates_no_active_run_tree(monkeypatch):
     assert out == {"summary": "unavailable"}
 
 
+def test_the_run_tree_carries_the_sizing_that_admitted_the_request(monkeypatch):
+    # The budget guard runs INSIDE build_request, so a trace showed that a request was
+    # admitted and nothing about the arithmetic that admitted it: an `llm.complete` span
+    # with no `llm.transport` child read the same whether the budget refused or the
+    # provider was never reached. These are the two integers `BuiltRequest` already
+    # carries for logging, stamped on the span that is already there.
+    #
+    # Deliberately NOT a span around `build_request` itself: that function is the
+    # redaction boundary (raw `**variables` in, redacted request out), so a tracer on it
+    # straddles the boundary every other span in this service sits on one side of.
+    from app.llm import client as client_mod
+
+    run_tree = _FakeRunTree()
+    monkeypatch.setattr(client_mod, "get_current_run_tree", lambda: run_tree)
+
+    client = ClaudeClient(_config(), adapter=FakeAdapter(response=GOOD_SUMMARY))
+    client.summarize_application('{"amount": 10000, "employer": "Zyxwvu Dynamics"}')
+
+    assert isinstance(run_tree.metadata["estimated_input_tokens"], int)
+    assert run_tree.metadata["estimated_input_tokens"] > 0
+    assert run_tree.metadata["trimmed_history_turns"] == 0
+    # Integers only. A distinctive applicant string must not ride along: these keys sit
+    # above `build_request`, whose inputs are pre-redaction.
+    blob = json.dumps(run_tree.metadata)
+    assert "Zyxwvu" not in blob
+
+
 def test_leak_guard_blocks_pii_in_output():
     leaky = (
         '{"summary": "SSN 412-55-9981 on file", "risk_flags": [], '
