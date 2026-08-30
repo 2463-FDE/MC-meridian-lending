@@ -29,9 +29,9 @@ satisfying every field she named cleanly.
 | Region | `us-east-1`, the region the calls were made to. The `us.` prefix is a cross-region inference profile, so this is not a data-residency claim and is not offered as one |
 | Call counts | 94 embedding calls (66 passages + 28 questions), 6,644 input tokens; 28 grading calls, one per question |
 | Retry counts | 0 embedding retries |
-| Cost | Not billed-metered during the run, so this is a derived estimate, not an invoice figure. Titan embedding: 6,644 input tokens at the published on-demand rate of $0.02 per million input tokens for `amazon.titan-embed-text-v2:0` (rate read 2026-08-30) = **$0.00013**, about four orders of magnitude under her $1 Titan ceiling. Grading cost is not derivable: the run captured 28 grading calls but no judge token counts, and her ceiling covers Titan cost specifically. See the limitation note below |
+| Cost | Not billed-metered during the run, so this is a derived estimate, not an invoice figure. Titan embedding: 6,644 input tokens at the published on-demand rate of $0.02 per million input tokens for `amazon.titan-embed-text-v2:0` = **$0.00013**, about four orders of magnitude under her $1 Titan ceiling. The rate is the Amazon Titan Text Embeddings V2 on-demand row of the AWS Bedrock pricing page, `https://aws.amazon.com/bedrock/pricing/`, read 2026-08-30; no page snapshot or revision id was captured, so the arithmetic reproduces only for a reader who accepts that rate. Grading cost is not derivable: the run captured 28 grading calls but no judge token counts, and her ceiling covers Titan cost specifically. See the limitation note below |
 | Corpus result | The packet supplied 2026-08-27, 18 files, verified against its own SHA-256 manifest before and after the run. **6 candidate files scanned, 0 refused** by the content and filename checks; 66 passages indexed. "6 scanned" is the hygiene gate's candidate-file count, not a count of policy documents — the harness counts every file it scans (`rag_eval/run.py`, "candidate files scanned"), while only gate-passed markdown reaches the chunker. The 66 passages match the five-document measurement recorded in `docs/handoffs/2026-08-27-fix-policy-corpus-admission.md`, so the sixth candidate contributed no passages. See the limitation note below |
-| Exclusion result | The run indexed the approved policy directory only. The two whole-document exclusion fixtures sit outside it, so neither was among the 6 candidate files scanned. Their refusal behaviour was verified separately — see the no-match table in `docs/client-asks-2026-08-26-gate0-data-path.md` |
+| Exclusion result | Neither whole-document exclusion fixture was among the 6 candidate files scanned. Both are refused by the hygiene checks — one on content, one on filename (the no-match table in `docs/client-asks-2026-08-26-gate0-data-path.md`) — and the run reported **0 refused**, so neither can have been scanned, whichever root it sat under. Her scope note places both outside the approved policy directory, which matches the packet layout. Note that the candidate scan takes in two roots, `policies/` and `kb_dump/` (`rag_eval/run.py`), and only `policies/` is audited against her manifest — see the limitation note below |
 | Retrieval result | 17 answerable questions: hit@1 0.71, hit@3 0.88, hit@5 0.94, MRR 0.80. All 6 unanswerable questions fell below the confidence threshold. Threshold `0.3007877649147387`, bound to this one (corpus, embedding model) pair |
 | Logging confirmation | The report records that no prompt, passage or model response is retained, that the embedding cache is disabled on the provider path, and that external tracing was excluded and is enforced in code — the evaluator refuses to start if tracing is enabled, checked before any call is made |
 
@@ -46,14 +46,21 @@ Named here rather than left for the table to read as a clean result on every fie
   list: `audit_corpus_against_manifest` audits in both directions and is scoped to the
   packet's `policies/` directory, so a file sitting in that directory and absent from her
   manifest aborts the run instead of being indexed, and a listed file whose digest has
-  moved does the same. A sixth file therefore cannot be outside the approved set — the run
-  would not have completed. What is missing is its name: the harness prints a per-file
-  hygiene table, but that output stayed inside the packet and is not in this repository, so
-  the count travelled and the list did not. Fix on our side, not hers: have the run record
-  carry the admitted document ids.
+  moved does the same. That audit covers `policies/`, and the candidate scan covers more
+  than that: the run scans `policies/` **and** `kb_dump/` (`rag_eval/run.py`), and a
+  `kb_dump/` file is outside her manifest's scope by design — the legacy dump is governed
+  by its own pinned-digest exception, not by her policy manifest. So the boundary argument
+  holds for a sixth candidate under `policies/`, where an unlisted file aborts the run, and
+  not for one under `kb_dump/`, which is never manifest-checked. Nothing retained here says
+  which root the sixth candidate sat under. What is missing is its name and its root: the
+  harness prints a per-file hygiene table, but that output stayed inside the packet and is
+  not in this repository, so the count travelled and the list did not. Fix on our side, not
+  hers: have the run record carry the admitted document ids and the root each was admitted
+  from.
 - **Cost is derived, not metered.** The Titan figure above is computed from the retained
-  token count at a published rate, not read from a bill, and the grading cost is not
-  derivable at all because judge token counts were never captured. Her ceiling is stated
+  token count at a rate cited by URL and date with no snapshot captured, not read from
+  a bill, and the grading cost is not derivable at all because judge token counts were
+  never captured. Her ceiling is stated
   against Titan cost, which is the half that is derivable.
 
 Grading rates, the topic breakdown and the limitations of the pass are in the report
