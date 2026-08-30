@@ -8,12 +8,14 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (62ce9a2)` — 62ce9a2 2026-08-30 Merge pull request #120 from 2463-FDE/docs/client-asks
+Base: `origin/main (d0812fe)` — d0812fe 2026-08-30 Merge pull request #128 from 2463-FDE/docs/client-asks-working-logs
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #128 | `d0812fe` | 2026-08-30 | Merge pull request #128 from 2463-FDE/docs/client-asks-working-logs |
+| #127 | `f66cc41` | 2026-08-30 | Merge pull request #127 from 2463-FDE/docs/rag-eval-handoff-pointers |
 | #120 | `62ce9a2` | 2026-08-30 | Merge pull request #120 from 2463-FDE/docs/client-asks |
 | #122 | `a6c38b5` | 2026-08-30 | Merge pull request #122 from 2463-FDE/docs/debt-rationale-cap |
 | #121 | `ffc05a7` | 2026-08-30 | Merge pull request #121 from 2463-FDE/docs/rag-eval-graded-pass |
