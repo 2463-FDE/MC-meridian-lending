@@ -79,8 +79,8 @@ Feeds `docs/spec-observability-week7.md` (D2, D3, D4), `adr/0015-settlement-reco
 ## Exchange 4 — payment integrity, card data, monitoring labels
 
 **Asked:** 2026-08-16. **Answered:** 2026-08-17, in writing. **Respondent:** VP Lending Ops,
-Meridian. **Source reference:** `docs/client-asks-2026-08-16.md` on `docs/client-asks` (this
-file is one of 23 commits on that branch not yet pushed to `origin/docs/client-asks`).
+Meridian. **Source reference:** `docs/client-asks-2026-08-16.md` on the `docs/client-asks`
+working-log branch.
 Feeds the payment-integrity design, `adr/0013-payment-idempotency-and-tokenization.md`, `docs/spec-payments-week5.md`, `docs/spec-fair-lending-monitoring-week8.md`.
 
 | # | Question | Answer | Feeds |
