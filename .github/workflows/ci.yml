@@ -233,6 +233,11 @@ jobs:
     # Phase B, PR #7). These tests live in test_proxy_methods.py, which the `backend` job
     # runs under continue-on-error/|| true, so a reopened leak would stay green. This job
     # MUST block -- no continue-on-error, no `|| true`.
+    #
+    # test_auth.py (D27) rides the same job rather than a new one: password hashing is the
+    # other half of "who is this session," and the `backend` matrix's || true tolerance
+    # would otherwise let a reverted salt/rehash pass silently, same as the header-strip gap
+    # above.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -243,7 +248,7 @@ jobs:
         run: |
           cd services/gateway
           pip install -r requirements.txt pytest
-          python -m pytest tests/test_proxy_methods.py -q
+          python -m pytest tests/test_proxy_methods.py tests/test_auth.py -q
 
   compose-hardening-gate-tests:
     # BLOCKING, like doc-path-lint-tests / spec-diff-gate-tests. Hermetic — each

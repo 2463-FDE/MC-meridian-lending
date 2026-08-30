@@ -407,6 +407,36 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
                     return False, "schema_not_ready:" + conname
                 if _normalize_constraint_def(str(row[0] or "")) != expected_def:
                     return False, "schema_not_ready:" + conname + ":definition"
+            # Append-only guarantee (D20, migration 0022): audit_logs is written from
+            # applications.py's INSERTs, so a volume that predates the triggers would
+            # accept those writes fine while UPDATE/DELETE on the "audit" trail stayed
+            # silently unguarded -- /health would read healthy over exactly the gap
+            # this rung exists to name. to_regclass, not table-name string matching:
+            # the check must name the SAME table the writer resolves to (search_path).
+            #
+            # BOTH triggers of the pair, because they guard different operations and a
+            # row-level trigger does not fire on TRUNCATE: on a volume carrying only
+            # trg_audit_logs_append_only, `TRUNCATE audit_logs` still empties the trail
+            # while this rung reports ready. tgenabled is read rather than presence
+            # alone -- ALTER TABLE ... DISABLE TRIGGER leaves the pg_trigger row in
+            # place enforcing nothing, which a SELECT 1 rung cannot tell from enforced.
+            # 'O' (origin) and 'A' (always) are the two values that fire for the plain
+            # session this service writes from; 'D' is disabled and 'R' fires only in
+            # replica mode, so either one leaves the trail mutable here.
+            for trigger in (
+                "trg_audit_logs_append_only",
+                "trg_audit_logs_no_truncate",
+            ):
+                cur.execute(
+                    "SELECT tgenabled FROM pg_trigger "
+                    "WHERE tgrelid = to_regclass('audit_logs') "
+                    "AND tgname = '" + trigger + "'"
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return False, "schema_not_ready:" + trigger
+                if str(row[0]) not in ("O", "A"):
+                    return False, "schema_not_ready:" + trigger + ":not_enforced"
         return True, None
     except Exception as exc:
         return False, exc.__class__.__name__
