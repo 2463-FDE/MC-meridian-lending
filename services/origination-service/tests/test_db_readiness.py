@@ -181,6 +181,10 @@ class _FakeCursor:
                 return (definition,)
         if "pg_get_constraintdef" in self._last:
             return (READABLE_DOB_CONSTRAINT_DEF,)
+        if "pg_trigger" in self._last:
+            # tgenabled, not a bare 1: 'O' (origin) is what a plainly created,
+            # enforcing trigger carries.
+            return ("O",)
         return (1,)
 
     def fetchall(self):
@@ -768,6 +772,75 @@ def test_probe_fails_when_audit_logs_append_only_trigger_is_not_ready(monkeypatc
     assert err == "schema_not_ready:trg_audit_logs_append_only"
 
 
+class _AuditLogsNoTruncateMissingCursor(_FakeCursor):
+    """The row-level trigger is applied but trg_audit_logs_no_truncate is not -- the
+    half of the D20 pair a row trigger cannot cover, because row-level triggers do not
+    fire on TRUNCATE. On such a volume `TRUNCATE audit_logs` still empties the trail."""
+
+    def fetchone(self):
+        if "trg_audit_logs_no_truncate" in self._last:
+            return None
+        return super().fetchone()
+
+
+class _AuditLogsNoTruncateMissingConn:
+    def cursor(self):
+        return _AuditLogsNoTruncateMissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_audit_logs_no_truncate_trigger_is_not_ready(monkeypatch):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _AuditLogsNoTruncateMissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:trg_audit_logs_no_truncate"
+
+
+def _audit_trigger_conn_with_tgenabled(value):
+    """A volume where both D20 triggers exist but the no-truncate one carries
+    `value` in tgenabled: 'D' is ALTER TABLE ... DISABLE TRIGGER, 'R' is ENABLE
+    REPLICA TRIGGER (fires only in replica mode). Both leave the pg_trigger row in
+    place, so a presence-only rung reads ready over a table that enforces nothing on
+    TRUNCATE for the plain session origination writes from."""
+
+    class _Cursor(_FakeCursor):
+        def fetchone(self):
+            if "trg_audit_logs_no_truncate" in self._last:
+                return (value,)
+            return super().fetchone()
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+        def close(self):
+            pass
+
+    return _Conn
+
+
+@pytest.mark.parametrize("tgenabled", ["D", "R"])
+def test_probe_fails_when_audit_logs_trigger_is_not_enforced(monkeypatch, tgenabled):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2,
+        "connect",
+        lambda *a, **k: _audit_trigger_conn_with_tgenabled(tgenabled)(),
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:trg_audit_logs_no_truncate:not_enforced"
+
+
 def test_probe_false_when_database_url_unset(monkeypatch):
     monkeypatch.setattr(config, "DATABASE_URL", "")
     ok, err = config.database_reachable()
@@ -942,6 +1015,10 @@ class _AssistantRunsCursor:
             return None
         if self._last.strip() == "SELECT to_regclass('assistant_runs')":
             return (None,) if self._columns is None else ("assistant_runs",)
+        if "pg_trigger" in self._last:
+            # tgenabled for the D20 audit_logs pair: 'O' (origin) is an enforcing
+            # trigger. This fake models a ready volume for every rung but its own.
+            return ("O",)
         return (1,)
 
     def fetchall(self):
