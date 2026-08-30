@@ -18,9 +18,9 @@ already on `main` before this file — in `rag_eval/hygiene.py` and in
 `docs/handoffs/2026-08-27-rag-eval-support-test.md`. The inputs themselves still never enter this repository — see the
 header, and the publication check in the run record, section 10a.
 
-Supersedes `docs/handoffs/2026-08-28-rag-eval-titan-pass.md` for sequencing; that file keeps the
-setup detail (steps 1–10) and `docs/rag-eval-run-pipeline.md` keeps the pipeline. Both are
-siblings in `handoffs/`.
+Supersedes `docs/handoffs/2026-08-28-rag-eval-titan-pass.md` for sequencing. That file is now a
+pointer record: `docs/rag-eval-run-pipeline.md` holds both the setup (§2, steps 1–10) and the
+pipeline (§3), and it is not in `handoffs/`.
 
 **Operational companion:** ``docs/runbook-rag-eval-graded-pass.md``, beside the scripts it
 documents — exact commands, expected output, stop conditions. This file is the why;
