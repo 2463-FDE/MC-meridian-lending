@@ -145,8 +145,13 @@ docker compose exec -T postgres psql -U meridian -d meridian -c \
     WHERE table_schema = current_schema()
       AND table_name = 'payments' AND column_name = 'cvv';"   # expect 0 rows
 
-# 2. both services came back healthy
-curl -s localhost:8006/health; curl -s localhost:8002/health
+# 2. both services came back healthy. Every backend service is `expose:`-only in
+#    docker-compose.yml — the gateway on :8000 is the sole host-published trust
+#    boundary — so a bare `curl localhost:8006/health` from the host is refused.
+docker compose exec -T payment-service   python -c \
+  "import urllib.request; print(urllib.request.urlopen('http://localhost:8006/health').read())"
+docker compose exec -T servicing-service python -c \
+  "import urllib.request; print(urllib.request.urlopen('http://localhost:8002/health').read())"
 ```
 
 **What this does not purge, and who owns it:** WAL segments, replicas, and any backup
