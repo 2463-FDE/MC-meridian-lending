@@ -8,6 +8,30 @@ inbound scope and the verified state as of 08-21; `docs/handoffs/2026-08-21-free
 is its resume pointer. Both predate PR #64 and state that policy retrieval is absent from
 `main`. That is no longer true — see §1. This plan supersedes their "what's left" sections.
 
+**Status since this plan was written (added 2026-08-30).** This is a plan, dated and based at
+`06c27a3`; its tables record what was true then and are deliberately not rewritten. Three of
+its present-tense claims have since been overtaken, and a reader arriving from
+`docs/freeze-demo-script-week10.md` §8 — which sends a receiving team here second — would
+otherwise read them as current:
+
+- **§1 slice 8, "CVV retention is live (D13)".** D13 split. The CVV column was deleted on
+  2026-08-24 by migration `db/migrations/0020_payments_drop_cvv.sql`, merged as #92
+  (`1eec439`), held by the blocking `no-sad-gate` and a fail-closed readiness rung in both
+  charge services. What remains live is **D13b**: the `pan` column is untouched and
+  tokenization is unbuilt, and it still blocks production. `docs/debt-log.md` D13 carries the
+  precise split, including the residual this does not cover — WAL segments, replicas and any
+  backup taken before the table rewrite still hold the purged values.
+- **§1 slice 8, "ADR 0010 ownership authorization is open".** Ownership landed: #32
+  (`f901894`) merged `services/servicing-service/app/authz.py`, and the guard takes the owner
+  from `X-User-Id` rather than from the identity flow ADR 0010 was blocked on. What stays open
+  is the **maker-checker** half — one money role still both makes and approves a balance
+  adjustment — and the gateway still not enforcing role authz on money actions. See
+  `docs/debt-log.md` D8.
+- **§4, "the model can currently name a tool that does not exist".** That improvement shipped.
+  #72 (`5f9362f`) merged real tool schemas and `tool_use` blocks to the provider, and #76
+  (`cc84ae0`) merged the loop swap to native tool calling, which also refuses a tool call
+  arriving as text. The failure class the sentence anticipates removing is removed.
+
 ---
 
 ## 1. What the freeze asks for, and what `main` already satisfies
@@ -215,9 +239,9 @@ and on no span; and step exhaustion returns the mapped refusal rather than a 500
 - **The payment-integrity work is half landed, and it no longer competes for the queue.**
   #63 merged on 2026-08-23 as `06c27a3`, carrying `db/migrations/0018_payments_idempotency.sql`
   — the schema rung that claims an idempotency key in the schema rather than in a service. The
-  second fix, the capture-side change, is built and its pull request is not yet raised. **No
-  pull request is open**, so the working agreement's cap of two is free and the slices below
-  are not queued behind anything.
+  second fix, the capture-side change, merged on 2026-08-23 as #65 (`c0e7023`). At the time
+  this plan was written the queue was empty, which is why the slices below were not scheduled
+  behind anything.
 - **Upside for the presentation.** The idempotency work restores the strongest number
   available: one $100 intent sent eight ways produced eight charges totalling $800 with only
   $600 credited (`scripts/repro_double_charge.py`). The W10 bar asks for a before-and-after
