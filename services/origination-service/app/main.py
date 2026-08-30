@@ -141,10 +141,26 @@ def assistant_decide(
     # score tool below performs the same regulated decision and appends the same
     # decision_events record, so gating only that route would leave the finding open
     # through this panel. The read-only GET (explain) never scores and stays open.
-    authz.deny_self_decision(app_id, x_user_role, x_user_id)
+    try:
+        authz.deny_self_decision(app_id, x_user_role, x_user_id)
+    except HTTPException as exc:
+        # Re-raised through the tracer so the block is one traced root with its own code
+        # instead of a refusal with no trace. `exc.detail` is authz's own fixed string
+        # (`app/authz.py`), officer-facing already and carrying no identifier.
+        _refused_before_loop(
+            app_id=app_id,
+            task="decision",
+            code="self_decision",
+            status=exc.status_code,
+            detail=exc.detail,
+        )
     if idempotency_key is not None and len(idempotency_key) > 64:
-        raise HTTPException(
-            status_code=400, detail="Idempotency-Key must be at most 64 characters"
+        _refused_before_loop(
+            app_id=app_id,
+            task="decision",
+            code="idempotency_key_too_long",
+            status=400,
+            detail="Idempotency-Key must be at most 64 characters",
         )
     return _run_assistant(app_id, client, "decision", idempotency_key or None)
 
@@ -177,8 +193,13 @@ def assistant_explain(
     authz.require_officer(x_user_role)
     rate_limit.check_llm_rate_limit(x_user_id)
     if policy_topic is not None and policy_topic not in policy_retrieval.POLICY_TOPICS:
-        raise HTTPException(
-            status_code=422,
+        # The rejected value is NOT passed to the span: it is officer-typed free text,
+        # and the closed vocabulary is what a trace reader needs, not the miss.
+        _refused_before_loop(
+            app_id=app_id,
+            task="explain",
+            code="unknown_policy_topic",
+            status=422,
             detail=(
                 "unknown policy_topic; choose one of: "
                 + ", ".join(policy_retrieval.POLICY_TOPICS)
@@ -512,6 +533,70 @@ def _charted(result: dict) -> dict:
         if isinstance(value, list):
             charted[key] = len(value)
     return charted
+
+
+def _refused_before_loop(
+    *,
+    app_id: int,
+    task: str,
+    code: str,
+    status: int,
+    detail: str,
+    policy_topic: str | None = None,
+) -> None:
+    """Trace a refusal the ROUTE raises above `_run_assistant`, then raise it.
+
+    `_run_assistant` opens `assistant.entry` and translates everything raised inside it,
+    but three post-authz business refusals are decided in the route bodies above that
+    call and so produced no trace at all: the self-decision block (ADR 0010 / the
+    2026-08-12 governance ask), an over-long `Idempotency-Key`, and an unlisted
+    `policy_topic`. Each is a real officer-visible outcome, and "refused before we
+    started" is exactly the case a trace is read to explain.
+
+    Opening the span here rather than moving the checks down keeps `authz` and the
+    `policy_topic` vocabulary at the route, where a reviewer looks for them. The cost is
+    that `_SPAN_ENTRY` has two call sites; the tests assert both produce the same root
+    name and the same metadata keys.
+
+    Holds the two rules `_SPAN_ENTRY` already holds (see the comment above it):
+
+    * Metadata is the task, the closed-vocabulary policy topic and an enum refusal code.
+      Never `app_id`, never the user id, never the rejected key or topic value -- the
+      officer's own input is echoed in the `detail` they receive, not onto the span.
+    * The `HTTPException` is raised AFTER the span closes, so `trace()` never attaches
+      `str(exception)` to it.
+
+    NOT used for `require_officer` or `check_llm_rate_limit`. Those two stand between an
+    arbitrary caller and this service, and a span opened before them would make trace
+    volume something an unauthorized caller controls -- with the rate limiter, the
+    control that would otherwise bound it, sitting behind the thing it is meant to bound.
+    Their refusals stay in the log only, and a test pins that.
+    """
+    with trace(
+        name=_SPAN_ENTRY,
+        run_type="chain",
+        metadata={
+            "task": task,
+            **({"policy_topic": policy_topic} if policy_topic else {}),
+            "http_status": status,
+            "refusal": code,
+        },
+    ) as entry:
+        trace_id = str(entry.trace_id)
+    assistant_runs.record(
+        trace_id=trace_id,
+        application_id=app_id,
+        task=task,
+        policy_topic=policy_topic,
+        http_status=status,
+        refusal_code=code,
+        charted={},
+        # Zero, not a measured span: the refusal is decided before any work starts, so a
+        # timed value here would report the cost of the check itself as request latency
+        # and skew every percentile the served rows carry.
+        latency_ms=0,
+    )
+    raise HTTPException(status_code=status, detail=detail)
 
 
 def _run_assistant(

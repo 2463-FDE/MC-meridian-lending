@@ -232,6 +232,28 @@ class ClaudeClient:
             **variables,
         )
 
+        # The sizing that ADMITTED this request, stamped on the span already open above.
+        # Both are plain integers `BuiltRequest` already carries for the log line: the
+        # estimate the budget check compared, and how many history turns it had to drop
+        # to fit. Without them an `llm.complete` that never reached the provider showed
+        # no arithmetic at all -- a budget refusal and an unreached provider read alike.
+        #
+        # A refusal needs no stamp of its own: `TokenBudgetExceeded` is raised inside
+        # `build_request` (so there is no `built` to read), and its message is integers
+        # only -- token counts and the budget literal, no variable values -- which already
+        # posts on this span, since `harden_trace_client` leaves `_hide_run_error`
+        # passthrough.
+        #
+        # Deliberately NOT a span around `build_request` itself. That function is the
+        # redaction boundary -- raw `**variables` and raw `history` in, redacted request
+        # out -- so tracing it would straddle the boundary every other span in this
+        # service sits on ONE side of (`assistant.*` pre-PII enum codes, `llm.transport`
+        # post-redaction), and its `idempotency_key` argument is the caller-linkable id
+        # `assistant.entry` refuses to carry.
+        if run_tree is not None:
+            run_tree.metadata["estimated_input_tokens"] = built.estimated_input_tokens
+            run_tree.metadata["trimmed_history_turns"] = built.trimmed_history_turns
+
         # Concern 4: transport with timeout + bounded retry.
         retries = {"n": 0}
 

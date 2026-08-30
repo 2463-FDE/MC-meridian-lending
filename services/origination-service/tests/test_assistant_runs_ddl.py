@@ -85,6 +85,9 @@ def test_refusal_code_is_constrained_to_the_codes_the_route_can_record():
         "refused",
         "idempotency_conflict",
         "downstream_unavailable",
+        "self_decision",
+        "idempotency_key_too_long",
+        "unknown_policy_topic",
     ):
         assert f"'{code}'" in block
 
