@@ -204,8 +204,10 @@ credential itself was malformed. The shell variable held the whole assignment li
 (`AWS_BEARER_TOKEN_BEDROCK=ABSK…`) because that line was pasted into `read -rs`,
 which takes the line literally. Diagnosable without spending anything: a long-term
 key is `ABSK` + base64, so the length minus 4 must divide by 4. It was 157 (= 25 +
-132). Check the prefix reads `ABSKQmVkcm9ja` and that the body length divides by 4
-before spending a call.
+132). Check the prefix against the long-term-key prefix that the `secret-scan`
+job pins in `.github/workflows/ci.yml` — this file is scanned by that job, so the
+literal cannot be repeated here — and that the body length divides by 4 before
+spending a call.
 
 **3. The model fences its JSON.** Phase B returned `reply text is not JSON`, with
 the reply starting ` ```json `. `grade()` called a bare `json.loads`, which raised,
