@@ -1,12 +1,15 @@
 -- Meridian Lending — schema (Halcyon v1, extended in-place over the years)
 -- NOTE: money is stored as double precision throughout. Keeps the app code simple.
 
--- Staff + borrower logins. Passwords are sha256 hex (no salt, no bcrypt — Halcyon's
--- "we'll harden it later"). Roles: admin | underwriter | csr | borrower.
+-- Staff + borrower logins. Roles: admin | underwriter | csr | borrower.
 CREATE TABLE IF NOT EXISTS users (
     id            SERIAL PRIMARY KEY,
     username      TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,        -- sha256(password), unsalted
+    -- D27: salted PBKDF2-HMAC-SHA256 ("pbkdf2_sha256$<iterations>$<salt>$<hash>",
+    -- services/gateway/app/auth.py). A row may still hold the pre-fix bare sha256(password)
+    -- hex -- the seed does, on purpose, so a fresh volume exercises the migration path --
+    -- authenticate() rehashes it to the new format on that row's next successful login.
+    password_hash TEXT NOT NULL,
     role          TEXT NOT NULL DEFAULT 'csr',
     display_name  TEXT,
     applicant_id  INTEGER,              -- set for borrower logins
@@ -173,15 +176,36 @@ CREATE TABLE IF NOT EXISTS payment_applications (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- "audit" log: an ordinary, mutable table. Rows can be UPDATE/DELETE-d. Not append-only.
+-- "audit" log (D20): append-only, enforced by trigger below. deleted_at predates the
+-- trigger and is now inert -- any UPDATE it would need is blocked the same as every
+-- other UPDATE -- kept rather than dropped because nothing in this change touches column
+-- shape, only mutability.
 CREATE TABLE IF NOT EXISTS audit_logs (
     id          SERIAL PRIMARY KEY,
     actor       TEXT,
     action      TEXT,
     detail      TEXT,
-    deleted_at  TIMESTAMPTZ,        -- soft-delete column on an "audit" trail
+    deleted_at  TIMESTAMPTZ,
     created_at  TIMESTAMPTZ DEFAULT now()
 );
+
+-- Append-only enforced at the database (D20), mirroring decision_events below: the
+-- audit trail must survive application bugs and ad-hoc SQL, not just code convention.
+CREATE OR REPLACE FUNCTION audit_logs_append_only() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'audit_logs is append-only (D20): % blocked', TG_OP;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_audit_logs_append_only ON audit_logs;
+CREATE TRIGGER trg_audit_logs_append_only
+    BEFORE UPDATE OR DELETE ON audit_logs
+    FOR EACH ROW EXECUTE FUNCTION audit_logs_append_only();
+
+-- Row-level triggers do not fire on TRUNCATE; block it explicitly.
+DROP TRIGGER IF EXISTS trg_audit_logs_no_truncate ON audit_logs;
+CREATE TRIGGER trg_audit_logs_no_truncate
+    BEFORE TRUNCATE ON audit_logs
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_logs_append_only();
 
 -- ADR 0009 / ADR 0008: append-only decision-event record. `decisions` above remains the
 -- mutable current-state pointer; this is the system of record for Reg B adverse action.
@@ -201,7 +225,7 @@ CREATE INDEX IF NOT EXISTS idx_decision_events_app ON decision_events(app_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_decision_events_request
     ON decision_events (app_id, request_id) WHERE request_id IS NOT NULL;
 
--- Append-only enforced at the database (contrast audit_logs above, which is mutable).
+-- Append-only enforced at the database (audit_logs above got the same guarantee, D20).
 CREATE OR REPLACE FUNCTION decision_events_append_only() RETURNS trigger AS $$
 BEGIN
     RAISE EXCEPTION 'decision_events is append-only (ADR 0009): % blocked', TG_OP;
@@ -463,14 +487,21 @@ CREATE TABLE IF NOT EXISTS assistant_runs (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT ck_assistant_runs_task
         CHECK (task IN ('decision', 'explain')),
-    -- Every code _run_assistant can record. never_decisioned is the half of the old
+    -- Every code the service can record. never_decisioned is the half of the old
     -- single `not_found` that means the application EXISTS but carries no decision
     -- record; fusing the two made a broken-link spike and an asked-too-early spike one
     -- number with opposite remedies.
+    --
+    -- The last three are refused in the ROUTE bodies ABOVE the loop
+    -- (main._refused_before_loop) and never reach _run_assistant's translation, so the
+    -- first eight are not the whole set. A code missing here is not a rejected write an
+    -- operator sees: services/origination-service/app/assistant_runs.py swallows the
+    -- violation by design, leaving a span, an answer for the officer, and no row.
     CONSTRAINT ck_assistant_runs_refusal_code
         CHECK (refusal_code IS NULL OR refusal_code IN (
             'not_found', 'never_decisioned', 'assistant_refused', 'llm_unavailable',
-            'kyc_blocked', 'refused', 'idempotency_conflict', 'downstream_unavailable'
+            'kyc_blocked', 'refused', 'idempotency_conflict', 'downstream_unavailable',
+            'self_decision', 'idempotency_key_too_long', 'unknown_policy_topic'
         )),
     -- A row is either a served answer or a refusal, never ambiguously both -- so a
     -- refusal can never be read as "outcome unknown". Keyed on http_status and NOT on

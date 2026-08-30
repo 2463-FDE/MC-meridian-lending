@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (e5f6ea7)` — e5f6ea7 2026-08-30 Merge pull request #119 from 2463-FDE/fix/rag-eval-fenced-reply
+Base: `origin/main (ddfb8c4)` — ddfb8c4 2026-08-30 Merge pull request #124 from 2463-FDE/fix/datastore-port-exposure
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #124 | `ddfb8c4` | 2026-08-30 | Merge pull request #124 from 2463-FDE/fix/datastore-port-exposure |
 | #119 | `e5f6ea7` | 2026-08-30 | Merge pull request #119 from 2463-FDE/fix/rag-eval-fenced-reply |
 | #118 | `245fdb7` | 2026-08-30 | Merge pull request #118 from 2463-FDE/fix/datastore-port-exposure |
 | #117 | `8c70f9a` | 2026-08-29 | Merge pull request #117 from 2463-FDE/chore/address-pr-turn-budget |

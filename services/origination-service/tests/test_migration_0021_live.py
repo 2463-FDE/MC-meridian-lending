@@ -168,11 +168,14 @@ def test_the_rows_the_route_actually_writes_are_accepted(cur):
         "refused",
         "idempotency_conflict",
         "downstream_unavailable",
+        "self_decision",
+        "idempotency_key_too_long",
+        "unknown_policy_topic",
     ):
         sql, params = _served(refusal=code, status=502)
         cur.execute(sql, params)
     cur.execute("SELECT count(*) FROM assistant_runs")
-    assert cur.fetchone()[0] == 9
+    assert cur.fetchone()[0] == 12
 
 
 def test_an_application_id_with_no_application_is_accepted(cur):
