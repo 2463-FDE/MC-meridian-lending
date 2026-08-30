@@ -18,13 +18,8 @@
 
 ## What this file still records
 
-Two facts that survive it and are recorded nowhere else in this repository.
+One fact that survives it and is recorded nowhere else in this repository.
 
-- **The client's acceptance set is 30 items, not 28.** 28 questions plus 2 whole-document
-  exclusion checks in `acceptance/`, held outside this repository. Both exclusion checks
-  passed when this file was written — one by body scan, one by filename scan — and nothing
-  in the repository records that they were ever run. Every other document on this track
-  counts 28.
 - **Person-name guard trip counts, measured on her 28 rows.** `expected_conclusion_text`
   trips **6** (Q08, Q10, Q12, Q15, Q18, Q24), `prohibitedUnsupportedConclusion` trips
   **1** (Q14), `synthetic_displayed_summary` trips **0**. **None of the seven trips carries
@@ -32,7 +27,13 @@ Two facts that survive it and are recorded nowhere else in this repository.
   Schedule` and `If Meridian`. `rag_eval/tests/test_conclusion_fields.py` pins the first
   count; the other two and the zero-PII finding are recorded only here.
 
-Two things this file's earlier banner claimed were unique to it are not. The `If Meridian`
+Three things this file's earlier banner claimed were unique to it are not. The 30-item
+acceptance set — 28 officer questions plus the 2 whole-document exclusion checks — is
+`docs/handoffs/2026-08-29-rag-eval-graded-pass.md` § 1, which also names the two check ids
+and the `acceptance/` file holding them. That section corrects this file as well as
+superseding it: this file recorded both exclusion checks as passing on 2026-08-28, and the
+08-29 measurement found `FIX-NEG-BORROWER-FILENAME` admitted (`passed=True`) until
+`filename-pii` shipped in #116 (`64f4871`). The `If Meridian`
 phrase-replacement defect — the allowlist replaces phrases, so `Meridian Lending` does not
 cover a sentence-initial `If Meridian …`, and adding entries will not close it — is carried
 by the code it affects, `rag_eval/run.py` (`_NAME_ALLOWLIST`) and

@@ -44,8 +44,11 @@ measured prohibited-axis cost, and the load-bearing `PROHIBITED_STATES` ordering
 needs an ADR 0007 rule 6 amendment and a PII re-review, because her authorization covers
 indexing and not retention — is in `docs/debt-log.md` under D16.
 
-One piece of housekeeping this file named is still undone: `feat/rag-eval-conclusion-fields`
-and `feat/rag-eval-prohibited-conclusion` are both merged and both still exist on `origin`.
+One piece of housekeeping this file named was still undone when this record was written:
+`feat/rag-eval-conclusion-fields` and `feat/rag-eval-prohibited-conclusion` are both merged
+and both were still present on `origin` per `git ls-remote --heads origin` on 2026-08-30.
+Re-run that command before acting on it — a local `git branch -a` answers a different
+question, since remote-tracking refs go stale without a `git fetch --prune`.
 
 ## Where the live state is
 
