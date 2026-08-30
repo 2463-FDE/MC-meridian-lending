@@ -39,6 +39,9 @@ def _report(
     n_chunks: int,
     verdicts: list[FileVerdict] | None = None,
     display_names: dict[str, str] | None = None,
+    judge_backend: str = "none",
+    judge_model: str | None = None,
+    judge_calls: int = 0,
 ) -> str:
     return report_mod.build(
         verdicts=verdicts
@@ -58,7 +61,40 @@ def _report(
         corpus_signature="corpus-test",
         wrong_abstain=0,
         false_confident=0,
+        judge_backend=judge_backend,
+        judge_model=judge_model,
+        judge_calls=judge_calls,
     )
+
+
+def test_retrieval_only_run_states_zero_llm_calls() -> None:
+    """With no judge configured, the original offline claim still holds."""
+    text = _report(
+        [_eval("q1", "What is the late fee?", unanswerable=False, top=0.5)], 66
+    )
+    assert "zero LLM calls" in text
+
+
+def test_judged_run_does_not_claim_zero_llm_calls() -> None:
+    """A judged run made real Bedrock calls and must not report zero.
+
+    RAG_JUDGE=bedrock means make_evaluator() built a BedrockEvaluator and
+    _graded() called evaluator.grade() once per gold row -- report.build()
+    must not print the retrieval-only "zero LLM calls" sentence over a run
+    that spent provider calls, and ADR 0022 requires it to name the backend
+    and model instead.
+    """
+    text = _report(
+        [_eval("q1", "What is the late fee?", unanswerable=False, top=0.5)],
+        66,
+        judge_backend="bedrock",
+        judge_model="anthropic.claude-3-haiku",
+        judge_calls=1,
+    )
+    assert "zero LLM calls" not in text
+    assert "bedrock" in text
+    assert "anthropic.claude-3-haiku" in text
+    assert "1 LLM call" in text
 
 
 def test_calibration_note_states_the_real_corpus_size() -> None:

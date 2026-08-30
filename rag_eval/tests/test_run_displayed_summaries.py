@@ -43,9 +43,16 @@ def _gold(tmp_path: Path, expected: str) -> None:
     )
 
 
-def _summaries_package(
-    tmp_path: Path, content: str = "officer,summary\n1,ok\n"
-) -> Path:
+# The real package's columns, not a placeholder: run() now reads this file rather
+# than only checksumming it, so a fixture with invented headers would pass a test
+# the client's own package fails.
+_REAL_SUMMARY_CSV = (
+    "expected_conclusion_id,synthetic_displayed_summary\n"
+    "Q01-ACCEPTABLE-CONCLUSION,A summary.\n"
+)
+
+
+def _summaries_package(tmp_path: Path, content: str = _REAL_SUMMARY_CSV) -> Path:
     pkg = tmp_path / "summaries"
     pkg.mkdir()
     (pkg / "displayed-summaries.csv").write_text(content, encoding="utf-8")

@@ -4,9 +4,9 @@ Date: 2026-08-29
 
 ## Status
 
-Accepted. Built in `rag_eval/evaluator.py`, held by the blocking `rag-eval-gate`.
-Not yet wired into `rag_eval/run.py` — that step needs the `rationale` field on
-`QueryEval` and lands separately.
+Accepted. Built in `rag_eval/evaluator.py` and wired into `rag_eval/run.py`, held
+by the blocking `rag-eval-gate`. No residual: the run builds a `GradingCase` per
+gold row and carries the three verdicts and the rationale onto `QueryEval`.
 
 ## Context
 
@@ -174,8 +174,11 @@ pass, so the engineering effort goes into refusals rather than into efficiency.
 
 **Performance and scalability.** 28 sequential calls at a few seconds each. There
 is no concurrency and no batching across cases, and neither is worth building for
-28 cases; the mechanical exclusion already keeps four of them off the model
-entirely. At a corpus large enough to matter this would need revisiting, which is
+28 cases. The mechanical exclusion does not reduce the call count: under the
+conclusion-axis-only reading below, the four literal-backed rows are still graded
+on summary and prohibited, so all 28 cases reach the model and only the model's
+conclusion for those four is discarded. That is what the ~40k figure above already
+assumes. At a corpus large enough to matter this would need revisiting, which is
 the same threshold D16 tracks for pgvector.
 
 **Reliability.** The failure modes are a provider outage (one retry, then a
@@ -202,10 +205,15 @@ suite stays keyless and the blocking gate can run it. No test spends a real call
    and `EvaluatorProviderError`, plus the tests. **Done in this change.**
 2. Wire it into `rag_eval/run.py`: build a `GradingCase` per gold row, skip the
    conclusion axis where `support_literal` already decided it, and assign the
-   verdicts and rationale onto `QueryEval`. This depends on the `rationale` field
-   and the per-topic verdict rates, and lands after those merge.
+   verdicts and rationale onto `QueryEval`. **Done in this change.** It also
+   resolves `displayed_summary_id` against her frozen summaries package, which was
+   audited but never read, and selects a backend from `RAG_JUDGE` — default
+   `none`, so no dry run and no gate can spend a call by accident.
 3. Run the full 28-case pass on TF-IDF first, confirming the evaluator produces
    verdicts and the report renders three rates per topic, before any Titan call.
+   A retrieval-only pass on 2026-08-29 already confirmed the report side: four
+   mechanical conclusions, 24 not evaluated, and all eight topics rendering three
+   columns.
 4. Spend the single graded pass.
 
 ## Rollback
