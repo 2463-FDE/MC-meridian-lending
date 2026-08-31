@@ -5,7 +5,7 @@ and gates what is allowed to enter a retrieval corpus. **Zero LLM calls, zero
 third-party runtime deps** (stdlib only; `pytest` for tests). This is an analysis
 tool, not a service — no FastAPI, no DB, no docker-compose entry.
 
-Spec: `docs/spec-rag-week2.md` · Plan: `docs/STAGE1-PLAN-RAG-WEEK2.md` ·
+Spec: `docs/specs/rag-week2.md` · Plan: `docs/STAGE1-PLAN-RAG-WEEK2.md` ·
 ADR 0007 (corpus hygiene) · ADR 0008 (retrievable decision records).
 
 ## Run

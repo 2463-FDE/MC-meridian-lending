@@ -6,7 +6,7 @@
   gets a superseding ADR, not an edit.
 - **Date:** 2026-08-01
 - **Author:** Claude Code
-- **Related:** `docs/spec-disclosure-week4.md` — the source of truth, and it **governs
+- **Related:** `docs/specs/disclosure-week4.md` — the source of truth, and it **governs
   implementation until this ADR is accepted**; this ADR is written from it (spec deliverable
   D8), so where the two disagree the spec is authoritative. ADR 0002 (single shared DB),
   ADR 0005 (LLM client guards), ADR 0006 (logging redaction), ADR 0008/0009 (append-only
@@ -296,5 +296,5 @@ is a knowledge-graph schema, and D4's ladder names the condition that promotes e
 later requirement for a running engine adds a rung (AGE as a read-only projection built from
 the FK chain) rather than reversing this decision.
 
-Per the scope lock in `docs/spec-disclosure-week4.md`: a decision that changes after this ADR is
+Per the scope lock in `docs/specs/disclosure-week4.md`: a decision that changes after this ADR is
 accepted gets a superseding ADR, not an edit.

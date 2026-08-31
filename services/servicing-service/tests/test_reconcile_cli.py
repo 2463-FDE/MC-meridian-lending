@@ -1,4 +1,4 @@
-"""The break report — spec `docs/spec-observability-week7.md` §D3.
+"""The break report — spec `docs/specs/observability-week7.md` §D3.
 
 `python -m app.reconcile --from YYYY-MM-DD --to YYYY-MM-DD`: one JSON document on
 stdout so a piped run is parseable, a human summary on stderr so a terminal run is

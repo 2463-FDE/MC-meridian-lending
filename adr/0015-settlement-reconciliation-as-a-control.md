@@ -14,7 +14,7 @@
   Debt D7 (no reconciliation job), D19 (no idempotency key), D3 (lost update),
   D2 (float money), D8 (servicing authz — partially mitigated by #32; maker-checker
   still open).
-- **Source:** `docs/spec-observability-week7.md`, and
+- **Source:** `docs/specs/observability-week7.md`, and
   docs/client-asks-2026-08-12-observability.md — local-only, on the docs/client-asks branch and in
   no checkout, so it is named un-backticked rather than linked.
 
@@ -52,7 +52,7 @@ Separately, the payment path spans two services — `payment-service` captures, 
 applies — with no shared identifier. A capture whose apply fails produces one error line in one
 service's log and no counterpart anywhere, and the caller still returns `captured`.
 
-Reconciliation is out of scope in `docs/spec-payments-week5.md` by that spec's own statement, so
+Reconciliation is out of scope in `docs/specs/payments-week5.md` by that spec's own statement, so
 this decision does not overlap the payments work. It depends on it in one direction only: the
 exact matching key is a schema column, `processor_ref`, added by migration
 `0018_payments_idempotency.sql` — but no capture code populates it, so it is not yet usable.
@@ -165,7 +165,7 @@ We will carry a `request_id` across the charge and the cross-service apply hop, 
 
 | Option | Rejected because |
 |---|---|
-| A. Add a `trace_id` column to `payments` | Duplicates work already specified. The persistent correlation between a capture and its application is `payments.id → payment_applications.payment_id` with `UNIQUE (payment_id)`, specified in `docs/spec-payments-week5.md` D3(b). A second persistent key either duplicates it or competes with it. |
+| A. Add a `trace_id` column to `payments` | Duplicates work already specified. The persistent correlation between a capture and its application is `payments.id → payment_applications.payment_id` with `UNIQUE (payment_id)`, specified in `docs/specs/payments-week5.md` D3(b). A second persistent key either duplicates it or competes with it. |
 | B. Add the id to the apply request body | The body is the payments work's territory — its D3(d) removes `amount` from `ApplyPaymentIn` and makes `payment_id` the only input. Changing the same structure here creates a merge conflict in a money path. A header does not. |
 | C. Adopt an instrumentation framework | No OpenTelemetry, Prometheus, or statsd exists anywhere under `services/`. Introducing one to correlate two log lines is a dependency and an operational surface for a problem two log fields solve. Revisit when a third service joins the span. |
 | **D. Chosen: header-propagated `request_id`, log-only** | Mirrors `decision-service`'s existing convention rather than inventing a second vocabulary, and leaves the persistent seam to the work that owns it. |

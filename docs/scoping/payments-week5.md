@@ -4,7 +4,7 @@
 **Date:** 2026-08-02
 **Branch:** `feature/payments-week5` (cut from `main` @ `170ed29`)
 **Deliverable:** spec package. Implementation is scoped, not built.
-**Companion docs:** `docs/spec-payments-week5.md` (acceptance criteria, design, test vectors),
+**Companion docs:** `docs/specs/payments-week5.md` (acceptance criteria, design, test vectors),
 ADR 0013 (idempotency + tokenization decision, supersedes ADR 0003).
 
 ---
@@ -581,5 +581,5 @@ None of these block writing the spec. Q7 changes the launch sequence, not the de
 
 ## 8. Status
 
-Sections 1–7 complete. Next: `docs/spec-payments-week5.md` (acceptance criteria, design,
+Sections 1–7 complete. Next: `docs/specs/payments-week5.md` (acceptance criteria, design,
 test vectors) and ADR 0013.

@@ -287,7 +287,7 @@ def deny_self_decision(
     block the platform's primary intake channel, not just a legacy backlog -- rejected for that
     reason. Closing the identity gap for real would mean matching on identity fields (SSN/DOB)
     instead of accounts, a different and much larger control than either check here. Mitigated
-    operationally, not in code: see docs/runbook.md "Known operational pain" for the manual
+    operationally, not in code: see docs/runbooks/operations.md "Known operational pain" for the manual
     back-book audit query, and docs/debt-log.md D24.
     """
     if not _is_officer(x_user_role):

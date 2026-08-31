@@ -4,7 +4,7 @@ apply_payment is the only place a captured charge becomes a balance movement,
 and before this it logged NOTHING -- so a payment that crossed the seam left one
 line in payment-service and no counterpart here at all.
 
-Test vector V-TRACE-DIRECT (docs/spec-observability-week7.md): a direct call
+Test vector V-TRACE-DIRECT (docs/specs/observability-week7.md): a direct call
 with no X-Request-Id is logged as request_id=-, not with the field omitted, so
 an uncorrelated apply is visible as uncorrelated rather than silently
 untraceable.

@@ -2,7 +2,7 @@
 # Stage 2: Verify Plan Against Spec
 
 **Date:** 2026-07-01  
-**Spec:** docs/spec-ai-assistant-week1.md  
+**Spec:** docs/specs/ai-assistant-week1.md  
 **Plan:** docs/STAGE1-PLAN-AI-ASSISTANT.md  
 **Status:** Verification in progress
 

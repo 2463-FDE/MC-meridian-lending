@@ -5,7 +5,7 @@
 -- applied, every response 200. D19 (migration 0018) closed the eight charges; nothing has
 -- closed the missing $200.
 --
--- ADR 0020 and docs/spec-payments-week5.md D3(b)/D3(d) put the fix in the SCHEMA and in one
+-- ADR 0020 and docs/specs/payments-week5.md D3(b)/D3(d) put the fix in the SCHEMA and in one
 -- statement pair rather than in a service: two handlers move this balance (payment-service and
 -- servicing-service, debt D23), so a lock taken in one does not apply to the other. UNIQUE
 -- (payment_id) is the property no amount of application-level checking provides.

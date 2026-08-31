@@ -1,6 +1,6 @@
 """The runbook's reconciliation entry must describe the code that exists — spec §D6.
 
-`docs/runbook.md` tells an operator what to run at month-end and what each break class
+`docs/runbooks/operations.md` tells an operator what to run at month-end and what each break class
 means. Those names and exit codes live in `app/reconciliation.py`, so the two drift
 apart silently: renaming a break class or adding a fourth exit code leaves the runbook
 confidently wrong, and the operator reading it at month-end is the one who finds out.
@@ -18,7 +18,7 @@ import pytest
 
 from app import reconciliation
 
-RUNBOOK = Path(__file__).resolve().parents[3] / "docs" / "runbook.md"
+RUNBOOK = Path(__file__).resolve().parents[3] / "docs" / "runbooks" / "operations.md"
 ENV_EXAMPLE = Path(__file__).resolve().parents[3] / ".env.example"
 
 BREAK_CLASSES = (

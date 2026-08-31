@@ -2,7 +2,7 @@
 
 **Status:** Draft
 **Companion ADR:** 0023 (not yet written — D6 below is the deliverable that writes it)
-**Depends on:** ADR 0006 (logging redaction), `docs/spec-observability-week7.md` D1 (the
+**Depends on:** ADR 0006 (logging redaction), `docs/specs/observability-week7.md` D1 (the
 correlation id), ADR 0021 (the agent framework and root trace)
 
 ---
@@ -18,7 +18,7 @@ inspecting an agent loop and the wrong tool for answering "what happened to this
 **The log files** are written by seven near-identical copies of `logging_config.py` to a host
 directory that has no rotation, no retention, no size bound, and nothing reading it. The one
 cross-service correlation mechanism the platform has — `request_id` on the payment span — was
-built log-only on purpose (`docs/spec-observability-week7.md` D1(e)), on the assumption that a
+built log-only on purpose (`docs/specs/observability-week7.md` D1(e)), on the assumption that a
 place to search those lines would follow. It has not.
 
 This spec builds that place, in the order the existing controls allow: retention and drift
@@ -59,7 +59,7 @@ normally on stdout.
 ### P3. Pre-redaction history is on disk and unaudited
 
 `PiiRedactor` merged in PR #2 (`1f89ac1`) and redacts every line written since. Lines written
-before it do not change retroactively. `docs/runbook.md` records that any `logs/*.log` written
+before it do not change retroactively. `docs/runbooks/operations.md` records that any `logs/*.log` written
 before that merge still holds plaintext PAN, CVV and SSN, that nothing has audited or deleted
 them, and — explicitly — that they must not be shipped to a third-party aggregator.
 
@@ -86,7 +86,7 @@ for the one span the platform can currently correlate.
 
 ### P5. The correlation id has nowhere to go
 
-`docs/spec-observability-week7.md` D1(e) is unambiguous: "No column, no migration… **This is the
+`docs/specs/observability-week7.md` D1(e) is unambiguous: "No column, no migration… **This is the
 single most important scope boundary in this spec.**" That was the correct call — the persistent
 correlation is `payments.id → payment_applications.payment_id`, and a second persistent key
 would fight it.
@@ -136,7 +136,7 @@ spike rolls history away in an afternoon and a quiet week keeps lines far past a
 D1 therefore sets a **capacity target**, not a retention guarantee: size the ceiling from an
 observed line rate so it holds roughly 30 days of that rate — the figure debt D5's own Mitigation
 Path states and client Q1 has not confirmed — and record the observed rate and the arithmetic in
-`docs/runbook.md` rather than leaving them implicit in two environment variables.
+`docs/runbooks/operations.md` rather than leaving them implicit in two environment variables.
 
 **(c)** The `except OSError: pass` becomes a logged warning on the stream handler that is
 already installed. Silence stays the behaviour — a service must not fail to boot because a log
@@ -157,7 +157,7 @@ access are decided together, and is re-asked as client Q1.
 **(a)** Reconcile the five distinct copies to one, with the per-service log filename as the only
 permitted difference. Adopt the five-service formatter (`%(name)s` included) as canonical, so
 `payment-service` and `servicing-service` gain the logger name rather than the other five losing
-it. Confirm against `docs/spec-observability-week7.md` D1(c), which quotes the two-service
+it. Confirm against `docs/specs/observability-week7.md` D1(c), which quotes the two-service
 formatter — the quote becomes stale and the spec is amended in the same PR.
 
 **(b)** A `scripts/sync_logging_config.sh` mirroring `scripts/sync_redactor.sh`, and a CI check
@@ -192,7 +192,7 @@ recreates the leak it is measuring.
 **(c)** Purge is a separate, explicit invocation. Deleting a file that may be evidence is an
 operator decision, taken once, recorded in the runbook.
 
-**(d)** `docs/runbook.md` gains the procedure and the ordering rule: the audit runs, and is
+**(d)** `docs/runbooks/operations.md` gains the procedure and the ordering rule: the audit runs, and is
 clean, before any collector is pointed at the directory.
 
 **(e)** This closes the "pre-redaction log files and any backups containing them are flagged
@@ -214,7 +214,7 @@ D5 exists to provide.
   receives.
 - `payment-service` and `decision-service` **already mint** today, each the entry point of its
   own path when reached directly — `new_request_id` at `services/payment-service/app/payments.py`
-  under `docs/spec-observability-week7.md` D1(a), which names `decision-service`'s convention as
+  under `docs/specs/observability-week7.md` D1(a), which names `decision-service`'s convention as
   the one it mirrors. D5 does **not** remove that; removing it would regress a merged week-7
   vector.
 - `origination-service`, `servicing-service`, `kyc-service` and `disclosure-service` **never
@@ -223,7 +223,7 @@ D5 exists to provide.
 What D5 adds is a constraint, not a fourth behaviour: **a service that received an
 `X-Request-Id` never re-mints**, so no request ever carries two ids.
 
-**(b)** The vocabulary does not change. `docs/spec-observability-week7.md` D1(a) forbids a second
+**(b)** The vocabulary does not change. `docs/specs/observability-week7.md` D1(a) forbids a second
 name for the same concept; `trace_id` and `correlation_id` stay out of the tree.
 
 **(c)** Every log line on a request path carries `request_id=<value>` as a named field, and a
@@ -250,7 +250,7 @@ A decision record, not an implementation. It must answer, at minimum:
    in-process redactor stays the first layer; the collector's own rules are a second, and both
    fail closed.
 3. **The parse format.** logfmt-style `key=value` extraction at the collector, **not** JSON
-   logging in the application. `docs/spec-observability-week7.md` D1(c) rules that re-encoding
+   logging in the application. `docs/specs/observability-week7.md` D1(c) rules that re-encoding
    the log line changes the byte sequence the redactor scans under two blocking gates, and is
    therefore a change to a security control. That ruling stands; the ADR does not reopen it.
 4. **The datastore constraint.** An aggregator is a datastore. The blocking
@@ -304,7 +304,7 @@ the decision and may ship first.
   is the honest general answer and a far larger change than D1–D7 combined. D5 delivers the
   identifier that any future OTel work would need anyway, so nothing here forecloses it. Named
   in `docs/debt-log.md`, not built.
-- **JSON log encoding.** Ruled out in `docs/spec-observability-week7.md` D1(c) as a change to a
+- **JSON log encoding.** Ruled out in `docs/specs/observability-week7.md` D1(c) as a change to a
   security control. D6(3) restates the ruling; neither reopens it.
 - **Metrics, dashboards and log-based alerting rules.** A store is a prerequisite for all three.
   Revisit once D6 has an implementation.
@@ -334,7 +334,7 @@ the decision and may ship first.
 | A9 | ADR 0023 exists and answers all six questions in D6 | D6 |
 | A10 | Until ADR 0024 lands, `test_assistant_trace.py`'s absent-identifier assertions stay green and no span carries `request_id`. After it lands, a traced assistant run carries `request_id` in metadata with inputs and outputs still hidden | D7(a), D7(e) |
 | A11 | With `LANGSMITH_TRACING=false`, D7 adds no call and no failure path | D7(d) |
-| A12 | `docs/runbook.md` states the audit-before-collector ordering | D4(d) |
+| A12 | `docs/runbooks/operations.md` states the audit-before-collector ordering | D4(d) |
 
 ---
 
@@ -378,7 +378,7 @@ with `make prove` from a detached worktree. Before handoff: the affected service
 locally. D3 and D6 both touch compose surfaces the hardening gate grades; a gate failure at CI
 on either is a wasted review round.
 
-`scripts/spec_gate_map.txt` audits coverage: every tracked `docs/spec-*.md` must be mapped to a
+`scripts/spec_gate_map.txt` audits coverage: every tracked `docs/specs/*.md` must be mapped to a
 code path or carry an `# EXEMPT:` line. This spec is mapped to the seven `logging_config.py`
 copies, listed individually on the precedent set by the redactor entries — drift catches copies
 that diverge, the map catches a copy that is deleted.
@@ -390,7 +390,7 @@ that diverge, the map catches a copy that is deleted.
 | Reading of the question | Delivered | Why |
 |---|---|---|
 | "Do we still need a collector and shipper?" | Yes, and D6 decides which — it does not build one | Choosing a vendor, a data-residency position and a datastore that satisfies debt D21's gate is an architecture decision, and this repo records those as ADRs before code |
-| "Ship logs somewhere central" | Blocked behind D4 until the pre-redaction audit is clean | `docs/runbook.md` forbids shipping those files; the constraint predates this spec |
+| "Ship logs somewhere central" | Blocked behind D4 until the pre-redaction audit is clean | `docs/runbooks/operations.md` forbids shipping those files; the constraint predates this spec |
 | "Structured logs" | Named `key=value` fields, parsed at the collector | The week-7 ruling on JSON encoding stands (D6(3)) |
 | "Use LangSmith for this" | Not delivered, and P1 states why | One service, no payload, off by default, third-party |
 

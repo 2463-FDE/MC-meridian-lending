@@ -3,7 +3,7 @@
 **Audience:** Dana (VP Lending Ops, Meridian) · **Sent:** — · **Answered:** —
 
 **Status: DRAFTED, NOT SENT.** No email-fence copy exists yet. The engineering spec these
-asks come out of is `docs/spec-log-aggregation.md`; five deliverables in it are implementable
+asks come out of is `docs/specs/log-aggregation.md`; five deliverables in it are implementable
 without any answer below, and one — the decision about where logs are collected and stored —
 is held until Q2 and Q3 come back.
 

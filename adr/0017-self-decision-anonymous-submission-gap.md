@@ -100,7 +100,7 @@ as fast as it is today.
 
 | Option | Rejected because |
 |---|---|
-| A. Accept the residual as-is; keep the manual audit query (`docs/runbook.md`) as the only mitigation | PR #38 round 4's own point: this is a live path, not a closed legacy window, and an unscheduled manual query is not a control — it is a query nobody is tasked to run. |
+| A. Accept the residual as-is; keep the manual audit query (`docs/runbooks/operations.md`) as the only mitigation | PR #38 round 4's own point: this is a live path, not a closed legacy window, and an unscheduled manual query is not a control — it is a query nobody is tasked to run. |
 | B. Identity-field matching against stored staff PII (name/DOB/SSN) at decision time, auto-block on match | Requires newly CAPTURING and STORING staff PII the platform does not hold today (`users` carries only `username`/`password_hash`/`role`/`display_name`/`applicant_id`) — a new privacy surface correlating staff identity against applicant identity, on a platform that already has an open PII-in-logs debt (D5). Fuzzy matching on SSN/DOB has real false-positive and false-negative rates (typos, name changes, common values), and an auto-block on a false positive stops a legitimate officer from doing their job with no recourse. An adversarial insider defeats it by supplying a slightly different name at submission — the same weakness Option D accepts, but B compounds it with a new PII store for no better outcome. |
 | C. Fail-closed gate: block ANY officer from deciding ANY application with `submitted_by_user_id IS NULL` | `NULL` is the correct, permanent value for the overwhelming majority of genuine applications — the primary channel. This blocks routine decisioning platform-wide, every officer, every anonymous application, to guard against a narrow insider-threat scenario. Disproportionate: trades near-total throughput loss for a control that does not even verify the actual risk (an officer deciding their OWN application) — it fires on every anonymous application, matching or not. |
 | **D. Chosen: maker-checker, triggered by a name-match heuristic on the NULL-submitter slice only** | Confines the added friction to applications a cheap, already-available signal (`users.display_name`, no new PII capture) flags as plausibly self-submitted. Every other anonymous application — the common case — is unaffected. |
@@ -112,7 +112,7 @@ name), does not trigger the check and reaches the existing exposure unchanged. T
 step is a tripwire that raises the cost of self-dealing through this channel from zero to
 "requires a second officer's cooperation or an unnoticed coincidence," not a guarantee that
 closes the gap the way checks 1 and 2 close their cases. The manual audit query in
-`docs/runbook.md` stays in place as a backstop, not a replacement.
+`docs/runbooks/operations.md` stays in place as a backstop, not a replacement.
 
 ---
 

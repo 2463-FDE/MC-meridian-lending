@@ -49,5 +49,5 @@ by the code it affects, `rag_eval/run.py` (`_NAME_ALLOWLIST`) and
 | The client deliverable | `docs/rag-eval-graded-pass-report-2026-08-30.md` |
 | Why the pass was sequenced as it was | `docs/handoffs/2026-08-29-rag-eval-graded-pass.md` |
 | Setup (§2), the pipeline (§3), the evaluator's scope (§4) | `docs/rag-eval-run-pipeline.md` |
-| The commands, and the failures seen on the day | `docs/runbook-rag-eval-graded-pass.md` |
+| The commands, and the failures seen on the day | `docs/runbooks/rag-eval-graded-pass.md` |
 | The client record and the S-1…S-10 / C-1…C-7 registers | `docs/handoffs/2026-08-27-rag-eval-support-test.md` |

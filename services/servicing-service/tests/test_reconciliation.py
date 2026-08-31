@@ -1,4 +1,4 @@
-"""Reading the settlement file — spec `docs/spec-observability-week7.md` §D2(b)/(g).
+"""Reading the settlement file — spec `docs/specs/observability-week7.md` §D2(b)/(g).
 
 `settlement_total()` returned `0.0` when the file was absent: no exception, no signal,
 a number reported over a file it never read. It also summed binary floats and asked

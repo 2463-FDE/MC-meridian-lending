@@ -673,7 +673,7 @@ jobs:
     #   test_reconciliation_utc.py   the cut-off is pinned to UTC (#47). A local-time cut-off
     #                                silently reclassifies every row near a window boundary.
     #   test_runbook_reconciliation.py  the documented invocation and exit codes still match
-    #                                the code, so docs/runbook.md cannot drift from the job
+    #                                the code, so docs/runbooks/operations.md cannot drift from the job
     #                                an operator actually runs on their cron.
     runs-on: ubuntu-latest
     steps:
@@ -1096,7 +1096,7 @@ jobs:
     # repo's specs. The load-bearing case is `code area without required spec fails`:
     # without it the gate could pass unconditionally and nothing here would notice.
     # One case is deliberately NOT hermetic (`audit globs still match this repo's
-    # tree`): the coverage audit's `adr/*.md` / `docs/spec-*.md` globs are a claim
+    # tree`): the coverage audit's `adr/*.md` / `docs/specs/*.md` globs are a claim
     # about THIS layout, and a fixture cannot catch them drifting off it.
     runs-on: ubuntu-latest
     steps:

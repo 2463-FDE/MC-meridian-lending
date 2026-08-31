@@ -1,6 +1,6 @@
 """D4 — one alert on the reconciliation outcome.
 
-Spec `docs/spec-observability-week7.md` §D4; threshold set by the client on 2026-08-14 at
+Spec `docs/specs/observability-week7.md` §D4; threshold set by the client on 2026-08-14 at
 $5.00 aggregate per close, so 500 minor units, from configuration with no default.
 
 The alert measures PER-LOAN ABSOLUTE variance, which is the choice most likely to be

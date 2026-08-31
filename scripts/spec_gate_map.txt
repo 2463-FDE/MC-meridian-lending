@@ -14,7 +14,7 @@
 # Add a line here when a week's spec+ADR merges and covers a code path that
 # didn't have one yet. Remove a line only if the code path is deleted.
 #
-# COVERAGE IS AUDITED. Every tracked adr/*.md and docs/spec-*.md must appear
+# COVERAGE IS AUDITED. Every tracked adr/*.md and docs/specs/*.md must appear
 # either on the right-hand side of a line below or in an `# EXEMPT:` line, or
 # the gate fails — so a merged spec/ADR with code-path obligations cannot be
 # silently left out of the map. Exemption syntax, reason mandatory:
@@ -28,12 +28,12 @@
 # about, so name the file when the obligation is file-specific.
 
 # --- Week 1: safe LLM client + PCI/PII-safe logging -------------------------
-# docs/spec-ai-assistant-week1.md D1 (hardened Claude client) and D2 (redacting
+# docs/specs/ai-assistant-week1.md D1 (hardened Claude client) and D2 (redacting
 # log filter in all 7 services); ADR 0005 backs the client, ADR 0006 the
 # redaction strategy. Each of the 7 redactor copies is listed on its own line:
 # redactor-drift catches copies that DIVERGE, this catches a copy that is
 # DELETED, which drift comparison alone would read as one fewer copy to check.
-services/origination-service/app/llm_client.py => docs/spec-ai-assistant-week1.md
+services/origination-service/app/llm_client.py => docs/specs/ai-assistant-week1.md
 services/origination-service/app/llm_client.py => adr/0005-llm-client-design.md
 services/gateway/app/redactor.py => adr/0006-logging-redaction-strategy.md
 services/origination-service/app/redactor.py => adr/0006-logging-redaction-strategy.md
@@ -53,16 +53,16 @@ rag_eval => adr/0007-rag-corpus-hygiene.md
 rag_eval/evaluator.py => adr/0022-offline-evaluator-for-the-support-test.md
 
 # --- Week 3: decisioning assistant ------------------------------------------
-services/decision-service/app => docs/spec-decision-assistant-week3.md
+services/decision-service/app => docs/specs/decision-assistant-week3.md
 services/decision-service/app => adr/0009-decisioning-assistant-design.md
 services/kyc-service/app => adr/0011-mandatory-kyc-before-decisioning.md
 
 # --- Week 4: TILA/Reg-Z disclosure ------------------------------------------
-services/disclosure-service/app => docs/spec-disclosure-week4.md
+services/disclosure-service/app => docs/specs/disclosure-week4.md
 services/disclosure-service/app => adr/0012-decimal-minor-units-and-externalized-rule-config.md
 
 # --- Week 5: payments -------------------------------------------------------
-services/payment-service/app => docs/spec-payments-week5.md
+services/payment-service/app => docs/specs/payments-week5.md
 services/payment-service/app => adr/0013-payment-idempotency-and-tokenization.md
 
 # --- Week 6: servicing money controls ---------------------------------------
@@ -97,7 +97,7 @@ services/servicing-service/app/routers/loans.py => adr/0014-servicing-money-cont
 # code area exists today (reconciliation.py, main.py, balance.py all live here),
 # so deleting it must fail this gate even though the week's own implementation
 # has not merged yet.
-services/servicing-service/app => docs/spec-observability-week7.md
+services/servicing-service/app => docs/specs/observability-week7.md
 services/servicing-service/app => adr/0015-settlement-reconciliation-as-a-control.md
 
 # --- Week 8: fair-lending monitoring ----------------------------------------
@@ -108,7 +108,7 @@ services/servicing-service/app => adr/0015-settlement-reconciliation-as-a-contro
 # card's six-input claim is demonstrated by that service's own test. Same
 # footing as week 7 above — the code area is live today, so deleting it must
 # fail this gate.
-services/decision-service/app => docs/spec-fair-lending-monitoring-week8.md
+services/decision-service/app => docs/specs/fair-lending-monitoring-week8.md
 # ADR 0016 records the decision behind that spec — the platform emits, the
 # reporting environment computes, and no protected characteristic or proxy
 # probability is stored here. It binds to the same code area because what it
@@ -141,7 +141,7 @@ services/origination-service/app/policy_retrieval.py => adr/0019-policy-retrieva
 # EXEMPT: adr/0002-single-database-shared-schema.md — records the existing one-database constraint; no artifact whose deletion violates it (DDL numbering is covered by migration-numbering-gate).
 # EXEMPT: adr/0003-store-card-data-for-convenience.md — documents the PCI debt scheduled for removal; mapping it would require the violating code to keep existing.
 # EXEMPT: adr/0008-retrievable-decision-records.md — Accepted as a field contract only; its own Status defers the schema migration and write path, so there is no implementation to pin yet.
-# EXEMPT: docs/spec-rag-week2.md — Status is Draft, pending gate approval; not approved for build.
+# EXEMPT: docs/specs/rag-week2.md — Status is Draft, pending gate approval; not approved for build.
 
 # --- Week 8 feedback: interim handling of a double-charged borrower ---------
 # ADR 0018's decision is Proposed, but the code area it obligates is live: the
@@ -207,7 +207,7 @@ services/origination-service/app/llm/chat_model.py => adr/0021-agent-framework-a
 services/origination-service/app/llm/config.py => adr/0021-agent-framework-and-root-trace.md
 
 # --- Log aggregation, retention and trace correlation -----------------------
-# docs/spec-log-aggregation.md is a spec package with no implementation behind
+# docs/specs/log-aggregation.md is a spec package with no implementation behind
 # it yet, mapped rather than exempt on the same footing as weeks 5-8 above:
 # several of the code areas it obligates are live today. What this gate can do
 # for it is bounded and worth stating, because the previous version of this
@@ -223,7 +223,7 @@ services/origination-service/app/llm/config.py => adr/0021-agent-framework-and-r
 #     is about, and drift comparison alone reads a deleted copy as one fewer
 #     copy to check.
 #   * docker-compose.yml (D3) -- the gateway log volume the spec adds.
-#   * docs/runbook.md (D1(b) rotation arithmetic, D4(d) audit-before-collector
+#   * docs/runbooks/operations.md (D1(b) rotation arithmetic, D4(d) audit-before-collector
 #     ordering). A doc on the left is unusual here and deliberate: the runbook
 #     is where two deliverables record their output, so its existence is a real
 #     obligation of this spec, not a code area.
@@ -271,31 +271,31 @@ services/origination-service/app/llm/config.py => adr/0021-agent-framework-and-r
 #   * D7's trace change. app/assistant.py is mapped to ADR 0021 above, which
 #     owns the trace surface; D7(a) is deferred pending ADR 0024 (D7(e)), so
 #     the obligation is on that ADR, not on this spec, until it lands.
-services/gateway/app/logging_config.py => docs/spec-log-aggregation.md
-services/origination-service/app/logging_config.py => docs/spec-log-aggregation.md
-services/servicing-service/app/logging_config.py => docs/spec-log-aggregation.md
-services/kyc-service/app/logging_config.py => docs/spec-log-aggregation.md
-services/decision-service/app/logging_config.py => docs/spec-log-aggregation.md
-services/disclosure-service/app/logging_config.py => docs/spec-log-aggregation.md
-services/payment-service/app/logging_config.py => docs/spec-log-aggregation.md
-docker-compose.yml => docs/spec-log-aggregation.md
-docs/runbook.md => docs/spec-log-aggregation.md
-services/origination-service/app/clients.py => docs/spec-log-aggregation.md
-services/origination-service/app/main.py => docs/spec-log-aggregation.md
-services/gateway/app/main.py => docs/spec-log-aggregation.md
-services/servicing-service/app/main.py => docs/spec-log-aggregation.md
-services/kyc-service/app/main.py => docs/spec-log-aggregation.md
-services/decision-service/app/main.py => docs/spec-log-aggregation.md
-services/disclosure-service/app/main.py => docs/spec-log-aggregation.md
-services/payment-service/app/main.py => docs/spec-log-aggregation.md
-services/origination-service/app/routers/applications.py => docs/spec-log-aggregation.md
-services/origination-service/app/routers/offers.py => docs/spec-log-aggregation.md
-services/servicing-service/app/routers/loans.py => docs/spec-log-aggregation.md
-services/kyc-service/app/routers/kyc.py => docs/spec-log-aggregation.md
-services/decision-service/app/routers/decisions.py => docs/spec-log-aggregation.md
-services/disclosure-service/app/routers/disclosures.py => docs/spec-log-aggregation.md
-services/disclosure-service/app/routers/offers.py => docs/spec-log-aggregation.md
-services/payment-service/app/routers/payments.py => docs/spec-log-aggregation.md
-services/payment-service/app/payments.py => docs/spec-log-aggregation.md
-services/decision-service/app/decision.py => docs/spec-log-aggregation.md
-services/servicing-service/app/payments.py => docs/spec-log-aggregation.md
+services/gateway/app/logging_config.py => docs/specs/log-aggregation.md
+services/origination-service/app/logging_config.py => docs/specs/log-aggregation.md
+services/servicing-service/app/logging_config.py => docs/specs/log-aggregation.md
+services/kyc-service/app/logging_config.py => docs/specs/log-aggregation.md
+services/decision-service/app/logging_config.py => docs/specs/log-aggregation.md
+services/disclosure-service/app/logging_config.py => docs/specs/log-aggregation.md
+services/payment-service/app/logging_config.py => docs/specs/log-aggregation.md
+docker-compose.yml => docs/specs/log-aggregation.md
+docs/runbooks/operations.md => docs/specs/log-aggregation.md
+services/origination-service/app/clients.py => docs/specs/log-aggregation.md
+services/origination-service/app/main.py => docs/specs/log-aggregation.md
+services/gateway/app/main.py => docs/specs/log-aggregation.md
+services/servicing-service/app/main.py => docs/specs/log-aggregation.md
+services/kyc-service/app/main.py => docs/specs/log-aggregation.md
+services/decision-service/app/main.py => docs/specs/log-aggregation.md
+services/disclosure-service/app/main.py => docs/specs/log-aggregation.md
+services/payment-service/app/main.py => docs/specs/log-aggregation.md
+services/origination-service/app/routers/applications.py => docs/specs/log-aggregation.md
+services/origination-service/app/routers/offers.py => docs/specs/log-aggregation.md
+services/servicing-service/app/routers/loans.py => docs/specs/log-aggregation.md
+services/kyc-service/app/routers/kyc.py => docs/specs/log-aggregation.md
+services/decision-service/app/routers/decisions.py => docs/specs/log-aggregation.md
+services/disclosure-service/app/routers/disclosures.py => docs/specs/log-aggregation.md
+services/disclosure-service/app/routers/offers.py => docs/specs/log-aggregation.md
+services/payment-service/app/routers/payments.py => docs/specs/log-aggregation.md
+services/payment-service/app/payments.py => docs/specs/log-aggregation.md
+services/decision-service/app/decision.py => docs/specs/log-aggregation.md
+services/servicing-service/app/payments.py => docs/specs/log-aggregation.md

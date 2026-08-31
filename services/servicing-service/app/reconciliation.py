@@ -1,6 +1,6 @@
 """Row-level settlement reconciliation — closes debt D7.
 
-Spec: `docs/spec-observability-week7.md` §D2. ADR 0015 records the decisions.
+Spec: `docs/specs/observability-week7.md` §D2. ADR 0015 records the decisions.
 
 Both total-only helpers are gone. `ledger_total()` summed the whole `payments` table —
 including the bulk-seeded 2026-05 rows — against a settlement file covering three loans

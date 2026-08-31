@@ -3,7 +3,7 @@
 **Model:** `meridian-risk-stub` v1 (`model_signature()` → `meridian-risk-stub:v1`) ·
 **Status:** in production on this platform · **Card written:** 2026-08-13 ·
 **Base:** `main` @ `23c1ea1`
-**Companion docs:** `docs/spec-fair-lending-monitoring-week8.md` (how outcomes are monitored),
+**Companion docs:** `docs/specs/fair-lending-monitoring-week8.md` (how outcomes are monitored),
 ADR 0009 (the decisioning design this implements), ADR 0011 (KYC before decisioning)
 
 ---
@@ -132,7 +132,7 @@ them (carded as G2 in `docs/cards-week8-governance.md`).
 - **A model that reads no protected characteristic can still produce disparate outcomes**, through
   inputs correlated with one. That is why monitoring is planned and why §3's claim, though
   demonstrable, is not sufficient on its own — see §7 and
-  `docs/spec-fair-lending-monitoring-week8.md` (**Status: draft**, not yet built).
+  `docs/specs/fair-lending-monitoring-week8.md` (**Status: draft**, not yet built).
 - **No performance validation exists.** The scorecard is a stand-in with no training data, no
   holdout, and no measured discriminatory power. Its bands come from the client's policy document,
   not from observed default behaviour. It must not be described as validated, calibrated, or
@@ -162,7 +162,7 @@ them (carded as G2 in `docs/cards-week8-governance.md`).
 
 - **Fair-lending outcome monitoring does not run today.** Nothing today measures whether
   decision outcomes fall differently across protected groups. The design is specified in
-  `docs/spec-fair-lending-monitoring-week8.md` (**Status: draft**), which names the intended
+  `docs/specs/fair-lending-monitoring-week8.md` (**Status: draft**), which names the intended
   posture — the reporting environment computes, this platform only emits, so no protected
   characteristic or proxy is stored here — but leaves the reporting environment unnamed, the
   review owner and escalation path unassigned, application volume ungiven, and the geocoding

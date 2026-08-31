@@ -48,7 +48,7 @@ Stated plainly, because the demo must not imply more than this. Each row is veri
 | Is a refund submitted? | **No.** The payment service has no refund, void, or reversal path, and the processor client exposes none. | `services/payment-service/app/payments.py` |
 | Where does refund status show? | **Nowhere.** No status field, no borrower screen, no officer screen. | — |
 | Is the duplicate detected? | **Yes**, as a pair, including across a window edge, and excluded from the variance figures. | `services/servicing-service/app/reconciliation.py:61`, `services/servicing-service/app/reconciliation.py:211` |
-| Does an alert reach a human? | **Undetermined.** The alert fires on the client's $5.00 threshold, and the runbook's recipient is `ops@example.com`. | `docs/runbook.md` |
+| Does an alert reach a human? | **Undetermined.** The alert fires on the client's $5.00 threshold, and the runbook's recipient is `ops@example.com`. | `docs/runbooks/operations.md` |
 
 The client already scoped the operator half of this, on 2026-08-14, when asked who owned the
 $500 on loan 4471: treat it as an open exception rather than a write-off, put both processor

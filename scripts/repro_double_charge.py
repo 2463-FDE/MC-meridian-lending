@@ -573,7 +573,7 @@ def main() -> int:
             print(
                 "         Not customer confusion. Not a UI bug. Two+ successful inserts."
             )
-            print("         See docs/scoping-payments-week5.md §3.1.")
+            print("         See docs/scoping/payments-week5.md §3.1.")
         print("=" * 72)
     finally:
         # Rows that appeared during the run but were NOT created by our own POSTs: a concurrent

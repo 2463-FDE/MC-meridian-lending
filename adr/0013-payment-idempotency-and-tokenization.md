@@ -12,7 +12,7 @@
   reused in Decision 3), ADR 0004 (the decomposition that duplicated the charge handler),
   ADR 0012 (Decimal / minor units precedent), ADR 0002 (single shared database).
   Debt D19, D13, D5, D8, D2, D20.
-- **Source:** `docs/spec-payments-week5.md`, `docs/scoping-payments-week5.md`.
+- **Source:** `docs/specs/payments-week5.md`, `docs/scoping/payments-week5.md`.
 
 ---
 
@@ -89,7 +89,7 @@ processor. The conflict target must carry the index predicate: the arbiter is a 
 unique index, so a bare `ON CONFLICT (idempotency_key)` matches no arbiter and Postgres raises
 `there is no unique or exclusion constraint matching the ON CONFLICT specification` at runtime,
 failing the insert before it claims the key. This is the single copyable pattern; the R-DDL
-vector (`docs/spec-payments-week5.md`) runs it against real Postgres. A replay returns the original
+vector (`docs/specs/payments-week5.md`) runs it against real Postgres. A replay returns the original
 status and body with an `Idempotent-Replay: true` header; a reused key with a different
 fingerprint returns `422`; an in-flight duplicate returns `409` with `Retry-After`.
 
@@ -336,7 +336,7 @@ every outstanding link dies.
 **Proposed, partly built.** Decision 1 shipped (PR #63, PR #65), held by the blocking
 `payment-idempotency-gate`; Decisions 2 and 3 remain engineering position only, with
 product and compliance review outstanding. Eight client questions are open in
-`docs/scoping-payments-week5.md` §6, with assumptions recorded so a different answer
+`docs/scoping/payments-week5.md` §6, with assumptions recorded so a different answer
 costs a configuration change. Only Q7 (delivery channel) affects sequencing, and phase 1
 is deliberately independent of it.
 

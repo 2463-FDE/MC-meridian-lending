@@ -136,7 +136,7 @@ Two consequences, both stated in the report rather than left for a reader to dis
 not supply one, mirroring `decision-service`'s existing convention: an `X-Request-Id` header is
 accepted on `POST /payments` and used verbatim when present, otherwise a `uuid4()` hex is
 generated. The name is `request_id`, matching `decision-service/app/decision.py` and the
-`Idempotency-Key → request_id` forwarding already documented at `docs/runbook.md:83`. Do not
+`Idempotency-Key → request_id` forwarding already documented at `docs/runbooks/operations.md:83`. Do not
 introduce a second vocabulary (`trace_id`, `correlation_id`) for the same concept.
 
 **(b) Propagation.** `_apply_via_servicing` (`payments.py:92`) sends the id as an
@@ -402,9 +402,9 @@ reasons, per the repo's ADR standard.
 
 ### D6. Documentation
 
-`docs/runbook.md` gains the invocation, the exit codes, the meaning of each break class, and
+`docs/runbooks/operations.md` gains the invocation, the exit codes, the meaning of each break class, and
 what an operator does about each. The existing month-end entry
-(`docs/runbook.md:119-120` — *"`reconciliation.peek` totals do not tie out and nothing runs on
+(`docs/runbooks/operations.md:119-120` — *"`reconciliation.peek` totals do not tie out and nothing runs on
 a schedule. Finance reconciles by hand in a spreadsheet."*) is replaced rather than appended to.
 
 ---
@@ -412,7 +412,7 @@ a schedule. Finance reconciles by hand in a spreadsheet."*) is replaced rather t
 ## Out of Scope (Not This Week)
 
 - **Preventing the double charge.** That is D19 — a client-minted idempotency key with a partial
-  unique index — fully specified in ADR 0013 Decision 1 and `docs/spec-payments-week5.md` D1/D2.
+  unique index — fully specified in ADR 0013 Decision 1 and `docs/specs/payments-week5.md` D1/D2.
   This week detects it. Saying "we can now see it" must not be mistaken for "it can no longer
   happen," and the client-asks draft states that explicitly.
 - **Fixing the lost update (D3).** Atomic `UPDATE` plus `payment_applications`, specified in

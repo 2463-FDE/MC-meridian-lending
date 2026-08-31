@@ -6,7 +6,7 @@
 **Source brief:** Dana's request — *"Customers want to pay online — card and ACH. Let's just
 add a payment form so they can self-serve. We've had a few 'I was charged twice' complaints,
 but I think people are just confused. Keep it simple."*
-**Scoping:** `docs/scoping-payments-week5.md` — the reframe, ground-truth verification of the
+**Scoping:** `docs/scoping/payments-week5.md` — the reframe, ground-truth verification of the
 handover, and the three-phase access model. Read it first; this document assumes it.
 **Related:** ADR 0013 (this week's decision record, supersedes ADR 0003), ADR 0010
 (ownership authorization — the continuation-token pattern reused here), ADR 0012
@@ -697,7 +697,7 @@ hands to the build week. Criteria 16–21 are what this week itself must deliver
     Committing them as executable tests — together with A1, A3, and T3 — is the build week's
     first task and is **not** delivered on this branch. A vector that cannot fail proves
     nothing, so each is written and watched fail before the fix it covers exists.
-19. `docs/scoping-payments-week5.md` and this spec cite `main` for every claim about current
+19. `docs/scoping/payments-week5.md` and this spec cite `main` for every claim about current
     state, with `file:line`, and the reproduction is committed and runnable.
 20. `docs/debt-log.md` updated: D19 and D13 addressed-by-design; D8 partly addressed
     (internal gate) with the RBAC half still open; D2 partly addressed (atomic mutation)
@@ -855,7 +855,7 @@ cannot see what a live volume does.
 
 ## Client Questions
 
-Carried from `docs/scoping-payments-week5.md` §6. None block the spec; Q7 changes the launch
+Carried from `docs/scoping/payments-week5.md` §6. None block the spec; Q7 changes the launch
 sequence rather than the design. Assumptions are recorded there so a different answer costs
 a configuration change.
 

@@ -151,7 +151,7 @@ def _redacted_charge_req(pan, ssn, amount, loan_id) -> dict:
 # function is the claim against that constraint, plus the branching D1 specifies for a
 # caller who loses it.
 #
-# ADR 0013 Decision 1 and docs/spec-payments-week5.md D1-D2 own the semantics.
+# ADR 0013 Decision 1 and docs/specs/payments-week5.md D1-D2 own the semantics.
 
 # Only a TERMINAL intent releases its key. An ACH row sits `submitted` for days and
 # routinely outlives the window; retiring its key would free the value for a NEW charge
