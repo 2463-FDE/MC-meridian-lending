@@ -8,6 +8,31 @@ inbound scope and the verified state as of 08-21; `docs/handoffs/2026-08-21-free
 is its resume pointer. Both predate PR #64 and state that policy retrieval is absent from
 `main`. That is no longer true — see §1. This plan supersedes their "what's left" sections.
 
+**Status since this plan was written (added 2026-08-30).** This is a plan, dated and based at
+`06c27a3`; its tables record what was true then and are deliberately not rewritten. Several of its
+present-tense claims have since been overtaken, and a reader arriving from
+`docs/freeze-demo-script-week10.md` §8 — which sends a receiving team here second — would
+otherwise read them as current. Each affected §2 week row carries a short inline
+**superseded** marker; the three that most mislead a receiving team are set out in full here:
+
+- **§2, week 8 row, "CVV retention is live (D13)".** D13 split. The CVV column was deleted on
+  2026-08-24 by migration `db/migrations/0020_payments_drop_cvv.sql`, merged as #92
+  (`1eec439`), held by the blocking `no-sad-gate` and a fail-closed readiness rung in both
+  charge services. What remains live is **D13b**: the `pan` column is untouched and
+  tokenization is unbuilt, and it still blocks production. `docs/debt-log.md` D13 carries the
+  precise split, including the residual this does not cover — WAL segments, replicas and any
+  backup taken before the table rewrite still hold the purged values.
+- **§2, week 8 row, "ADR 0010 ownership authorization is open".** Ownership landed: #32
+  (`f901894`) merged `services/servicing-service/app/authz.py`, and the guard takes the owner
+  from `X-User-Id` rather than from the identity flow ADR 0010 was blocked on. What stays open
+  is the **maker-checker** half — one money role still both makes and approves a balance
+  adjustment — and the gateway still not enforcing role authz on money actions. See
+  `docs/debt-log.md` D8.
+- **§4, "the model can currently name a tool that does not exist".** That improvement shipped.
+  #72 (`5f9362f`) merged real tool schemas and `tool_use` blocks to the provider, and #76
+  (`cc84ae0`) merged the loop swap to native tool calling, which also refuses a tool call
+  arriving as text. The failure class the sentence anticipates removing is removed.
+
 ---
 
 ## 1. What the freeze asks for, and what `main` already satisfies
@@ -39,12 +64,12 @@ it is the framework migration, the root trace, the demo runtime, and the handove
 |---|---|---|---|
 | 1 | LLM client | `ClaudeClient` (30s timeout, 3 retries, schema validation, cost guard), `ModelAdapter` with Claude, Bedrock and fake adapters, `PiiRedactor` in all 7 services behind `redactor-drift` and `redaction-tests` | The Bedrock proof receipt's success path has not been run; it needs a live credential |
 | 2 | RAG | The `rag_eval` harness behind the blocking `rag-eval-gate`, and the product retrieval path behind `rag-eval-import-gate`, which proves retrieval inside the built image | `rag-eval-gate` asserts hygiene, cache and PII absence but no retrieval-quality floor. `q11-why-6012-denied` retrieves at 0.338 and is recorded false-confident. In-memory exact cosine; pgvector is D16 |
-| 3 | Single agent | `run()` with `_MAX_STEPS = 6`, three tools, the officer-supplied application id, the single-score cache, `_validated_final` | The JSON-action protocol. `test_assistant.py` (25 cases) has no blocking gate |
-| 4 | Multi-agent and graph | The LangGraph disclosure pipeline behind `disclosure-lifecycle-gate` (32 cases): six nodes, a deterministic verify gate, one bounded retry edge | `_assemble` and `_narrate` are prompt roles with no tools and no loop. `README.md` and `ARCHITECTURE.md:82` say "single-agent" |
+| 3 | Single agent | `run()` with `_MAX_STEPS = 6`, three tools, the officer-supplied application id, the single-score cache, `_validated_final` | The JSON-action protocol. `test_assistant.py` (25 cases) has no blocking gate — **superseded as of 2026-08-30:** native `tool_use` blocks replaced the JSON-action protocol (#72 `5f9362f`, #76 `cc84ae0`), and `test_assistant.py` now runs under the blocking `agentic-loop-gate` |
+| 4 | Multi-agent and graph | The LangGraph disclosure pipeline behind `disclosure-lifecycle-gate` (32 cases): six nodes, a deterministic verify gate, one bounded retry edge | `_assemble` and `_narrate` are prompt roles with no tools and no loop. `README.md` and `ARCHITECTURE.md:82` say "single-agent" — **that second sentence is superseded as of 2026-08-30:** both files now state two agent surfaces (`README.md:15`, `ARCHITECTURE.md:83`) |
 | 5 | Spec-driven development | `spec-diff-gate`: every tracked `adr/*.md` and `docs/specs/*.md` is mapped in `scripts/spec_gate_map.txt` or carries an `# EXEMPT:` reason | Week 5's own subject shipped as a spec package with no `services/` or `db/` file; **superseded** — D19 shipped in Week 9 (PR #63 schema, PR #65 claim path; see `docs/kb.md` Week 9) |
 | 6 | AI-augmented SDLC | `make prove` (red without the fix, green with it), the comprehension report, characterization tests, and the then-red lost-update test — green since PR #77 (`d649bc6`), which is held by the blocking `atomic-apply-gate` | D3 is fixed; what stays unbuilt from this week is maker-checker and the append-only ledger, and ADR 0014 is still Proposed |
 | 7 | Observability | D1–D6: the `request_id` span across payment and servicing, the reconciliation report CLI, the variance alert, and the blocking `reconciliation-gate` | The spec states its own reductions: named fields in text log lines, no span or duration semantics, no instrumentation framework, schedulable but not scheduled. The gateway mints no correlation id, so the span starts at payment-service |
-| 8 | Security and governance | Reason codes written in the decision's own transaction and carried to both screens, the model card, ADR 0016's export contract, and seven blocking gates | ADR 0010 ownership authorization is open and is live exposure. CVV retention is live (D13) |
+| 8 | Security and governance | Reason codes written in the decision's own transaction and carried to both screens, the model card, ADR 0016's export contract, and seven blocking gates | ADR 0010 ownership authorization is open and is live exposure. CVV retention is live (D13) — **superseded as of 2026-08-30; see the status note at the top of this file.** Ownership landed in #32 (`f901894`), leaving D8 (maker-checker, and the gateway still not enforcing role authz on money actions); the CVV column was deleted by migration `db/migrations/0020_payments_drop_cvv.sql` in #92 (`1eec439`), leaving D13b (PAN tokenization) |
 
 One **Explain** request already crosses weeks 1, 2, 3 and 8. The week absent from it is 7:
 nothing shows the request happening. That absence is this plan's subject.
@@ -215,9 +240,9 @@ and on no span; and step exhaustion returns the mapped refusal rather than a 500
 - **The payment-integrity work is half landed, and it no longer competes for the queue.**
   #63 merged on 2026-08-23 as `06c27a3`, carrying `db/migrations/0018_payments_idempotency.sql`
   — the schema rung that claims an idempotency key in the schema rather than in a service. The
-  second fix, the capture-side change, is built and its pull request is not yet raised. **No
-  pull request is open**, so the working agreement's cap of two is free and the slices below
-  are not queued behind anything.
+  second fix, the capture-side change, merged on 2026-08-23 as #65 (`c0e7023`). At the time
+  this plan was written the queue was empty, which is why the slices below were not scheduled
+  behind anything.
 - **Upside for the presentation.** The idempotency work restores the strongest number
   available: one $100 intent sent eight ways produced eight charges totalling $800 with only
   $600 credited (`scripts/repro_double_charge.py`). The W10 bar asks for a before-and-after
