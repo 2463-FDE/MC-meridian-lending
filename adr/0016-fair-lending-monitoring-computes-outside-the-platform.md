@@ -9,7 +9,7 @@
   ADR 0009 (the decisioning assistant that reads those records), ADR 0002 (single shared
   database — why "stored in this platform" means reachable by all seven services),
   ADR 0006 (logging redaction — the per-service PII redactor an export path sits beside).
-- **Source:** `docs/spec-fair-lending-monitoring-week8.md` §4,
+- **Source:** `docs/specs/fair-lending-monitoring-week8.md` §4,
   `docs/model-card-decisioning-scorecard.md` §7, `docs/cards-week8-governance.md`,
   and Lending Ops' written answers of 2026-08-13.
 
@@ -32,7 +32,7 @@ principal reasons. Group membership is not here, and how it is obtained differs 
 - **Everything else.** Reg B generally prohibits collecting those characteristics for
   non-dwelling-secured consumer credit, so membership is estimated with BISG — Bayesian Improved
   Surname Geocoding — from the applicant's surname and their address geocoded to block group
-  (`docs/spec-fair-lending-monitoring-week8.md` §3.2).
+  (`docs/specs/fair-lending-monitoring-week8.md` §3.2).
 
 So a join is unavoidable, and the question this ADR settles is **where it happens**. The choice
 is not administrative. It decides whether a race-correlated field comes to rest inside the
@@ -167,7 +167,7 @@ there is no capability it buys that Option A does not already have.
   Ops to name the reporting environment and its operator. Until answered, this ADR describes a
   boundary whose far side is unspecified.
 - **BISG's error characteristics cannot be measured here.** Accuracy is uneven across groups
-  (`docs/spec-fair-lending-monitoring-week8.md` §3.2). The platform cannot calibrate what it does
+  (`docs/specs/fair-lending-monitoring-week8.md` §3.2). The platform cannot calibrate what it does
   not compute, so those characteristics must be recorded alongside each report by whoever runs it.
 
 ### Neutral
@@ -278,5 +278,5 @@ discipline and every later reader must audit behavior instead of schema.
 
 **Proposed.** The decision is settled with Lending Ops in writing and the spec has merged; this
 ADR records the reasoning and the rejected options behind it. Open Items 1–4 of
-`docs/spec-fair-lending-monitoring-week8.md` remain with the client, and Open Items 1 and 4 gate
+`docs/specs/fair-lending-monitoring-week8.md` remain with the client, and Open Items 1 and 4 gate
 reliance on any report, not this decision.

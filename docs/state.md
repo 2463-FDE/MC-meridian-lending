@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (9b49d53)` — 9b49d53 2026-08-30 Merge pull request #132 from 2463-FDE/docs/truth-pass-freeze
+Base: `origin/main (64a9552)` — 64a9552 2026-08-30 Merge pull request #133 from 2463-FDE/docs/plan-freeze-truth
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #133 | `64a9552` | 2026-08-30 | Merge pull request #133 from 2463-FDE/docs/plan-freeze-truth |
 | #132 | `9b49d53` | 2026-08-30 | Merge pull request #132 from 2463-FDE/docs/truth-pass-freeze |
 | #131 | `67427a5` | 2026-08-30 | Merge pull request #131 from 2463-FDE/docs/demo-preflight |
 | #130 | `fb3f93c` | 2026-08-30 | Merge pull request #130 from 2463-FDE/docs/client-qa-register |
@@ -205,6 +206,8 @@ A job is BLOCKING unless its body carries `continue-on-error` or `|| true`.
 - **BLOCKING** — `secret-scan`
 - **BLOCKING** — `doc-path-lint-tests`
 - **BLOCKING** — `doc-path-lint`
+- **BLOCKING** — `retired-doc-path-tests`
+- **BLOCKING** — `retired-doc-path-lint`
 - **BLOCKING** — `spec-diff-gate-tests`
 - **BLOCKING** — `spec-diff-gate`
 - **BLOCKING** — `docs-drift-tests`

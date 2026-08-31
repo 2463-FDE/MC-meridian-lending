@@ -7,7 +7,7 @@ Date: 2026-08-23
 Accepted. Migration 0019, the `balance.apply_payment` rewrite, both callers, the tests
 below, and the blocking `atomic-apply-gate` merged to `main` in PR #77 (`ceda4e2`),
 where `test_lost_update.py` flipped from failing to passing, proven by `make prove`. It
-implements `docs/spec-payments-week5.md` D3(b), D3(d) and D3(e), and supersedes the
+implements `docs/specs/payments-week5.md` D3(b), D3(d) and D3(e), and supersedes the
 `captured_unapplied` half of ADR 0013 Decision 1 only where noted in Decision 3 below;
 the rest of ADR 0013 stands.
 

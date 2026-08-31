@@ -22,7 +22,7 @@ Supersedes `docs/handoffs/2026-08-28-rag-eval-titan-pass.md` for sequencing. Tha
 pointer record: `docs/rag-eval-run-pipeline.md` holds both the setup (§2, steps 1–10) and the
 pipeline (§3), and it is not in `handoffs/`.
 
-**Operational companion:** ``docs/runbook-rag-eval-graded-pass.md``, beside the scripts it
+**Operational companion:** ``docs/runbooks/rag-eval-graded-pass.md``, beside the scripts it
 documents — exact commands, expected output, stop conditions. This file is the why;
 that one is the how.
 

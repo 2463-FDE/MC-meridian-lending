@@ -34,7 +34,7 @@ answered it.
 **Source:** week-8 client-demo feedback, improvement priorities 1 and 2, plus an audit of the
 08-13 consolidated ask against what was actually sent. **Consumes these answers:**
 `adr/0018-interim-handling-of-a-double-charged-borrower.md` (ask 15 is its sign-off),
-`docs/runbook.md` (ask 14).
+`docs/runbooks/operations.md` (ask 14).
 
 ---
 
@@ -68,7 +68,7 @@ no stated-assumption list, and no deferral row.** It is not in the 0-of-3 count 
 that has nothing to do with priority.
 
 **What it blocks.** Nothing in code. Everything in effect. The cron example in
-`docs/runbook.md` mails `ops@example.com`, a placeholder — line 213 as of commit `956b3f6`,
+`docs/runbooks/operations.md` mails `ops@example.com`, a placeholder — line 213 as of commit `956b3f6`,
 cited against a commit rather than a branch so the number keeps pointing at the line it was
 written for. The control detects correctly, exits non-zero, and reports to nobody. The runbook
 says so at line 253 of the same commit, where the placeholder appears, because a runbook that
@@ -150,7 +150,7 @@ _The email body for this section is held outside this repository with the other 
   purpose. Matching works without it.
 - **Anything already in email 2.** The export source, the print-and-mail vendor, and the policy
   corpus stand as written.
-- **Backup and recovery.** Now recorded in `docs/runbook.md` as absent, with the client-side
+- **Backup and recovery.** Now recorded in `docs/runbooks/operations.md` as absent, with the client-side
   half named — who takes backups of production, on what schedule, stored where, and whether
   any predate the card-data work. It belongs in next cycle's ask, not this email: it is a
   larger conversation than two lines, and nothing before freeze turns on it.

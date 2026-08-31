@@ -35,7 +35,7 @@ new_repo() {
 
 # new_repo_with_docs -> like new_repo, plus a tracked adr/0001-process.md and a
 # tracked spec.md. Used by the coverage-audit cases: the audit only grades docs
-# matching `adr/*.md` / `docs/spec-*.md`, so new_repo's bare tree has nothing to
+# matching `adr/*.md` / `docs/specs/*.md`, so new_repo's bare tree has nothing to
 # grade and cannot exercise it.
 new_repo_with_docs() {
   local d
@@ -265,13 +265,13 @@ else
 fi
 
 # The audit's own globs are the other way it can silently grade nothing: if
-# `adr/*.md` / `docs/spec-*.md` stopped matching this repo's layout, every
+# `adr/*.md` / `docs/specs/*.md` stopped matching this repo's layout, every
 # coverage case above would still pass on its fixtures while the real gate
 # certified zero docs. An empty listing is deliberately NOT an abort in the
 # script (the map-syntax fixtures are legitimately doc-free, and aborting would
 # mask a pairing failure's exit 1), so assert non-emptiness here, against the
 # real tree, where it is actually a claim about coverage.
-real_docs=$(git -C "$(dirname "$SCRIPT")/.." ls-files -- 'adr/*.md' 'docs/spec-*.md')
+real_docs=$(git -C "$(dirname "$SCRIPT")/.." ls-files -- 'adr/*.md' 'docs/specs/*.md')
 if [ -n "$real_docs" ]; then
   echo "ok    audit globs still match this repo's tree ($(printf '%s\n' "$real_docs" | wc -l | tr -d ' ') docs graded)"
   pass=$((pass + 1))

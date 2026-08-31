@@ -2,7 +2,7 @@
 
 **Status:** Phase 1 implemented (branch `feature/rag-eval-impl-week2`). Phases 2–3 scoped, not built.
 **Date:** 2026-07-13
-**Related:** `rag_eval/README.md`, ADR 0007 (corpus hygiene), ADR 0005 (LLM client), `docs/spec-rag-week2.md`
+**Related:** `rag_eval/README.md`, ADR 0007 (corpus hygiene), ADR 0005 (LLM client), `docs/specs/rag-week2.md`
 
 ## Why this doc exists
 

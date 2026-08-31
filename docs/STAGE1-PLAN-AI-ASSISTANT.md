@@ -1,7 +1,7 @@
 # Stage 1 Plan: AI Assistant Infrastructure (Week 1)
 
 **Date:** 2026-07-01  
-**Spec:** docs/spec-ai-assistant-week1.md  
+**Spec:** docs/specs/ai-assistant-week1.md  
 **Status:** Ready for gate approval
 
 ---

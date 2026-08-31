@@ -216,7 +216,7 @@ confirmed. What remains:
 which their email describes approvingly, and the **disclosure maker-checker**
 (`app/disclosure_coordinator.py`) — `_assemble` (maker) and `_narrate` (checker) inside a LangGraph
 pipeline. Our own documents call that multi-agent: ADR 0012 §D5 *"Multi-agent is maker-checker"*, and
-`docs/spec-disclosure-week4.md` §D4 *"Multi-agent disclosure assembly — maker-checker on LangGraph"*.
+`docs/specs/disclosure-week4.md` §D4 *"Multi-agent disclosure assembly — maker-checker on LangGraph"*.
 (`loan_summary` is a single completion, not an agent.)
 
 **Two readings.** (a) a cap on the total — the delivery contains one agent, so the maker-checker is

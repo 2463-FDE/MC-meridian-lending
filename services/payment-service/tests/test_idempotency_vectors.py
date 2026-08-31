@@ -1,4 +1,4 @@
-"""D19 test vectors (docs/spec-payments-week5.md, the R table).
+"""D19 test vectors (docs/specs/payments-week5.md, the R table).
 
 The defect: a retried or double-clicked POST inserted a second payments row and
 charged the card again. Measured against the live stack 2026-08-02 -- one $100 intent

@@ -105,8 +105,8 @@ check "fenced code not scanned" 0 "$r" 'OK: every backticked'
 
 # --- 6. an allowlisted absent path passes ----------------------------------
 r=$(new_repo)
-echo 'Spec at `docs/spec-payments-week5.md` (other branch).' > "$r/docs/fixture.md"
-printf '# on another branch\ndocs/spec-payments-week5.md\n' > "$r/scripts/doc_path_lint_allow.txt"
+echo 'Spec at `docs/specs/payments-week5.md` (other branch).' > "$r/docs/fixture.md"
+printf '# on another branch\ndocs/specs/payments-week5.md\n' > "$r/scripts/doc_path_lint_allow.txt"
 check "allowlisted absent path passes" 0 "$r" 'OK: every backticked'
 
 # --- 7. a stale allowlist entry fails -------------------------------------
@@ -122,7 +122,7 @@ check "stale allowlist entry fails" 1 "$r" 'STALE ALLOWLIST'
 # their references go unused every run. Unused must stay silent.
 r=$(new_repo)
 echo 'Nothing cited here.' > "$r/docs/fixture.md"
-printf 'docs/spec-payments-week5.md\n' > "$r/scripts/doc_path_lint_allow.txt"
+printf 'docs/specs/payments-week5.md\n' > "$r/scripts/doc_path_lint_allow.txt"
 check "unused allowlist entry is not an error" 0 "$r" 'OK: every backticked'
 
 # --- 9. an absent doc: SKIPPED if optional, FAIL if required ---------------

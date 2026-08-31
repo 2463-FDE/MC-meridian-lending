@@ -48,7 +48,7 @@ Feeds `adr/0014-servicing-money-controls.md` and `docs/cards-week6-servicing.md`
 **Asked:** 2026-08-12. **Answered:** 2026-08-13, in writing. **Respondent:** VP Lending Ops,
 Meridian. **Source reference:** `docs/client-asks-2026-08-12-governance.md` at commit
 `126120c` on `docs/client-asks` (pushed — reachable after `git fetch origin`).
-Feeds `docs/spec-fair-lending-monitoring-week8.md`, `adr/0016-fair-lending-monitoring-computes-outside-the-platform.md`, `docs/cards-week8-governance.md`, `docs/model-card-decisioning-scorecard.md`.
+Feeds `docs/specs/fair-lending-monitoring-week8.md`, `adr/0016-fair-lending-monitoring-computes-outside-the-platform.md`, `docs/cards-week8-governance.md`, `docs/model-card-decisioning-scorecard.md`.
 
 | # | Question | Answer | Feeds |
 |---|---|---|---|
@@ -67,7 +67,7 @@ than absorbed.
 **Asked:** 2026-08-12. **Answered:** 2026-08-14, in writing. **Respondent:** VP Lending Ops,
 Meridian. **Source reference:** `docs/client-asks-2026-08-12-observability.md` at commit
 `126120c` on `docs/client-asks` (pushed — reachable after `git fetch origin`).
-Feeds `docs/spec-observability-week7.md` (D2, D3, D4), `adr/0015-settlement-reconciliation-as-a-control.md`, `docs/runbook.md`.
+Feeds `docs/specs/observability-week7.md` (D2, D3, D4), `adr/0015-settlement-reconciliation-as-a-control.md`, `docs/runbooks/operations.md`.
 
 | # | Question | Answer | Feeds |
 |---|---|---|---|
@@ -85,7 +85,7 @@ Meridian. **Source reference:** `docs/client-asks-2026-08-16.md` at commit `b772
 `origin/docs/client-asks`, so no checkout can reach the file: after `git fetch origin`,
 `git cat-file -e b772bb2` says whether the branch has since been pushed, and while that
 fails the register's maintainer holds the only copy.
-Feeds the payment-integrity design, `adr/0013-payment-idempotency-and-tokenization.md`, `docs/spec-payments-week5.md`, `docs/spec-fair-lending-monitoring-week8.md`.
+Feeds the payment-integrity design, `adr/0013-payment-idempotency-and-tokenization.md`, `docs/specs/payments-week5.md`, `docs/specs/fair-lending-monitoring-week8.md`.
 
 | # | Question | Answer | Feeds |
 |---|---|---|---|

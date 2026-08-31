@@ -43,7 +43,7 @@ def get_past_due(loan_id: int) -> float:
 # together on an autocommit connection without this module opening a transaction on the
 # process-wide connection `db.py` hands every thread.
 #
-# Four properties, none optional (docs/spec-payments-week5.md D3(d)):
+# Four properties, none optional (docs/specs/payments-week5.md D3(d)):
 #
 # 1. The UPDATE computes from the stored value INSIDE the statement. Under READ COMMITTED
 #    a concurrent updater blocks on the row lock and then re-evaluates `b.balance` against
@@ -114,7 +114,7 @@ def apply_payment(
 
     Both callers (main.apply_payment's route handler and payments.charge) pass the span
     fields down, so this line joins the same request_id-scoped log search as theirs
-    (docs/spec-observability-week7.md P2).
+    (docs/specs/observability-week7.md P2).
     """
     rows = db.query(_APPLY_SQL, {"payment_id": payment_id, "loan_id": loan_id})
     if rows:

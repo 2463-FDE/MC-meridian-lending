@@ -567,7 +567,7 @@ def test_payments_route_rejects_patch():
 def test_payments_health_subpath_forwards(monkeypatch):
     # Codex review, PR 32: the first fix replaced /payments/{path:path} with
     # an exact /payments route and dropped subpath forwarding entirely, which
-    # broke /payments/health -- documented in docs/runbook.md as the
+    # broke /payments/health -- documented in docs/runbooks/operations.md as the
     # payment-service gateway surface and used by
     # scripts/repro_double_charge.py's health probe. The wildcard route
     # (registered alongside the exact one) must still cover it.

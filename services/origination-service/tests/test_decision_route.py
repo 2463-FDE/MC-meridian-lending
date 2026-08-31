@@ -350,7 +350,7 @@ def test_legacy_null_submitter_self_decision_route_is_not_blocked(
     # SQL level to a real anonymous applicant -- no code-level check can tell them apart.
     # Route-level pin matching test_legacy_null_submitter_self_decision_is_not_blocked_by_code
     # in test_authz.py: documents the residual is still open through this route rather than
-    # leaving it untested. Mitigated operationally (docs/runbook.md), not in code.
+    # leaving it untested. Mitigated operationally (docs/runbooks/operations.md), not in code.
     monkeypatch.setattr(
         applications.authz.db,
         "query",

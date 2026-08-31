@@ -778,7 +778,7 @@ def test_assistant_legacy_null_submitter_self_decision_is_not_blocked(monkeypatc
     # (or any genuinely anonymous submit) has submitted_by_user_id NULL, identical at the
     # SQL level to a real anonymous applicant -- no code-level check can tell them apart.
     # Route-level pin through the assistant path, matching the run_decision route pin in
-    # test_decision_route.py. Mitigated operationally (docs/runbook.md), not in code.
+    # test_decision_route.py. Mitigated operationally (docs/runbooks/operations.md), not in code.
     from fastapi.testclient import TestClient
 
     from app import authz, main

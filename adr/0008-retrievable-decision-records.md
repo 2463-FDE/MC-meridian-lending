@@ -3,7 +3,7 @@
 - **Status:** Accepted as a **Week 2 planning contract** — the field contract is locked now; the schema migration and write-path implementation are deferred to Week 3+ and need their own implementation review (see *Scope*). The specific Reg B citations are **non-authoritative** pending legal review.
 - **Date:** 2026-07-07
 - **Author:** Claude Code
-- **Related:** ADR 0007 (corpus hygiene), docs/spec-rag-week2.md (D4), Reg B adverse action
+- **Related:** ADR 0007 (corpus hygiene), docs/specs/rag-week2.md (D4), Reg B adverse action
 
 ---
 

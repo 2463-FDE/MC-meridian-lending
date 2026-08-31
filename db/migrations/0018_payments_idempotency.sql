@@ -2,7 +2,7 @@
 -- double-clicked request inserts a second payments row and charges the card again.
 -- Measured 2026-08-02: one $100 intent sent eight ways captured $800.00.
 --
--- ADR 0013 Decision 1 and docs/spec-payments-week5.md D2 put the guarantee in the
+-- ADR 0013 Decision 1 and docs/specs/payments-week5.md D2 put the guarantee in the
 -- SCHEMA rather than in a service, because two handlers write this table
 -- (payment-service and servicing-service, debt D23) and a support engineer with psql
 -- is a third. A control implemented in one handler silently does not apply to the other.

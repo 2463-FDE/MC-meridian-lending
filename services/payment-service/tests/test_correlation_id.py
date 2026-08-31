@@ -1,7 +1,7 @@
 """Regression coverage for D1: one correlation id across the payment span.
 
 Test vectors V-TRACE, V-TRACE-SUPPLIED and V-TRACE-FAIL from
-docs/spec-observability-week7.md, plus acceptance criteria 3 (no log line
+docs/specs/observability-week7.md, plus acceptance criteria 3 (no log line
 asserts success before the work it describes) and 9b (every payment-path line
 carries request_id, loan_id, payment_id and outcome as NAMED fields, in a fixed
 order, so a span is recoverable by field extraction rather than by reading

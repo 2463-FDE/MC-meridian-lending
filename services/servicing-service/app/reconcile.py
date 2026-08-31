@@ -1,6 +1,6 @@
 """The break report entrypoint — `python -m app.reconcile --from DATE --to DATE`.
 
-Spec: `docs/spec-observability-week7.md` §D3. Runnable inside the container and in CI.
+Spec: `docs/specs/observability-week7.md` §D3. Runnable inside the container and in CI.
 
 **Schedulable, not scheduled.** There is no scheduler in this stack — compose runs no
 cron and `db/migrations` are hand-applied — and this does not introduce one. What ships

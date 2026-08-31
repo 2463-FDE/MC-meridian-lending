@@ -1014,7 +1014,7 @@ def test_legacy_null_submitter_self_decision_is_not_blocked_by_code(monkeypatch)
     # SQL level, to a genuine anonymous applicant's permanent NULL, so no code-level check
     # can tell "an officer self-submitted this before the fix landed" apart from "someone
     # genuinely anonymous applied" -- pinning this documents the residual as a known,
-    # tested limit rather than an untested gap. Mitigated operationally (docs/runbook.md
+    # tested limit rather than an untested gap. Mitigated operationally (docs/runbooks/operations.md
     # "Known operational pain" carries the manual back-book audit query), not in code: a
     # fail-closed gate on submitted_by_user_id IS NULL would permanently block every future
     # anonymous application too, not just this legacy window.

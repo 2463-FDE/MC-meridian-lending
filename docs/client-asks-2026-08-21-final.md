@@ -64,7 +64,7 @@ settled while the recipient half sat in no table at all.
 
 **What it blocks:** nothing in code, everything in effect. The control fires on the 500 minor units
 she set and exits so a cron can escalate, but the runbook's cron example mails `ops@example.com`, a
-placeholder — docs/runbook.md line 213 as of commit `956b3f6`, whose line 253 also states outright
+placeholder — docs/runbooks/operations.md line 213 as of commit `956b3f6`, whose line 253 also states outright
 that no recipient is configured. Cited against a commit rather than against `main`, because a line
 number on a moving branch stops pointing at the sentence it was written for. This branch carries
 the identical runbook. It detects correctly and reports to nobody.
@@ -106,7 +106,7 @@ request; if the security code were part of it, we would be keeping a value deriv
 may not retain, and every retry where the customer re-enters the card without the code would fail to
 match.
 
-**One line is enough.** The exclusion is **specified, not yet built** — `docs/spec-payments-week5.md`
+**One line is enough.** The exclusion is **specified, not yet built** — `docs/specs/payments-week5.md`
 defines the fingerprint as `sha256` over `(loan_id, amount_minor, method, card_token, bank_token)`,
 which carries no security code in any form. On `feat/payment-idempotency-week9` today
 `request_fingerprint` is a column with no writer, so there is nothing computing a fingerprint to

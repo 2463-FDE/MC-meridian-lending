@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test for the Week 2 RAG eval harness (docs/spec-rag-week2.md).
+# Smoke test for the Week 2 RAG eval harness (docs/specs/rag-week2.md).
 # Runs the real CLI twice against the real corpus from the repo root:
 #   1. cold run embeds everything; 2nd run must re-embed nothing (D1.3)
 #   2. report carries the #6012 data gap exactly when the gold set asks for it,

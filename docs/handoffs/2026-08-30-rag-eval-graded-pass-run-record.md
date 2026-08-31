@@ -12,7 +12,7 @@
 This is the raw capture of the pass, written so a client report can be produced
 later without re-deriving anything. It is not itself the report. Companion files:
 `docs/handoffs/2026-08-29-rag-eval-graded-pass.md` (the sequencing and the why),
-`docs/rag-eval-run-pipeline.md` (the pipeline), ``docs/runbook-rag-eval-graded-pass.md`` (the how).
+`docs/rag-eval-run-pipeline.md` (the pipeline), ``docs/runbooks/rag-eval-graded-pass.md`` (the how).
 
 The pass ran once. ADR 0022 S-7 allows one bounded pass, and every case is now
 spent — nothing below can be re-measured.

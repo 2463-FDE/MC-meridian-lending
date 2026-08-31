@@ -3,7 +3,7 @@
 - **Status:** Accepted — hygiene **policy** is locked; the Week 2 harness **mechanics** (index/cache shape, report-time snippet reconstruction) are subject to implementation verification and may change during the build without reopening this ADR (see Decision)
 - **Date:** 2026-07-07
 - **Author:** Claude Code
-- **Related:** ADR 0006 (logging redaction), docs/spec-rag-week2.md (D2, D3), debt items D5/D13
+- **Related:** ADR 0006 (logging redaction), docs/specs/rag-week2.md (D2, D3), debt items D5/D13
 
 ---
 

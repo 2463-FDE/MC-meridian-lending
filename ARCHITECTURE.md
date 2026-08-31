@@ -194,4 +194,4 @@ redaction logic. See `CLAUDE.md` for the exception to the tolerated-money-math r
 ## Local development
 
 `docker compose up -d` brings up Postgres (auto-seeds from `db/init`), Redis, the gateway,
-the six backend services, and the frontend. See `docs/runbook.md`.
+the six backend services, and the frontend. See `docs/runbooks/operations.md`.

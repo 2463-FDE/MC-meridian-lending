@@ -19,7 +19,7 @@
 # someone remembered to list reports "clean" over an unguarded control: the
 # merged Week 1 LLM-client and per-service redactor pairings were absent from
 # the map, so deleting them kept this gate green. Every tracked `adr/*.md` and
-# `docs/spec-*.md` must therefore be either on the right-hand side of a map
+# `docs/specs/*.md` must therefore be either on the right-hand side of a map
 # line or carry an `# EXEMPT: <doc> — <reason>` line in the map. A stale
 # exemption (doc no longer tracked) or an exemption for a doc that is also
 # mapped fails too, so retiring or implementing a doc forces the map to change
@@ -132,8 +132,8 @@ done < "$MAP_FILE"
 # temp file; globbing off so a path is never expanded).
 in_set() { printf '%s\n' "$2" | grep -qxF -- "$1"; }
 
-if ! audit_docs="$(git ls-files -- 'adr/*.md' 'docs/spec-*.md')"; then
-  echo "ABORT: coverage audit input failed: git ls-files could not list 'adr/*.md' 'docs/spec-*.md' — refusing to report coverage over an audit that did not run." >&2
+if ! audit_docs="$(git ls-files -- 'adr/*.md' 'docs/specs/*.md')"; then
+  echo "ABORT: coverage audit input failed: git ls-files could not list 'adr/*.md' 'docs/specs/*.md' — refusing to report coverage over an audit that did not run." >&2
   exit 2
 fi
 # An empty listing is NOT an abort: `git ls-files` exiting 0 with no output is a

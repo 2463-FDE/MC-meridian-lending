@@ -674,7 +674,7 @@ jobs:
     #   test_reconciliation_utc.py   the cut-off is pinned to UTC (#47). A local-time cut-off
     #                                silently reclassifies every row near a window boundary.
     #   test_runbook_reconciliation.py  the documented invocation and exit codes still match
-    #                                the code, so docs/runbook.md cannot drift from the job
+    #                                the code, so docs/runbooks/operations.md cannot drift from the job
     #                                an operator actually runs on their cron.
     runs-on: ubuntu-latest
     steps:
@@ -1091,13 +1091,59 @@ jobs:
       - name: Backticked doc paths resolve in this tree
         run: ./scripts/check_doc_paths.sh
 
+  retired-doc-path-tests:
+    # BLOCKING, like doc-path-lint-tests. Hermetic apart from two deliberate cases
+    # that assert against the real tree, because they are claims about THIS repo's
+    # layout that a fixture cannot make: that the scan reaches a non-trivial number
+    # of tracked files, and that the gate's self-exclusion is still exactly itself
+    # plus this test. The gate necessarily contains the patterns it bans, so it must
+    # skip those two files; a third exclusion would be a place to hide a dead path,
+    # and the exclusion set is pinned here rather than left to review.
+    #
+    # The load-bearing cases are the six "retired pattern N caught" ones. Dropping
+    # any single pattern from the gate turns at least one of them red (verified by
+    # deleting each in turn), so the gate cannot quietly narrow to a no-op.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check_retired_doc_paths.sh tests
+        run: ./scripts/test_check_retired_doc_paths.sh
+
+  retired-doc-path-lint:
+    # BLOCKING. The specs, runbooks and scoping docs moved into docs/specs/,
+    # docs/runbooks/ and docs/scoping/, and every reference in the tree was
+    # repointed in the same change. This refuses the pre-move spellings coming
+    # back.
+    #
+    # Why a gate rather than trusting the sweep: roughly 25 unmerged branches still
+    # carry the old spellings in their own prose, and merging any of them
+    # re-introduces a dead reference that nothing else here grades. doc-path-lint
+    # reads only README.md, CLAUDE.md and docs/kb.md; docs-drift reads the same
+    # three. This one reads the whole tracked tree, which is the scope that matters:
+    # the reference that would have broken reconciliation-gate during the move was
+    # not prose and not in a doc — it was a path built by joining quoted segments
+    # inside a servicing test.
+    #
+    # Why not extend doc-path-lint instead: that gate asserts a cited path EXISTS,
+    # which is right for orientation docs and wrong for ADRs and specs. An ADR cites
+    # the path of a REJECTED option, a spec cites work it proposes and migrations
+    # later renumbered — grading those 30 docs yields 99 absences, most correct to be
+    # absent, and the allowlist would fill with permanent entries. This gate asks the
+    # decidable question instead: not "does this path exist" but "is this path one we
+    # know is dead". No allowlist, no false positives.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No reference to a retired doc path
+        run: ./scripts/check_retired_doc_paths.sh
+
   spec-diff-gate-tests:
     # BLOCKING, like doc-path-lint-tests. Hermetic — each case builds a throwaway git
     # repo in $TMPDIR — so it asserts the gate's own logic, never the state of the
     # repo's specs. The load-bearing case is `code area without required spec fails`:
     # without it the gate could pass unconditionally and nothing here would notice.
     # One case is deliberately NOT hermetic (`audit globs still match this repo's
-    # tree`): the coverage audit's `adr/*.md` / `docs/spec-*.md` globs are a claim
+    # tree`): the coverage audit's `adr/*.md` / `docs/specs/*.md` globs are a claim
     # about THIS layout, and a fixture cannot catch them drifting off it.
     runs-on: ubuntu-latest
     steps:

@@ -6,7 +6,7 @@
 - **Date:** 2026-07-15
 - **Author:** Claude Code
 - **Related:** ADR 0005 (LLM client), ADR 0006 (logging redaction), ADR 0007 (identifier-free
-  projection), ADR 0008 (decision-record field contract), docs/spec-decision-assistant-week3.md,
+  projection), ADR 0008 (decision-record field contract), docs/specs/decision-assistant-week3.md,
   12 CFR 1002.9 (Reg B adverse-action notice requirement)
 
 ---

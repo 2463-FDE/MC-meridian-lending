@@ -3,7 +3,7 @@
 -- PCI-DSS 3.2.1 prohibits retaining SAD after authorization outright. There is no
 -- retention window, no compensating control, and no "we stopped writing it" variant of
 -- compliance -- the remediation is a deletion of the values that are already stored.
--- ADR 0013 Decision 2 and docs/spec-payments-week5.md D4 decide it that way.
+-- ADR 0013 Decision 2 and docs/specs/payments-week5.md D4 decide it that way.
 --
 -- This migration is the CVV half (D13a). The PAN half (D13b: replace `pan` with
 -- `card_token` + `card_brand` + `card_last4`) needs a tokenization provider and a card
@@ -91,7 +91,7 @@ $mig$;
 --    VACUUM FULL takes an ACCESS EXCLUSIVE lock for its duration: payments is
 --    unreadable and unwritable while it runs, so charges fail during the window. On a
 --    volume where that downtime is not acceptable, run `pg_repack -t payments` instead
---    and skip this statement -- it reaches the same place online. docs/runbook.md
+--    and skip this statement -- it reaches the same place online. docs/runbooks/operations.md
 --    carries the operator procedure.
 --
 --    Re-running this migration on a volume whose column is already gone still performs
