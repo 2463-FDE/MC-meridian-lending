@@ -188,6 +188,62 @@ def test_missing_corpus_directory_abstains(threshold, monkeypatch, tmp_path):
     )
 
 
+def test_index_rebuilds_after_ttl_elapses(threshold, monkeypatch, tmp_path):
+    """The corpus directory is a bind mount an operator can update independently of a
+    deploy (docstring on `_index()`/`corpus_dir()`). Before the TTL, nothing rebuilds
+    the index short of a process restart, so an update is invisible to a long-lived
+    container. Same chunk id (same heading), different amount -- a cache that never
+    expired would keep serving the stale $35 forever."""
+    fees_md = tmp_path / "fees.md"
+    fees_md.write_text(
+        "# Fees\n\n## Late\n\nThe late fee is $35 flat.\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(config, "POLICY_CORPUS_DIR", str(tmp_path))
+    threshold("0.05")
+
+    first = policy_retrieval.search("late fee amount")
+    assert first.is_hit and "$35" in first.text
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(policy_retrieval.time, "monotonic", lambda: clock["t"])
+    policy_retrieval.reset_index_cache()
+    policy_retrieval.search("late fee amount")  # build at t=0 under the fake clock
+
+    fees_md.write_text(
+        "# Fees\n\n## Late\n\nThe late fee is $99 flat.\n", encoding="utf-8"
+    )
+    clock["t"] = policy_retrieval._INDEX_TTL_SECONDS + 1  # past the TTL
+
+    second = policy_retrieval.search("late fee amount")
+    assert second.is_hit and "$99" in second.text, (
+        "the index must rebuild once the TTL has elapsed, not serve the stale chunk"
+    )
+
+
+def test_index_does_not_rebuild_before_ttl_elapses(threshold, monkeypatch, tmp_path):
+    """The other half of the same control: a rebuild before the TTL would spend an
+    embedder call (billed on the Bedrock backend) on every search, not just the first
+    one after the corpus could plausibly have changed."""
+    fees_md = tmp_path / "fees.md"
+    fees_md.write_text(
+        "# Fees\n\n## Late\n\nThe late fee is $35 flat.\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(config, "POLICY_CORPUS_DIR", str(tmp_path))
+    threshold("0.05")
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(policy_retrieval.time, "monotonic", lambda: clock["t"])
+    policy_retrieval.search("late fee amount")  # build at t=0
+
+    fees_md.write_text(
+        "# Fees\n\n## Late\n\nThe late fee is $99 flat.\n", encoding="utf-8"
+    )
+    clock["t"] = policy_retrieval._INDEX_TTL_SECONDS - 1  # still within the TTL
+
+    still_stale = policy_retrieval.search("late fee amount")
+    assert still_stale.is_hit and "$35" in still_stale.text
+
+
 # --- the loop --------------------------------------------------------------------
 
 

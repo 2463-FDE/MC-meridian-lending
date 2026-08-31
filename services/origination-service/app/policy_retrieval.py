@@ -21,6 +21,7 @@ G2a) and kept in memory — 9 chunks, exact cosine (ADR 0007 rule 6, debt D16).
 """
 
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -121,6 +122,15 @@ def abstain(reason: str, score: float = 0.0) -> PolicyAnswer:
 
 _lock = threading.Lock()
 _index_state = None  # (InMemoryIndex, embedder, {chunk_id: text}) once built
+_index_built_at = None  # time.monotonic() of the last build; None until built once
+
+# `corpus_dir()` is a bind mount (docker-compose.yml) an operator can update
+# independently of a deploy, and nothing else rebuilds the index short of a
+# process restart. 15 minutes: this is an infrequently-updated policy corpus,
+# not a cache needing sub-second freshness, so a wall-clock TTL is the cheapest
+# correct fix -- no file-watcher, no content hash, just a rebuild on the next
+# search() once the age check trips.
+_INDEX_TTL_SECONDS = 900
 
 # `rag_eval.run`'s pre-admission audit (the client's whole-package delivery
 # check) reads manifest entries as `policies/X.md`, matched against the
@@ -204,10 +214,11 @@ def corpus_dir() -> Path:
 
 
 def reset_index_cache() -> None:
-    """Drop the built index (tests, and any future corpus reload)."""
-    global _index_state
+    """Drop the built index (tests, and a manual reload)."""
+    global _index_state, _index_built_at
     with _lock:
         _index_state = None
+        _index_built_at = None
 
 
 def _load_corpus() -> list:
@@ -410,13 +421,21 @@ def _build_index():
 
 
 def _index():
-    """The process-wide index, built on first use. None when there is no usable corpus."""
-    global _index_state
-    if _index_state is not None:
+    """The process-wide index, built on first use and rebuilt once `_INDEX_TTL_SECONDS`
+    has elapsed. None when there is no usable corpus.
+
+    The TTL is checked here rather than always rebuilding, so a rebuild is billed
+    (embedder calls on the Bedrock backend) only on the first search after the corpus
+    could plausibly have changed, not on every request.
+    """
+    global _index_state, _index_built_at
+    now = time.monotonic()
+    if _index_state is not None and now - _index_built_at <= _INDEX_TTL_SECONDS:
         return _index_state
     with _lock:
-        if _index_state is None:
+        if _index_state is None or now - _index_built_at > _INDEX_TTL_SECONDS:
             _index_state = _build_index()
+            _index_built_at = now
         return _index_state
 
 
