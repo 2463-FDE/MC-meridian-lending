@@ -546,7 +546,8 @@ jobs:
     # database_reachable(), and test_no_sad.py calls it directly. Only the readiness suite
     # proves an unmigrated volume actually reports unhealthy end to end.
     #
-    # This is the one job in this file with a database behind it. It needs one: the
+    # This job and assistant-telemetry-gate are the only two in this file with a database
+    # behind them (migration 0020 here, 0021 there). Both need one: the
     # migration is applied BY HAND, so "does this file run a second time" is a question
     # only Postgres can answer, and every other vector here grades SQL as text. A skipped
     # live vector inside a blocking gate would report success for a path it never ran --
