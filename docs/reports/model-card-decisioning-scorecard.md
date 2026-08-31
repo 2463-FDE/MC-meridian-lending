@@ -125,7 +125,7 @@ explained does not get to decide. This is the gate any future licensed model mus
 **Generation never sits on the causal path.** 12 CFR 1002.9 requires the notice to state the
 reasons *actually used*; a generated reason is a guess about a decision already made. If drafted
 wording is added later, the codes still come from real attributions and the model only phrases
-them (carded as G2 in `docs/cards-week8-governance.md`).
+them (carded as G2 in `docs/cards/week8-governance.md`).
 
 ## 6. Limitations and caveats
 
@@ -147,7 +147,7 @@ them (carded as G2 in `docs/cards-week8-governance.md`).
   answer — and that is the one path where human discretion would enter.
 - **Adverse-action notice delivery cannot be proven.** This platform displays reasons and records
   them; it does not send, track, or time a notice. Carded as G1 in
-  `docs/cards-week8-governance.md`.
+  `docs/cards/week8-governance.md`.
 
 ## 7. Controls around the model
 

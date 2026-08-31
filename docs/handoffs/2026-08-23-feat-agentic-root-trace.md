@@ -4,7 +4,7 @@
 **Status:** on track. Slices 1–3 are built and green; slice 4 is the hard one and its scope
 grew during slice 2. Freeze **Wed 2026-09-02**, presentation **Fri 2026-09-04**.
 
-Plan of record: `docs/plan-freeze-agentic-week10.md` (on `fix/demo-runtime`, PR #66 — not
+Plan of record: `docs/plans/freeze-agentic-week10.md` (on `fix/demo-runtime`, PR #66 — not
 yet on `main`). Read it after this file for the week-by-week position and the framework
 reasoning; this file is the resume pointer and supersedes its slice-4 scope.
 

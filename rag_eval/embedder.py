@@ -7,7 +7,7 @@ Two backends implement the same contract, so callers (`run.py`, `cache.py`,
 - ``TfidfEmbedder`` (default): pure-Python TF-IDF. Zero third-party deps, zero
   API calls, deterministic. Vectors are sparse term→weight dicts, L2-normalized.
 - ``BedrockEmbedder``: dense embeddings from Amazon Bedrock (Titan/Cohere) via
-  ``boto3`` — the scaling path (Phase 1 of docs/PHASE1-BEDROCK-PGVECTOR.md).
+  ``boto3`` — the scaling path (Phase 1 of docs/plans/phase1-bedrock-pgvector.md).
   Vectors are dense ``list[float]``, L2-normalized.
 
 Both normalize, so cosine similarity is a plain dot product either way;

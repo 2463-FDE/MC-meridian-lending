@@ -3,7 +3,7 @@
 
 **Date:** 2026-07-01  
 **Spec:** docs/specs/ai-assistant-week1.md  
-**Plan:** docs/STAGE1-PLAN-AI-ASSISTANT.md  
+**Plan:** docs/plans/stage1-ai-assistant.md  
 **Status:** Verification in progress
 
 

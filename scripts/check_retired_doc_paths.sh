@@ -40,6 +40,51 @@ RETIRED=(
   'docs/runbook-[A-Za-z0-9._-]+\.md|||docs/runbooks/<name>.md (the runbook- prefix is dropped)'
   'docs/scoping-[A-Za-z0-9._-]+\.md|||docs/scoping/<name>.md (the scoping- prefix is dropped)'
   '"runbook\.md"|||"runbooks" / "operations.md" — a path built by joining quoted segments'
+
+  # Second pass: the dated and serial families, grouped into six folders.
+  # Listed as EXACT filenames rather than one wildcard per family, deliberately.
+  # Several branches that have not merged cite client-asks and plan documents
+  # which have never existed in THIS tree (docs/plan-weeks7-10.md, seven dated
+  # asks that live only on the client-asks branches). A family wildcard would
+  # fail the build on those already-dangling references, which this gate has no
+  # business grading -- it bans paths it KNOWS moved, not paths that look like
+  # they might have. Exact names also let the advice name the real destination
+  # instead of a template.
+  # -> docs/client-asks/
+  'docs/client-answers-week6-servicing\.md|||docs/client-asks/week6-servicing-answers.md'
+  'docs/client-asks-2026-08-10-payments\.md|||docs/client-asks/2026-08-10-payments.md'
+  'docs/client-asks-2026-08-12-governance\.md|||docs/client-asks/2026-08-12-governance.md'
+  'docs/client-asks-2026-08-12-observability\.md|||docs/client-asks/2026-08-12-observability.md'
+  'docs/client-asks-2026-08-20-double-charge-interim\.md|||docs/client-asks/2026-08-20-double-charge-interim.md'
+  'docs/client-asks-2026-08-21-final\.md|||docs/client-asks/2026-08-21-final.md'
+  'docs/client-asks-2026-08-25-policy-corpus\.md|||docs/client-asks/2026-08-25-policy-corpus.md'
+  'docs/client-asks-2026-08-26-gate0-data-path\.md|||docs/client-asks/2026-08-26-gate0-data-path.md'
+  'docs/client-asks-2026-08-30-graded-pass-results\.md|||docs/client-asks/2026-08-30-graded-pass-results.md'
+  'docs/client-asks-2026-08-30-log-aggregation\.md|||docs/client-asks/2026-08-30-log-aggregation.md'
+  'docs/client-asks-week6-servicing\.md|||docs/client-asks/week6-servicing.md'
+  # -> docs/cards/
+  'docs/cards-week6-servicing\.md|||docs/cards/week6-servicing.md'
+  'docs/cards-week7-reconciliation\.md|||docs/cards/week7-reconciliation.md'
+  'docs/cards-week8-governance\.md|||docs/cards/week8-governance.md'
+  # -> docs/regulator-watch/
+  'docs/regulator-watch-2026-08-07\.md|||docs/regulator-watch/2026-08-07.md'
+  'docs/regulator-watch-2026-08-14\.md|||docs/regulator-watch/2026-08-14.md'
+  # -> docs/plans/
+  'docs/PHASE1-BEDROCK-PGVECTOR\.md|||docs/plans/phase1-bedrock-pgvector.md'
+  'docs/STAGE1-PLAN-AI-ASSISTANT\.md|||docs/plans/stage1-ai-assistant.md'
+  'docs/STAGE1-PLAN-RAG-WEEK2\.md|||docs/plans/stage1-rag-week2.md'
+  'docs/freeze-demo-script-week10\.md|||docs/plans/freeze-demo-script-week10.md'
+  'docs/plan-freeze-agentic-week10\.md|||docs/plans/freeze-agentic-week10.md'
+  'docs/plan-loan-summary\.md|||docs/plans/loan-summary.md'
+  # -> docs/reports/
+  'docs/STAGE2-VERIFICATION\.md|||docs/reports/stage2-verification.md'
+  'docs/llm-client-code-review\.md|||docs/reports/llm-client-code-review.md'
+  'docs/model-card-decisioning-scorecard\.md|||docs/reports/model-card-decisioning-scorecard.md'
+  'docs/rag-eval-graded-pass-report-2026-08-30\.md|||docs/reports/rag-eval-graded-pass-2026-08-30.md'
+  'docs/servicing-money-comprehension-week6\.md|||docs/reports/servicing-money-comprehension-week6.md'
+  # -> docs/process/
+  'docs/rag-eval-run-pipeline\.md|||docs/process/rag-eval-run-pipeline.md'
+  'docs/review-roundtrip-playbook\.md|||docs/process/review-roundtrip-playbook.md'
 )
 
 # The input is captured and its status checked BEFORE anything reports a verdict:

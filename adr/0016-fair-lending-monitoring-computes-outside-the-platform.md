@@ -10,7 +10,7 @@
   database — why "stored in this platform" means reachable by all seven services),
   ADR 0006 (logging redaction — the per-service PII redactor an export path sits beside).
 - **Source:** `docs/specs/fair-lending-monitoring-week8.md` §4,
-  `docs/model-card-decisioning-scorecard.md` §7, `docs/cards-week8-governance.md`,
+  `docs/reports/model-card-decisioning-scorecard.md` §7, `docs/cards/week8-governance.md`,
   and Lending Ops' written answers of 2026-08-13.
 
 ---
@@ -19,7 +19,7 @@
 
 An examiner asks whether credit decisions fall differently across protected groups. Meridian
 cannot answer. Nothing in this platform measures outcome disparity, and the model card says so
-in those words (`docs/model-card-decisioning-scorecard.md` §7, "Planned, not active").
+in those words (`docs/reports/model-card-decisioning-scorecard.md` §7, "Planned, not active").
 
 Answering the question requires two things that sit in different places. The outcomes are here:
 `decision_events` holds every approve, refer and deny with its policy band, model score and Reg B

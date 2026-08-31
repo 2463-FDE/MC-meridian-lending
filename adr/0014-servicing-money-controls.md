@@ -1,7 +1,7 @@
 # ADR 0014: Servicing Money Controls — Authorization, a Balance Ledger, and Deferred Approval
 
 - **Status:** Proposed — the four decisions below rest on business answers Lending Ops
-  confirmed in writing on 2026-08-12, transcribed in `docs/client-answers-week6-servicing.md`
+  confirmed in writing on 2026-08-12, transcribed in `docs/client-asks/week6-servicing-answers.md`
   with the questions that produced them; the ADR itself is awaiting engineering review
 - **Date:** 2026-08-12
 - **Deciders:** Engineering, with Lending Ops (Dana Whitfield, VP Lending Ops) as requesting
@@ -58,7 +58,7 @@ column (`001_schema.sql:137-144`), no servicing code writes it, and its rows are
 today only as "that is the number", plus a timestamp. This is not hypothetical: `README.md`
 names Sam as the client's SOX/reconciliation contact (repo-observed fact); no one asked Sam
 whether a walkthrough assumes an adjustment trail exists, so that inference is engineering's,
-not a client-stated answer — `docs/client-answers-week6-servicing.md` does not carry it. The
+not a client-stated answer — `docs/client-asks/week6-servicing-answers.md` does not carry it. The
 retention answer Sam did give (Q7, seven years) is cited on its own terms below. The one
 genuinely append-only table in
 this schema is `decision_events` (`001_schema.sql:148-179`): serial primary key, JSONB
@@ -398,7 +398,7 @@ Later PRs, in this order. Each is independently mergeable.
 
 Steps 1–3 are this cycle's control. Step 1 alone removes the Critical finding, so it does not
 wait for the ledger. Steps 4 onward, plus borrower notifications, historical reconciliation, and
-waiver-limit enforcement, are carded in `docs/cards-week6-servicing.md` at Lending Ops' request
+waiver-limit enforcement, are carded in `docs/cards/week6-servicing.md` at Lending Ops' request
 so they are planned rather than dropped.
 
 ---

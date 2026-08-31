@@ -19,7 +19,7 @@
 | D — cleanup | 2026-08-30 | 18 OK, no `rag_eval` residue in the packet |
 
 Results: `docs/handoffs/2026-08-30-rag-eval-graded-pass-run-record.md`.
-Deliverable: `docs/rag-eval-graded-pass-report-2026-08-30.md`.
+Deliverable: `docs/reports/rag-eval-graded-pass-2026-08-30.md`.
 
 **S-7 is now exhausted for this gold set.** Every one of the 28 cases has been
 graded once. Re-running any of them is a second sample and is not permitted without

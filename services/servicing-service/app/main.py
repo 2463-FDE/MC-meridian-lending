@@ -308,7 +308,7 @@ class WaiveIn(BaseModel):
 def waive_fee(loan_id: int, body: WaiveIn, x_user_role: Optional[str] = Header(None)):
     # CSR or admin only (ADR 0014 Decision 1). No amount limit is enforced: the
     # ops-manual $150-per-account-per-month guideline is recorded and displayed, not
-    # gated, and enforcement is carded (docs/cards-week6-servicing.md C4). A manual
+    # gated, and enforcement is carded (docs/cards/week6-servicing.md C4). A manual
     # late-fee reversal comes through here rather than a separate flow.
     authz.require_money_role(x_user_role)
     return {"loan_id": loan_id, "past_due": balance.waive_fee(loan_id, body.amount)}

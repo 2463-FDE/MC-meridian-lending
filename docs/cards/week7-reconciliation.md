@@ -1,7 +1,7 @@
 # Cards — settlement reconciliation (deferred work)
 
 Work the week-7 reconciliation control names but does not build. Same format as
-`docs/cards-week6-servicing.md` and `docs/cards-week8-governance.md`: what it is, what
+`docs/cards/week6-servicing.md` and `docs/cards/week8-governance.md`: what it is, what
 exists today, and why it is not in this cycle.
 
 ## R1 — One ledger snapshot per run

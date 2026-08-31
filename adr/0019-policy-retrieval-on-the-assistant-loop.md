@@ -7,7 +7,7 @@
   within), ADR 0006 (logging redaction), ADR 0007 (RAG corpus hygiene — what may enter a
   retrieval corpus), ADR 0009 (decisioning assistant, §5 — the loop this tool joins), ADR 0016
   (fair-lending monitoring computes outside the platform). Card G2a/G2b,
-  `docs/cards-week8-governance.md`. Debt D16 (`docs/debt-log.md`) — pgvector stays deferred.
+  `docs/cards/week8-governance.md`. Debt D16 (`docs/debt-log.md`) — pgvector stays deferred.
 - **Source:** card G2b, and the redaction contract read at `app/llm/request_builder.py`.
 
 ---

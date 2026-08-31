@@ -15,7 +15,7 @@ Branch from `main`: `docs/servicing-comprehension-week6`.
 
 ## Success looks like
 
-- `docs/servicing-money-comprehension-week6.md` exists with all sections listed under Deliverables.
+- `docs/reports/servicing-money-comprehension-week6.md` exists with all sections listed under Deliverables.
 - `test_characterization_balance.py` and `test_lost_update.py` exist; no other code file changed.
 - The four-row tolerated-red matrix below has actually been run and matches its Expected column.
 - Every file:line cited in the report is a line you opened in this branch's tree, not a number
@@ -92,7 +92,7 @@ discretionary moves.
 
 ## Deliverables (this PR only)
 
-1. `docs/servicing-money-comprehension-week6.md` — the report. Sections: money-endpoint
+1. `docs/reports/servicing-money-comprehension-week6.md` — the report. Sections: money-endpoint
    inventory (table, file:line refs), balance-mutation walkthrough (the read-modify-write), the
    four questions above with answers, the Q4 table, D8/D2/D20 tie-in, and a short "what the
    companion ADR (docs/servicing-money-controls-adr-week6 branch) decides" pointer — don't

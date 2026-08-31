@@ -6,7 +6,7 @@
 Bedrock run**. One fail condition remains: the framework is in the repo, not in the request
 path. Freeze **Wed 2026-09-02**, presentation **Fri 2026-09-04**.
 
-Plan of record: `docs/plan-freeze-agentic-week10.md` §5 (on `main`). This file supersedes its
+Plan of record: `docs/plans/freeze-agentic-week10.md` §5 (on `main`). This file supersedes its
 slice-4 scope and records two decisions taken after it was written.
 
 ## What's done

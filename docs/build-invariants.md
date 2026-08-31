@@ -1,6 +1,6 @@
 # Build Invariants
 
-Correct-by-construction catalogs. Sibling to `docs/review-roundtrip-playbook.md` — that
+Correct-by-construction catalogs. Sibling to `docs/process/review-roundtrip-playbook.md` — that
 one makes the adversarial reviewer converge in 2–3 rounds; **this one stops the finding
 from being writable in the first place.**
 

@@ -39,15 +39,15 @@ cover a sentence-initial `If Meridian …`, and adding entries will not close it
 by the code it affects, `rag_eval/run.py` (`_NAME_ALLOWLIST`) and
 `rag_eval/tests/test_prohibited_conclusion.py`. The two-manifest scoping trap
 (`SHA256SUMS.txt` package-relative, `CORPUS-SHA256SUMS.txt` corpus-relative) is
-`docs/rag-eval-run-pipeline.md` § "Step 6 — Pick the right manifest".
+`docs/process/rag-eval-run-pipeline.md` § "Step 6 — Pick the right manifest".
 
 ## Where the live state is
 
 | For | Read |
 |---|---|
 | What the pass actually did | `docs/handoffs/2026-08-30-rag-eval-graded-pass-run-record.md` |
-| The client deliverable | `docs/rag-eval-graded-pass-report-2026-08-30.md` |
+| The client deliverable | `docs/reports/rag-eval-graded-pass-2026-08-30.md` |
 | Why the pass was sequenced as it was | `docs/handoffs/2026-08-29-rag-eval-graded-pass.md` |
-| Setup (§2), the pipeline (§3), the evaluator's scope (§4) | `docs/rag-eval-run-pipeline.md` |
+| Setup (§2), the pipeline (§3), the evaluator's scope (§4) | `docs/process/rag-eval-run-pipeline.md` |
 | The commands, and the failures seen on the day | `docs/runbooks/rag-eval-graded-pass.md` |
 | The client record and the S-1…S-10 / C-1…C-7 registers | `docs/handoffs/2026-08-27-rag-eval-support-test.md` |

@@ -127,7 +127,7 @@ This is a genuine architecture change, not a swap:
 ## Phase 3 — production RAG service (NOT SCOPED HERE)
 
 The harness graduates from an offline eval tool to a live service only if/when the
-"AI underwriting assistant" is greenlit (`docs/STAGE1-PLAN-AI-ASSISTANT.md`). Out of
+"AI underwriting assistant" is greenlit (`docs/plans/stage1-ai-assistant.md`). Out of
 scope until that decision.
 
 ## Explicitly NOT doing now

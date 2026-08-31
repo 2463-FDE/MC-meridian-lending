@@ -19,7 +19,7 @@ already on `main` before this file — in `rag_eval/hygiene.py` and in
 header, and the publication check in the run record, section 10a.
 
 Supersedes `docs/handoffs/2026-08-28-rag-eval-titan-pass.md` for sequencing. That file is now a
-pointer record: `docs/rag-eval-run-pipeline.md` holds both the setup (§2, steps 1–10) and the
+pointer record: `docs/process/rag-eval-run-pipeline.md` holds both the setup (§2, steps 1–10) and the
 pipeline (§3), and it is not in `handoffs/`.
 
 **Operational companion:** ``docs/runbooks/rag-eval-graded-pass.md``, beside the scripts it
@@ -31,7 +31,7 @@ that one is the how.
 The pass ran on 2026-08-30. Everything below describes the plan as it stood before
 it, and is kept for the reasoning, not the state. **The record of what actually
 happened is `docs/handoffs/2026-08-30-rag-eval-graded-pass-run-record.md`**, and the deliverable written
-from it is `docs/rag-eval-graded-pass-report-2026-08-30.md`.
+from it is `docs/reports/rag-eval-graded-pass-2026-08-30.md`.
 
 What changed against the plan below:
 

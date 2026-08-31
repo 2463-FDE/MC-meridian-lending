@@ -3,7 +3,7 @@
 **Status:** draft · **Written:** 2026-08-12 · **Base:** `main` @ `f375ef2`
 **Client ask:** observability / SRE / guardrails — "Payments feel flaky, and my finance team
 grumbles about 'noise' at month-end that they just write off."
-**Companion docs:** docs/client-asks-2026-08-12-observability.md (the asks and the evidence) —
+**Companion docs:** docs/client-asks/2026-08-12-observability.md (the asks and the evidence) —
 local-only, on the docs/client-asks branch and in no checkout, so it is named un-backticked
 rather than linked; ADR 0015 (the decisions), `docs/debt-log.md` (D7).
 
@@ -569,7 +569,7 @@ about at the demo is a reduction they did not agree to.
 
 ## Client Questions
 
-Raised in docs/client-asks-2026-08-12-observability.md (local-only, un-backticked — see
+Raised in docs/client-asks/2026-08-12-observability.md (local-only, un-backticked — see
 **Companion docs** above); none blocks the build, each changes a constant rather than a design.
 
 - **Q1** Does the processor return a reference at capture, and in which field? Decides when

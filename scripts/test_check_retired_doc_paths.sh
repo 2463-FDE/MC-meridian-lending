@@ -62,6 +62,50 @@ for probe in \
   check "retired pattern $i caught" 1 "$r" "RETIRED DOC PATH"
 done
 
+# --- 2b. one probe per folder added in the second pass -----------------------
+# The 29 second-pass entries are exact filenames, so a family is only covered by
+# the entries actually listed. One representative per destination folder catches
+# a whole group going missing.
+j=0
+for probe in \
+  'answered in docs/client-asks-2026-08-21-final.md' \
+  'see docs/cards-week8-governance.md' \
+  'the sweep in docs/regulator-watch-2026-08-14.md' \
+  'specified in docs/plan-freeze-agentic-week10.md' \
+  'measured in docs/servicing-money-comprehension-week6.md' \
+  'the loop in docs/review-roundtrip-playbook.md' \
+; do
+  j=$((j + 1))
+  r=$(new_repo)
+  printf '%s\n' "$probe" > "$r/docs/probe.md"
+  git -C "$r" add -A >/dev/null 2>&1
+  check "second-pass folder $j caught" 1 "$r" "RETIRED DOC PATH"
+done
+
+# --- 2c. every replacement the gate advises actually resolves ----------------
+# The advice is a literal destination for all 29 second-pass entries, so a typo
+# in one would send a reader to a path that does not exist -- and nothing else
+# would notice, because the gate only fails on the OLD spelling. Prose advice
+# (the first-pass entries, which explain a rule) is skipped by the space/<> test.
+bad_advice=""
+n_advice=0
+while IFS= read -r advice; do
+  # skip prose advice and the glob-form entry: neither is a literal path.
+  case "$advice" in *" "*|*"<"*|*"*"*) continue ;; esac
+  case "$advice" in docs/*) ;; *) continue ;; esac
+  n_advice=$((n_advice + 1))
+  [ -f "$REPO_ROOT/$advice" ] || bad_advice="$bad_advice $advice"
+done <<ADVICE
+$(sed -n "s/^  '[^|]*|||\(.*\)'$/\1/p" "$SCRIPT")
+ADVICE
+if [ -z "$bad_advice" ] && [ "$n_advice" -ge 29 ]; then
+  echo "ok    every advised replacement resolves ($n_advice checked)"
+  pass=$((pass + 1))
+else
+  echo "FAIL  advised replacement does not resolve:$bad_advice (checked $n_advice, wanted >=29)"
+  fail=$((fail + 1))
+fi
+
 # --- 3. the advice names the replacement -------------------------------------
 r=$(new_repo)
 echo 'see docs/runbook.md' > "$r/docs/probe.md"

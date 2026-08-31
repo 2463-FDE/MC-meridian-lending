@@ -19,8 +19,8 @@
 - **Related:** ADR 0005 (LLM client — the transport, retry and redaction boundary this decision
   keeps), ADR 0006 (logging redaction), ADR 0009 §5 (the officer assistant this replaces the loop
   of), ADR 0012 (externalized rule config), ADR 0019 (policy retrieval — the third tool the
-  framework binds). Plan: `docs/plan-freeze-agentic-week10.md` §3–§4. Demo and handover:
-  `docs/freeze-demo-script-week10.md`.
+  framework binds). Plan: `docs/plans/freeze-agentic-week10.md` §3–§4. Demo and handover:
+  `docs/plans/freeze-demo-script-week10.md`.
 - **Source:** the 2026-08-21 program instruction for the 2026-09-02 freeze, and the pins read at
   `services/origination-service/requirements.txt`.
 

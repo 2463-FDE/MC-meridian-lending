@@ -1,6 +1,6 @@
 # Freeze demo script — agentic slice (week 10)
 
-Slice 7 of `docs/plan-freeze-agentic-week10.md` §5. Demo script with a rehearsed failure, the
+Slice 7 of `docs/plans/freeze-agentic-week10.md` §5. Demo script with a rehearsed failure, the
 exact-SHA Bedrock proof run, the real/fixture/fallback statement, known limitations, and the
 document truth pass (this file, plus the `docs/kb.md` sync in the same commit).
 
@@ -99,7 +99,7 @@ identical to a healthy stack:
 | HTTP 503 `LLM feature is not enabled` | `LLM_ENABLED` not exported — the lifespan skipped client init entirely |
 | provider fault on the first call | AWS credential absent or expired. boto3 resolves at call time and the adapter builds lazily, so nothing earlier can catch it — this is what §4 exists for |
 | `searches: [{"status": "policy_abstain", "reason": "threshold_unset"}]` | `POLICY_RETRIEVAL_MIN_SCORE` unset, blank, or malformed (non-numeric, ≤0, >1 all read as unset) |
-| `"reason": "below_threshold"` on every topic | threshold set to the **wrong (corpus, embedder) pair's** value. A threshold belongs to exactly one pairing and three are in circulation: `0.13666298135750454` for `tfidf-v1:a4f3039100df155d` over `corpus-0b32d4ca92a5` and `0.3007877649147387` for `amazon.titan-embed-text-v2:0`, both over the 66-passage client packet (`docs/rag-eval-run-pipeline.md`, `docs/rag-eval-graded-pass-report-2026-08-30.md`); and the `0.1609` the demo runs, for TF-IDF over the 9-chunk repo corpus. Every one of them is in range and boots clean; the wrong one abstains on everything |
+| `"reason": "below_threshold"` on every topic | threshold set to the **wrong (corpus, embedder) pair's** value. A threshold belongs to exactly one pairing and three are in circulation: `0.13666298135750454` for `tfidf-v1:a4f3039100df155d` over `corpus-0b32d4ca92a5` and `0.3007877649147387` for `amazon.titan-embed-text-v2:0`, both over the 66-passage client packet (`docs/process/rag-eval-run-pipeline.md`, `docs/reports/rag-eval-graded-pass-2026-08-30.md`); and the `0.1609` the demo runs, for TF-IDF over the 9-chunk repo corpus. Every one of them is in range and boots clean; the wrong one abstains on everything |
 | `"reason": "corpus_unavailable"` | empty or misdirected corpus mount; a `POLICY_CORPUS_MANIFEST` that does not match the directory (indexes nothing, by design); or `RAG_EMBEDDER=bedrock` with a blank `AWS_REGION` or no credential — `BedrockEmbedder.fit()` is a no-op, so the first network call is inside the index loop |
 | `"reason": "harness_unavailable"` | `rag_eval` not importable in the running image. CI's `rag-eval-import-gate` proves this for the image CI built, not for the one on this laptop |
 | `404` / `never_decisioned` | the chosen `$APP_ID` has no decision record, or KYC never passed — the score tool is KYC-gated and fails closed |
@@ -238,7 +238,7 @@ State plainly, don't let it be inferred:
 
 ## 6. Known limitations (state at handover)
 
-Full list: `docs/plan-freeze-agentic-week10.md` §6. Headline points for the room:
+Full list: `docs/plans/freeze-agentic-week10.md` §6. Headline points for the room:
 
 - Retrieval is in-memory exact cosine similarity over a 9-chunk, two-document corpus —
   pgvector is D16, deferred.
@@ -288,5 +288,5 @@ deterministic stand-in, and nothing here has been through a compliance review. T
 CI gates are real and hold real controls; they are not an assurance opinion.
 
 **What a receiving team should read first, in order:** `docs/kb.md` (orientation),
-`docs/plan-freeze-agentic-week10.md` (the decisions and their rejected alternatives),
+`docs/plans/freeze-agentic-week10.md` (the decisions and their rejected alternatives),
 `docs/debt-log.md` (what is knowingly unbuilt, D-numbered), then this document's §6.

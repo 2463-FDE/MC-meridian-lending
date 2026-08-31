@@ -1,7 +1,7 @@
 # Cards — servicing money controls (deferred work)
 
 **Raised:** 2026-08-12 · **Source:** Lending Ops' written answers to the week-6 servicing
-questions, transcribed in `docs/client-answers-week6-servicing.md` ·
+questions, transcribed in `docs/client-asks/week6-servicing-answers.md` ·
 **Decision record:** `adr/0014-servicing-money-controls.md`
 
 Five pieces of work the client deferred on purpose and asked to see carded, so they are planned

@@ -66,7 +66,7 @@ scan beats the index, and building one is the same speculative cost as building 
 ## Proposed order
 
 1. Switch to Titan (the table above). Ours, this week.
-2. Get the corpus and the officer questions from the client (`docs/client-asks-2026-08-25-policy-corpus.md`).
+2. Get the corpus and the officer questions from the client (`docs/client-asks/2026-08-25-policy-corpus.md`).
 3. Measure. Rebuild the gold set, re-derive the threshold.
 4. If cold-start cost is what hurts, reuse `EmbeddingCache` on the product path first — already
    written, already privacy-aware, no schema, no extension, no shared-database change.

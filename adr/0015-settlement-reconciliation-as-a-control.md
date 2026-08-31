@@ -15,7 +15,7 @@
   D2 (float money), D8 (servicing authz — partially mitigated by #32; maker-checker
   still open).
 - **Source:** `docs/specs/observability-week7.md`, and
-  docs/client-asks-2026-08-12-observability.md — local-only, on the docs/client-asks branch and in
+  docs/client-asks/2026-08-12-observability.md — local-only, on the docs/client-asks branch and in
   no checkout, so it is named un-backticked rather than linked.
 
 ---
@@ -329,7 +329,7 @@ path only.
 |---|---|
 | Ambiguous tuples are common in an installment portfolio, so many breaks need manual review | The report abstains rather than guessing; migration `0018`'s `processor_ref` column is the named successor once a capture path populates it, and Decision 1 is written to be replaced |
 | A reader treats gross break value as a stable measurement | Labelled in the report itself, not only in this ADR |
-| The client hears detection as prevention | Stated in docs/client-asks-2026-08-12-observability.md (local-only, un-backticked — see **Source** above) and repeated in the runbook. **Still the live risk, narrower than it was:** ADR 0013 Decision 1 (PR #63/#65) now prevents the exact-retry case at capture, but a processor-side duplicate, a break that predates that fix, and a missing `processor_ref` are still detection/manual-review only, and week-8 client-demo feedback names user notification and refund status as unevidenced |
+| The client hears detection as prevention | Stated in docs/client-asks/2026-08-12-observability.md (local-only, un-backticked — see **Source** above) and repeated in the runbook. **Still the live risk, narrower than it was:** ADR 0013 Decision 1 (PR #63/#65) now prevents the exact-retry case at capture, but a processor-side duplicate, a break that predates that fix, and a missing `processor_ref` are still detection/manual-review only, and week-8 client-demo feedback names user notification and refund status as unevidenced |
 | Nobody runs the job, so the control exists on paper | Exit codes make it CI-runnable; the runbook names the invocation. A scheduler is deferred, not assumed |
 | The cut-off convention turns out to differ from ±1 day, changing every classification | The window is configuration; the client question is open and the answer changes a value |
 | Someone tightens the window and believes duplicate detection improved | Decision 2 makes duplicate detection independent of the window, and a test vector asserts invariance across both values |

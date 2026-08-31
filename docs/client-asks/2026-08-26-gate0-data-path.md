@@ -23,11 +23,11 @@ Three of her limits conflicted with the code as it stood on 2026-08-26 — see
 > report and run record state that no prompt, passage or model response is retained and
 > that the embedding cache is disabled on the provider path, so no content-derived vectors
 > reach disk. For the asks that came out of the run see
-> `docs/client-asks-2026-08-30-graded-pass-results.md`; for the measured results and the
-> full run envelope see `docs/rag-eval-graded-pass-report-2026-08-30.md` and
+> `docs/client-asks/2026-08-30-graded-pass-results.md`; for the measured results and the
+> full run envelope see `docs/reports/rag-eval-graded-pass-2026-08-30.md` and
 > `docs/handoffs/2026-08-30-rag-eval-graded-pass-run-record.md`.
 
-**Follows** `docs/client-asks-2026-08-25-policy-corpus.md` — that file holds the original five asks
+**Follows** `docs/client-asks/2026-08-25-policy-corpus.md` — that file holds the original five asks
 and her scoped approval. This one is the return round: two approvals we need, and the two
 confirmations she asked for.
 
