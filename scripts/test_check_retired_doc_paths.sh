@@ -54,6 +54,9 @@ for probe in \
   'see docs/runbook-rag-eval-graded-pass.md' \
   'scoped in docs/scoping-payments-week5.md' \
   'RUNBOOK = base / "docs" / "runbook.md"' \
+  'SPEC = base / "docs" / "spec-payments-week5.md"' \
+  "RB = base / 'docs' / 'runbook-rag-eval-graded-pass.md'" \
+  'SCOPE = base / "docs" / "scoping-payments-week5.md"' \
 ; do
   i=$((i + 1))
   r=$(new_repo)
@@ -61,6 +64,15 @@ for probe in \
   git -C "$r" add -A >/dev/null 2>&1
   check "retired pattern $i caught" 1 "$r" "RETIRED DOC PATH"
 done
+
+# --- 2b. the joined-segment form is caught in EITHER quote style --------------
+# Python in this repo is written with both, so a family covered only for double
+# quotes is covered for half the tree.
+r=$(new_repo)
+mkdir -p "$r/services/x/tests"
+echo "RUNBOOK = base / 'docs' / 'runbook.md'" > "$r/services/x/tests/test_x.py"
+git -C "$r" add -A >/dev/null 2>&1
+check "single-quoted joined segment is caught" 1 "$r" "test_x.py"
 
 # --- 3. the advice names the replacement -------------------------------------
 r=$(new_repo)
