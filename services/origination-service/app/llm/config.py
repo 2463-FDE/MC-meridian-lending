@@ -24,6 +24,16 @@ _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 # Confirm the exact id enabled in your account/region before relying on this.
 _DEFAULT_BEDROCK_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
+# Models this deployment has actually been tested against, per provider. Not a
+# general "all Claude models" list (unlike the model roster in the global
+# CLAUDE.md, which is provider-agnostic) — ADR 0005 documents CLAUDE_MODEL as
+# an operator override "if needed", and an override that is a typo or a
+# retired model id otherwise only 4xxs on the first real call, mid-run, not at
+# boot. Widen a set here only after confirming the id against this system's
+# prompts/tool schemas, same discipline as _AWS_REGIONS.
+_KNOWN_ANTHROPIC_MODELS = frozenset({_DEFAULT_MODEL})
+_KNOWN_BEDROCK_MODELS = frozenset({_DEFAULT_BEDROCK_MODEL})
+
 _PROVIDERS = ("anthropic", "bedrock")
 
 # Pinned Bedrock region. An unset AWS_REGION let boto3 resolve the region from the
@@ -206,6 +216,28 @@ def _aws_region(provider: str) -> str | None:
     return raw
 
 
+def _validated_model(provider: str, default_model: str) -> str:
+    """Resolve CLAUDE_MODEL against the per-provider known-model set.
+
+    Mirrors `_aws_region`: an unset value uses the tested default; a set value
+    must be in the allowlist for the provider, or this raises at boot instead
+    of the provider 4xx'ing on the first real call.
+    """
+    raw = os.getenv("CLAUDE_MODEL", "").strip()
+    if not raw:
+        return default_model
+    known = _KNOWN_BEDROCK_MODELS if provider == "bedrock" else _KNOWN_ANTHROPIC_MODELS
+    if raw not in known:
+        raise LLMConfigError(
+            f"CLAUDE_MODEL={raw!r} is not a known model id for provider={provider!r} "
+            f"(expected one of {sorted(known)}). An untested model id fails as a "
+            "provider 4xx on the first real call instead of at boot. Unset it to "
+            "use the tested default, or add the id to the known-model set once "
+            "it's confirmed to work against this system's prompts/tool schemas."
+        )
+    return raw
+
+
 def load_llm_config() -> LLMConfig:
     """Load config from the environment.
 
@@ -310,7 +342,7 @@ def load_llm_config() -> LLMConfig:
     return LLMConfig(
         api_key=api_key,
         provider=provider,
-        model=os.getenv("CLAUDE_MODEL", default_model),
+        model=_validated_model(provider, default_model),
         timeout=timeout,
         max_retries=max_retries,
         max_tokens=max_tokens,
