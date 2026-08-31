@@ -5,7 +5,7 @@ and gates what is allowed to enter a retrieval corpus. **Zero LLM calls, zero
 third-party runtime deps** (stdlib only; `pytest` for tests). This is an analysis
 tool, not a service — no FastAPI, no DB, no docker-compose entry.
 
-Spec: `docs/specs/rag-week2.md` · Plan: `docs/STAGE1-PLAN-RAG-WEEK2.md` ·
+Spec: `docs/specs/rag-week2.md` · Plan: `docs/plans/stage1-rag-week2.md` ·
 ADR 0007 (corpus hygiene) · ADR 0008 (retrievable decision records).
 
 ## Run
@@ -68,7 +68,7 @@ backend runs cacheless.
 | `bedrock` | Amazon Bedrock dense embeddings | `boto3` | AWS credentials |
 
 TF-IDF is the CI/offline default — keyless, deterministic, no network. Bedrock is
-the **scaling path** (Phase 1 of `docs/PHASE1-BEDROCK-PGVECTOR.md`):
+the **scaling path** (Phase 1 of `docs/plans/phase1-bedrock-pgvector.md`):
 
 ```bash
 pip install -r rag_eval/requirements-bedrock.txt
@@ -88,7 +88,7 @@ the backend signature, in the report.
 
 The retrieval index stays **in-memory** for both backends (ADR 0007 rule 6). A
 persistent pgvector store is **Phase 2**, gated on corpus growth (~hundreds+ of
-chunks), not on the embedding swap — see `docs/PHASE1-BEDROCK-PGVECTOR.md`.
+chunks), not on the embedding swap — see `docs/plans/phase1-bedrock-pgvector.md`.
 
 ## Tests
 

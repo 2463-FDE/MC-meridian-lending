@@ -14,9 +14,9 @@ Every exchange with Dana is recorded on two branches. Neither is pushed except
 
 - **`docs/client-asks-originals`** — **verbatim** emails, both directions. Never edit, summarise
   or reorder these. This is the record of what was actually said.
-  - `docs/client-asks-2026-08-25-policy-corpus.md` — her packet reply + the packet's own
+  - `docs/client-asks/2026-08-25-policy-corpus.md` — her packet reply + the packet's own
     `titan-embeddings-authorization.md` and scope confirmation, reproduced in full
-  - `docs/client-asks-2026-08-26-gate0-data-path.md` — the as-sent Gate 0 email and her
+  - `docs/client-asks/2026-08-26-gate0-data-path.md` — the as-sent Gate 0 email and her
     approval of both Titan flows with operating limits
   - `docs/client-asks-2026-08-26-query-composition.md` — the query-composition round and her
     generate-review-freeze decision

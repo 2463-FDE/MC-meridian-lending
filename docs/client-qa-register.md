@@ -11,7 +11,7 @@ is load-bearing for a decision, a short phrase is quoted; nothing longer.
 **Client:** VP Lending Ops, Meridian (referred to below as the client). **Register maintained:**
 2026-08-21.
 
-**Relationship to `docs/client-answers-week6-servicing.md`.** This register is a roll-up:
+**Relationship to `docs/client-asks/week6-servicing-answers.md`.** This register is a roll-up:
 Exchange 1 below condenses the same eleven questions (Q1–Q11) to one line each, except Q5, which
 this register splits into two rows (5 and 6) so the still-open code-list item stays traceable in
 the open-items summary — row 6 has no separate counterpart in the week-6 file. The week-6 file
@@ -23,10 +23,10 @@ answer live there, and it is what ADR 0014 cites. Update both when a servicing a
 ## Exchange 1 — servicing money controls
 
 **Asked:** 2026-08-08. **Answered:** 2026-08-12, in writing. **Respondent:** VP Lending Ops,
-Meridian. **Source reference:** `docs/client-asks-week6-servicing.md` at commit `062f408` on
+Meridian. **Source reference:** `docs/client-asks/week6-servicing.md` at commit `062f408` on
 `docs/client-asks` (pushed — reachable after `git fetch origin`); verbatim reply on
 `docs/client-asks-originals`, which has no remote, so that half is the maintainer's copy only.
-Feeds `adr/0014-servicing-money-controls.md` and `docs/cards-week6-servicing.md`.
+Feeds `adr/0014-servicing-money-controls.md` and `docs/cards/week6-servicing.md`.
 
 | # | Question | Answer | Feeds |
 |---|---|---|---|
@@ -41,21 +41,21 @@ Feeds `adr/0014-servicing-money-controls.md` and `docs/cards-week6-servicing.md`
 | 9 | Should balances be reconciled against payment records before the ledger starts? | No — an honest line in the sand beats a reconstructed history that cannot be defended | ADR 0014 Decision 3 — the ledger opens with one `opening` posting carrying today's stored balance, labelled as such because it may be wrong |
 | 10 | Should the borrower be told when a representative adjusts their balance? | No notification for now; record only. Take it together with the payments delivery-channel decision — both need a verified way to reach the borrower, and none exists | Card C2, explicitly not estimable until a channel exists |
 | 11 | Is the $150 monthly fee-waiver guideline a limit the system should enforce? | The ops manual sets $150 per account per month with escalation above it. The system has never enforced it and this work does not start | Card C4. **Untested assumption: whether the window is a calendar month or rolling 30 days was never asked** |
-| 12 | What is in scope this cycle? | The comprehension work — report, characterization tests, the failing lost-update test, and the decision record. The dashboard waits, and deferrals are to be carded | `docs/cards-week6-servicing.md` C1–C5 exist because of this answer |
+| 12 | What is in scope this cycle? | The comprehension work — report, characterization tests, the failing lost-update test, and the decision record. The dashboard waits, and deferrals are to be carded | `docs/cards/week6-servicing.md` C1–C5 exist because of this answer |
 
 ## Exchange 2 — decisioning governance
 
 **Asked:** 2026-08-12. **Answered:** 2026-08-13, in writing. **Respondent:** VP Lending Ops,
-Meridian. **Source reference:** `docs/client-asks-2026-08-12-governance.md` at commit
+Meridian. **Source reference:** `docs/client-asks/2026-08-12-governance.md` at commit
 `126120c` on `docs/client-asks` (pushed — reachable after `git fetch origin`).
-Feeds `docs/specs/fair-lending-monitoring-week8.md`, `adr/0016-fair-lending-monitoring-computes-outside-the-platform.md`, `docs/cards-week8-governance.md`, `docs/model-card-decisioning-scorecard.md`.
+Feeds `docs/specs/fair-lending-monitoring-week8.md`, `adr/0016-fair-lending-monitoring-computes-outside-the-platform.md`, `docs/cards/week8-governance.md`, `docs/reports/model-card-decisioning-scorecard.md`.
 
 | # | Question | Answer | Feeds |
 |---|---|---|---|
 | 1 | Reason truncation: four principal reasons are computed and stored, one is displayed. When should it land? | **Fix this cycle.** Not a display bug — the notice being wrong. Show all of them, up to four, to both applicant and officer | Landed with the governance package |
 | 2 | Who owns the adverse-action notice, and does it get all four reasons or the truncated one? | **Not this platform, and it should not become this platform.** Letters are produced in the origination back office: someone exports the decision, a print-and-mail vendor sends it, and the 30-day clock lives on a spreadsheet. It gets whatever the export carries. **"The fix that matters is making the export carry all four, this cycle."** A real notice channel is out of scope — card it, and name it in the monitoring spec as a gap so nobody assumes delivery can be proven | Card G1. **The export half is not verified** — no export endpoint, report or file writer exists under `services/`, and what the back office exports *from* is still an open question |
 | 3 | Does Meridian hold applicant race, ethnicity, sex or marital status anywhere, and is any product dwelling-secured? | **Yes to both** — a small home-equity line, for which that data is collected under Reg B and lives in the origination system. **Not to be ingested into this platform.** So monitoring covers both cases: direct measurement for the dwelling-secured book joined in the reporting environment, proxy for everything else with the method named and its error characteristics stated | Replaced our written default of "no such data, all unsecured", which was wrong on both halves |
-| 4 | If a licensed vendor model is replacing the deterministic scorecard, its name and version is worth recording | Record it in the model card in those words: a deterministic stand-in, six inputs, none a prohibited basis, **and the test that demonstrates it, cited** | `docs/model-card-decisioning-scorecard.md` |
+| 4 | If a licensed vendor model is replacing the deterministic scorecard, its name and version is worth recording | Record it in the model card in those words: a deterministic stand-in, six inputs, none a prohibited basis, **and the test that demonstrates it, cited** | `docs/reports/model-card-decisioning-scorecard.md` |
 | 5 | Self-decision authz gap: no check compares caller identity to applicant on the decisioning route. Fix this cycle or card it? | **Do it this cycle, exactly as scoped** — block the decision route when caller and applicant are the same account, leave every other officer action alone. **Log the blocked attempts** (a requirement the ask did not offer) | ADR 0017 and the self-decision authz work |
 
 **Standing constraint from this exchange:** the governance package and the queued balance-correctness
@@ -65,7 +65,7 @@ than absorbed.
 ## Exchange 3 — settlement reconciliation
 
 **Asked:** 2026-08-12. **Answered:** 2026-08-14, in writing. **Respondent:** VP Lending Ops,
-Meridian. **Source reference:** `docs/client-asks-2026-08-12-observability.md` at commit
+Meridian. **Source reference:** `docs/client-asks/2026-08-12-observability.md` at commit
 `126120c` on `docs/client-asks` (pushed — reachable after `git fetch origin`).
 Feeds `docs/specs/observability-week7.md` (D2, D3, D4), `adr/0015-settlement-reconciliation-as-a-control.md`, `docs/runbooks/operations.md`.
 

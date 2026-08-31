@@ -33,14 +33,14 @@ Two facts that survive it and are recorded nowhere else in this repository.
   stranded. Third instance of this shape: #57, then #45/#46
   (`docs/handoffs/2026-08-21-freeze-scope-response.md`), then this one. Check the base of a
   stacked PR **before** the parent merges, not after.
-  `docs/rag-eval-run-pipeline.md` § "F. Build order" records the rescue but not the cause.
+  `docs/process/rag-eval-run-pipeline.md` § "F. Build order" records the rescue but not the cause.
 
 Everything else this file carried is now held where it belongs. The `us.` prefix being a
 cross-region inference profile rather than a region pin, and the `AWS_BEARER_TOKEN_BEDROCK`
-resolution needing no code change, are in `docs/rag-eval-run-pipeline.md` § 2 and
+resolution needing no code change, are in `docs/process/rag-eval-run-pipeline.md` § 2 and
 `docs/runbooks/rag-eval-graded-pass.md`. The polarity-inversion caveat on a shared prompt, the
 measured prohibited-axis cost, and the load-bearing `PROHIBITED_STATES` ordering are in
-`docs/rag-eval-run-pipeline.md` § 4. The D16 retention question — persisting Titan vectors
+`docs/process/rag-eval-run-pipeline.md` § 4. The D16 retention question — persisting Titan vectors
 needs an ADR 0007 rule 6 amendment and a PII re-review, because her authorization covers
 indexing and not retention — is in `docs/debt-log.md` under D16.
 
@@ -55,8 +55,8 @@ question, since remote-tracking refs go stale without a `git fetch --prune`.
 | For | Read |
 |---|---|
 | What the pass actually did | `docs/handoffs/2026-08-30-rag-eval-graded-pass-run-record.md` |
-| The client deliverable | `docs/rag-eval-graded-pass-report-2026-08-30.md` |
+| The client deliverable | `docs/reports/rag-eval-graded-pass-2026-08-30.md` |
 | Why the pass was sequenced as it was | `docs/handoffs/2026-08-29-rag-eval-graded-pass.md` |
-| Setup (§2), the pipeline (§3), the evaluator's scope (§4) | `docs/rag-eval-run-pipeline.md` |
+| Setup (§2), the pipeline (§3), the evaluator's scope (§4) | `docs/process/rag-eval-run-pipeline.md` |
 | The commands, and the failures seen on the day | `docs/runbooks/rag-eval-graded-pass.md` |
 | The client record and the S-1…S-10 / C-1…C-7 registers | `docs/handoffs/2026-08-27-rag-eval-support-test.md` |

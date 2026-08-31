@@ -153,7 +153,7 @@ starts.
 
 | # | Step | Files | Traces to |
 |---|------|-------|-----------|
-| 1 | Commit spec + this plan | `docs/specs/rag-week2.md`, `docs/STAGE1-PLAN-RAG-WEEK2.md` | Process 7 |
+| 1 | Commit spec + this plan | `docs/specs/rag-week2.md`, `docs/plans/stage1-rag-week2.md` | Process 7 |
 | 2 | ADR 0007 corpus hygiene | `adr/0007-rag-corpus-hygiene.md` | D3, Process 8 |
 | 3 | ADR 0008 retrievable decision records | `adr/0008-retrievable-decision-records.md` | D4, Process 8 |
 | 4 | Hygiene validator + unit tests | `rag_eval/hygiene.py`, `rag_eval/tests/test_hygiene.py` | D2.1–D2.3, D2.6 |

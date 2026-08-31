@@ -1,4 +1,4 @@
-"""The rag_eval import seam — card G2a (`docs/cards-week8-governance.md`).
+"""The rag_eval import seam — card G2a (`docs/cards/week8-governance.md`).
 
 `rag_eval/` is a repo-root package and origination is its only in-platform consumer. The
 service's build context was `./services/origination-service`, so `rag_eval/` sat OUTSIDE the

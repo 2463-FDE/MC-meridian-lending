@@ -3,7 +3,7 @@
 **Asked:** week-6 servicing questions to Lending Ops · **Answered:** 2026-08-12, in writing
 **Respondent:** Dana Whitfield, VP Lending Ops, with Sam (control owner) on retention
 **Consumes these answers:** `adr/0014-servicing-money-controls.md`,
-`docs/cards-week6-servicing.md`
+`docs/cards/week6-servicing.md`
 
 This file exists so the decisions in ADR 0014 can be checked against their source without the
 email thread. ADR 0014 cites these answers in ten places and previously described them only in
@@ -161,7 +161,7 @@ lost-update test, and this decision record. The dashboard is the original ask an
 client set that scope explicitly, and asked that the deferred pieces be **carded** so they are
 planned rather than dropped.
 
-**Feeds.** `docs/cards-week6-servicing.md` exists because of this answer. Cards C1 through C5
+**Feeds.** `docs/cards/week6-servicing.md` exists because of this answer. Cards C1 through C5
 are the five deferrals.
 
 ---

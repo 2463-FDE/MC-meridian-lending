@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (64a9552)` — 64a9552 2026-08-30 Merge pull request #133 from 2463-FDE/docs/plan-freeze-truth
+Base: `origin/main (9c9d9cd)` — 9c9d9cd 2026-08-30 Merge pull request #134 from 2463-FDE/chore/docs-tree
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #134 | `9c9d9cd` | 2026-08-30 | Merge pull request #134 from 2463-FDE/chore/docs-tree |
 | #133 | `64a9552` | 2026-08-30 | Merge pull request #133 from 2463-FDE/docs/plan-freeze-truth |
 | #132 | `9b49d53` | 2026-08-30 | Merge pull request #132 from 2463-FDE/docs/truth-pass-freeze |
 | #131 | `67427a5` | 2026-08-30 | Merge pull request #131 from 2463-FDE/docs/demo-preflight |

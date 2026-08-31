@@ -695,7 +695,7 @@ jobs:
   agentic-loop-gate:
     # The officer assistant's tool-calling loop (search_policy retrieval, decision-record
     # lookup, native tool_use via create_agent) is the whole agentic surface named in the
-    # week10 freeze (docs/plan-freeze-agentic-week10.md). It ran only in the `backend`
+    # week10 freeze (docs/plans/freeze-agentic-week10.md). It ran only in the `backend`
     # matrix job, which is continue-on-error + `python -m pytest -q || true`, so a regression
     # in any interlock below ships on a green build -- the same failure mode tila-vectors-gate
     # and reconciliation-gate exist to close for their own surfaces. This job MUST block --
@@ -1030,7 +1030,7 @@ jobs:
           # AWS_BEARER_TOKEN_BEDROCK; rag_eval never reads them as a literal. IAM
           # secret-access keys (40-char base64) are too generic to match without
           # false positives — the control is: creds live in ~/.aws or the shell
-          # env, never a tracked file (see docs/PHASE1-BEDROCK-PGVECTOR.md).
+          # env, never a tracked file (see docs/plans/phase1-bedrock-pgvector.md).
           if git grep -nIE 'cb_live_|proc_live_|EXAMPLE-LEAKED-KEY|meridian_dev_pw_2024|(AKIA|ASIA)[0-9A-Z]{16}|ABSKQmVkcm9ja|bedrock-api-key-' \
               -- ':!docs/security-remediation-2026-07.md' \
                  ':!.github/workflows/ci.yml' \

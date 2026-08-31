@@ -32,25 +32,121 @@ set -u
 SELF="scripts/check_retired_doc_paths.sh"
 SELF_TEST="scripts/test_check_retired_doc_paths.sh"
 
-# REGEX|||what to write instead. Extended regex (git grep -E).
+# Extended regex throughout (git grep -E). Q matches either quote style: this
+# repo's Python uses both, so a family covered for one is covered for half the
+# tree.
+Q="[\"']"
+
+# ONE table of moves: RETIRED PATH ||| WHERE IT LIVES NOW. Both scan shapes are
+# derived from it below rather than hand-listed, because hand-listing left a
+# real hole: the first pass wrote a joined-segment regex for the runbook, spec
+# and scoping families and the second pass wrote none, so every dated and serial
+# family was graded for prose only.
 #
-# Every retired family needs TWO shapes. The slash form is what prose writes
-# (docs/spec-payments-week5.md). The joined-segment form is what code writes
-# (base / "docs" / "spec-payments-week5.md"), and it contains no slash at all, so
-# it matches none of the slash regexes. The joined form is the shape that broke a
-# blocking gate during the move, and nothing about it is specific to runbook.md:
-# a spec, a named runbook and a scoping doc can each be written that way. Both
-# quote styles are matched because this repo's Python uses both.
-RETIRED=(
-  'docs/spec-\*\.md|||docs/specs/*.md'
+# The slash form is what prose writes (docs/spec-payments-week5.md). The joined
+# form is what code writes (base / "docs" / "spec-payments-week5.md"), contains
+# no slash at all, and is the shape that broke a blocking gate during the move.
+#
+# Deriving the joined form has one trap. Where a move DROPPED a prefix
+# (docs/cards-week8-governance.md -> docs/cards/week8-governance.md) the old
+# basename belongs to the dead path alone, so a bare quoted basename is safe.
+# Where a move only changed the FOLDER (docs/review-roundtrip-playbook.md ->
+# docs/process/review-roundtrip-playbook.md) the basename is unchanged, and a
+# bare quoted basename would also match the CORRECT new path written as joined
+# segments -- so the retired parent segment is bound into the regex instead.
+#
+# Listed as EXACT filenames rather than one wildcard per family, deliberately.
+# Several branches that have not merged cite client-asks and plan documents
+# which have never existed in THIS tree (docs/plan-weeks7-10.md, seven dated
+# asks that live only on the client-asks branches). A family wildcard would
+# fail the build on those already-dangling references, which this gate has no
+# business grading -- it bans paths it KNOWS moved, not paths that look like
+# they might have. Exact names also let the advice name the real destination
+# instead of a template.
+MOVED=(
+  # -> docs/runbooks/
+  'docs/runbook.md|||docs/runbooks/operations.md'
+  # -> docs/client-asks/
+  'docs/client-answers-week6-servicing.md|||docs/client-asks/week6-servicing-answers.md'
+  'docs/client-asks-2026-08-10-payments.md|||docs/client-asks/2026-08-10-payments.md'
+  'docs/client-asks-2026-08-12-governance.md|||docs/client-asks/2026-08-12-governance.md'
+  'docs/client-asks-2026-08-12-observability.md|||docs/client-asks/2026-08-12-observability.md'
+  'docs/client-asks-2026-08-20-double-charge-interim.md|||docs/client-asks/2026-08-20-double-charge-interim.md'
+  'docs/client-asks-2026-08-21-final.md|||docs/client-asks/2026-08-21-final.md'
+  'docs/client-asks-2026-08-25-policy-corpus.md|||docs/client-asks/2026-08-25-policy-corpus.md'
+  'docs/client-asks-2026-08-26-gate0-data-path.md|||docs/client-asks/2026-08-26-gate0-data-path.md'
+  'docs/client-asks-2026-08-30-graded-pass-results.md|||docs/client-asks/2026-08-30-graded-pass-results.md'
+  'docs/client-asks-2026-08-30-log-aggregation.md|||docs/client-asks/2026-08-30-log-aggregation.md'
+  'docs/client-asks-week6-servicing.md|||docs/client-asks/week6-servicing.md'
+  # -> docs/cards/
+  'docs/cards-week6-servicing.md|||docs/cards/week6-servicing.md'
+  'docs/cards-week7-reconciliation.md|||docs/cards/week7-reconciliation.md'
+  'docs/cards-week8-governance.md|||docs/cards/week8-governance.md'
+  # -> docs/regulator-watch/
+  'docs/regulator-watch-2026-08-07.md|||docs/regulator-watch/2026-08-07.md'
+  'docs/regulator-watch-2026-08-14.md|||docs/regulator-watch/2026-08-14.md'
+  # -> docs/plans/
+  'docs/PHASE1-BEDROCK-PGVECTOR.md|||docs/plans/phase1-bedrock-pgvector.md'
+  'docs/STAGE1-PLAN-AI-ASSISTANT.md|||docs/plans/stage1-ai-assistant.md'
+  'docs/STAGE1-PLAN-RAG-WEEK2.md|||docs/plans/stage1-rag-week2.md'
+  'docs/freeze-demo-script-week10.md|||docs/plans/freeze-demo-script-week10.md'
+  'docs/plan-freeze-agentic-week10.md|||docs/plans/freeze-agentic-week10.md'
+  'docs/plan-loan-summary.md|||docs/plans/loan-summary.md'
+  # -> docs/reports/
+  'docs/STAGE2-VERIFICATION.md|||docs/reports/stage2-verification.md'
+  'docs/llm-client-code-review.md|||docs/reports/llm-client-code-review.md'
+  'docs/model-card-decisioning-scorecard.md|||docs/reports/model-card-decisioning-scorecard.md'
+  'docs/rag-eval-graded-pass-report-2026-08-30.md|||docs/reports/rag-eval-graded-pass-2026-08-30.md'
+  'docs/servicing-money-comprehension-week6.md|||docs/reports/servicing-money-comprehension-week6.md'
+  # -> docs/process/
+  'docs/rag-eval-run-pipeline.md|||docs/process/rag-eval-run-pipeline.md'
+  'docs/review-roundtrip-playbook.md|||docs/process/review-roundtrip-playbook.md'
+)
+
+# Escape the one regex metacharacter these literal paths contain.
+esc() { printf '%s' "${1//./\\.}"; }
+
+RETIRED=()
+for move in "${MOVED[@]}"; do
+  old=${move%%|||*}
+  new=${move#*|||}
+  old_base=${old##*/}; new_base=${new##*/}
+  old_parent=${old%/*}; old_parent=${old_parent##*/}
+  new_parent=${new%/*}; new_parent=${new_parent##*/}
+
+  RETIRED+=("$(esc "$old")|||$new")
+
+  if [ "$old_base" = "$new_base" ]; then
+    joined="${Q}$(esc "$old_parent")${Q}[^A-Za-z0-9_]+${Q}$(esc "$old_base")${Q}"
+  else
+    joined="${Q}$(esc "$old_base")${Q}"
+  fi
+  RETIRED+=("$joined|||\"$new_parent\" / \"$new_base\" — a path built by joining quoted segments")
+done
+
+# Open-ended families: a whole prefix retired, so the members cannot be
+# tabulated as exact moves. Both shapes are written out here.
+RETIRED+=(
   'docs/spec-[A-Za-z0-9._-]+\.md|||docs/specs/<name>.md (the spec- prefix is dropped; the folder carries it)'
-  'docs/runbook\.md|||docs/runbooks/operations.md'
   'docs/runbook-[A-Za-z0-9._-]+\.md|||docs/runbooks/<name>.md (the runbook- prefix is dropped)'
   'docs/scoping-[A-Za-z0-9._-]+\.md|||docs/scoping/<name>.md (the scoping- prefix is dropped)'
-  "[\"']runbook\.md[\"']|||\"runbooks\" / \"operations.md\" — a path built by joining quoted segments"
-  "[\"']spec-[A-Za-z0-9._-]+\.md[\"']|||\"specs\" / \"<name>.md\" — the spec- prefix is dropped, and this is a path built by joining quoted segments"
-  "[\"']runbook-[A-Za-z0-9._-]+\.md[\"']|||\"runbooks\" / \"<name>.md\" — the runbook- prefix is dropped, and this is a path built by joining quoted segments"
-  "[\"']scoping-[A-Za-z0-9._-]+\.md[\"']|||\"scoping\" / \"<name>.md\" — the scoping- prefix is dropped, and this is a path built by joining quoted segments"
+  "${Q}spec-[A-Za-z0-9._-]+\\.md${Q}|||\"specs\" / \"<name>.md\" — the spec- prefix is dropped, and this is a path built by joining quoted segments"
+  "${Q}runbook-[A-Za-z0-9._-]+\\.md${Q}|||\"runbooks\" / \"<name>.md\" — the runbook- prefix is dropped, and this is a path built by joining quoted segments"
+  "${Q}scoping-[A-Za-z0-9._-]+\\.md${Q}|||\"scoping\" / \"<name>.md\" — the scoping- prefix is dropped, and this is a path built by joining quoted segments"
+
+  # Glob forms. These docs are recurring procedures: one tells its next
+  # maintainer to find the newest entry with `ls docs/regulator-watch-*.md`,
+  # which after the move matches nothing and, if followed, recreates the flat
+  # layout the tree no longer uses. A literal asterisk cannot collide with the
+  # live folder form (docs/regulator-watch/*.md), so a glob is safe to state as
+  # a family even where an exact-name wildcard is not.
+  'docs/spec-\*|||docs/specs/*'
+  'docs/runbook-\*|||docs/runbooks/*'
+  'docs/scoping-\*|||docs/scoping/*'
+  'docs/client-asks-\*|||docs/client-asks/*'
+  'docs/cards-\*|||docs/cards/*'
+  'docs/regulator-watch-\*|||docs/regulator-watch/*'
+  'docs/plan-\*|||docs/plans/*'
 )
 
 # The input is captured and its status checked BEFORE anything reports a verdict:

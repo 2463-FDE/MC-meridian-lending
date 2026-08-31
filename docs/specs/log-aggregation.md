@@ -398,7 +398,7 @@ that diverge, the map catches a copy that is deleted.
 
 ## Client Questions
 
-Raised in `docs/client-asks-2026-08-30-log-aggregation.md`. **None blocks D1–D5** — those five
+Raised in `docs/client-asks/2026-08-30-log-aggregation.md`. **None blocks D1–D5** — those five
 are implementable today and each changes a constant at most. **Q2 and Q3 together decide whether
 D6 is a week of work or an afternoon**, so they are asked before D6 starts rather than during it.
 

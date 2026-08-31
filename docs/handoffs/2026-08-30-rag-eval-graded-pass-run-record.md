@@ -12,7 +12,7 @@
 This is the raw capture of the pass, written so a client report can be produced
 later without re-deriving anything. It is not itself the report. Companion files:
 `docs/handoffs/2026-08-29-rag-eval-graded-pass.md` (the sequencing and the why),
-`docs/rag-eval-run-pipeline.md` (the pipeline), ``docs/runbooks/rag-eval-graded-pass.md`` (the how).
+`docs/process/rag-eval-run-pipeline.md` (the pipeline), ``docs/runbooks/rag-eval-graded-pass.md`` (the how).
 
 The pass ran once. ADR 0022 S-7 allows one bounded pass, and every case is now
 spent — nothing below can be re-measured.
@@ -51,7 +51,7 @@ Credential in `AWS_BEARER_TOKEN_BEDROCK`, env var only, never a file.
 otherwise). Both manifests passed, so the summaries audit was exercised.
 
 Console log: `graded-pass-20260830-111157.log`.
-Report copied out of the packet before cleanup: `docs/rag-eval-graded-pass-report-2026-08-30.md`.
+Report copied out of the packet before cleanup: `docs/reports/rag-eval-graded-pass-2026-08-30.md`.
 
 ## 3. Inputs
 
@@ -252,7 +252,7 @@ on 2026-08-30, rather than the assertion restated:
 
 ## 11. Still open
 
-- **The client report** — written, as `docs/rag-eval-graded-pass-report-2026-08-30.md`,
+- **The client report** — written, as `docs/reports/rag-eval-graded-pass-2026-08-30.md`,
   and it ships alongside this record. It carries retrieval plus the three per-topic rates
   never pooled, S-6 stated as conclusion-axis-only, the calling region disclosed, the
   `human_review` bucket enumerated with §7's explanation, and the negative-control gap and
@@ -266,7 +266,7 @@ on 2026-08-30, rather than the assertion restated:
 
 | file | what |
 |---|---|
-| `docs/rag-eval-graded-pass-report-2026-08-30.md` | the run's own report, copied out before cleanup |
+| `docs/reports/rag-eval-graded-pass-2026-08-30.md` | the run's own report, copied out before cleanup |
 | `graded-pass-20260830-111157.log` | console summary of the pass |
 | `rehearsal-report-2026-08-29.md` (held outside this repository) | fake-judge rehearsal, NOT a deliverable |
 | `smoke_bedrock_judge.py` | Phase B contract test, raw-payload assertions |

@@ -195,4 +195,4 @@ non-idempotent tool-calling (where the key would gate replay). We retry only 429
 
 Per the assignment, the turn-in is three artifacts: **(1)** the client (the seven
 modules above), **(2)** a code review of that client against the review checklist
-(`docs/llm-client-code-review.md`), and **(3)** a prompt library (`app/prompts/`).
+(`docs/reports/llm-client-code-review.md`), and **(3)** a prompt library (`app/prompts/`).

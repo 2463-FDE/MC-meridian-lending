@@ -6,7 +6,7 @@ by Lending Ops on 2026-08-13 — that answer is the compliance position of recor
 the assumption this spec was going to be written on.
 **Companion docs:** the week-8 governance asks and their verbatim answers, on the
 `docs/client-asks` and `docs/client-asks-originals` branches (not on this branch);
-`docs/cards-week8-governance.md` (the deferrals); the model card (companion deliverable).
+`docs/cards/week8-governance.md` (the deferrals); the model card (companion deliverable).
 
 ---
 
@@ -173,7 +173,7 @@ This platform holds no notice record, no send, no delivery status, and nothing t
 the origination back office from an export, sent by a print-and-mail vendor, with the clock kept
 on a spreadsheet. Monitoring can show what was decided and which reasons were recorded. **It
 cannot show that a notice reached an applicant, or that it reached them within 30 days.** Carded
-as **G1** in `docs/cards-week8-governance.md`, at Lending Ops' instruction, so this spec is not
+as **G1** in `docs/cards/week8-governance.md`, at Lending Ops' instruction, so this spec is not
 read as covering it.
 
 **Gap 2 — Pricing disparity is not measurable, because there is no pricing variation.**

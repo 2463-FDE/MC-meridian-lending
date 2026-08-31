@@ -37,7 +37,7 @@ update, rather than failing on some unrelated figure.
 The client brief's own example — a payment concurrent with a fee waiver — does NOT
 reproduce this: apply_payment writes `balance` and waive_fee writes `past_due`,
 different columns. The collision is same-column, which is what this test drives. See
-`docs/servicing-money-comprehension-week6.md` Q2.
+`docs/reports/servicing-money-comprehension-week6.md` Q2.
 """
 
 import threading

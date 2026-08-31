@@ -9,7 +9,7 @@ Two pieces of work deliberately out of this cycle. G1 the client deferred by nam
 carded. G2 nobody asked for — it comes from our own plan, and this card is the record of choosing
 not to build it now.
 
-Card ids are prefixed `G` so they do not collide with `docs/cards-week6-servicing.md`'s C1–C5 when
+Card ids are prefixed `G` so they do not collide with `docs/cards/week6-servicing.md`'s C1–C5 when
 a spec cites both.
 
 Estimates are engineering days for one person. They are planning figures, not commitments.

@@ -11,7 +11,7 @@ is its resume pointer. Both predate PR #64 and state that policy retrieval is ab
 **Status since this plan was written (added 2026-08-30).** This is a plan, dated and based at
 `06c27a3`; its tables record what was true then and are deliberately not rewritten. Several of its
 present-tense claims have since been overtaken, and a reader arriving from
-`docs/freeze-demo-script-week10.md` §8 — which sends a receiving team here second — would
+`docs/plans/freeze-demo-script-week10.md` §8 — which sends a receiving team here second — would
 otherwise read them as current. Each affected §2 week row carries a short inline
 **superseded** marker; the three that most mislead a receiving team are set out in full here:
 
@@ -183,7 +183,7 @@ Each slice is one pull request, at or under 800 changed lines, with at most two 
 
 | # | Slice | Day | Content |
 |---|---|---|---|
-| 1 | Demo runtime and document truth | 1 | `LLM_ENABLED`, `POLICY_RETRIEVAL_MIN_SCORE` and `LANGSMITH_TRACING` into the demo override, credentials host-shell-only; the missing `LLM_ENABLED` block in `.env.example`; the stale `search_policy` "not built" claims corrected in `scripts/check_rag_eval_import.sh`, `.github/workflows/ci.yml` and `docs/cards-week8-governance.md` (which also still credited an unmerged branch). The threshold in `.env.example` was checked against a fresh `python3 -m rag_eval.run` and is correct at 0.1609 — the disagreeing 0.1806 was a stale generated report, not a repository inconsistency |
+| 1 | Demo runtime and document truth | 1 | `LLM_ENABLED`, `POLICY_RETRIEVAL_MIN_SCORE` and `LANGSMITH_TRACING` into the demo override, credentials host-shell-only; the missing `LLM_ENABLED` block in `.env.example`; the stale `search_policy` "not built" claims corrected in `scripts/check_rag_eval_import.sh`, `.github/workflows/ci.yml` and `docs/cards/week8-governance.md` (which also still credited an unmerged branch). The threshold in `.env.example` was checked against a fresh `python3 -m rag_eval.run` and is correct at 0.1609 — the disagreeing 0.1806 was a stale generated report, not a repository inconsistency |
 | 2 | `MeridianChatModel` | 1–2 | A `BaseChatModel` over `ClaudeClient`, plus the three strict tool schemas, and no loop change. This slice exists to prove the redaction boundary survives the framework calling into it |
 | 3 | The root trace | 2–4 | Entry, per-step, per-tool, retrieval, validation and outcome spans on the existing loop. Reuses the `@traceable` mechanism at `app/llm/client.py:114`. **Merged as #68 WITHOUT the `request_id` this row originally promised** — its review round stripped both identifiers from the span (`0cc9575`, `d049f51`), which is decision 9 above; the run-to-record join moves to slice 6's trace run id |
 | 4 | The loop swap | 5–6 | `run()` becomes a framework agent, preserving the four interlocks and the request-scoped record fetch. Re-anchors the per-step and per-tool spans |

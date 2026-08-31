@@ -19,7 +19,7 @@ worktrees until they were recovered on 08-21. Dana replied on 08-17 and **deferr
 five were unasked, and the other three were asked and deferred. Acting on it would have re-asked
 her deferrals.
 
-**Where asks 14 and 15 now sit.** Both are carried in `docs/client-asks-2026-08-21-final.md`, and
+**Where asks 14 and 15 now sit.** Both are carried in `docs/client-asks/2026-08-21-final.md`, and
 both are **deliberately excluded from the send going out before freeze**. That send is three items,
 all of which change what gets built this week: two questions the 08-17 reply itself raised, plus a
 one-line confirmation. Neither 14 nor 15 blocks the freeze scope, and putting five items in front of

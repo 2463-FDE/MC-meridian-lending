@@ -312,7 +312,7 @@ services/servicing-service/app/payments.py => docs/specs/log-aggregation.md
 # there is none to name, so mapping it would fail this gate as a stale entry.
 #
 # Owner: maha-c, the sole owner of every surface in this repo
-# (docs/freeze-demo-script-week10.md section 8).
+# (docs/plans/freeze-demo-script-week10.md section 8).
 # Why an exception is tolerable for now: the BEHAVIOUR is held by the blocking
 # assistant-telemetry-gate -- the write path at the entry span, init-DDL vs
 # migration parity, the readiness rung, and migration 0021 against a real

@@ -74,6 +74,149 @@ echo "RUNBOOK = base / 'docs' / 'runbook.md'" > "$r/services/x/tests/test_x.py"
 git -C "$r" add -A >/dev/null 2>&1
 check "single-quoted joined segment is caught" 1 "$r" "test_x.py"
 
+# --- 2c. one probe per folder added in the second pass -----------------------
+# MOVED holds exact filenames, so a family is only covered by the rows actually
+# listed. One representative per destination folder catches a whole group going
+# missing.
+j=0
+for probe in \
+  'answered in docs/client-asks-2026-08-21-final.md' \
+  'see docs/cards-week8-governance.md' \
+  'the sweep in docs/regulator-watch-2026-08-14.md' \
+  'specified in docs/plan-freeze-agentic-week10.md' \
+  'measured in docs/servicing-money-comprehension-week6.md' \
+  'the loop in docs/review-roundtrip-playbook.md' \
+; do
+  j=$((j + 1))
+  r=$(new_repo)
+  printf '%s\n' "$probe" > "$r/docs/probe.md"
+  git -C "$r" add -A >/dev/null 2>&1
+  check "second-pass folder $j caught" 1 "$r" "RETIRED DOC PATH"
+done
+
+# --- 2c2. the joined-segment form is derived for EVERY moved family ----------
+# Hand-listing produced exactly this hole: the first pass wrote joined-form
+# regexes for runbook/spec/scoping and the second pass wrote none, so every
+# dated and serial family was graded for prose only. Both quote styles, in code.
+k=0
+for probe in \
+  'ASK = base / "docs" / "client-asks-2026-08-21-final.md"' \
+  "CARD = base / 'docs' / 'cards-week8-governance.md'" \
+  'WATCH = base / "docs" / "regulator-watch-2026-08-14.md"' \
+  "PLAN = base / 'docs' / 'plan-freeze-agentic-week10.md'" \
+  'RPT = base / "docs" / "servicing-money-comprehension-week6.md"' \
+  "PLAY = base / 'docs' / 'review-roundtrip-playbook.md'" \
+; do
+  k=$((k + 1))
+  r=$(new_repo)
+  mkdir -p "$r/services/x/tests"
+  printf '%s\n' "$probe" > "$r/services/x/tests/test_x.py"
+  git -C "$r" add -A >/dev/null 2>&1
+  check "joined form, folder $k caught" 1 "$r" "test_x.py"
+done
+
+# --- 2c3. the LIVE joined form is NOT flagged --------------------------------
+# Five moves changed only the folder, so the basename is shared with the correct
+# new path and a bare quoted basename would fail the build on code that is
+# already right. Those rows bind the retired parent segment instead; this is the
+# case that proves it.
+r=$(new_repo)
+mkdir -p "$r/services/x/tests"
+{
+  echo 'PLAY = base / "process" / "review-roundtrip-playbook.md"'
+  echo 'RPT = base / "reports" / "servicing-money-comprehension-week6.md"'
+  echo "WATCH = base / 'regulator-watch' / '2026-08-07.md'"
+  echo 'ASK = base / "client-asks" / "2026-08-21-final.md"'
+  echo 'DEMO = base / "plans" / "freeze-demo-script-week10.md"'
+} > "$r/services/x/tests/test_x.py"
+git -C "$r" add -A >/dev/null 2>&1
+check "live joined form is not flagged" 0 "$r"
+
+# --- 2c4. every moved family is caught in BOTH shapes ------------------------
+# A representative per folder cannot show that the derivation covers the whole
+# table, so both shapes are asserted against every row of MOVED.
+moved_old=$(awk '/^MOVED=\(/{f=1;next} f&&/^\)/{f=0} f' "$SCRIPT" \
+            | sed -n "s/^  '\([^|]*\)|||.*'\$/\1/p")
+n_moved=$(printf '%s\n' "$moved_old" | grep -c .)
+r=$(new_repo)
+mkdir -p "$r/services/x/tests"
+: > "$r/docs/probe.md"
+: > "$r/services/x/tests/test_x.py"
+while IFS= read -r old; do
+  [ -z "$old" ] && continue
+  printf 'see %s\n' "$old" >> "$r/docs/probe.md"
+  ob=${old##*/}; op=${old%/*}; op=${op##*/}
+  printf 'P = root / "%s" / "%s"\n' "$op" "$ob" >> "$r/services/x/tests/test_x.py"
+done <<MOVEDOLD
+$moved_old
+MOVEDOLD
+git -C "$r" add -A >/dev/null 2>&1
+out=$(cd "$r" && "$SCRIPT" 2>&1)
+want=$((n_moved * 2))
+if [ "$n_moved" -ge 30 ] && printf '%s' "$out" | grep -qE "FAIL: $want reference"; then
+  echo "ok    all $n_moved moved families caught in both shapes ($want hits)"
+  pass=$((pass + 1))
+else
+  echo "FAIL  wanted $want hits from $n_moved moved families (n_moved must be >= 30)"
+  printf '%s\n' "$out" | tail -3 | sed 's/^/        /'
+  fail=$((fail + 1))
+fi
+
+# --- 2c5. the retired GLOB form is caught ------------------------------------
+# The regulator-watch docs are a recurring procedure telling their next
+# maintainer to find the newest entry with `ls docs/regulator-watch-*.md`. After
+# the move that command matches nothing, and following it recreates the flat
+# layout -- yet no exact-filename regex sees it, because it names no file.
+m=0
+for probe in \
+  'the newest `ls docs/regulator-watch-*.md | tail -1` must be <= 7 days old' \
+  'kept out of the `docs/client-asks-*` set on purpose' \
+  'copied from docs/cards-*.md each week' \
+  'the plans live in docs/plan-*.md' \
+  'runbooks are docs/runbook-*.md' \
+  'scoping notes are docs/scoping-*.md' \
+; do
+  m=$((m + 1))
+  r=$(new_repo)
+  printf '%s\n' "$probe" > "$r/docs/probe.md"
+  git -C "$r" add -A >/dev/null 2>&1
+  check "retired glob form $m caught" 1 "$r" "RETIRED DOC PATH"
+done
+
+# --- 2c6. the LIVE glob form is NOT flagged ----------------------------------
+r=$(new_repo)
+{
+  echo 'the newest `ls docs/regulator-watch/*.md | tail -1` must be <= 7 days old'
+  echo 'every tracked docs/specs/*.md must be mapped'
+  echo 'asks live in docs/client-asks/*.md'
+} > "$r/docs/probe.md"
+git -C "$r" add -A >/dev/null 2>&1
+check "live glob form is not flagged" 0 "$r"
+
+# --- 2d. every replacement the gate advises actually resolves ----------------
+# The advice is a literal destination for every row of MOVED, so a typo
+# in one would send a reader to a path that does not exist -- and nothing else
+# would notice, because the gate only fails on the OLD spelling. Prose advice
+# (the first-pass entries, which explain a rule) is skipped by the space/<> test.
+bad_advice=""
+n_advice=0
+while IFS= read -r advice; do
+  # skip prose advice and the glob-form entry: neither is a literal path.
+  case "$advice" in *" "*|*"<"*|*"*"*) continue ;; esac
+  case "$advice" in docs/*) ;; *) continue ;; esac
+  n_advice=$((n_advice + 1))
+  [ -f "$REPO_ROOT/$advice" ] || bad_advice="$bad_advice $advice"
+done <<ADVICE
+$(sed -n "s/^  '[^|]*|||\(.*\)'$/\1/p" "$SCRIPT")
+ADVICE
+if [ -z "$bad_advice" ] && [ "$n_advice" -ge 30 ]; then
+  echo "ok    every advised replacement resolves ($n_advice checked)"
+  pass=$((pass + 1))
+else
+  echo "FAIL  advised replacement does not resolve:$bad_advice (checked $n_advice, wanted >=30)"
+  fail=$((fail + 1))
+fi
+
 # --- 3. the advice names the replacement -------------------------------------
 r=$(new_repo)
 echo 'see docs/runbook.md' > "$r/docs/probe.md"
