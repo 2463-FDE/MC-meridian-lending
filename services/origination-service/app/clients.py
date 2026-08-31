@@ -46,11 +46,18 @@ def _breaker_for(base_url: str) -> dict:
 
 def _breaker_before_call(base_url: str) -> None:
     """Fail fast (no network call) while a breaker is open and its cooldown hasn't
-    elapsed; otherwise let one call through to test recovery (half-open)."""
+    elapsed. Once cooldown elapses, admit exactly one caller through to test recovery
+    (half-open); every other caller fails fast until that probe closes or reopens the
+    circuit — otherwise a recovering (or still-dead) downstream takes a concurrent
+    burst instead of a single probe."""
     with _breaker_lock:
         b = _breaker_for(base_url)
-        if b["state"] != "open":
+        if b["state"] == "closed":
             return
+        if b["state"] == "half_open":
+            raise CircuitOpenError(
+                f"circuit half-open probe in progress for {base_url}"
+            )
         if time.monotonic() - b["opened_at"] < _BREAKER_COOLDOWN_SECONDS:
             raise CircuitOpenError(f"circuit open for {base_url}")
         b["state"] = "half_open"
@@ -89,7 +96,12 @@ def _breaker_after_call(base_url: str, *, ok: bool) -> None:
 def _with_breaker(base_url: str, make_request):
     """Run `make_request()` behind the breaker for base_url. A downstream 4xx is a
     legitimate response (the service is up and answered) and does not count as a
-    breaker failure; a timeout/connection error or a 5xx does."""
+    breaker failure; a timeout/connection error or a 5xx does.
+
+    `post()` raises on non-2xx, so its failures surface as `httpx.HTTPStatusError`
+    below. `get()`/`post_raw()` return the raw response instead of raising, so a 5xx
+    from either must still be classified here — checking `resp.status_code` on the
+    no-exception path, not just `True`."""
     _breaker_before_call(base_url)
     try:
         resp = make_request()
@@ -99,7 +111,7 @@ def _with_breaker(base_url: str, make_request):
     except httpx.HTTPError:
         _breaker_after_call(base_url, ok=False)
         raise
-    _breaker_after_call(base_url, ok=True)
+    _breaker_after_call(base_url, ok=resp.status_code < 500)
     return resp
 
 

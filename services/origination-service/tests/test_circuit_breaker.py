@@ -7,6 +7,9 @@ via a half-open probe, and that a downstream 4xx (the service is up and answered
 counts as a breaker failure.
 """
 
+import threading
+import time
+
 import httpx
 import pytest
 
@@ -98,3 +101,87 @@ def test_downstream_4xx_does_not_trip_breaker(monkeypatch):
             clients.post(base, "/decisions", {})
 
     assert clients._breaker_state[base]["state"] == "closed"
+
+
+def test_get_5xx_trips_breaker_without_raising(monkeypatch):
+    """`get()` returns the raw response instead of raising on a 5xx, so `_with_breaker`
+    must classify it off `resp.status_code`, not off "no exception was raised"."""
+    base = "http://kyc-service:8003"
+
+    def unavailable_get(url, **kwargs):
+        return httpx.Response(
+            503, json={"detail": "unavailable"}, request=httpx.Request("GET", url)
+        )
+
+    monkeypatch.setattr(clients.httpx, "get", unavailable_get)
+
+    for _ in range(clients._BREAKER_FAILURE_THRESHOLD):
+        resp = clients.get(base, "/health")
+        assert resp.status_code == 503
+
+    assert clients._breaker_state[base]["state"] == "open"
+
+
+def test_post_raw_5xx_trips_breaker_without_raising(monkeypatch):
+    """Same defect as above, for `post_raw()` — used by the disclosure lifecycle proxy
+    and the disclosure-coordinator's internal POSTs, both of which classify the 4xx/5xx
+    split themselves after the breaker has already recorded the outcome."""
+    base = "http://disclosure-service:8005"
+
+    def unavailable_post(url, **kwargs):
+        return httpx.Response(
+            503, json={"detail": "unavailable"}, request=httpx.Request("POST", url)
+        )
+
+    monkeypatch.setattr(clients.httpx, "post", unavailable_post)
+
+    for _ in range(clients._BREAKER_FAILURE_THRESHOLD):
+        resp = clients.post_raw(base, "/offers", {})
+        assert resp.status_code == 503
+
+    assert clients._breaker_state[base]["state"] == "open"
+
+
+def test_half_open_admits_exactly_one_concurrent_probe(monkeypatch):
+    """Once cooldown elapses, concurrent callers must not all sail through as
+    half-open — only the first to acquire the breaker lock probes; every other
+    concurrent caller fails fast with CircuitOpenError."""
+    base = "http://kyc-service:8003"
+    calls = {"n": 0}
+    calls_lock = threading.Lock()
+
+    def slow_ok_get(*args, **kwargs):
+        with calls_lock:
+            calls["n"] += 1
+        time.sleep(0.05)
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(clients.httpx, "get", slow_ok_get)
+
+    clients._breaker_state[base] = {
+        "state": "open",
+        "failures": clients._BREAKER_FAILURE_THRESHOLD,
+        "opened_at": 0.0,
+    }
+
+    results = []
+    results_lock = threading.Lock()
+
+    def worker():
+        try:
+            clients.get(base, "/health")
+            outcome = "ok"
+        except clients.CircuitOpenError:
+            outcome = "blocked"
+        with results_lock:
+            results.append(outcome)
+
+    threads = [threading.Thread(target=worker) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert calls["n"] == 1
+    assert results.count("ok") == 1
+    assert results.count("blocked") == 19
