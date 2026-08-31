@@ -4,7 +4,7 @@
 Simulated business-client handoff presentation Friday 2026-09-04. Eight working days
 (Aug 24–28, Aug 31–Sep 2).
 
-**Not client correspondence.** This is program/internal and is kept out of the `docs/client-asks-*`
+**Not client correspondence.** This is program/internal and is kept out of the `docs/client-asks/`
 set on purpose — that set is the record of what Dana was asked and what she answered, and mixing an
 internal scope reply into it would corrupt an audit surface.
 

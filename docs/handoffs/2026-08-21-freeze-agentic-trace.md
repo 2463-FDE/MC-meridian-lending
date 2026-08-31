@@ -5,7 +5,7 @@
 **Blocked on one thing as of 2026-08-22: PR #57 did not reach `main`** — see "Drain state" below.
 
 **Scope of this handoff: the program code-freeze thread only.** The client-ask / Dana thread is
-separate and has its own docs, which stay local-only (`docs/client-asks-*` and its own handoff, on
+separate and has its own docs, which stay local-only (`docs/client-asks/` and its own handoff, on
 `docs/cycle-w9-finalise`).
 Do not mix them — that set is an audit surface for what the client was asked and answered.
 
