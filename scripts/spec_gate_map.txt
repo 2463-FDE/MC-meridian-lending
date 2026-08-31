@@ -299,3 +299,30 @@ services/payment-service/app/routers/payments.py => docs/specs/log-aggregation.m
 services/payment-service/app/payments.py => docs/specs/log-aggregation.md
 services/decision-service/app/decision.py => docs/specs/log-aggregation.md
 services/servicing-service/app/payments.py => docs/specs/log-aggregation.md
+
+
+# --- Assistant run telemetry: deliberate exception, no spec or ADR ----------
+# NOT MAPPED, and this is a recorded decision rather than an oversight:
+# services/origination-service/app/assistant_runs.py, the assistant_runs block
+# in db/init/001_schema.sql, and db/migrations/0021_assistant_runs.sql.
+#
+# The surface shipped with no spec and no ADR behind it -- the module docstring
+# and the migration header are the whole design record. It cannot be mapped as
+# it stands: a line here requires a right-hand spec/ADR path that exists, and
+# there is none to name, so mapping it would fail this gate as a stale entry.
+#
+# Owner: maha-c, the sole owner of every surface in this repo
+# (docs/freeze-demo-script-week10.md section 8).
+# Why an exception is tolerable for now: the BEHAVIOUR is held by the blocking
+# assistant-telemetry-gate -- the write path at the entry span, init-DDL vs
+# migration parity, the readiness rung, and migration 0021 against a real
+# Postgres. A regression is caught. What is unwritten is the DECISION: the
+# privacy and export rules (application_id stored with no FK, aggregation as
+# the export boundary), the hand-applied-migration parity requirement, and
+# failure detection existing only on the readiness rung because the write is
+# swallowed by design.
+# OPEN, and owed to whoever inherits this: either those rules become an ADR
+# (taking the next free number at the time it is written) and this block turns
+# into a mapped line, or the exception is accepted explicitly by a second
+# reviewer. Decide before the surface changes -- an unwritten rule is not
+# inheritable.
