@@ -250,6 +250,24 @@ Full list: `docs/plans/freeze-agentic-week10.md` §6. Headline points for the ro
   `.env.local` for debugging and puts prompts/responses on spans, which the requirement
   forbids. `compose-hardening-gate` blocks a *committed* file from enabling it; nothing blocks
   a shell — check this by hand before presenting.
+- One durable row per assistant request is written to `assistant_runs`
+  (`services/origination-service/app/assistant_runs.py`, migration
+  `db/migrations/0021_assistant_runs.sql`), because `trace()` is a no-op unless
+  `LANGSMITH_TRACING` is set and no rate computed from LangSmith has a trustworthy
+  denominator. Two things to say if asked: the write is **logged and swallowed** on any
+  failure — a telemetry row must never 500 an officer's request — so a volume whose
+  migration 0021 was never applied records nothing and only the `/health` readiness rung
+  reports it; and `application_id` **is** recorded here with no foreign key, unlike on the
+  spans, because a table beside `applicants` in the same schema grants a reader no
+  capability they do not already have. Aggregation is the export boundary: anything
+  reporting over these rows emits no application id and no trace id.
+- **Open decision, owed before that surface changes:** `assistant_runs` is the one shipped
+  surface here with no spec and no ADR behind it — the rules in the point above are recorded
+  only in the module docstring and the migration header. It is now a named exception in
+  `scripts/spec_gate_map.txt` (owner `maha-c`, rationale, and what is unwritten) rather than
+  prose in this document. Either those rules become an ADR and the map gains a line, or a
+  second reviewer accepts the exception explicitly. The blocking `assistant-telemetry-gate`
+  holds the behaviour meanwhile; it does not hold the decision.
 - The trace root is `assistant.entry` (`services/origination-service/app/main.py`), which
   opens at the assistant route funnel — so a refusal raised before the loop starts
   (404/409/502/503) is now a trace with a root, an HTTP status and an enum refusal code.
@@ -259,13 +277,41 @@ Full list: `docs/plans/freeze-agentic-week10.md` §6. Headline points for the ro
 
 ## 7. Document truth pass
 
-Done in this same change: `docs/kb.md`'s "Last synced" line and merged-PR list were current
-through #68 (2026-08-23); this pass verified and cited #69–#80 (D19 status rescue, the
-loop swap, the blocking `agentic-loop-gate`, and the trace surface) with
-`git merge-base --is-ancestor` against `origin/main` before writing each SHA, per the
-debt-log status discipline (`CLAUDE.md` "Debt-log status vocabulary"). `docs/debt-log.md`'s
-D19 entry was checked against the same rule and is already correct (`Mitigated`, citing
-`payment-idempotency-gate`) — no change needed there.
+**The ritual changed — do not perform the old one.** This section used to describe checking
+`docs/kb.md`'s "Last synced" line and its merged-PR list. Neither exists any more: #91
+(`49390fe`) split the knowledge base by mutability, moving the base tip, the merged-PR
+ledger, the ADR list and the blocking-job list into generated `docs/state.md`, and
+`volatile-claim-lint` now **refuses** to let those facts be hand-written back into
+`docs/kb.md`. `grep "Last synced" docs/kb.md` returns nothing.
+
+What a truth pass is today:
+
+```bash
+make kb                          # regenerates docs/state.md, then re-runs volatile-claim-lint
+./scripts/check_doc_paths.sh     # every backticked repo-path resolves in this tree
+git status --short               # a dirty docs/state.md means it WAS behind — commit it
+```
+
+`make kb` must run **after** the merge commit, not before, or the regenerated page silently
+drops the PR's own job rows. `kb-freshness` grades `docs/state.md` against the branch's
+merge base and runs on `pull_request` only — on `main` the merge base is the tip, so the
+commit that lands a regenerated page would have to describe itself.
+
+What the generator cannot do, and still has to be done by hand: the durable prose in
+`docs/kb.md` — what shipped and why — and every status word in `docs/debt-log.md`. For those,
+the rule is unchanged: verify with `git merge-base --is-ancestor <branch> <base>` before
+writing any SHA or status, per `CLAUDE.md` "Debt-log status vocabulary". A branch existing
+locally proves nothing.
+
+Carried out in this pass: `docs/kb.md` covered the week-10 slice through #86 and now covers
+the merges after it, including `assistant_runs` — a shipped table, migration, module, six
+test files and a blocking CI job that appeared in **no** handover document. `CLAUDE.md`'s
+blocking-job list gained `assistant-telemetry-gate`, and its claim that `no-sad-gate` is the
+only job with a database behind it was corrected: 0021 is hand-applied too. The same false
+claim lived a second time in `.github/workflows/ci.yml`, in the `no-sad-gate` comment — the
+likelier place to land when debugging a gate — and was corrected there in the same pass.
+Correcting one copy of a claim and leaving the other is how a truth pass creates the thing it
+came to remove.
 
 ## 8. Handoff ownership
 
@@ -280,6 +326,7 @@ exists today.
 | Root trace and its content rule | `app/main.py` (`assistant.entry`, the route-funnel root), `app/assistant.py` CONTENT RULE and the `assistant.request` loop root, `app/llm/client.py`, `app/llm/transport.py` | Every new span key is a decision: enum codes, integers, booleans, retrieval scores and chunk ids only — never an identifier, never prose. And no caught exception may cross the entry span: each is translated to an enum refusal code inside it, because `trace()` would otherwise attach a provider message or an `app_id`-bearing URL to the span |
 | Policy retrieval and the corpus | `app/policy_retrieval.py`, `policies/` | The 8-code `policy_topic` vocabulary, the fail-closed score threshold, and the hygiene refusal on a bind-mounted corpus. Corpus CONTENT is Lending Ops' (`policies/fee_schedule.md` names them), the retrieval path is ours |
 | Provider selection and the proof | `app/llm/config.py`, `scripts/bedrock_proof.py` | The pinned region, the bedrock-runtime region allowlist, and re-running the proof receipt at whatever SHA is being cited |
+| Assistant run telemetry | `app/assistant_runs.py`, `db/migrations/0021_assistant_runs.sql`, the `assistant_runs` block in `db/init/001_schema.sql` | Keeping the two DDL copies byte-identical (the blocking `assistant-telemetry-gate` compares them), keeping `refusal_code`'s CHECK list in step with the codes the routes can actually produce, and holding the aggregation-is-the-export-boundary rule on anything that reports over these rows. **No spec or ADR sits behind this surface** — the module docstring and the migration header are the whole design record, recorded as a named exception with owner and rationale in `scripts/spec_gate_map.txt`, open until an ADR replaces it or a second reviewer accepts it |
 | Demo runtime | `docker-compose.demo.yml`, this document | Keeping the pinned provider/region and the export block in step with what the deck claims |
 
 **Status of the thing being handed over.** This is a synthetic training demonstration, not a

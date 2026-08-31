@@ -54,6 +54,9 @@ for probe in \
   'see docs/runbook-rag-eval-graded-pass.md' \
   'scoped in docs/scoping-payments-week5.md' \
   'RUNBOOK = base / "docs" / "runbook.md"' \
+  'SPEC = base / "docs" / "spec-payments-week5.md"' \
+  "RB = base / 'docs' / 'runbook-rag-eval-graded-pass.md'" \
+  'SCOPE = base / "docs" / "scoping-payments-week5.md"' \
 ; do
   i=$((i + 1))
   r=$(new_repo)
@@ -62,7 +65,16 @@ for probe in \
   check "retired pattern $i caught" 1 "$r" "RETIRED DOC PATH"
 done
 
-# --- 2b. one probe per folder added in the second pass -----------------------
+# --- 2b. the joined-segment form is caught in EITHER quote style --------------
+# Python in this repo is written with both, so a family covered only for double
+# quotes is covered for half the tree.
+r=$(new_repo)
+mkdir -p "$r/services/x/tests"
+echo "RUNBOOK = base / 'docs' / 'runbook.md'" > "$r/services/x/tests/test_x.py"
+git -C "$r" add -A >/dev/null 2>&1
+check "single-quoted joined segment is caught" 1 "$r" "test_x.py"
+
+# --- 2c. one probe per folder added in the second pass -----------------------
 # The 29 second-pass entries are exact filenames, so a family is only covered by
 # the entries actually listed. One representative per destination folder catches
 # a whole group going missing.
@@ -82,7 +94,7 @@ for probe in \
   check "second-pass folder $j caught" 1 "$r" "RETIRED DOC PATH"
 done
 
-# --- 2c. every replacement the gate advises actually resolves ----------------
+# --- 2d. every replacement the gate advises actually resolves ----------------
 # The advice is a literal destination for all 29 second-pass entries, so a typo
 # in one would send a reader to a path that does not exist -- and nothing else
 # would notice, because the gate only fails on the OLD spelling. Prose advice

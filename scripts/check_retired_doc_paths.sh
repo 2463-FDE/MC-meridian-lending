@@ -33,13 +33,24 @@ SELF="scripts/check_retired_doc_paths.sh"
 SELF_TEST="scripts/test_check_retired_doc_paths.sh"
 
 # REGEX|||what to write instead. Extended regex (git grep -E).
+#
+# Every retired family needs TWO shapes. The slash form is what prose writes
+# (docs/spec-payments-week5.md). The joined-segment form is what code writes
+# (base / "docs" / "spec-payments-week5.md"), and it contains no slash at all, so
+# it matches none of the slash regexes. The joined form is the shape that broke a
+# blocking gate during the move, and nothing about it is specific to runbook.md:
+# a spec, a named runbook and a scoping doc can each be written that way. Both
+# quote styles are matched because this repo's Python uses both.
 RETIRED=(
   'docs/spec-\*\.md|||docs/specs/*.md'
   'docs/spec-[A-Za-z0-9._-]+\.md|||docs/specs/<name>.md (the spec- prefix is dropped; the folder carries it)'
   'docs/runbook\.md|||docs/runbooks/operations.md'
   'docs/runbook-[A-Za-z0-9._-]+\.md|||docs/runbooks/<name>.md (the runbook- prefix is dropped)'
   'docs/scoping-[A-Za-z0-9._-]+\.md|||docs/scoping/<name>.md (the scoping- prefix is dropped)'
-  '"runbook\.md"|||"runbooks" / "operations.md" — a path built by joining quoted segments'
+  "[\"']runbook\.md[\"']|||\"runbooks\" / \"operations.md\" — a path built by joining quoted segments"
+  "[\"']spec-[A-Za-z0-9._-]+\.md[\"']|||\"specs\" / \"<name>.md\" — the spec- prefix is dropped, and this is a path built by joining quoted segments"
+  "[\"']runbook-[A-Za-z0-9._-]+\.md[\"']|||\"runbooks\" / \"<name>.md\" — the runbook- prefix is dropped, and this is a path built by joining quoted segments"
+  "[\"']scoping-[A-Za-z0-9._-]+\.md[\"']|||\"scoping\" / \"<name>.md\" — the scoping- prefix is dropped, and this is a path built by joining quoted segments"
 
   # Second pass: the dated and serial families, grouped into six folders.
   # Listed as EXACT filenames rather than one wildcard per family, deliberately.
