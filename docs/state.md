@@ -204,6 +204,8 @@ A job is BLOCKING unless its body carries `continue-on-error` or `|| true`.
 - **BLOCKING** — `secret-scan`
 - **BLOCKING** — `doc-path-lint-tests`
 - **BLOCKING** — `doc-path-lint`
+- **BLOCKING** — `retired-doc-path-tests`
+- **BLOCKING** — `retired-doc-path-lint`
 - **BLOCKING** — `spec-diff-gate-tests`
 - **BLOCKING** — `spec-diff-gate`
 - **BLOCKING** — `docs-drift-tests`
