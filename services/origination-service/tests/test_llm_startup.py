@@ -9,6 +9,7 @@ TestClient used as a context manager runs the app lifespan, so entering the
 context is what triggers — or fails — startup validation.
 """
 
+import logging
 import re
 from pathlib import Path
 
@@ -26,11 +27,19 @@ from tests.test_db_readiness import (
 )
 
 
-class _Req:
-    """Minimal stand-in for fastapi.Request — get_llm_client only reads .app."""
+class _Url:
+    def __init__(self, path):
+        self.path = path
 
-    def __init__(self, app):
+
+class _Req:
+    """Minimal stand-in for fastapi.Request — get_llm_client reads .app, and on the
+    disabled path .method/.url.path for its refusal log line (audit item 8)."""
+
+    def __init__(self, app, method="GET", path="/assistant/decisions/1"):
         self.app = app
+        self.method = method
+        self.url = _Url(path)
 
 
 class _FakeCursor:
@@ -138,6 +147,39 @@ def test_get_llm_client_503_when_disabled(monkeypatch):
         with pytest.raises(HTTPException) as exc_info:
             get_llm_client(_Req(app))
         assert exc_info.value.status_code == 503
+
+
+class _CaptureHandler(logging.Handler):
+    """Collect records emitted on the origination logger. `logging_config.get_logger`
+    sets `propagate = False`, so `caplog` reports "nothing was logged" for a line that
+    WAS logged (same reason test_authz.py/test_llm_client.py carry their own copy)."""
+
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+def test_llm_disabled_refusal_is_logged(monkeypatch):
+    # Audit item 8: this 503 fires as a FastAPI dependency, before `_run_assistant` ever
+    # opens `assistant.entry` -- with no fix, nothing records that the refusal happened.
+    monkeypatch.delenv("LLM_ENABLED", raising=False)
+    handler = _CaptureHandler()
+    logger = logging.getLogger("origination")
+    logger.addHandler(handler)
+    try:
+        with TestClient(app):
+            with pytest.raises(HTTPException):
+                get_llm_client(_Req(app, method="GET", path="/assistant/decisions/1"))
+    finally:
+        logger.removeHandler(handler)
+    warnings = [r.getMessage() for r in handler.records if r.levelno >= logging.WARNING]
+    assert warnings, "an LLM-disabled refusal must be logged"
+    message = warnings[0]
+    assert "GET" in message
+    assert "/assistant/decisions/1" in message
 
 
 # --- the gate has to be reachable from where operators actually set it -------------

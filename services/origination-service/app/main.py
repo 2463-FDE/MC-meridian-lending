@@ -78,9 +78,18 @@ app.include_router(offers.router)
 
 def get_llm_client(request: Request) -> ClaudeClient:
     """FastAPI dependency for routes that summarize via the LLM. Returns 503 when
-    the feature is disabled so a summary route degrades cleanly, not with a 500."""
+    the feature is disabled so a summary route degrades cleanly, not with a 500.
+
+    Runs as a dependency, before the route body and before `_run_assistant` ever opens
+    `assistant.entry` -- audit item 8's pre-funnel gap. A structured log line is enough
+    here (not a trace span): this fires before authz, same reasoning as
+    `_refused_before_loop`'s note on `require_officer`/`check_llm_rate_limit`.
+    """
     client = getattr(request.app.state, "llm_client", None)
     if client is None:
+        log.warning(
+            "llm feature disabled, refusing %s %s", request.method, request.url.path
+        )
         raise HTTPException(status_code=503, detail="LLM feature is not enabled")
     return client
 
