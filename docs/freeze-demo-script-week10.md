@@ -181,6 +181,13 @@ Full list: `docs/plan-freeze-agentic-week10.md` §6. Headline points for the roo
   spans, because a table beside `applicants` in the same schema grants a reader no
   capability they do not already have. Aggregation is the export boundary: anything
   reporting over these rows emits no application id and no trace id.
+- **Open decision, owed before that surface changes:** `assistant_runs` is the one shipped
+  surface here with no spec and no ADR behind it — the rules in the point above are recorded
+  only in the module docstring and the migration header. It is now a named exception in
+  `scripts/spec_gate_map.txt` (owner `maha-c`, rationale, and what is unwritten) rather than
+  prose in this document. Either those rules become an ADR and the map gains a line, or a
+  second reviewer accepts the exception explicitly. The blocking `assistant-telemetry-gate`
+  holds the behaviour meanwhile; it does not hold the decision.
 - The trace root is `assistant.entry` (`services/origination-service/app/main.py`), which
   opens at the assistant route funnel — so a refusal raised before the loop starts
   (404/409/502/503) is now a trace with a root, an HTTP status and an enum refusal code.
@@ -220,7 +227,11 @@ Carried out in this pass: `docs/kb.md` covered the week-10 slice through #86 and
 the merges after it, including `assistant_runs` — a shipped table, migration, module, six
 test files and a blocking CI job that appeared in **no** handover document. `CLAUDE.md`'s
 blocking-job list gained `assistant-telemetry-gate`, and its claim that `no-sad-gate` is the
-only job with a database behind it was corrected: 0021 is hand-applied too.
+only job with a database behind it was corrected: 0021 is hand-applied too. The same false
+claim lived a second time in `.github/workflows/ci.yml`, in the `no-sad-gate` comment — the
+likelier place to land when debugging a gate — and was corrected there in the same pass.
+Correcting one copy of a claim and leaving the other is how a truth pass creates the thing it
+came to remove.
 
 ## 8. Handoff ownership
 
@@ -235,7 +246,7 @@ exists today.
 | Root trace and its content rule | `app/main.py` (`assistant.entry`, the route-funnel root), `app/assistant.py` CONTENT RULE and the `assistant.request` loop root, `app/llm/client.py`, `app/llm/transport.py` | Every new span key is a decision: enum codes, integers, booleans, retrieval scores and chunk ids only — never an identifier, never prose. And no caught exception may cross the entry span: each is translated to an enum refusal code inside it, because `trace()` would otherwise attach a provider message or an `app_id`-bearing URL to the span |
 | Policy retrieval and the corpus | `app/policy_retrieval.py`, `policies/` | The 8-code `policy_topic` vocabulary, the fail-closed score threshold, and the hygiene refusal on a bind-mounted corpus. Corpus CONTENT is Lending Ops' (`policies/fee_schedule.md` names them), the retrieval path is ours |
 | Provider selection and the proof | `app/llm/config.py`, `scripts/bedrock_proof.py` | The pinned region, the bedrock-runtime region allowlist, and re-running the proof receipt at whatever SHA is being cited |
-| Assistant run telemetry | `app/assistant_runs.py`, `db/migrations/0021_assistant_runs.sql`, the `assistant_runs` block in `db/init/001_schema.sql` | Keeping the two DDL copies byte-identical (the blocking `assistant-telemetry-gate` compares them), keeping `refusal_code`'s CHECK list in step with the codes the routes can actually produce, and holding the aggregation-is-the-export-boundary rule on anything that reports over these rows. **No spec or ADR sits behind this surface** — the module docstring and the migration header are the whole design record |
+| Assistant run telemetry | `app/assistant_runs.py`, `db/migrations/0021_assistant_runs.sql`, the `assistant_runs` block in `db/init/001_schema.sql` | Keeping the two DDL copies byte-identical (the blocking `assistant-telemetry-gate` compares them), keeping `refusal_code`'s CHECK list in step with the codes the routes can actually produce, and holding the aggregation-is-the-export-boundary rule on anything that reports over these rows. **No spec or ADR sits behind this surface** — the module docstring and the migration header are the whole design record, recorded as a named exception with owner and rationale in `scripts/spec_gate_map.txt`, open until an ADR replaces it or a second reviewer accepts it |
 | Demo runtime | `docker-compose.demo.yml`, this document | Keeping the pinned provider/region and the export block in step with what the deck claims |
 
 **Status of the thing being handed over.** This is a synthetic training demonstration, not a
