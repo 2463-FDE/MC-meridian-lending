@@ -6,7 +6,10 @@ gate (recorded facts beat narration), fail-closed paths, and the redaction
 compatibility of history turns.
 """
 
+import io
 import json
+import logging
+from contextlib import contextmanager
 
 import httpx
 import pytest
@@ -16,6 +19,22 @@ from tests.test_native_script import native_adapter
 from app import assistant
 from app.llm import ClaudeClient, FakeAdapter, LLMConfig
 from app.llm.request_builder import redact_json
+
+
+@contextmanager
+def _capture_assistant_log():
+    """`get_logger("assistant")` sets `propagate = False` (own its handlers, keep
+    LLM/PII content out of uvicorn/root), so `caplog` -- which hooks the root
+    logger -- never sees its records. Attach a handler directly, same as
+    test_llm_client.py's `test_key_not_logged_on_call_or_error`."""
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    log = logging.getLogger("assistant")
+    log.addHandler(handler)
+    try:
+        yield buf
+    finally:
+        log.removeHandler(handler)
 
 
 @pytest.fixture(autouse=True)
@@ -188,6 +207,69 @@ def test_step_budget_exhaustion_is_refused(tools):
     client, _ = _client(*([TOOL_CALL] * assistant._MAX_STEPS))
     with pytest.raises(assistant.AssistantError, match="no final answer"):
         assistant.run(42, client)
+
+
+def test_step_budget_exhaustion_after_scoring_marks_scored(tools):
+    """The soft-stop refusal (_terminal_action, interlock 4's soft half): the model
+    called score_application (a decision_events row is durably written) before
+    exhausting its step budget on the narrate turn. The refusal must not read as
+    though nothing happened -- the exception carries `.scored` for main.py's refusal
+    handler, and the log line says it too, so an operator can tell "recorded, but the
+    run refused" from "nothing happened" without correlating decision-service's own
+    event log."""
+    client, _ = _client(*([TOOL_CALL] * assistant._MAX_STEPS))
+    with _capture_assistant_log() as log_buf:
+        with pytest.raises(assistant.AssistantError, match="no final answer") as exc:
+            assistant.run(42, client)
+    assert tools["score"] == 1  # the decision was recorded before the refusal
+    assert exc.value.scored is True
+    assert "scored=True" in log_buf.getvalue()
+
+
+def test_step_budget_exhaustion_before_scoring_marks_unscored(monkeypatch):
+    """The same refusal on a run that never reached score_application must not claim
+    a decision was recorded when none was."""
+    monkeypatch.setattr(
+        assistant.clients, "get", lambda base, path: _FakeRecordResponse()
+    )
+    non_scoring_call = json.dumps(
+        {
+            "action": "tool",
+            "tool": "get_decision_record",
+            "input": {"application_id": 42},
+        }
+    )
+    client, _ = _client(*([non_scoring_call] * assistant._MAX_STEPS))
+    with _capture_assistant_log() as log_buf:
+        with pytest.raises(assistant.AssistantError, match="no final answer") as exc:
+            assistant.run(42, client)
+    assert exc.value.scored is False
+    assert "scored=False" in log_buf.getvalue()
+
+
+def test_recursion_error_after_scoring_marks_scored(tools, monkeypatch):
+    """The hard half of interlock 4 (`GraphRecursionError`, not currently reachable
+    on the pinned langgraph -- see test_agentic_loop.py's interlock 4 tests -- but the
+    except block is real code and must carry the same signal as the soft half."""
+
+    class _RaisingAgent:
+        def __init__(self, tools):
+            self._score_tool = tools[0]  # score_application, built first
+
+        def invoke(self, inputs, config=None):
+            self._score_tool.func()
+            raise assistant.GraphRecursionError("recursion limit reached")
+
+    monkeypatch.setattr(
+        assistant, "_build_agent", lambda client, tools: _RaisingAgent(tools)
+    )
+    client, _ = _client(TOOL_CALL)
+    with _capture_assistant_log() as log_buf:
+        with pytest.raises(assistant.AssistantError, match="no final answer") as exc:
+            assistant.run(42, client)
+    assert tools["score"] == 1
+    assert exc.value.scored is True
+    assert "scored=True" in log_buf.getvalue()
 
 
 def test_tool_uses_officer_app_id_not_model_echo(tools, monkeypatch):

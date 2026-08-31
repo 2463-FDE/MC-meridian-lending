@@ -628,7 +628,12 @@ def _run_assistant(
         except assistant.ApplicationNotFound as exc:
             refusal = (404, "not_found", "application not found", exc)
         except assistant.AssistantError as exc:
-            log.error("assistant failed for app_id=%s: %s", app_id, exc)
+            log.error(
+                "assistant failed for app_id=%s: %s (scored=%s)",
+                app_id,
+                exc,
+                getattr(exc, "scored", None),
+            )
             refusal = (502, "assistant_refused", str(exc), exc)
         except LLMError as exc:
             log.error(
@@ -691,7 +696,22 @@ def _run_assistant(
             )
             return result
         status, code, detail, cause = refusal
-        entry.add_metadata({"http_status": status, "refusal": code})
+        # `scored` is set only on the two AssistantError refusals raised after a
+        # successful score_application call (assistant.py's GraphRecursionError catch
+        # and _terminal_action's refusal path) -- absent (None) on every other refusal,
+        # so it's omitted for those rather than asserting scored=False about a run that
+        # never got that far. On the trace metadata, not `assistant_runs` -- that table
+        # has no `scored` column (`db/init/001_schema.sql`), and adding one is a
+        # migration, not a log-line fix; the log line above already carries this for an
+        # operator reading logs.
+        scored = getattr(cause, "scored", None)
+        entry.add_metadata(
+            {
+                "http_status": status,
+                "refusal": code,
+                **({"scored": scored} if scored is not None else {}),
+            }
+        )
         assistant_runs.record(
             trace_id=trace_id,
             application_id=app_id,
