@@ -741,11 +741,41 @@ def run(
             # AssistantError to the officer-facing refusal, and an unmapped framework
             # exception is a 500 where a refusal was intended. The framework's message
             # is not quoted -- it names its own config key, which is not an answer.
-            raise AssistantError(
+            #
+            # `state["score"]` may already hold a persisted decision_events row at this
+            # point -- the model scored, then exhausted its step budget on the
+            # narrate/validate turn. The refusal below still fires (the officer must
+            # re-fetch/retry), but the log line and the recorded row (`.scored`,
+            # read by main.py's refusal handler) say the decision went through, so an
+            # operator doesn't have to correlate against decision-service's own event
+            # log to tell "nothing happened" from "recorded, but the run refused".
+            scored = state["score"] is not None
+            log.warning(
+                "assistant step budget exhausted for app_id=%s (scored=%s)",
+                application_id,
+                scored,
+            )
+            refusal_exc = AssistantError(
                 f"assistant gave no final answer within {_MAX_STEPS} steps"
-            ) from exc
+            )
+            refusal_exc.scored = scored
+            raise refusal_exc from exc
         messages = result.get("messages") or []
-        action = _terminal_action(messages)
+        try:
+            action = _terminal_action(messages)
+        except AssistantError as exc:
+            # Soft half of interlock 4 (see `_terminal_action`'s docstring): the model's
+            # own node returned without a `final` action rather than the graph raising.
+            # Same reasoning as the GraphRecursionError branch above -- surface whether
+            # the regulated decision already landed before this refusal fires.
+            scored = state["score"] is not None
+            log.warning(
+                "assistant gave no final action for app_id=%s (scored=%s)",
+                application_id,
+                scored,
+            )
+            exc.scored = scored
+            raise
         if policy_topic is not None and task == "explain" and not state["searches"]:
             # The officer asked a policy question (policy_topic set) — a final answer
             # that never called search_policy would reach the officer with an empty

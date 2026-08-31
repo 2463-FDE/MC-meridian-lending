@@ -147,6 +147,30 @@ def test_unknown_provider_rejected(monkeypatch):
         load_llm_config()
 
 
+def test_unknown_model_rejected_at_boot(monkeypatch):
+    """A typo'd/deprecated CLAUDE_MODEL must fail at boot, not on the first call."""
+    monkeypatch.setenv("CLAUDE_API_KEY", "k")
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-nonsense-9000")
+    with pytest.raises(LLMConfigError):
+        load_llm_config()
+
+
+def test_known_model_override_accepted(monkeypatch):
+    monkeypatch.setenv("CLAUDE_API_KEY", "k")
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+    cfg = load_llm_config()
+    assert cfg.model == "claude-haiku-4-5-20251001"
+
+
+def test_anthropic_model_id_rejected_on_bedrock_provider(monkeypatch):
+    """The allowlist is per-provider: an anthropic-shaped id is not a bedrock id."""
+    monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_PROVIDER", "bedrock")
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+    with pytest.raises(LLMConfigError):
+        load_llm_config()
+
+
 # --- Concern 1: numeric range validation (fail loud at boot) --------------
 
 
