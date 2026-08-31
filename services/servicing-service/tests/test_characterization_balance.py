@@ -15,8 +15,12 @@ What is pinned:
     D3 (ADR 0020) writes payment_applications in the same statement as the movement
 
 ADR 0020 landed and changed three of these deliberately, which is the signal this
-file exists to produce: apply_payment is now one atomic statement, it now records the
-movement, and adjust_balance/waive_fee are the two that keep the unlocked shape.
+file exists to produce: apply_payment is now one atomic statement and it now records
+the movement. D32's first half changed a fourth: waive_fee is now also one atomic
+statement (the decrement computes from the stored past_due inside the UPDATE), same
+shape as apply_payment, one column over. adjust_balance is the one mutation still
+unlocked — it sets an absolute figure rather than a delta, so the D3/D32 fix does not
+apply to it as-is (docs/debt-log.md D32).
 
 Money here is float because the code is float (D2); the assertions use pytest.approx
 so they pin behaviour rather than re-testing float representation.
@@ -89,6 +93,12 @@ def db_spy(monkeypatch):
                 if "BALANCE" in selected:
                     return [{"balance": self.row["balance"]}]
                 return []
+            if "UPDATE BALANCES" in upper and "PAST_DUE = PAST_DUE" in upper:
+                # waive_fee's atomic form (D32): the decrement computes from the
+                # stored value inside the statement, so this is the whole mutation.
+                self.row["past_due"] -= params[0]
+                self.row["updated_at"] = "t1"
+                return [{"past_due": self.row["past_due"]}]
             if "UPDATE BALANCES" in upper:
                 if "SET BALANCE" in upper:
                     self.row["balance"] = params[0]
@@ -252,17 +262,26 @@ def test_apply_payment_is_one_atomic_statement(db_spy):
     )
 
 
-def test_the_other_mutations_are_still_a_separate_unlocked_read_then_write(db_spy):
-    # adjust_balance and waive_fee keep the shape D3 removed from apply_payment: two
-    # statements, no transaction, no row lock. A different defect on a different
-    # column, carded in docs/debt-log.md rather than fixed by ADR 0020.
+def test_adjust_balance_is_still_a_separate_unlocked_read_then_write(db_spy):
+    # adjust_balance keeps the shape D3 removed from apply_payment: two statements,
+    # no transaction, no row lock. Not fixed by D32 either — it sets an absolute
+    # figure, so the atomic-decrement fix does not apply to it as-is (docs/debt-log.md
+    # D32).
     balance.adjust_balance(1, 100.0)
+
+    sql = db_spy.sql_text().upper()
+    assert len(db_spy.statements) == 2, db_spy.statements
+    assert "FOR UPDATE" not in sql
+    assert "BEGIN" not in sql
+
+
+def test_waive_fee_is_now_one_atomic_statement(db_spy):
+    # D32 first half: the read-modify-write is gone, the decrement computes from the
+    # stored past_due inside the UPDATE, same shape as D3's fix to apply_payment.
     balance.waive_fee(1, 10.0)
 
     sql = db_spy.sql_text().upper()
-    assert len(db_spy.statements) == 4, db_spy.statements
-    assert "FOR UPDATE" not in sql
-    assert "BEGIN" not in sql
-    assert "SET PAST_DUE = PAST_DUE" not in sql, (
-        "an atomic decrement would not read first"
+    assert len(db_spy.statements) == 1, db_spy.statements
+    assert "SET PAST_DUE = PAST_DUE -" in sql, (
+        "the decrement must compute from the stored value inside the statement"
     )
