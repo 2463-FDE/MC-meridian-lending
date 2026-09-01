@@ -541,3 +541,77 @@ describe("loan detail — payment idempotency (D19)", () => {
     expect(apiPost).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("loan detail — adjust-balance compare-and-set (D32)", () => {
+  it("quotes the balance on screen and refuses to silently resubmit on a 409", async () => {
+    // The row moved underneath the operator between opening the screen and
+    // submitting; servicing refuses (409) rather than overwrite a figure it never
+    // confirmed still holds -- see adjustBalance/isBalanceConflict in page.tsx.
+    apiPost.mockRejectedValue({
+      status: 409,
+      detail: "balance changed since it was quoted; current balance is 8750.00",
+    });
+
+    render(<LoanDetailPage />);
+    await screen.findByText("Maria Alvarez");
+    await screen.findByText("$9,000.00"); // LOAN_1.balance, shown before the attempt
+
+    fireEvent.change(screen.getAllByRole("spinbutton")[1], {
+      target: { value: "500.00" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Adjust balance" }));
+
+    // The request quotes the balance the operator was actually shown, not a stale
+    // client-side assumption.
+    await screen.findByText(/review the current balance above and resubmit/i);
+    expect(apiPost).toHaveBeenCalledWith(
+      "/lss/accounts/1/adjust-balance",
+      { new_balance: 500, expected_balance: 9000 }
+    );
+    // The refusal must not read as a success, and it must have pulled the real
+    // balance (the /balance mock, 8750) onto the screen rather than leaving the
+    // stale 9000 -- an operator who reloads instead of reading the message must
+    // still see the truth.
+    expect(screen.queryByText(/^Balance adjusted to/)).toBeNull();
+    await screen.findByText("$8,750.00");
+  });
+
+  it("does not tell the operator to review the balance above when the refresh itself fails", async () => {
+    // The compare-and-set refused (409) AND the follow-up /balance GET also failed --
+    // Promise.allSettled swallows that rejection, so loan.balance never changes. The
+    // generic "review the current balance above" message would then point at the
+    // exact stale $9,000.00 figure the 409 just refused to write over.
+    apiPost.mockRejectedValue({
+      status: 409,
+      detail: "balance changed since it was quoted; current balance is 8750.00",
+    });
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === "/lss/loans/1") return LOAN_1;
+      if (path.endsWith("/schedule")) return { schedule: [] };
+      if (path.endsWith("/payments")) return { items: [] };
+      if (path.includes("/balance")) throw new Error("network error");
+      throw new Error(`unexpected GET ${path}`);
+    });
+
+    render(<LoanDetailPage />);
+    await screen.findByText("Maria Alvarez");
+    await screen.findByText("$9,000.00");
+
+    fireEvent.change(screen.getAllByRole("spinbutton")[1], {
+      target: { value: "500.00" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Adjust balance" }));
+
+    // Must not tell the operator to trust a figure on screen that never refreshed --
+    // falls back to the 409's own detail, which names the real current balance itself.
+    await screen.findByText(
+      "balance changed since it was quoted; current balance is 8750.00"
+    );
+    expect(
+      screen.queryByText(/review the current balance above and resubmit/i)
+    ).toBeNull();
+    // The stale figure is still the only one on screen -- proof the bug scenario is
+    // real, not just that the message changed.
+    expect(screen.getByText("$9,000.00")).toBeTruthy();
+  });
+});

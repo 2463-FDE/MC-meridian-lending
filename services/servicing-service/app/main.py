@@ -283,6 +283,10 @@ def get_account_balance(
 
 class AdjustIn(BaseModel):
     new_balance: float
+    # The balance the operator was quoted when they opened the correction (D32 second
+    # half) — required, not defaulted: a caller with no quoted figure has nothing valid
+    # to compare-and-set against.
+    expected_balance: float
 
 
 @app.post("/accounts/{loan_id}/adjust-balance")
@@ -294,9 +298,26 @@ def adjust_balance(
     # to the next cycle by the client and the ledger is Decision 3. (debt D8(b) closed,
     # D2 open)
     authz.require_money_role(x_user_role)
+    try:
+        new_balance = balance.adjust_balance(
+            loan_id, body.new_balance, body.expected_balance
+        )
+    except balance.BalanceChanged as exc:
+        # 409, not 422 or 500: the request is well-formed and authorized, but the row
+        # moved underneath the operator between quote and submit. Nothing was written.
+        # The current balance rides in the (plain-string, per this API's convention)
+        # detail so the caller can show it; the frontend re-fetches rather than parsing
+        # it back out, and either way requires a deliberate resubmit, never an auto-retry.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "balance changed since it was quoted; current balance is "
+                f"{exc.current_balance:.2f}"
+            ),
+        )
     return {
         "loan_id": loan_id,
-        "balance": balance.adjust_balance(loan_id, body.new_balance),
+        "balance": new_balance,
     }
 
 
