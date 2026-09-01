@@ -26,6 +26,49 @@ Nothing prohibits storing a full SSN (FCRA furnishing, TIN reporting, CIP all ne
 3. **Do not run the back-book purge on an assumption.** That is the one irreversible step and needs an explicit human yes.
 4. Consider **ADR 0023** (next free; 0022 is the offline evaluator). Three options with real trade-offs — this is ADR-shaped by the project's own rules.
 
+### One design question inside the slice
+
+The slice above says `ssn_last4`, but KYC's actual need is `bool(applicant.get("ssn"))` — **a boolean satisfies it**. Last-4 is only required if a *human* (a CSR verifying a caller) needs it. If not, a presence flag is strictly less PII for identical functionality, and last-4 beside a name and DOB is not nothing. Decide this before adding the column; it is cheaper than removing it later.
+
+## The rest of D33 — beyond the reversible slice
+
+The slice plus one yes/no is **not** the whole job. Four more pieces, and the first has the real unknowns in it.
+
+### 1. The purge is not migration 0020's shape
+
+0020 is the right precedent for *technique* and the wrong one for *shape*. It dropped a column, once. D33 cannot: the bureau pull needs the real digits while an application is decisionable, so the column stays and the **value** is nulled at terminal state. That makes the purge **recurring and event-driven, not a one-shot migration**, and it moves the hard part:
+
+- Every purge leaves the old row versions as dead tuples. 0020 answered that with one `VACUUM FULL`. That cannot run on every purge — it takes an `ACCESS EXCLUSIVE` lock on `applicants`, blocking intake and every officer read.
+- So the open question is whether routine autovacuum reclaims those tuples on an acceptable schedule, or whether scheduled maintenance is required. **Until that is answered, "purged" means "nulled in the live row, still readable in the data files for an unbounded window"** — which is not what the entry would be claiming.
+
+Resolve this before writing the migration, not after.
+
+### 2. The encryption branch is a second build, not an addition
+
+If the retention answer is "retain through the record-retention window", the purge path is off and the work becomes application-level encryption: a key from a secret manager, a rotation and re-encryption story, and both read sites changed. That waits on a deployment existing — the same blocker as D35. It is largely *instead of* the slice, not on top of it.
+
+### 3. Copies the purge cannot reach
+
+The same **Not covered** row D13a still carries applies here identically:
+
+- pre-redaction log files — D5's open residual, explicitly "flagged here but not audited"
+- database backups and WAL segments, and any replica
+
+Nulling the column does not remove the SSN from the system. That needs its own retention action, which nobody has taken for the PAN/CVV either. **Closing D33 without saying this would claim more coverage than the code has** — the failure mode the debt-log status vocabulary exists to prevent. Name it as a residual on the entry.
+
+### 4. The browser hop still sends it in the clear
+
+`frontend/app/apply/page.tsx:352` posts the raw SSN. The field is a password input with a reveal toggle (`:198`), which is shoulder-surfing protection, not transport. That hop is plaintext `http` today — D35. At-rest work does not touch it.
+
+## Verified: no work needed here
+
+Checked so the next session does not re-investigate:
+
+- **No response surface echoes the SSN.** `services/origination-service/app/routers/applications.py:91` and `:611` are internal forwards to kyc-service and decision-service; `services/decision-service/app/schemas.py:12` is the *request* model, not a response. Nothing returns it to a browser.
+- `decision_events` is already identifier-free — peppered HMAC at `services/decision-service/app/decision.py:139`.
+- The LLM path masks it before the model boundary (`services/origination-service/app/llm/request_builder.py`).
+- Intake keeps writing the full value under either retention answer.
+
 ## Blockers / open questions
 
 Two, both for the client (Priya, Compliance Officer; Dana, VP Lending Ops):
