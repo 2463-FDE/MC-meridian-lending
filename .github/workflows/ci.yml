@@ -798,9 +798,11 @@ jobs:
     #   test_payment_applications_ddl.py  the init DDL and migration 0019 declare one table,
     #                                byte-for-byte, and the migration RAISE EXCEPTIONs on a
     #                                shape it did not create.
-    #   test_characterization_balance.py  pins that adjust_balance still holds the unlocked
-    #                                shape -- a decision, not an oversight (D32).
-    #   test_waive_fee_lost_update.py  D32's other half: waive_fee is now the same
+    #   test_characterization_balance.py  pins that adjust_balance is now one atomic
+    #                                compare-and-set (D32's second half) and refuses --
+    #                                writes nothing -- when the caller's expected_balance
+    #                                no longer matches the stored one.
+    #   test_waive_fee_lost_update.py  D32's first half: waive_fee is now the same
     #                                atomic-UPDATE shape as apply_payment, and this is the
     #                                before-number for it, same role as test_lost_update.py.
     #   payment-service tests/test_apply_via_servicing.py  the caller sends payment_id only.
@@ -822,13 +824,13 @@ jobs:
       # Selected, not the whole file: test_characterization_balance.py also pins the
       # ADR 0014 authorization gaps, which are still open and still red on purpose. Only
       # the D3/D32 assertions belong in a blocking gate -- the apply's shape, its record,
-      # waive_fee's now-atomic shape, and the one mutation (adjust_balance) that
-      # deliberately keeps the old shape.
+      # and both D32 halves' now-atomic shapes (waive_fee's decrement, adjust_balance's
+      # compare-and-set).
       - name: servicing-service characterization of what D3/D32 changed and what they did not
         run: |
           cd services/servicing-service
           python -m pytest tests/test_characterization_balance.py -q \
-            -k "(apply_payment or adjust_balance_is_still or waive_fee_is_now) and not route_takes_no_caller_identity"
+            -k "(apply_payment or adjust_balance_is_now or adjust_balance_refuses_when_balance_moved or waive_fee_is_now) and not route_takes_no_caller_identity"
       - name: payment-service sends payment_id only, and cannot retire an unapplied capture
         run: |
           cd services/payment-service
