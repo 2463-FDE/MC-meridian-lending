@@ -8,12 +8,14 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (6aee0f4)` — 6aee0f4 2026-09-01 Merge pull request #143 from 2463-FDE/docs/narration-judge-handoff-fix
+Base: `origin/main (558d048)` — 558d048 2026-09-01 Merge pull request #145 from 2463-FDE/test/disclosure-narration-fixtures
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #145 | `558d048` | 2026-09-01 | Merge pull request #145 from 2463-FDE/test/disclosure-narration-fixtures |
+| #142 | `25157e4` | 2026-09-01 | Merge pull request #142 from 2463-FDE/fix/ssn-at-rest |
 | #143 | `6aee0f4` | 2026-09-01 | Merge pull request #143 from 2463-FDE/docs/narration-judge-handoff-fix |
 | #141 | `18cc928` | 2026-09-01 | Merge pull request #141 from 2463-FDE/docs/disclosure-narration-judge |
 | #140 | `1f89999` | 2026-08-31 | Merge pull request #140 from 2463-FDE/docs/adr-0023-ssn-at-rest |
