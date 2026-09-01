@@ -16,9 +16,24 @@ file is on disk" and a row being purged:
 Nothing wires this into a scheduler (same posture as app/reconcile.py) -- an operator
 invokes it by hand, or from their own cron once the retention answer lands.
 
-Eligibility: applicants.created_at older than the configured window, ssn not already
-NULL/empty. ssn_last4 is backfilled in the same UPDATE for any row that predates
-migration 0023 -- a purge must never destroy the last-4 signal, only the full value.
+KNOWN-WRONG SHAPE, DO NOT ENABLE AS-IS (docs/handoffs/2026-08-31-docs-glba-encryption-
+framing.md, "The purge is not migration 0020's shape"). Eligibility here is calendar
+age since applicants.created_at. That is wrong: the bureau pull needs the real digits
+while an application is still decisionable, so the trigger has to be the application
+reaching a TERMINAL state (decided/funded/declined), not elapsed time -- and one
+applicant can have more than one applications row, so the real rule is "purge only
+once every application tied to this applicant is terminal", which this file does not
+check. The exact trigger also still depends on the client's retention-window answer
+(the handoff's blocker #1) -- terminal-state-only vs. terminal-state-plus-a-grace-
+period are different migrations, so this shape should not be finalized twice. This
+file ships the two safety gates (env flag + --execute) and the dry-run reporting
+shape; the WHERE clause is a placeholder and must be rewritten to an
+applications-status join before SSN_PURGE_ENABLED is ever set outside a test.
+
+Eligibility (placeholder, see above): applicants.created_at older than the configured
+window, ssn not already NULL/empty. ssn_last4 is backfilled in the same UPDATE for any
+row that predates migration 0023 -- a purge must never destroy the last-4 signal, only
+the full value.
 
 An UPDATE does not erase the old row version; the CVV purge (migration 0020) rewrites
 the table afterward (VACUUM FULL / pg_repack) for exactly that reason, and this
