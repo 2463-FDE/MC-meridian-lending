@@ -142,6 +142,7 @@ services/origination-service/app/policy_retrieval.py => adr/0019-policy-retrieva
 # EXEMPT: adr/0003-store-card-data-for-convenience.md — documents the PCI debt scheduled for removal; mapping it would require the violating code to keep existing.
 # EXEMPT: adr/0008-retrievable-decision-records.md — Accepted as a field contract only; its own Status defers the schema migration and write path, so there is no implementation to pin yet.
 # EXEMPT: docs/specs/rag-week2.md — Status is Draft, pending gate approval; not approved for build.
+# EXEMPT: docs/specs/disclosure-narration-judge.md — Status is Draft; not approved for build, no code path exists yet.
 
 # --- Week 8 feedback: interim handling of a double-charged borrower ---------
 # ADR 0018's decision is Proposed, but the code area it obligates is live: the
