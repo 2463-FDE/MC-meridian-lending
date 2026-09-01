@@ -6,11 +6,11 @@ no transaction history).
 `apply_payment` is atomic as of D3 (ADR 0020): it records the application and moves
 the balance in one statement, computing from the stored value inside the UPDATE.
 `waive_fee` is atomic the same way as of D32's first half: the decrement computes
-from the stored `past_due` inside its own UPDATE. `adjust_balance` is still the
-unlocked read-modify-write this module was written with — it sets an absolute
-figure rather than a delta, so D3/D32's fix does not apply to it as-is; it needs a
-compare-and-set on the value the caller was quoted, which needs the client's answer
-on refusal UX (D32, docs/debt-log.md). (D2, D12, D14 also remain.)
+from the stored `past_due` inside its own UPDATE. `adjust_balance` closes D32's
+second half via compare-and-set: it sets an absolute figure rather than a delta, so
+the decrement shape doesn't apply to it — it refuses instead when the stored balance
+no longer matches what the caller was quoted (D32, docs/debt-log.md). (D2, D12, D14
+still remain — no ledger entry, still float, still no waterfall.)
 """
 
 from .logging_config import get_logger
@@ -30,6 +30,17 @@ class PaymentNotApplicable(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+class BalanceChanged(Exception):
+    """`adjust_balance`'s compare-and-set refused: the stored balance no longer
+    matches what the caller quoted, so nothing was written. Carries the current
+    balance so the caller can show it and require a fresh, deliberate resubmit —
+    never an automatic retry against a figure the operator never saw."""
+
+    def __init__(self, current_balance: float):
+        super().__init__("balance changed since it was quoted")
+        self.current_balance = current_balance
 
 
 def get_balance(loan_id: int) -> float:
@@ -160,15 +171,37 @@ def apply_payment(
     return float(current), False
 
 
-def adjust_balance(loan_id: int, new_value: float) -> float:
-    """Set the balance directly. No ledger entry; the prior value is gone forever."""
-    current = get_balance(loan_id)
-    db.query(
-        "UPDATE balances SET balance = %s, updated_at = now() WHERE loan_id = %s",
-        (float(new_value), loan_id),
+def adjust_balance(loan_id: int, new_value: float, expected_balance: float) -> float:
+    """Set the balance to `new_value`, but only if the stored balance still equals
+    `expected_balance` — the figure the operator was quoted when they opened the
+    correction. One statement: the predicate and the write commit together, so a
+    concurrent `apply_payment`/`waive_fee`/`adjust_balance` between quote and submit
+    is caught rather than silently overwritten (D32 second half).
+
+    Raises `BalanceChanged` (nothing written) when the row moved underneath the
+    caller. No ledger entry on success either way; the prior value is still gone.
+    """
+    rows = db.query(
+        "UPDATE balances SET balance = %s, updated_at = now() "
+        "WHERE loan_id = %s AND balance = %s RETURNING balance",
+        (float(new_value), loan_id, float(expected_balance)),
     )
-    log.info("adjusted balance loan_id=%s %s -> %s", loan_id, current, new_value)
-    return float(new_value)
+    if rows:
+        log.info(
+            "adjusted balance loan_id=%s %s -> %s",
+            loan_id,
+            expected_balance,
+            new_value,
+        )
+        return float(rows[0]["balance"])
+    current = get_balance(loan_id)
+    log.warning(
+        "adjust_balance refused loan_id=%s expected=%s actual=%s",
+        loan_id,
+        expected_balance,
+        current,
+    )
+    raise BalanceChanged(current)
 
 
 def waive_fee(loan_id: int, amount: float) -> float:
