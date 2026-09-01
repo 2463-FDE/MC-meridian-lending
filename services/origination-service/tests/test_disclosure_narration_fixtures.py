@@ -71,7 +71,12 @@ def test_no_fixture_expects_hold_for_compliance():
 
 
 def test_rate_driven_fixtures_pin_no_officer_action():
-    """The rate criterion is not graded — no rate band exists to place a fixture at."""
+    """The rate criterion is not graded.
+
+    policies/fee_schedule.md documents a band (7.99%-24.99%), but no code enforces it --
+    POLICY_RATE_PCT hardcodes every issued offer to 7.99%, so no fixture can be a real
+    top-of-band offer.
+    """
     rate_driven = [f for f in NARRATION_FIXTURES if f["id"].startswith("rate_")]
     assert rate_driven, "the groundedness axis still needs high-rate inputs"
     assert all(f["expected_officer_action"] is None for f in rate_driven)

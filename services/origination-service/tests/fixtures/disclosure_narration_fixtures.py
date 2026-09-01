@@ -30,14 +30,15 @@ threshold for "top of the band" or "unusually long term" anywhere in
   term is <= 60, so every fixture here — including the 60- and 54-month ones — expects
   `review_and_send`. That the cutoff is unreachable in-schema is a property of the spec's
   own cutoff, recorded for D3/D4 rather than worked around here.
-- **Rate: not graded.** `POLICY_RATE_PCT = 7.99`
+- **Rate: not graded.** `policies/fee_schedule.md` documents a band (7.99%–24.99% APR by
+  risk band), but no code enforces it: `POLICY_RATE_PCT = 7.99`
   (`services/origination-service/app/routers/offers.py`) is a single constant applied to
-  every offer; no rate band exists anywhere in the repo, so no fixture can sit at the top of
-  one. The spec rules this axis not gradeable and D3 does not grade it. The rate-driven
-  fixtures below therefore carry `expected_officer_action: None` — they remain real inputs
-  for the groundedness axis, but pinning either verdict on them would grade the criterion
-  the spec just withdrew. If a rate band is later added under `policies/`, these fixtures
-  and their expectations need review (spec's own Fixture staleness risk).
+  every offer, so no fixture can sit at the top of a band the code never produces. The spec
+  rules this axis not gradeable and D3 does not grade it. The rate-driven fixtures below
+  therefore carry `expected_officer_action: None` — they remain real inputs for the
+  groundedness axis, but pinning either verdict on them would grade the criterion the spec
+  just withdrew. If the band is later code-enforced, these fixtures and their expectations
+  need review (spec's own Fixture staleness risk).
 
 `expected_officer_action` is also `None` on the two `checks_passed`-mismatch fixtures: the
 system prompt surfaces `checks_passed` to the model only as "Verification: PASSED (N
@@ -137,7 +138,7 @@ NARRATION_FIXTURES: tuple[NarrationFixture, ...] = (
         "id": "rate_at_schema_ceiling",
         "description": (
             "Exactly the schema's rate ceiling (Field le=35). Rate axis is not graded — "
-            "no rate band exists for this to be the top of."
+            "the documented band is code-unenforced, so no fixture can be the top of it."
         ),
         "application_id": 990008,
         "term_months": 48,
