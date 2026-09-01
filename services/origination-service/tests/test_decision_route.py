@@ -82,6 +82,30 @@ def test_downstream_refusal_maps_to_503_not_500(monkeypatch):
     assert exc.value.detail == "decisioning unavailable"
 
 
+def test_downstream_timeout_maps_to_503_not_an_unhandled_500(monkeypatch):
+    # D28: a transport failure with no response at all (origination's own 30s budget
+    # expiring before decision-service answers) is a different case from the 503 test
+    # above (decision-service DID answer, inside its own shorter bureau-pull timeout).
+    # Before this fix, run_decision caught only httpx.HTTPStatusError, so a bare
+    # httpx.ReadTimeout (no `.response`) fell through uncaught to FastAPI's generic
+    # handler as an untranslated 500 with no line naming which hop stalled.
+    monkeypatch.setattr(
+        applications,
+        "decision_request_payload",
+        lambda app_id: {"application_id": app_id},
+    )
+
+    def _post_timeout(base, path, payload):
+        request = httpx.Request("POST", f"{base}{path}")
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    monkeypatch.setattr(applications.clients, "post", _post_timeout)
+    with pytest.raises(HTTPException) as exc:
+        applications.run_decision(42, idempotency_key=None, x_user_role="underwriter")
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "decisioning unavailable"
+
+
 def test_downstream_conflict_maps_to_409_not_503(monkeypatch):
     # A reused idempotency key with changed inputs comes back from decision-service as
     # 409; the LOS must preserve the conflict, not mask it as a retryable 503.

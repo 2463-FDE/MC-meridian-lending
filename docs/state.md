@@ -8,12 +8,14 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (52723c1)` — 52723c1 2026-08-31 Merge pull request #137 from 2463-FDE/fix/downstream-circuit-breaker-trace
+Base: `origin/main (864147c)` — 864147c 2026-08-31 Merge pull request #139 from 2463-FDE/fix/downstream-timeout-budget
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #139 | `864147c` | 2026-08-31 | Merge pull request #139 from 2463-FDE/fix/downstream-timeout-budget |
+| #138 | `530aa61` | 2026-08-31 | Merge pull request #138 from 2463-FDE/fix/servicing-lost-update |
 | #137 | `52723c1` | 2026-08-31 | Merge pull request #137 from 2463-FDE/fix/downstream-circuit-breaker-trace |
 | #136 | `98715eb` | 2026-08-31 | Merge pull request #136 from 2463-FDE/fix/audit-immediate-hardening |
 | #135 | `1d0e485` | 2026-08-31 | Merge pull request #135 from 2463-FDE/chore/docs-tree-remainder |
@@ -193,7 +195,6 @@ A job is BLOCKING unless its body carries `continue-on-error` or `|| true`.
 - **BLOCKING** — `compose-hardening-gate`
 - **BLOCKING** — `kyc-enforcement-gate`
 - **BLOCKING** — `kyc-persistence-gate`
-- **BLOCKING** — `ssn-purge-gate`
 - **BLOCKING** — `payment-idempotency-gate`
 - **BLOCKING** — `assistant-telemetry-gate`
 - **BLOCKING** — `no-sad-gate`

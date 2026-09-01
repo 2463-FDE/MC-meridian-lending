@@ -27,6 +27,14 @@ from . import db
 
 log = get_logger("decision")
 
+# D28: origination's outer HTTP budget for this hop is 30s (origination-service
+# app/clients.py _TIMEOUT). This inner timeout must stay below that, or a stalled
+# bureau call always surfaces as origination's own 30s timeout expiring first —
+# indistinguishable from this service simply not answering — instead of this
+# service's own bounded refusal. 10s of slack leaves room for this service's own
+# request/response overhead on top of the bureau call itself.
+_BUREAU_TIMEOUT = 20.0
+
 
 class CreditPullError(RuntimeError):
     """The bureau credit pull could not be completed. Raised so decisioning FAILS
@@ -54,7 +62,8 @@ def _synthetic_score(ssn: str) -> int:
 
 
 def _pull_credit(ssn: str) -> int:
-    """Synchronous bureau call. Blocks the request thread. No real timeout budget.
+    """Synchronous bureau call. Blocks the request thread. Bounded by _BUREAU_TIMEOUT,
+    kept below origination's own outer HTTP budget for this hop (D28).
 
     Fails CLOSED: with no EXPERIAN_KEY (or on any bureau failure) it raises
     CreditPullError unless synthetic credit is explicitly enabled for a dev
@@ -75,7 +84,7 @@ def _pull_credit(ssn: str) -> int:
             f"{config.EXPERIAN_BASE_URL}/score",
             params={"ssn": ssn},
             headers={"Authorization": f"Bearer {config.EXPERIAN_KEY}"},
-            timeout=30,
+            timeout=_BUREAU_TIMEOUT,
         )
         resp.raise_for_status()  # a bad/expired key returns 401/403 — treat as failure
         score = resp.json().get("score")

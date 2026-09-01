@@ -709,6 +709,21 @@ def run_decision(
         # assistant route's handling).
         log.error("decision-service refused decision for app_id=%s: %s", app_id, exc)
         raise HTTPException(status_code=503, detail="decisioning unavailable") from exc
+    except httpx.HTTPError as exc:
+        # `HTTPError`, not `HTTPStatusError`: a transport failure (`httpx.ConnectError`,
+        # `httpx.ReadTimeout` — `httpx.RequestError`, no `response`) means decision-service
+        # never answered at all within origination's own 30s budget (D28) — distinct from
+        # the branch above, where decision-service DID answer, inside its own shorter
+        # bureau-pull timeout, with a clean 503. Without this catch the exception fell
+        # through to FastAPI's generic handler as an untranslated 500 with no line naming
+        # which hop it was.
+        log.error(
+            "origination timeout budget exceeded calling decision-service for "
+            "app_id=%s: %s",
+            app_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=503, detail="decisioning unavailable") from exc
     # score is unvalidated downstream JSON, same as get_application's drivers.model_score
     # (Codex review): decision-service can rebuild this response from persisted
     # decision_events on idempotency replay, so a nonnumeric value must degrade to no
