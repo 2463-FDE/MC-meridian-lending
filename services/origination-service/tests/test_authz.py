@@ -792,7 +792,7 @@ def _apply_flow_db(state):
                     "applicant_id": None,
                     "name": "Jane",
                     "dob": None,
-                    "ssn": None,
+                    "ssn_last4": None,
                     "address": "10 Main St",
                     "is_entity": False,
                 }

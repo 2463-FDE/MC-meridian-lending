@@ -82,3 +82,15 @@ SELECT l.id,
   TIMESTAMPTZ '2026-05-01 09:00:00' + ((l.id % 20) || ' days')::interval + (s || ' days')::interval
 FROM loans l CROSS JOIN LATERAL generate_series(1, 1 + (l.id % 5)) AS s
 WHERE l.id BETWEEN 7000 AND 7299;
+
+-- Neither this file's INSERTs nor 002_seed.sql's populate ssn_last4 (D33 backfilled it
+-- for pre-existing volumes via migration 0023; a fresh volume's init never runs that
+-- migration). recheck_kyc sends only ssn_last4 to kyc-service, whose presence-only CIP
+-- check would then see NULL where the applicant HAS an ssn, flipping kyc_checks.ssn_verified
+-- to false on the next recheck. Mirror migration 0023's own backfill so a fresh volume ends
+-- up in the same state as an upgraded one.
+UPDATE applicants
+   SET ssn_last4 = RIGHT(ssn, 4)
+ WHERE ssn_last4 IS NULL
+   AND ssn IS NOT NULL
+   AND ssn <> '';

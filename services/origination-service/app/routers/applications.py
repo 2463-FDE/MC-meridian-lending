@@ -57,7 +57,7 @@ def _run_kyc(
     applicant_id: int | None,
     name: str | None,
     dob: str | None,
-    ssn: str | None,
+    ssn_last4: str | None,
     address: str | None,
     is_entity: bool,
 ) -> tuple[dict, bool]:
@@ -71,6 +71,11 @@ def _run_kyc(
     application then has no kyc_checks row and stays blocked at the gate until a successful
     recheck persists one (see recheck_kyc). Shared by submit and recheck so the mapping and
     the failure handling cannot drift on this regulated path.
+
+    ssn_last4 (D33, docs/debt-log.md): callers pass the last 4 characters, not the full
+    SSN. kyc-service's CIP check only ever does bool(applicant.get("ssn")) -- a presence
+    check -- so a truthy last-4 satisfies it identically; the wire field is still named
+    "ssn" (unchanged kyc-service contract) but no caller here puts the full value in it.
     """
     cip = {
         "name_verified": False,
@@ -88,7 +93,7 @@ def _run_kyc(
                 "applicant_id": applicant_id,
                 "name": name,
                 "dob": dob,
-                "ssn": ssn,
+                "ssn": ssn_last4,
                 "address": address,
                 "entity_type": "llc" if is_entity else None,
             },
@@ -176,7 +181,7 @@ def submit_application(
         applicant_id,
         payload.get("name"),
         payload.get("dob"),
-        payload.get("ssn"),
+        intake.ssn_last4(payload.get("ssn")),
         payload.get("address"),
         is_entity,
     )
@@ -205,7 +210,7 @@ def recheck_kyc(
     # authorization as the other application-scoped routes (ADR 0010).
     authz.require_officer_or_owner(app_id, x_user_role, x_user_id, x_application_token)
     rows = db.query(
-        "SELECT a.applicant_id, ap.name, ap.dob, ap.ssn, ap.address, ap.is_entity "
+        "SELECT a.applicant_id, ap.name, ap.dob, ap.ssn_last4, ap.address, ap.is_entity "
         "FROM applications a JOIN applicants ap ON ap.id = a.applicant_id "
         "WHERE a.id = %s",
         (app_id,),
@@ -221,7 +226,7 @@ def recheck_kyc(
         r["applicant_id"],
         r["name"],
         dob,
-        r["ssn"],
+        r["ssn_last4"],
         r["address"],
         bool(r["is_entity"]),
     )

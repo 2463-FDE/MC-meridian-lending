@@ -159,6 +159,59 @@ taken before the rewrite still contain the CVV values. That is a retention actio
 operator side, not a schema change — `docs/debt-log.md` D13 tracks it under "Not covered".
 The PAN column is untouched and stays open as D13b.
 
+### Purging stored SSNs (D33) — NOT YET RUNNABLE
+
+`services/origination-service/app/purge_ssn.py` exists and **must not be enabled**. This
+section is here because that module points at it; it is a statement of what is missing,
+not a procedure to follow. Read it before anyone asks you to "just turn the purge on".
+
+Three gates stand between the file and a purged row, and **all three are still shut**:
+
+| Gate | State | Who opens it |
+|---|---|---|
+| `SSN_PURGE_ENABLED` env var | unset | operator, once the retention answer lands |
+| `--execute` CLI flag | not passed | operator, per run |
+| `_ELIGIBILITY_IS_PLACEHOLDER` module constant | `True` | **a reviewed code change, not an operator** |
+
+The third gate is the one that matters today. The module's `WHERE` clause purges on
+**calendar age since submission**, which is wrong: the bureau pull needs the real digits
+while an application is still decisionable, so the trigger has to be every application
+tied to that applicant reaching a terminal state. Running the current query would null
+`applicants.ssn` for live applications and break their re-pull, irreversibly. With the
+constant set, `--execute` aborts with exit 2 instead.
+
+Dry-running is safe and is the only supported operation right now:
+
+```bash
+docker compose exec -T origination-service \
+  env SSN_PURGE_WINDOW_DAYS=365 python -m app.purge_ssn
+```
+
+Exit codes match `app/reconcile.py`: **0** ran (dry or executed), **2** refused to run
+(placeholder eligibility, unset/invalid window, or a DB error). A refusal is never a
+clean 0.
+
+**Before this can ever run, three things must land, in order:**
+
+1. The client's retention answer — how long the platform must be able to re-run a bureau
+   pull. `docs/debt-log.md` D33 and the GLBA handoff carry the question.
+2. The eligibility query rewritten to an `applications`-status join, and
+   `_ELIGIBILITY_IS_PLACEHOLDER` cleared **in the same change**.
+3. An answer on dead tuples. **This is where the CVV procedure above does not transfer.**
+   Migration 0020 dropped a column once and could rewrite the table with a single
+   `VACUUM FULL`. This purge is recurring and per-applicant, and `VACUUM FULL` takes an
+   `ACCESS EXCLUSIVE` lock on `applicants` — it would block intake and every officer read,
+   so it cannot run after each purge. Until someone establishes that routine autovacuum
+   reclaims those row versions on an acceptable schedule, or schedules maintenance
+   windows for it, "purged" means *nulled in the live row and still readable in the data
+   files* for an unbounded period. Do not report a purge as complete on the strength of
+   the `UPDATE` alone.
+
+**What this will not purge, and who owns it:** the same list as the CVV section above, and
+for the same reason — pre-redaction log files, WAL segments, replicas, and any backup.
+Nulling the column does not remove the SSN from the system. `docs/debt-log.md` D33 tracks
+these under "Not covered"; they are operator retention actions, not schema changes.
+
 ### Month-end reconciliation
 
 Compares the `payments` table (the capture side) against the processor settlement file

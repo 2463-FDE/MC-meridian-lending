@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (18cc928)` — 18cc928 2026-09-01 Merge pull request #141 from 2463-FDE/docs/disclosure-narration-judge
+Base: `origin/main (6aee0f4)` — 6aee0f4 2026-09-01 Merge pull request #143 from 2463-FDE/docs/narration-judge-handoff-fix
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #143 | `6aee0f4` | 2026-09-01 | Merge pull request #143 from 2463-FDE/docs/narration-judge-handoff-fix |
 | #141 | `18cc928` | 2026-09-01 | Merge pull request #141 from 2463-FDE/docs/disclosure-narration-judge |
 | #140 | `1f89999` | 2026-08-31 | Merge pull request #140 from 2463-FDE/docs/adr-0023-ssn-at-rest |
 | #139 | `864147c` | 2026-08-31 | Merge pull request #139 from 2463-FDE/fix/downstream-timeout-budget |
@@ -198,6 +199,7 @@ A job is BLOCKING unless its body carries `continue-on-error` or `|| true`.
 - **BLOCKING** — `compose-hardening-gate`
 - **BLOCKING** — `kyc-enforcement-gate`
 - **BLOCKING** — `kyc-persistence-gate`
+- **BLOCKING** — `ssn-purge-gate`
 - **BLOCKING** — `payment-idempotency-gate`
 - **BLOCKING** — `assistant-telemetry-gate`
 - **BLOCKING** — `no-sad-gate`

@@ -186,6 +186,11 @@ class _FakeCursor:
             # tgenabled, not a bare 1: 'O' (origin) is what a plainly created,
             # enforcing trigger carries.
             return ("O",)
+        if "'ssn_last4'" in self._last:
+            # The rung's pg_attribute/format_type query returns the column's rendered
+            # type, not a bare presence marker -- a fake (1,) would trip the NEW
+            # :type mismatch branch (1 != "text") for every rung after this one.
+            return ("text",)
         return (1,)
 
     def fetchall(self):
@@ -668,6 +673,100 @@ def test_dob_readable_constraint_is_in_canonical_init_schema():
         )
 
 
+# --- D33 (docs/debt-log.md): applicants.ssn_last4 must exist and be text -------------
+
+
+class _SSNLast4MissingCursor:
+    """Every earlier applicants rung satisfied, but migration 0023's ssn_last4 column is
+    absent -- a volume that ran 0011 but not 0023. intake's INSERT and recheck-kyc's
+    SELECT both name the column, so both would 500 while /health read fine."""
+
+    def __init__(self):
+        self._last = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self._last = sql
+
+    def fetchone(self):
+        if "'ssn_last4'" in self._last:
+            return None
+        if "pg_get_constraintdef" in self._last:
+            return (READABLE_DOB_CONSTRAINT_DEF,)
+        return (1,)
+
+
+class _SSNLast4MissingConn:
+    def cursor(self):
+        return _SSNLast4MissingCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_ssn_last4_column_missing(monkeypatch):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _SSNLast4MissingConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:applicants.ssn_last4"
+
+
+class _SSNLast4WrongTypeCursor(_SSNLast4MissingCursor):
+    """A same-named column of the WRONG type -- `ADD COLUMN IF NOT EXISTS` swallows a
+    pre-existing `ssn_last4` of any type, so the rung has to grade the rendered type,
+    not just presence. intake's INSERT would still succeed against an `integer` column
+    (Postgres would refuse a string literal at write time), but the point of asserting
+    here rather than there is a schema drift visible at /health, not at the first write."""
+
+    def fetchone(self):
+        if "'ssn_last4'" in self._last:
+            return ("integer",)
+        return super().fetchone()
+
+
+class _SSNLast4WrongTypeConn:
+    def cursor(self):
+        return _SSNLast4WrongTypeCursor()
+
+    def close(self):
+        pass
+
+
+def test_probe_fails_when_ssn_last4_column_has_the_wrong_type(monkeypatch):
+    monkeypatch.setattr(
+        config, "DATABASE_URL", "postgresql://meridian:s3cret@postgres:5432/meridian"
+    )
+    monkeypatch.setattr(
+        config.psycopg2, "connect", lambda *a, **k: _SSNLast4WrongTypeConn()
+    )
+    ok, err = config.database_reachable()
+    assert ok is False
+    assert err == "schema_not_ready:applicants.ssn_last4:type"
+
+
+def test_ssn_last4_column_is_in_canonical_init_schema():
+    from pathlib import Path
+
+    schema = Path(__file__).resolve().parents[3] / "db" / "init" / "001_schema.sql"
+    text = schema.read_text()
+    assert "uq_loans_app" in text, "parity anchor missing -- test path is wrong"
+    assert "ssn_last4" in text, (
+        "ssn_last4 is not declared by db/init/001_schema.sql -- a default `make up` "
+        "deploy would then have no column for intake to populate, permanently failing "
+        "schema_not_ready:applicants.ssn_last4"
+    )
+
+
 class _DocumentBodyMissingCursor:
     """Every earlier rung present but disclosures.document_body absent -- a volume that ran
     migration 0012 (the table) and not 0013 (the column). `accept_offer` selects it to decide
@@ -694,6 +793,8 @@ class _DocumentBodyMissingCursor:
     def fetchone(self):
         if "pg_get_constraintdef" in self._last:
             return (READABLE_DOB_CONSTRAINT_DEF,)
+        if "'ssn_last4'" in self._last:
+            return ("text",)
         if "'document_body'" in self._last:
             return None
         return (1,)
@@ -715,6 +816,8 @@ class _DocumentBodyWrongTypeCursor(_DocumentBodyMissingCursor):
     def fetchone(self):
         if "pg_get_constraintdef" in self._last:
             return (READABLE_DOB_CONSTRAINT_DEF,)
+        if "'ssn_last4'" in self._last:
+            return ("text",)
         if "'document_body'" in self._last and "jsonb" in self._last:
             return None
         return (1,)
@@ -1020,6 +1123,10 @@ class _AssistantRunsCursor:
             # tgenabled for the D20 audit_logs pair: 'O' (origin) is an enforcing
             # trigger. This fake models a ready volume for every rung but its own.
             return ("O",)
+        if "'ssn_last4'" in self._last:
+            # Same reasoning as _FakeCursor above: the rung reads a rendered type,
+            # not a bare presence marker.
+            return ("text",)
         return (1,)
 
     def fetchall(self):
