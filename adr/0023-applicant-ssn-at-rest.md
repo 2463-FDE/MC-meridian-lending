@@ -1,0 +1,275 @@
+# ADR 0023: Applicant SSN at Rest
+
+- **Status:** **Proposed** — partly built. Decision 1 (reduce internal exposure, independent
+  of retention) is built and covered by tests, held by the blocking `db-readiness-gate`.
+  Decision 2 (the retention-contingent remediation) is not built; it is blocked on a client
+  answer.
+- **Date:** 2026-08-31
+- **Author:** Claude Code
+- **Related:** ADR 0002 (single shared database — why every service reads `applicants.ssn`
+  under the same credential), ADR 0006 (logging redaction), ADR 0013 Decision 2 (the CVV/PAN
+  purge — precedent for technique, explicitly **not** for shape; see *Assumptions challenged*).
+  Debt D33 (this entry), D35 (SSN in transit, deferred separately), D5 (unencrypted
+  backup/WAL residual), D13b (PAN tokenization, same purge-vs-encrypt fork).
+- **Source:** `docs/debt-log.md` D33, `docs/handoffs/2026-08-31-docs-glba-encryption-framing.md`.
+
+---
+
+## Context
+
+`applicants.ssn` is a plaintext `TEXT` column (`db/init/001_schema.sql`). The only place in
+the repository that records this fact is a trailing comment on the declaration itself. There
+is one shared Postgres database and one schema (ADR 0002), so all seven services read the
+column under the same credential; nothing scopes access to the two that need it
+(`kyc-service`, `decision-service`).
+
+This is not a discretionary hardening question. The **GLBA Safeguards Rule, 16 CFR Part 314**
+(FTC, applies to non-bank financial institutions) was amended in 2021 to add **§314.4(c)(3)**:
+encrypt customer information *"in transit over external networks and at rest."* The two halves
+of that sentence do not carry the same status here. The in-transit half is qualified to
+*external* networks — every hop in this stack sits on one Docker bridge network on one host, so
+that half is deferred separately (D35) and the deferral is correct today. The at-rest half
+carries no such qualifier. A plaintext `applicants.ssn` sits inside the requirement regardless
+of network topology, and the rule's only recognized exception is a compensating control
+approved **in writing** by the institution's designated Qualified Individual. Nobody has done
+that. Depending on where the client lends, NY DFS Part 500 (23 NYCRR 500.15) may add a second,
+overlapping encryption-at-rest requirement. State breach-notification statutes near-universally
+treat an SSN as a notification trigger and most provide a safe harbor for encrypted data, so
+this control also decides whether a future incident is reportable.
+
+Nothing prohibits *storing* a full SSN — bureau furnishing under FCRA, TIN reporting, and the
+CIP flow this platform implements all need it at some point. The question this ADR answers is
+narrower and non-optional: how the value is protected while it sits in the column, and for how
+long it needs to sit there at all. Whether the applicable law requires action is not a call
+this register makes; that a rule is on point, so the remediation is not discretionary, is the
+fact being recorded.
+
+The two services that read the column need different amounts of it. `decision-service`
+(`app/decision.py:330`, `_pull_credit`) needs the real digits — it is the sole consumer of the
+value for its stated purpose. `kyc-service` (`app/kyc.py:28`) does not: its check is
+`bool(applicant.get("ssn"))`, a presence check, not a verification against the value. That gap
+is what makes a partial remediation available immediately, without waiting on the retention
+answer below.
+
+## Decision
+
+### Decision 1 — Reduce internal exposure now, independent of the retention answer (Built)
+
+We will add `applicants.ssn_last4` (migration `db/migrations/0023_applicants_ssn_last4.sql`,
+same number as this ADR by coincidence of two independent sequences — migrations and ADRs do
+not share a numbering space), populated at intake and backfilled on existing rows. Both call
+sites that previously sent `kyc-service` the full SSN (`applications.py` submit and
+`recheck-kyc`) now send only the last four characters. `kyc-service`'s own check is
+`bool(value)`; a non-empty last-4 satisfies it identically to a non-empty full value, so this
+is not a behaviour change. The origination readiness rung (`app/config.py`,
+`db-readiness-gate`) asserts the column exists and is `text`, so a volume that predates the
+migration reports unhealthy rather than 500ing intake or recheck on a missing column.
+`decision-service`'s bureau pull is untouched — it still reads the full column, because it
+must.
+
+#### Options considered
+
+| Option | Why rejected |
+|---|---|
+| **A. Chosen: `ssn_last4` column, sent to kyc-service instead of the full value** | Cuts the number of services that see the full SSN on the wire from two to one, today, with no dependency on the retention answer. |
+| **B. A boolean presence flag instead of last-4** | Seriously considered — `kyc-service`'s actual need is exactly `bool(value)`, and a flag is strictly less PII for identical functionality. Rejected for this pass on a usability ground: last-4 is the form a CSR verifying a caller over the phone actually uses, and building the boolean version now forecloses that without a product answer on whether CSR verification needs it. Recorded as a live open question, not a settled no — see *Assumptions challenged*. |
+| **C. Status quo — kyc-service continues receiving the full value** | Rejected. It is strictly worse than Option A on the same axis Option A improves, for no offsetting benefit; `kyc-service` never uses the extra digits. |
+
+### Decision 2 — The retention-contingent remediation: purge preferred, encryption as fallback (Proposed, not built)
+
+We will treat **purge to `ssn_last4` at application-terminal-state** as the preferred
+remediation, with **application-level encryption** as the fallback if the client's retention
+answer forecloses purging. Both remain live until that answer arrives; neither is built.
+
+The fork depends on one question, put to Priya (Compliance Officer) and Dana (VP Lending
+Ops): **how long after submission must the platform be able to re-run a bureau pull?** *Not
+once the decision is final* selects purge — no key management, the risk is removed rather
+than relocated. *Any time within the retention window* selects encryption — the column must
+persist, which requires a key-management answer (rotation, re-encryption, who holds the key)
+that itself waits on a deployment existing (the same blocker as D35). The record-retention
+rule (ECOA/Reg B, 25 months, 12 CFR 1002.12) bounds the window if retention is required, but
+whether the *raw* SSN is in scope under that rule is counsel's read, not engineering's.
+
+A scaffold for the purge path exists (`services/origination-service/app/purge_ssn.py`) but its
+eligibility query is a **known-wrong placeholder** and is documented as such in its own
+docstring: it selects on calendar age since submission. The correct trigger is the
+application reaching a terminal state (decided/funded/declined) for every `applications` row
+tied to that applicant — recurring and event-driven, not a one-shot migration (see
+*Assumptions challenged*). The scaffold ships three independent safety gates
+(`SSN_PURGE_ENABLED` env flag, an explicit `--execute`, and an in-code
+`_ELIGIBILITY_IS_PLACEHOLDER` constant that makes `run()` raise rather than purge while it
+stands) and the CLI's dry-run/reporting shape, which the corrected query can reuse. The third
+gate exists because the first two are both operator-flippable — an env var and a CLI flag —
+and the eligibility query below is known-wrong, so a code-level refusal is what stands between
+that query and a live run, not just a docstring. Clearing it is a reviewed code change made in
+the same diff that replaces the calendar-age `WHERE` clause below with the
+applications-terminal-state join.
+
+#### Options considered
+
+| Option | Why rejected |
+|---|---|
+| **A. Chosen (preferred): purge to `ssn_last4` at terminal state** | The only option that removes the risk rather than relocating it, and the only one that needs no key-management answer. Selected if the retention answer permits it. |
+| **B. Chosen (fallback): application-level encryption, key from a secret manager** | Correct if the retention answer requires the value to persist. Needs a key-management story (rotation, re-encryption, both read sites changed) and a deployment to hold the key, so it is a second build, not an increment on Decision 1 — not a quick fallback in practice, only in framing. |
+| **C. `pgcrypto` column encryption** | Rejected outright, independent of the retention answer. The key is reachable by the same database credential that is the threat this ADR responds to (ADR 0002: one shared schema, one credential, all seven services). It protects against a stolen disk and nothing in the actual threat set — the same critique this repository already made of ADR 0003's disk-encryption argument for card data. |
+
+## Consequences
+
+### Positive
+
+- The number of services that see the full SSN on the wire drops from two to one today,
+  with no dependency on any external answer (Decision 1).
+- Whichever path Decision 2 resolves to, the fork is already named with its trade-offs
+  recorded, so the client's answer selects a path rather than triggering a design exercise.
+- The purge scaffold's safety shape (three independent gates, dry-run default, reporting
+  format) is reusable once the eligibility query is corrected — it does not need to be
+  built twice, only the `WHERE` clause does.
+
+### Negative / tradeoff (accepted)
+
+- **`applicants.ssn` stays plaintext until Decision 2 resolves.** Decision 1 does not close
+  D33; it narrows what Decision 2 has to fix.
+- **`ssn_last4` is itself PII beside a name and DOB**, more than the functionality it serves
+  strictly requires (Decision 1, Option B). Accepted for now as a considered trade, not an
+  oversight.
+- **The purge scaffold exists but cannot be enabled.** Shipping an inert, documented-wrong
+  placeholder is a deliberate choice — it reuses safety gates and shape later — but it is
+  still unfinished work sitting in the tree.
+- **Encryption, if selected, is a second build that waits on a deployment existing.** The
+  same dependency already blocks D35; this ADR does not remove it.
+
+### Neutral
+
+- `applicants` gains one nullable column (`ssn_last4`) regardless of which Decision 2 path
+  is eventually selected.
+
+## Cross-cutting concerns
+
+**Security.** Decision 1 shrinks the set of services holding the full value without waiting
+on anything. Decision 2's two live paths both reduce exposure further; `pgcrypto` is rejected
+specifically because it would not, given the threat model ADR 0002 already establishes (one
+shared credential). Redaction and logging paths are unaffected — neither `ssn` nor
+`ssn_last4` is logged anywhere in this change.
+
+**Performance.** Decision 1 adds one column and one slice operation per intake/recheck call;
+immaterial. Decision 2's purge path, once corrected, updates one row per terminal-state
+transition rather than in bulk, so it does not introduce a batch cost; the open question is
+whether that per-row `UPDATE`'s dead tuples need scheduled maintenance (see *Assumptions
+challenged*), which is a maintenance-window cost, not a request-latency one.
+
+**Scalability.** No new service, no new datastore. Both Decision 2 paths operate within the
+existing shared database.
+
+**Reliability.** The readiness rung added for `ssn_last4` (Decision 1) makes an unmigrated
+volume fail closed at `/health` rather than 500ing intake or recheck-kyc, the same pattern
+every other schema-dependent rung in this codebase follows.
+
+**Maintainability.** Decision 1 is a small, self-contained change. Decision 2 deliberately
+defers its harder engineering (event-driven purge triggering, or key management) rather than
+building either speculatively before the client answer is known — building the wrong shape
+now would cost more to unwind than building nothing.
+
+**Cost.** Encryption's cost is mostly deferred key-management infrastructure, not measured
+here. Purge has no comparable infrastructure cost, which is part of why it is preferred when
+available.
+
+**Operational impact.** The purge path, once corrected, needs an operator procedure for
+whatever reclaims dead tuples on a schedule that does not lock `applicants` the way a
+`VACUUM FULL` would (see *Assumptions challenged*) — not yet written, blocked on that
+question. Encryption's operational cost is key rotation and incident-response key recovery,
+neither designed yet.
+
+**Testing impact.** Decision 1 is covered: `test_intake.py`, `test_db_readiness.py`,
+`test_authz.py`, `test_kyc_gate.py` assert the presence-check behaviour is unchanged and the
+readiness rung fires correctly. Decision 2 has no tests beyond the purge scaffold's own
+gate-and-dry-run unit tests (`test_purge_ssn.py`) — its eligibility logic is untested because
+it is known-wrong and unfinished by design.
+
+## Implementation plan
+
+1. `ssn_last4` column — migration `db/migrations/0023_applicants_ssn_last4.sql`, backfilled.
+   **Built.**
+2. Submit and recheck-kyc send `kyc-service` last-4 instead of the full value
+   (`app/intake.py::ssn_last4`). **Built.**
+3. Readiness rung for `applicants.ssn_last4` in `app/config.py`, covered by the existing
+   blocking `db-readiness-gate`. **Built.**
+4. Purge CLI scaffold (`app/purge_ssn.py`) — safety gates and reporting shape only, eligibility
+   query is a documented placeholder. **Built, not enabled.**
+5. Get the retention-window answer from Priya/Dana. **Not started — the actual blocker.**
+6. Rework the purge eligibility query to a terminal-state, per-applicant trigger; resolve the
+   autovacuum-vs-scheduled-maintenance question named in *Assumptions challenged*; write the
+   real migration. **Not started, contingent on step 5.**
+7. If the answer instead requires retention, scope the encryption build (key source, rotation,
+   both read sites) as its own change. **Not started, contingent on step 5.**
+8. Name the residuals a purge cannot reach — pre-redaction logs (D5), backups, WAL, replicas —
+   as their own retention action once step 6 or 7 lands. **Not started.**
+
+## Rollback strategy
+
+Decision 1 is additive and fully reversible: drop `ssn_last4`, revert the two call sites to
+sending the full value, remove the readiness rung. Nothing downstream depends on the column
+existing.
+
+The purge scaffold (`app/purge_ssn.py`) can be deleted with no effect on running behaviour —
+it has never executed a purge, by construction.
+
+**Once Decision 2's purge path actually runs, it is not reversible.** Nulling `applicants.ssn`
+destroys the value; that is the point. This is the same posture ADR 0013 takes for its CVV/PAN
+purge: the rollback for a defect discovered after purging is to fix forward, not to restore
+data that no longer exists. If Decision 2 instead resolves to encryption, that path is
+reversible in principle (decrypt back) but requires the key to still be held — losing the key
+is equivalent to a purge in effect, which is itself a risk the key-management design has to
+carry, not a rollback strategy this ADR can specify in advance.
+
+## Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| The purge scaffold is enabled before its eligibility query is corrected, purging the SSN of an applicant still awaiting a decision | Three gates, not two: `SSN_PURGE_ENABLED` and `--execute` are both required and neither is set, and even with both set `run()` raises `PurgeAbort` (exit 2, not a clean 0) while the in-code `_ELIGIBILITY_IS_PLACEHOLDER` constant stands — an env var and a CLI flag are both operator-flippable with no review, so the refusal that actually matters is the one that needs a reviewed diff to lift. |
+| Decision 2 stalls indefinitely on the client answer, leaving `applicants.ssn` plaintext with no forcing function | D33 is already recorded as the highest-priority item among the entries this sweep found (`docs/debt-log.md`), and this ADR names the exact question blocking it so it is not rediscovered by a future session. |
+| The eventual purge migration ships without solving the dead-tuple reclaim question, so "purged" means only "nulled in the live row" | Named explicitly in *Assumptions challenged* and in the Implementation plan as a precondition of step 6, not an afterthought to discover during that migration's review. |
+| Encryption is selected and ships with a placeholder or hardcoded key, the same class of defect this rule exists to prevent | `decision-service`'s `_ssn_fingerprint` pepper pattern (`app/config.py`) is the precedent to mirror: refuse a known-placeholder value, report unhealthy outside development without a real one. Cite this ADR's Decision 2 when that build starts. |
+| `ssn_last4` is later judged to have been the wrong call (Decision 1, Option B) after CSR-verification requirements turn out not to need it | Removing a column is a strictly smaller change than adding one under a readiness rung already in place; the option was recorded as live, not closed, for exactly this reason. |
+
+## Assumptions challenged
+
+- **"Leave it as it is until the client answers."** False. GLBA's at-rest requirement carries
+  no topology qualifier and its only exception is a written, Qualified-Individual-approved
+  compensating control, which does not exist here. The retention answer selects *which*
+  remediation, not *whether* one happens.
+- **"The purge is the same shape as the CVV/PAN purge (ADR 0013 Decision 2, migration
+  0020)."** False, and corrected in this ADR relative to an earlier debt-log draft that made
+  this claim. 0020 dropped a column once, because SAD retention is prohibited outright with
+  no legitimate ongoing need for the value. D33 cannot drop the column the same way: the
+  bureau pull needs the real digits while an application is still decisionable, so the
+  column stays and the *value* is nulled per-applicant at terminal state — recurring and
+  event-driven. That also means the single `VACUUM FULL` that closed 0020 does not transfer:
+  it takes an `ACCESS EXCLUSIVE` lock on `applicants`, which a per-purge rewrite cannot afford
+  without blocking intake and every officer read. Whether routine autovacuum reclaims the
+  resulting dead tuples on an acceptable schedule, or whether scheduled maintenance is
+  required, is unresolved and named as a precondition, not assumed either way.
+- **"`kyc-service` needs the real SSN, or at least a recognizable fragment of it."** False,
+  measured directly: its own code is `bool(applicant.get("ssn"))`. This is what makes
+  Decision 1 available without waiting on Decision 2.
+- **"Last-4 costs nothing over a boolean, so there's nothing to decide."** Not accepted as
+  free. Recorded as a live, considered trade (Decision 1, Option B) rather than settled by
+  default, because the cheaper direction to build is the one that removes a column later, not
+  the one that adds it back after regulatory or product review flags it.
+- **"Nulling the column closes D33."** False on its own terms even after Decision 2 lands.
+  The same residuals ADR 0013 named for cardholder data apply identically here: pre-redaction
+  log files, database backups, WAL segments, and any replica are not reached by a column
+  purge and need their own retention action, owned elsewhere. Closing D33 without naming this
+  would claim more coverage than the code has.
+
+## Sign-off status
+
+**Proposed, partly built.** Decision 1 is built, covered by tests, and held by the blocking
+`db-readiness-gate`. Decision 2 is engineering position only —
+purge preferred, encryption as the named fallback — with the retention-window question still
+open with Priya and Dana. This ADR does not resolve that question; it records what each
+answer selects and why, so the answer costs a path choice rather than a design exercise.
+
+Decision 2 carries no active remediation obligation the way ADR 0013's Decision 2 did (an
+already-prohibited value being retained today): storing the full SSN is lawful here, so the
+open item is a hardening deadline, not an ongoing violation. It is still, per the Regulatory
+finding in `docs/debt-log.md` D33, not a deadline this register can decide to skip.

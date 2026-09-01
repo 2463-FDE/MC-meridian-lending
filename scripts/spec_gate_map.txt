@@ -326,3 +326,13 @@ services/servicing-service/app/payments.py => docs/specs/log-aggregation.md
 # into a mapped line, or the exception is accepted explicitly by a second
 # reviewer. Decide before the surface changes -- an unwritten rule is not
 # inheritable.
+
+# D33 (applicants.ssn at rest) -- ADR 0023. Mapped to intake.py, the write path that
+# persists the column the ADR governs, and NOT to the purge mechanism the decision most
+# directly constrains: spec_diff_gate is an existence check, so mapping a path that ships
+# in a sibling PR would fail this gate for a docs-only change and force a stack. intake.py
+# is already on main, so this line resolves the day the ADR lands. Tighten it to
+# services/origination-service/app/purge_ssn.py once that file is on main -- that is the
+# file whose eligibility rule, destroy-full-keep-last-4 behaviour and inertness the ADR
+# actually obligates.
+services/origination-service/app/intake.py => adr/0023-applicant-ssn-at-rest.md
