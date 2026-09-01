@@ -3,7 +3,7 @@
 INERT BY DEFAULT. This is the mechanism, not the decision: it exists so the reversible
 half of D33 (ssn_last4, KYC off the full value) does not have to wait on the client's
 retention answer, but the one irreversible step -- actually nulling applicants.ssn --
-needs that answer and an explicit human yes. Two independent gates stand between "this
+needs that answer and an explicit human yes. Three independent gates stand between "this
 file is on disk" and a row being purged:
 
   1. SSN_PURGE_ENABLED must be a truthy env var (config.py). Unset -- the shipped
