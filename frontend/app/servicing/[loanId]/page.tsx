@@ -134,9 +134,12 @@ export default function LoanDetailPage() {
   } | null>(null);
 
   // UI-only affordance: only CSR/admin SEE the money-moving rep actions
-  // (adjust balance / waive fee). The gateway/API still accept ANY
-  // authenticated caller — server-side authz is intentionally absent
-  // (debt D8, fixed in W6). Hiding the buttons changes nothing server-side.
+  // (adjust balance / waive fee). servicing-service enforces the same role
+  // check server-side (authz.require_money_role, D8, PR #32) -- hiding the
+  // buttons is not what stops a borrower from calling the route directly.
+  // Still open: the gateway itself enforces no role authz on money actions
+  // (D8), and one money role still makes and approves its own adjustment
+  // with no second approver (maker-checker, ADR 0017, not built).
   const [canRepActions, setCanRepActions] = useState(false);
   useEffect(() => {
     const role = getUser()?.role;
@@ -217,14 +220,16 @@ export default function LoanDetailPage() {
 
   // Refresh only balance + payment history after an action. Takes the caller's route
   // generation so a refresh started before a navigation cannot write another loan's
-  // balance onto the account now on screen.
+  // balance onto the account now on screen. Returns whether the balance fetch itself
+  // landed, so a caller relying on the refreshed figure being on screen (the 409
+  // conflict message below) can tell a stale display from a current one.
   const refreshBalanceAndHistory = useCallback(async (gen: number) => {
-    if (!loanId) return;
+    if (!loanId) return false;
     const [bal, pay] = await Promise.allSettled([
       apiGet(`/lss/accounts/${loanId}/balance`),
       apiGet(`/lss/loans/${loanId}/payments`),
     ]);
-    if (routeGenRef.current !== gen) return;
+    if (routeGenRef.current !== gen) return false;
     if (bal.status === "fulfilled") {
       const b = bal.value as { balance?: number; past_due?: number };
       setLoan((prev) =>
@@ -240,6 +245,7 @@ export default function LoanDetailPage() {
     if (pay.status === "fulfilled") {
       setPayments((pay.value as { items?: PaymentRow[] })?.items ?? []);
     }
+    return bal.status === "fulfilled";
   }, [loanId]);
 
   // Shared by makePayment (fresh key, new intent) and retryPayment (same key, same
@@ -322,7 +328,7 @@ export default function LoanDetailPage() {
     setActionErr(null);
     setActionMsg(null);
     try {
-      // weak authz: any authenticated user can do this
+      // servicing-service rejects a non-money role with a 403 (authz.require_money_role, D8)
       await apiPost(`/lss/accounts/${loanId}/adjust-balance`, {
         new_balance: parseFloat(newBalance || "0"),
         // The balance last shown on screen -- servicing refuses (409) if the stored
@@ -339,11 +345,25 @@ export default function LoanDetailPage() {
         // Refuse to guess what the operator meant against a figure that has moved.
         // Refresh so the KPI/placeholder show the real balance, and require them to
         // review it and resubmit deliberately -- never auto-retry a money write.
-        await refreshBalanceAndHistory(gen);
+        const refreshed = await refreshBalanceAndHistory(gen);
         if (routeGenRef.current !== gen) return;
-        setActionErr(
-          "Balance changed since it was quoted. Review the current balance above and resubmit."
-        );
+        if (refreshed) {
+          setActionErr(
+            "Balance changed since it was quoted. Review the current balance above and resubmit."
+          );
+        } else {
+          // The screen still shows the stale quoted figure -- telling the operator
+          // to "review the current balance above" here would point at the exact
+          // number the compare-and-set just refused. Fall back to the 409's own
+          // detail (it names the current balance) so a deliberate resubmit is
+          // never made against a number this screen never actually confirmed.
+          setActionErr(
+            errMsg(
+              err,
+              "Balance changed since it was quoted, and the current balance could not be refreshed. Reload before resubmitting."
+            )
+          );
+        }
       } else {
         setActionErr(errMsg(err, "Balance adjustment failed."));
       }
@@ -358,7 +378,7 @@ export default function LoanDetailPage() {
     setActionErr(null);
     setActionMsg(null);
     try {
-      // weak authz: any authenticated user can do this
+      // servicing-service rejects a non-money role with a 403 (authz.require_money_role, D8)
       await apiPost(`/lss/accounts/${loanId}/waive-fee`, {
         amount: parseFloat(waiveAmount || "0"),
       });
@@ -598,9 +618,8 @@ export default function LoanDetailPage() {
       </div>
 
       {/* Rep actions — UI-only affordance, shown only to CSR/admin. */}
-      {/* UI-only affordance. The gateway/API still accept ANY authenticated */}
-      {/* caller — server-side authz is intentionally absent (debt D8, fixed */}
-      {/* in W6). The endpoints below remain callable by every role. */}
+      {/* servicing-service enforces the same role check server-side (D8, PR #32); */}
+      {/* the gateway itself still enforces no role authz on money actions (D8 open half). */}
       {canRepActions ? (
         <>
           <h2>Servicing rep actions</h2>
