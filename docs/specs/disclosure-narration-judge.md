@@ -144,12 +144,13 @@ Two reasons it isn't the vehicle here:
    - **Long term:** `term_months > 60` routes `hold_for_compliance`. This cutoff is defined
      by this spec, not by a policy source — no term band exists anywhere in the repo. If one
      is later added under `policies/`, this cutoff moves there and the fixtures cite it.
-   - **Top-of-band rate: not gradeable, and D3 does not grade it.** There is no rate band.
+   - **Top-of-band rate: not gradeable, and D3 does not grade it.** `policies/fee_schedule.md`
+     documents a band (7.99%–24.99% APR by risk band), but no code enforces it:
      `POLICY_RATE_PCT = 7.99` (`services/origination-service/app/routers/offers.py`) is a
      single constant applied to every offer, so no fixture can present a rate at the top of
-     a band that does not exist. Grading this axis would pin a boundary the code cannot
-     produce. The axis is deferred until a rate band exists; when it does, this section and
-     D3's axis (b) are what change.
+     a band the code never produces. Grading this axis would pin a boundary runtime behavior
+     cannot reach. The axis is deferred until the band is code-enforced; when it is, this
+     section and D3's axis (b) are what change.
 3. **Offline LLM judge** (D3). Reuses `ClaudeClient` (`app/llm/client.py`) already in the
    service — no new provider dependency.
 
@@ -171,7 +172,7 @@ Two reasons it isn't the vehicle here:
      pass over the same question D1 answers at runtime — spelled-out or paraphrased figures
      a regex cannot enumerate.
    - **(b) `officer_action`.** Graded against the D2 term cutoff only. The rate criterion is
-     not graded — see D2, there is no rate band.
+     not graded — see D2, the band is documented but code-unenforced.
    - **(c) Agreement with D1.** D1's verdict on that same raw completion must match axis
      (a). A completion the judge marks fabricated that D1 passed is a gate failure: that
      disagreement is the regex hole D1's own Risks section predicts, and catching it is why

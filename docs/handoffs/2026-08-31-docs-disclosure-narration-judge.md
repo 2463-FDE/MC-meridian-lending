@@ -37,9 +37,9 @@ D1 is done (see above). D2–D4 remain, in spec order (each landable on its own)
 1. **D2 — pinned fixture set.** ~12–15 synthetic `DisclosureState` cases: normal,
    unusually long term, minimum term, mismatched `checks_passed`. No real
    `application_id`/applicant data. No top-of-band-rate fixture — spec
-   (`docs/specs/disclosure-narration-judge.md:147`) rules that axis not gradeable:
-   `POLICY_RATE_PCT` is a single constant, no rate band exists to put a fixture at the top
-   of.
+   (`docs/specs/disclosure-narration-judge.md:147`) rules that axis not gradeable: the
+   documented band (`policies/fee_schedule.md`) is code-unenforced, `POLICY_RATE_PCT` is a
+   single constant, so no fixture can be a real top-of-band offer.
 2. **D3 — offline LLM judge.** Reuse `ClaudeClient` from
    `services/origination-service/app/llm/client.py` — no new provider dependency. Judge
    grades: (a) no figure beyond what the model was given, (b) `officer_action` matches the
