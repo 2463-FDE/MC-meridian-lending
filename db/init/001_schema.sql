@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS applicants (
     name        TEXT NOT NULL,
     dob         DATE,
     ssn         TEXT,            -- plaintext
+    -- D33 (docs/debt-log.md): last-4 only, so a presence check (kyc-service's
+    -- ssn_verified) does not need the full value on the wire. Populated at intake
+    -- (app/intake.py::ssn_last4); does not replace ssn -- see the migration for why.
+    ssn_last4   TEXT,
     ein         TEXT,            -- for entity applicants
     is_entity   BOOLEAN DEFAULT FALSE,
     email       TEXT,

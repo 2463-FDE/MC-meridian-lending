@@ -13,6 +13,7 @@ This logic used to live inside origination-service (app/kyc.py); it is now its o
 kyc-service. Splitting it into a standalone service did NOT close the gap — the CIP-only
 story (no sanctions/OFAC, no UBO, no ongoing monitoring, no SAR) is carried forward intact.
 """
+
 from .logging_config import get_logger
 
 log = get_logger("kyc")
@@ -25,12 +26,15 @@ def run_cip(applicant: dict) -> dict:
         "name_verified": bool(applicant.get("name")),
         "dob_verified": bool(applicant.get("dob")),
         "address_verified": bool(applicant.get("address")),
-        "ssn_verified": bool(applicant.get("ssn")),
+        "ssn_verified": bool(applicant.get("ssn")),  # presence only; origination
+        # sends last-4 for this field since D33 (docs/debt-log.md) -- bool() cannot
+        # tell the difference, so this is unchanged.
     }
     # NOTE: entity applicants (LLC) have no dob/ssn — they still "pass" CIP here.
     # Allowlist log: applicant_id + the boolean CIP result only. The raw name is
     # client-controlled free text (could hide a PAN) and is PII in its own right,
     # so it is never logged. redactor stays a backstop for the id/result string.
-    log.info("CIP check applicant_id=%s result=%s",
-             applicant.get("applicant_id"), result)
+    log.info(
+        "CIP check applicant_id=%s result=%s", applicant.get("applicant_id"), result
+    )
     return result

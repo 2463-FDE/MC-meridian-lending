@@ -14,6 +14,15 @@ from . import authz, config, db
 log = get_logger("intake")
 
 
+def ssn_last4(ssn: str | None) -> str | None:
+    """Last 4 characters of an SSN -- enough for kyc-service's presence check
+    (ssn_verified = bool(value)) without putting the full value on the wire (D33,
+    docs/debt-log.md). A slice, not a digit strip: preserves bool()-truthiness of the
+    original value exactly (any non-empty ssn yields a non-empty result), so routing
+    KYC through this is not a behaviour change. None in, None out."""
+    return ssn[-4:] if ssn else None
+
+
 def create_application(
     payload: dict, submitted_by_user_id: int | None = None
 ) -> tuple[int, str]:
@@ -65,12 +74,13 @@ def create_application(
     )
     with db.transaction() as cur:
         cur.execute(
-            "INSERT INTO applicants (name, dob, ssn, ein, is_entity, address) "
-            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            "INSERT INTO applicants (name, dob, ssn, ssn_last4, ein, is_entity, address) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (
                 payload.get("name"),
                 payload.get("dob"),
                 payload.get("ssn"),
+                ssn_last4(payload.get("ssn")),
                 payload.get("ein"),
                 payload.get("is_entity", False),
                 payload.get("address"),

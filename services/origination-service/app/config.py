@@ -322,6 +322,20 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
                 != _DOB_READABLE_EXPECTED_DEF
             ):
                 return False, "schema_not_ready:ck_applicants_dob_readable:definition"
+            # D33 (docs/debt-log.md): intake writes applicants.ssn_last4 on every submit
+            # (migration 0023), and recheck-kyc reads it instead of the full ssn column.
+            # A volume that has applicants but predates 0023 has the table and not the
+            # column, so both writes would 500 while /health read fine -- same class as
+            # the rungs above. Type asserted, not just the name, same reason as the rest
+            # of this function: ADD COLUMN IF NOT EXISTS swallows a same-named column of
+            # any type.
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'applicants' AND column_name = 'ssn_last4' "
+                "AND data_type = 'text'"
+            )
+            if cur.fetchone() is None:
+                return False, "schema_not_ready:applicants.ssn_last4"
             # `accept_offer` reads disclosures.document_body: `delivered` is a claim about a
             # document, and migration 0013 leaves already-delivered rows at NULL, so the
             # boarding gate has to see whether one was recorded. A volume that ran 0011 but
@@ -539,6 +553,19 @@ def continuation_token_keys() -> list:
 # shared-device residue / a stale link. The apply flow is a short single-session or
 # same-week resume, so a few days is ample.
 CONTINUATION_TOKEN_TTL_DAYS = int(os.getenv("CONTINUATION_TOKEN_TTL_DAYS", "7"))
+
+# D33 (docs/debt-log.md, app/purge_ssn.py). NO COMMITTED DEFAULT for either: an
+# unset SSN_PURGE_ENABLED means the purge mechanism is off no matter what flags a
+# caller passes, and an unset SSN_PURGE_WINDOW_DAYS means purge_ssn.py refuses to
+# guess a retention window rather than fall back to one nobody chose. Both wait on
+# the client's retention answer (see the handoff) -- this is the switch, not a
+# decision about when to flip it.
+SSN_PURGE_ENABLED = os.getenv("SSN_PURGE_ENABLED", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+SSN_PURGE_WINDOW_DAYS = os.getenv("SSN_PURGE_WINDOW_DAYS", "")
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
