@@ -10,7 +10,6 @@ What is pinned:
   - waive_fee reduces past_due only, never balance
   - apply_payment reduces balance only, never past_due
   - assess_late_fee adds a flat $35 to past_due and does not touch updated_at
-  - the x_user_role header on adjust-balance / waive-fee is accepted and IGNORED
   - no money path writes any audit or ledger row, EXCEPT apply_payment, which since
     D3 (ADR 0020) writes payment_applications in the same statement as the movement
 
@@ -29,6 +28,7 @@ so they pin behaviour rather than re-testing float representation.
 """
 
 import pytest
+from fastapi import HTTPException
 
 from app import balance, delinquency, main
 
@@ -188,16 +188,27 @@ def test_late_fee_adds_flat_35_and_does_not_touch_updated_at(db_spy):
     assert "UPDATED_AT" not in db_spy.sql_text().upper()
 
 
-# --- the role header is declared and ignored -------------------------------
+# --- the role header is enforced (D8, PR #32) -------------------------------
 
 
-@pytest.mark.parametrize(
-    "role", ["borrower", "csr", "underwriter", "admin", None, "", "nonsense"]
-)
-def test_adjust_balance_route_ignores_x_user_role(db_spy, role):
-    # main.py:103 declares x_user_role and never reads it, so every role — including
-    # a borrower and an unrecognized string — moves money. Closing this is ADR 0014
-    # Decision 1, and this test is expected to change when that lands.
+@pytest.mark.parametrize("role", ["borrower", "underwriter", None, "", "nonsense"])
+def test_adjust_balance_route_rejects_a_non_money_role(db_spy, role):
+    # authz.require_money_role restricts adjust-balance to {csr, admin} (D8). A
+    # rejected caller must move nothing -- the 403 happens before balance.adjust_balance
+    # is ever called.
+    with pytest.raises(HTTPException) as exc_info:
+        main.adjust_balance(
+            1,
+            main.AdjustIn(new_balance=0.0, expected_balance=500.0),
+            x_user_role=role,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert db_spy.row["balance"] == pytest.approx(500.0)
+
+
+@pytest.mark.parametrize("role", ["csr", "admin"])
+def test_adjust_balance_route_allows_a_money_role(db_spy, role):
     out = main.adjust_balance(
         1,
         main.AdjustIn(new_balance=0.0, expected_balance=500.0),
@@ -208,9 +219,17 @@ def test_adjust_balance_route_ignores_x_user_role(db_spy, role):
     assert db_spy.row["balance"] == pytest.approx(0.0)
 
 
-@pytest.mark.parametrize("role", ["borrower", "csr", None])
-def test_waive_fee_route_ignores_x_user_role(db_spy, role):
-    out = main.waive_fee(1, main.WaiveIn(amount=75.0), x_user_role=role)
+@pytest.mark.parametrize("role", ["borrower", None])
+def test_waive_fee_route_rejects_a_non_money_role(db_spy, role):
+    with pytest.raises(HTTPException) as exc_info:
+        main.waive_fee(1, main.WaiveIn(amount=75.0), x_user_role=role)
+
+    assert exc_info.value.status_code == 403
+    assert db_spy.row["past_due"] == pytest.approx(75.0)
+
+
+def test_waive_fee_route_allows_a_money_role(db_spy):
+    out = main.waive_fee(1, main.WaiveIn(amount=75.0), x_user_role="csr")
 
     assert out == {"loan_id": 1, "past_due": pytest.approx(0.0)}
 
