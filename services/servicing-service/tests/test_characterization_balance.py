@@ -18,9 +18,11 @@ ADR 0020 landed and changed three of these deliberately, which is the signal thi
 file exists to produce: apply_payment is now one atomic statement and it now records
 the movement. D32's first half changed a fourth: waive_fee is now also one atomic
 statement (the decrement computes from the stored past_due inside the UPDATE), same
-shape as apply_payment, one column over. adjust_balance is the one mutation still
-unlocked — it sets an absolute figure rather than a delta, so the D3/D32 fix does not
-apply to it as-is (docs/debt-log.md D32).
+shape as apply_payment, one column over. D32's second half changed a fifth:
+adjust_balance is now a compare-and-set — one atomic statement that refuses (nothing
+written) when the caller's quoted balance no longer matches the stored one, rather
+than a delta computed inside the statement (it still sets an absolute figure, so the
+decrement shape itself does not apply — see docs/debt-log.md D32).
 
 Money here is float because the code is float (D2); the assertions use pytest.approx
 so they pin behaviour rather than re-testing float representation.
@@ -99,6 +101,19 @@ def db_spy(monkeypatch):
                 self.row["past_due"] -= params[0]
                 self.row["updated_at"] = "t1"
                 return [{"past_due": self.row["past_due"]}]
+            if (
+                "UPDATE BALANCES" in upper
+                and "SET BALANCE" in upper
+                and "RETURNING BALANCE" in upper
+            ):
+                # adjust_balance's compare-and-set (D32 second half): only mutates
+                # when the caller's expected_balance still matches the stored value.
+                new_value, loan_id, expected = params
+                if self.row["balance"] != expected:
+                    return []
+                self.row["balance"] = new_value
+                self.row["updated_at"] = "t1"
+                return [{"balance": self.row["balance"]}]
             if "UPDATE BALANCES" in upper:
                 if "SET BALANCE" in upper:
                     self.row["balance"] = params[0]
@@ -133,15 +148,14 @@ def test_apply_payment_subtracts_from_balance_and_leaves_past_due(db_spy):
 
 
 def test_adjust_balance_overwrites_in_place_and_loses_the_prior_value(db_spy):
-    returned = balance.adjust_balance(1, 12.34)
+    returned = balance.adjust_balance(1, 12.34, expected_balance=500.0)
 
     assert returned == pytest.approx(12.34)
     assert db_spy.row["balance"] == pytest.approx(12.34)
-    # The prior 500.0 is not written anywhere: the only statements are one SELECT and
-    # one UPDATE of the same column. This is the whole of Q3 in the week-6 report.
-    assert len(db_spy.statements) == 2, db_spy.statements
-    assert "500" not in db_spy.sql_text()
-    assert not any(p and 500.0 in p for _, p in db_spy.statements)
+    # The prior 500.0 is not recorded anywhere the reader could recover it from -- it
+    # appears only as the compare-and-set predicate, one atomic UPDATE. This is the
+    # whole of Q3 in the week-6 report, still true after D32's second half.
+    assert len(db_spy.statements) == 1, db_spy.statements
 
 
 def test_waive_fee_subtracts_from_past_due_and_leaves_balance(db_spy):
@@ -184,7 +198,11 @@ def test_adjust_balance_route_ignores_x_user_role(db_spy, role):
     # main.py:103 declares x_user_role and never reads it, so every role — including
     # a borrower and an unrecognized string — moves money. Closing this is ADR 0014
     # Decision 1, and this test is expected to change when that lands.
-    out = main.adjust_balance(1, main.AdjustIn(new_balance=0.0), x_user_role=role)
+    out = main.adjust_balance(
+        1,
+        main.AdjustIn(new_balance=0.0, expected_balance=500.0),
+        x_user_role=role,
+    )
 
     assert out == {"loan_id": 1, "balance": pytest.approx(0.0)}
     assert db_spy.row["balance"] == pytest.approx(0.0)
@@ -219,7 +237,10 @@ def test_late_fee_route_takes_no_caller_identity_at_all():
 @pytest.mark.parametrize(
     "move",
     [
-        pytest.param(lambda: balance.adjust_balance(1, 10.0), id="adjust_balance"),
+        pytest.param(
+            lambda: balance.adjust_balance(1, 10.0, expected_balance=500.0),
+            id="adjust_balance",
+        ),
         pytest.param(lambda: balance.waive_fee(1, 10.0), id="waive_fee"),
         pytest.param(lambda: delinquency.assess_late_fee(1), id="late_fee"),
     ],
@@ -262,17 +283,29 @@ def test_apply_payment_is_one_atomic_statement(db_spy):
     )
 
 
-def test_adjust_balance_is_still_a_separate_unlocked_read_then_write(db_spy):
-    # adjust_balance keeps the shape D3 removed from apply_payment: two statements,
-    # no transaction, no row lock. Not fixed by D32 either — it sets an absolute
-    # figure, so the atomic-decrement fix does not apply to it as-is (docs/debt-log.md
-    # D32).
-    balance.adjust_balance(1, 100.0)
+def test_adjust_balance_is_now_one_atomic_compare_and_set(db_spy):
+    # D32 second half: adjust_balance still sets an absolute figure rather than a
+    # delta, so the atomic-decrement shape doesn't apply to it as-is -- but a
+    # compare-and-set (predicate + write in one statement) closes the same race.
+    balance.adjust_balance(1, 100.0, expected_balance=500.0)
 
     sql = db_spy.sql_text().upper()
-    assert len(db_spy.statements) == 2, db_spy.statements
-    assert "FOR UPDATE" not in sql
+    assert len(db_spy.statements) == 1, db_spy.statements
+    assert "WHERE LOAN_ID = %S AND BALANCE = %S" in sql
     assert "BEGIN" not in sql
+
+
+def test_adjust_balance_refuses_when_balance_moved_underneath_caller(db_spy):
+    # The row moved (something else applied a payment) between the operator quoting
+    # 500.0 and submitting -- nothing must be written, and the current balance rides
+    # on the exception so the caller can show it.
+    with pytest.raises(balance.BalanceChanged) as exc_info:
+        balance.adjust_balance(1, 100.0, expected_balance=499.0)
+
+    assert exc_info.value.current_balance == pytest.approx(500.0)
+    assert db_spy.row["balance"] == pytest.approx(500.0), (
+        "a refused CAS must write nothing"
+    )
 
 
 def test_waive_fee_is_now_one_atomic_statement(db_spy):

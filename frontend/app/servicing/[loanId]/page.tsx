@@ -58,6 +58,17 @@ function isCapturedUnapplied(err: unknown): boolean {
   );
 }
 
+// 409 Conflict: adjust-balance's compare-and-set refused because the stored balance
+// no longer matched what the operator was quoted (D32 second half) -- see adjustBalance.
+function isBalanceConflict(err: unknown): boolean {
+  return (
+    !!err &&
+    typeof err === "object" &&
+    "status" in err &&
+    (err as { status: unknown }).status === 409
+  );
+}
+
 type PaymentBody = {
   loan_id: string | undefined;
   pan: string;
@@ -314,13 +325,28 @@ export default function LoanDetailPage() {
       // weak authz: any authenticated user can do this
       await apiPost(`/lss/accounts/${loanId}/adjust-balance`, {
         new_balance: parseFloat(newBalance || "0"),
+        // The balance last shown on screen -- servicing refuses (409) if the stored
+        // value has moved since, rather than silently overwriting whatever changed
+        // it (D32 second half: a compare-and-set, not a blind SET).
+        expected_balance: loan?.balance,
       });
       if (routeGenRef.current !== gen) return;
       setActionMsg(`Balance adjusted to ${usd(newBalance)}.`);
       await refreshBalanceAndHistory(gen);
     } catch (err) {
       if (routeGenRef.current !== gen) return;
-      setActionErr(errMsg(err, "Balance adjustment failed."));
+      if (isBalanceConflict(err)) {
+        // Refuse to guess what the operator meant against a figure that has moved.
+        // Refresh so the KPI/placeholder show the real balance, and require them to
+        // review it and resubmit deliberately -- never auto-retry a money write.
+        await refreshBalanceAndHistory(gen);
+        if (routeGenRef.current !== gen) return;
+        setActionErr(
+          "Balance changed since it was quoted. Review the current balance above and resubmit."
+        );
+      } else {
+        setActionErr(errMsg(err, "Balance adjustment failed."));
+      }
     } finally {
       if (routeGenRef.current === gen) setActionBusy(false);
     }

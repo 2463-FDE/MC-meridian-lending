@@ -541,3 +541,38 @@ describe("loan detail — payment idempotency (D19)", () => {
     expect(apiPost).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("loan detail — adjust-balance compare-and-set (D32)", () => {
+  it("quotes the balance on screen and refuses to silently resubmit on a 409", async () => {
+    // The row moved underneath the operator between opening the screen and
+    // submitting; servicing refuses (409) rather than overwrite a figure it never
+    // confirmed still holds -- see adjustBalance/isBalanceConflict in page.tsx.
+    apiPost.mockRejectedValue({
+      status: 409,
+      detail: "balance changed since it was quoted; current balance is 8750.00",
+    });
+
+    render(<LoanDetailPage />);
+    await screen.findByText("Maria Alvarez");
+    await screen.findByText("$9,000.00"); // LOAN_1.balance, shown before the attempt
+
+    fireEvent.change(screen.getAllByRole("spinbutton")[1], {
+      target: { value: "500.00" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Adjust balance" }));
+
+    // The request quotes the balance the operator was actually shown, not a stale
+    // client-side assumption.
+    await screen.findByText(/review the current balance above and resubmit/i);
+    expect(apiPost).toHaveBeenCalledWith(
+      "/lss/accounts/1/adjust-balance",
+      { new_balance: 500, expected_balance: 9000 }
+    );
+    // The refusal must not read as a success, and it must have pulled the real
+    // balance (the /balance mock, 8750) onto the screen rather than leaving the
+    // stale 9000 -- an operator who reloads instead of reading the message must
+    // still see the truth.
+    expect(screen.queryByText(/^Balance adjusted to/)).toBeNull();
+    await screen.findByText("$8,750.00");
+  });
+});

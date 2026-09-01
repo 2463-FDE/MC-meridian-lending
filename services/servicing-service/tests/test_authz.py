@@ -193,7 +193,7 @@ def test_require_staff_denies_non_staff(role):
 def test_adjust_balance_denied_without_money_role():
     resp = TestClient(app).post(
         "/accounts/1/adjust-balance",
-        json={"new_balance": 100.0},
+        json={"new_balance": 100.0, "expected_balance": 100.0},
         headers={"X-User-Role": "underwriter"},
     )
     assert resp.status_code == 403
@@ -201,11 +201,12 @@ def test_adjust_balance_denied_without_money_role():
 
 def test_adjust_balance_allowed_with_money_role(monkeypatch):
     monkeypatch.setattr(
-        "app.balance.adjust_balance", lambda loan_id, new_value: new_value
+        "app.balance.adjust_balance",
+        lambda loan_id, new_value, expected_balance: new_value,
     )
     resp = TestClient(app).post(
         "/accounts/1/adjust-balance",
-        json={"new_balance": 100.0},
+        json={"new_balance": 100.0, "expected_balance": 100.0},
         headers={"X-User-Role": "csr"},
     )
     assert resp.status_code == 200
