@@ -69,7 +69,9 @@ class _FakeCursor:
         self.executed.append((sql, params))
 
 
-def test_both_env_gates_open_still_refuses_while_eligibility_is_a_placeholder(monkeypatch):
+def test_both_env_gates_open_still_refuses_while_eligibility_is_a_placeholder(
+    monkeypatch,
+):
     """The interlock, and the reason this file's other execute test has to unset it.
 
     The module documents its WHERE clause as a known-wrong placeholder: it purges on
@@ -146,6 +148,24 @@ def test_main_aborts_when_window_not_configured(monkeypatch, capsys):
     assert exit_code == purge_ssn.EXIT_ABORT
     captured = capsys.readouterr()
     assert captured.out == ""  # no document on abort, mirrors app/reconcile.py
+    assert "ABORT" in captured.err
+
+
+def test_main_aborts_exit_2_on_a_db_error_instead_of_raising(monkeypatch, capsys):
+    """M1 (fix/ssn-at-rest review): the module docstring promises exit 2 for a DB
+    error, but main() used to catch only PurgeAbort -- a raw psycopg2 error from
+    eligible_count() propagated out of main() uncaught, exiting 1 with a traceback
+    instead of the documented ABORT."""
+    import psycopg2
+
+    def _boom(sql, params=None):
+        raise psycopg2.OperationalError("could not connect to server")
+
+    monkeypatch.setattr(purge_ssn.db, "query", _boom)
+    exit_code = purge_ssn.main(["--window-days", "30"])
+    assert exit_code == purge_ssn.EXIT_ABORT
+    captured = capsys.readouterr()
+    assert captured.out == ""
     assert "ABORT" in captured.err
 
 

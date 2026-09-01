@@ -56,6 +56,8 @@ import argparse
 import json
 import sys
 
+import psycopg2
+
 from . import config, db
 
 EXIT_OK = 0
@@ -183,6 +185,9 @@ def main(argv=None) -> int:
         result = run(window_days, args.execute)
     except PurgeAbort as exc:
         print(f"ABORT: {exc}", file=sys.stderr)
+        return EXIT_ABORT
+    except psycopg2.Error as exc:
+        print(f"ABORT: database error -- {exc}", file=sys.stderr)
         return EXIT_ABORT
 
     json.dump(result, sys.stdout, indent=2)
