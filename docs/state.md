@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (864147c)` — 864147c 2026-08-31 Merge pull request #139 from 2463-FDE/fix/downstream-timeout-budget
+Base: `origin/main (1f89999)` — 1f89999 2026-08-31 Merge pull request #140 from 2463-FDE/docs/adr-0023-ssn-at-rest
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #140 | `1f89999` | 2026-08-31 | Merge pull request #140 from 2463-FDE/docs/adr-0023-ssn-at-rest |
 | #139 | `864147c` | 2026-08-31 | Merge pull request #139 from 2463-FDE/fix/downstream-timeout-budget |
 | #138 | `530aa61` | 2026-08-31 | Merge pull request #138 from 2463-FDE/fix/servicing-lost-update |
 | #137 | `52723c1` | 2026-08-31 | Merge pull request #137 from 2463-FDE/fix/downstream-circuit-breaker-trace |
@@ -173,8 +174,9 @@ Base: `origin/main (864147c)` — 864147c 2026-08-31 Merge pull request #139 fro
 - `adr/0020-atomic-payment-application.md`
 - `adr/0021-agent-framework-and-root-trace.md`
 - `adr/0022-offline-evaluator-for-the-support-test.md`
+- `adr/0023-applicant-ssn-at-rest.md`
 
-Count: 22. The next free number is one past the highest above.
+Count: 23. The next free number is one past the highest above.
 
 ## CI jobs
 
@@ -195,6 +197,7 @@ A job is BLOCKING unless its body carries `continue-on-error` or `|| true`.
 - **BLOCKING** — `compose-hardening-gate`
 - **BLOCKING** — `kyc-enforcement-gate`
 - **BLOCKING** — `kyc-persistence-gate`
+- **BLOCKING** — `ssn-purge-gate`
 - **BLOCKING** — `payment-idempotency-gate`
 - **BLOCKING** — `assistant-telemetry-gate`
 - **BLOCKING** — `no-sad-gate`
