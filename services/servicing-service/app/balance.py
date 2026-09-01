@@ -5,9 +5,12 @@ no transaction history).
 
 `apply_payment` is atomic as of D3 (ADR 0020): it records the application and moves
 the balance in one statement, computing from the stored value inside the UPDATE.
-`adjust_balance` and `waive_fee` below are still the unlocked read-modify-write this
-module was written with — a different defect on a different column, carded in
-docs/debt-log.md rather than fixed here. (D2, D12, D14 also remain.)
+`waive_fee` is atomic the same way as of D32's first half: the decrement computes
+from the stored `past_due` inside its own UPDATE. `adjust_balance` is still the
+unlocked read-modify-write this module was written with — it sets an absolute
+figure rather than a delta, so D3/D32's fix does not apply to it as-is; it needs a
+compare-and-set on the value the caller was quoted, which needs the client's answer
+on refusal UX (D32, docs/debt-log.md). (D2, D12, D14 also remain.)
 """
 
 from .logging_config import get_logger
@@ -169,13 +172,20 @@ def adjust_balance(loan_id: int, new_value: float) -> float:
 
 
 def waive_fee(loan_id: int, amount: float) -> float:
-    """Reduce past_due. Read-modify-write, no lock — races with apply_payment."""
-    rows = db.query("SELECT past_due FROM balances WHERE loan_id = %s", (loan_id,))
-    past_due = rows[0]["past_due"] if rows else 0.0
-    new_past_due = past_due - float(amount)  # float
-    db.query(
-        "UPDATE balances SET past_due = %s, updated_at = now() WHERE loan_id = %s",
-        (new_past_due, loan_id),
+    """Reduce past_due by amount, atomically (D32 first half).
+
+    One statement: the decrement computes from the stored `past_due` inside the
+    UPDATE, so two concurrent waives on the same loan serialize on the row lock
+    instead of both reading one opening figure and the last writer winning — same
+    shape as D3/ADR 0020's fix to `apply_payment`, one column over.
+    """
+    rows = db.query(
+        "UPDATE balances SET past_due = past_due - %s, updated_at = now() "
+        "WHERE loan_id = %s RETURNING past_due",
+        (float(amount), loan_id),
     )
-    log.info("waived fee loan_id=%s past_due %s -> %s", loan_id, past_due, new_past_due)
+    new_past_due = rows[0]["past_due"] if rows else -float(amount)
+    log.info(
+        "waived fee loan_id=%s amount=%s new_past_due=%s", loan_id, amount, new_past_due
+    )
     return new_past_due
