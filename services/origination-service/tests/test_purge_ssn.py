@@ -69,7 +69,43 @@ class _FakeCursor:
         self.executed.append((sql, params))
 
 
+def test_both_env_gates_open_still_refuses_while_eligibility_is_a_placeholder(monkeypatch):
+    """The interlock, and the reason this file's other execute test has to unset it.
+
+    The module documents its WHERE clause as a known-wrong placeholder: it purges on
+    calendar age, while the real trigger is every application tied to the applicant
+    reaching a terminal state. Both of the other gates are operator-flippable (an env
+    var and a CLI flag), so without a THIRD gate in code the only thing standing
+    between the documented-wrong query and a live run is that someone read the
+    docstring. Nulling applicants.ssn for a still-decisionable application breaks its
+    bureau re-pull and is not reversible, so the refusal has to be code, not prose.
+    Clearing _ELIGIBILITY_IS_PLACEHOLDER is a reviewed edit; exporting an env var is not.
+    """
+    monkeypatch.setattr(config, "SSN_PURGE_ENABLED", True)
+
+    @contextmanager
+    def _txn():  # pragma: no cover - must never be entered
+        raise AssertionError("purge opened a transaction while the placeholder stands")
+        yield
+
+    monkeypatch.setattr(purge_ssn.db, "transaction", _txn)
+    with pytest.raises(purge_ssn.PurgeAbort) as exc:
+        purge_ssn.run(window_days=45, execute=True)
+    assert "placeholder" in str(exc.value).lower()
+
+
+def test_main_aborts_with_exit_2_while_the_placeholder_stands(monkeypatch):
+    """A refusal must reach the operator as the ABORT exit code, not a clean 0 —
+    same rule the reconcile CLI follows: could-not-run is distinct from ran-clean."""
+    monkeypatch.setattr(config, "SSN_PURGE_ENABLED", True)
+    monkeypatch.setattr(config, "SSN_PURGE_WINDOW_DAYS", "45")
+    assert purge_ssn.main(["--execute"]) == purge_ssn.EXIT_ABORT
+
+
 def test_execute_with_both_gates_open_purges_and_backfills_last4(monkeypatch):
+    # Placeholder interlock cleared: this pins the UPDATE the corrected query will reuse
+    # (last-4 preserved, full value nulled), NOT permission to run today.
+    monkeypatch.setattr(purge_ssn, "_ELIGIBILITY_IS_PLACEHOLDER", False)
     monkeypatch.setattr(config, "SSN_PURGE_ENABLED", True)
     cur = _FakeCursor()
 

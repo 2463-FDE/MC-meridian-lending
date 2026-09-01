@@ -329,13 +329,25 @@ def _run_database_probe(timeout: float) -> tuple[bool, str | None]:
             # the rungs above. Type asserted, not just the name, same reason as the rest
             # of this function: ADD COLUMN IF NOT EXISTS swallows a same-named column of
             # any type.
+            #
+            # to_regclass + pg_attribute, not information_schema: the rung must ask about
+            # the SAME table intake's unqualified INSERT resolves to, and that resolves by
+            # search_path. An information_schema lookup filtered on table_name alone
+            # matches EVERY schema holding an `applicants`, so it can report ready over a
+            # table the write never touches. Same rule as the assistant_runs rung below
+            # and migrations 0020/0021; debt D31 is the carded instance of getting this
+            # wrong, and this is the pattern that stops it spreading further.
             cur.execute(
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_name = 'applicants' AND column_name = 'ssn_last4' "
-                "AND data_type = 'text'"
+                "SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a "
+                "WHERE a.attrelid = to_regclass('applicants') "
+                "AND a.attname = 'ssn_last4' "
+                "AND a.attnum > 0 AND NOT a.attisdropped"
             )
-            if cur.fetchone() is None:
+            row = cur.fetchone()
+            if row is None:
                 return False, "schema_not_ready:applicants.ssn_last4"
+            if row[0] != "text":
+                return False, "schema_not_ready:applicants.ssn_last4:type"
             # `accept_offer` reads disclosures.document_body: `delivered` is a claim about a
             # document, and migration 0013 leaves already-delivered rows at NULL, so the
             # boarding gate has to see whether one was recorded. A volume that ran 0011 but

@@ -35,13 +35,22 @@ UPDATE applicants
 -- IF NOT EXISTS swallows a pre-existing column of ANY type, which would let this
 -- migration report success over a column the KYC call cannot use as a string. Assert
 -- the definition, not the name -- and refuse rather than warn, same as 0014.
+-- Resolved with to_regclass + pg_attribute, NOT information_schema: the ALTER and the
+-- UPDATE above are unqualified and resolve by search_path, while an information_schema
+-- lookup filtered on table_name alone matches EVERY schema holding an `applicants`. Under
+-- `SET search_path TO other, public` this block could therefore grade a table the
+-- statements above never touched, and SELECT ... INTO would silently take one row of
+-- several rather than error. The check and the write must resolve the same table. Same
+-- rule as migration 0020; debt D31 is the carded instance of getting this wrong.
 DO $$
 DECLARE
     actual text;
 BEGIN
-    SELECT data_type INTO actual
-    FROM information_schema.columns
-    WHERE table_name = 'applicants' AND column_name = 'ssn_last4';
+    SELECT format_type(a.atttypid, a.atttypmod) INTO actual
+    FROM pg_attribute a
+    WHERE a.attrelid = to_regclass('applicants')
+      AND a.attname = 'ssn_last4'
+      AND a.attnum > 0 AND NOT a.attisdropped;
 
     IF actual IS NULL THEN
         RAISE EXCEPTION 'applicants.ssn_last4 was not created';

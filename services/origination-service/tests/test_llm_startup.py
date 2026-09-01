@@ -70,6 +70,10 @@ class _FakeCursor:
             # The D20 audit_logs rung reads tgenabled, not a bare 1: 'O' (origin) is
             # what an enforcing trigger carries on a fully-migrated volume.
             return ("O",)
+        if "'ssn_last4'" in last:
+            # The D33 rung reads the column's rendered type via format_type, not a
+            # bare presence marker -- a stub meant to model a fully-migrated database.
+            return ("text",)
         return (1,)
 
     def fetchall(self):
