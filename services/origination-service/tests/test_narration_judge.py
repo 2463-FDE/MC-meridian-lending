@@ -11,9 +11,15 @@ from app.llm import ClaudeClient, FakeAdapter
 from app.llm.config import LLMConfig
 from app.llm.errors import LLMTimeoutError
 from app.narration_judge import grade_fixture
+from app.prompts import get_prompt
 
+from .fixtures.disclosure_narration_fixtures import NARRATION_FIXTURES
+
+# The D2 shape, verbatim -- `id` and `description` included, because that is what
+# `grade_fixture` has to consume (see test_grades_a_real_pinned_fixture below).
 FIXTURE = {
-    "fixture_id": "normal_short_term",
+    "id": "normal_short_term",
+    "description": "Hand-built twin of the first pinned fixture.",
     "application_id": 990001,
     "term_months": 24,
     "note_rate_pct": 7.99,
@@ -42,7 +48,7 @@ def test_grounded_narration_matching_action_passes():
             _judge(True),
         ]
     )
-    verdict = grade_fixture(client, **FIXTURE)
+    verdict = grade_fixture(client, FIXTURE)
     assert verdict.passed
     assert verdict.grounded_by_d1 is True
     assert verdict.grounded_by_judge is True
@@ -58,7 +64,7 @@ def test_fabricated_figure_fails_even_though_d1_and_judge_agree():
             _judge(False),
         ]
     )
-    verdict = grade_fixture(client, **FIXTURE)
+    verdict = grade_fixture(client, FIXTURE)
     assert not verdict.passed
     assert verdict.grounded_by_d1 is False
     assert verdict.grounded_by_judge is False
@@ -74,7 +80,7 @@ def test_d1_judge_disagreement_fails_the_fixture():
             _judge(False),  # judge disagrees
         ]
     )
-    verdict = grade_fixture(client, **FIXTURE)
+    verdict = grade_fixture(client, FIXTURE)
     assert not verdict.passed
     assert verdict.grounded_by_d1 is True
     assert verdict.grounded_by_judge is False
@@ -89,7 +95,7 @@ def test_misrouted_officer_action_fails_when_expected_is_pinned():
             _judge(True),
         ]
     )
-    verdict = grade_fixture(client, **FIXTURE)
+    verdict = grade_fixture(client, FIXTURE)
     assert not verdict.passed
     assert verdict.officer_action_match is False
 
@@ -107,7 +113,7 @@ def test_ungraded_officer_action_fixture_does_not_fail_on_mismatch():
             _judge(True),
         ]
     )
-    verdict = grade_fixture(client, **fixture)
+    verdict = grade_fixture(client, fixture)
     assert verdict.passed
     assert verdict.officer_action_match is None
 
@@ -115,7 +121,7 @@ def test_ungraded_officer_action_fixture_does_not_fail_on_mismatch():
 def test_narrate_call_failure_fails_closed():
     client = _client([])
     client.adapter._raises = [LLMTimeoutError("boom")]
-    verdict = grade_fixture(client, **FIXTURE)
+    verdict = grade_fixture(client, FIXTURE)
     assert not verdict.passed
     assert verdict.error is not None
     assert verdict.grounded_by_judge is None
@@ -134,8 +140,53 @@ def test_judge_call_failure_fails_closed():
 
     config = LLMConfig(api_key="test-key", model="claude-test", max_tokens=512)
     client = ClaudeClient(config, adapter=FakeAdapter(on_complete=_on_complete))
-    verdict = grade_fixture(client, **FIXTURE)
+    verdict = grade_fixture(client, FIXTURE)
     assert not verdict.passed
     assert verdict.error is not None
     assert verdict.grounded_by_d1 is True
     assert verdict.grounded_by_judge is None
+
+
+def test_grades_a_real_pinned_fixture():
+    """The harness must consume a D2 entry as it is actually written.
+
+    `NARRATION_FIXTURES` entries carry `id` and `description`; a keyword signature
+    taking `fixture_id` raises TypeError on its own input, and every other test here
+    hand-builds a dict, so nothing else would notice.
+    """
+    fixture = NARRATION_FIXTURES[0]
+    client = _client(
+        [
+            _narration("Term is 24 months at 7.99% APR. Review and send."),
+            _judge(True),
+        ]
+    )
+    verdict = grade_fixture(client, fixture)
+    assert verdict.fixture_id == fixture["id"]
+    assert verdict.passed
+    assert verdict.error is None
+
+
+def test_judge_is_given_the_same_context_as_the_narrator():
+    """Axes (a) and (c) both misread if the judge is told the narrator got only two
+    numbers: `disclosure_narrate` is also handed the application id and the passed check
+    count, and is asked to name the loan, so a judge without them grades supplied context
+    as fabrication.
+    """
+    fixture = NARRATION_FIXTURES[0]
+    client = _client(
+        [
+            _narration("Application 990001: 24 months at 7.99% APR, 5 checks passed."),
+            _judge(True),
+        ]
+    )
+    grade_fixture(client, fixture)
+
+    judge_request = client.adapter.calls[1]
+    user_message = judge_request.messages[-1]["content"]
+    assert str(fixture["application_id"]) in user_message
+    assert f"({fixture['checks_passed']} deterministic checks)" in user_message
+    assert set(get_prompt("disclosure_narrate_judge").required_vars) >= {
+        "application_id",
+        "checks_passed",
+    }

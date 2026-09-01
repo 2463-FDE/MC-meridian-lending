@@ -25,7 +25,9 @@ reconciliation and atomic-apply hold on their own inputs).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from .disclosure_coordinator import _narration_is_grounded
 from .llm import ClaudeClient
@@ -66,16 +68,24 @@ class NarrationJudgeVerdict:
 
 
 def grade_fixture(
-    client: ClaudeClient,
-    *,
-    fixture_id: str,
-    application_id: int,
-    term_months: int,
-    note_rate_pct: float,
-    checks_passed: int,
-    expected_officer_action: str | None,
+    client: ClaudeClient, fixture: Mapping[str, Any]
 ) -> NarrationJudgeVerdict:
-    """Grade one fixture end to end: real `disclosure_narrate` call, then the judge."""
+    """Grade one fixture end to end: real `disclosure_narrate` call, then the judge.
+
+    `fixture` is a D2 entry (`NARRATION_FIXTURES`, `tests/fixtures/
+    disclosure_narration_fixtures.py`) taken as-is: its `id` names the verdict and its
+    `description` is documentation this harness does not read. Taking the mapping rather
+    than exploded keywords is what lets the pinned set be graded without a per-call
+    adapter -- a keyword signature that renamed `id` to `fixture_id` could not consume
+    its own input.
+    """
+    fixture_id = fixture["id"]
+    application_id = fixture["application_id"]
+    term_months = fixture["term_months"]
+    note_rate_pct = fixture["note_rate_pct"]
+    checks_passed = fixture["checks_passed"]
+    expected_officer_action = fixture["expected_officer_action"]
+
     try:
         narration = client.complete(
             "disclosure_narrate",
@@ -110,8 +120,10 @@ def grade_fixture(
         judge = client.complete(
             "disclosure_narrate_judge",
             summary=summary,
+            application_id=application_id,
             term_months=term_months,
             note_rate_pct=note_rate_pct,
+            checks_passed=checks_passed,
         )
     except (LLMError, ValidationFailed) as exc:
         return NarrationJudgeVerdict(
