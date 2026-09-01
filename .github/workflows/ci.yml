@@ -408,6 +408,42 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_kyc_persistence.py -q
 
+  ssn-purge-gate:
+    # D33. app/purge_ssn.py nulls applicants.ssn -- irreversible, and its eligibility
+    # query is a KNOWN-WRONG placeholder (calendar age since submission, not the
+    # application-terminal-state trigger the real rule needs), so running it today would
+    # destroy the digits a still-decisionable application's bureau re-pull depends on.
+    # Three gates stand in front of it. Two are operator-flippable (SSN_PURGE_ENABLED,
+    # --execute); the third, _ELIGIBILITY_IS_PLACEHOLDER, is a module constant precisely
+    # so it cannot be flipped without a diff. test_purge_ssn.py is what makes that
+    # constant load-bearing rather than decorative: it proves --execute with the env gate
+    # OPEN still refuses, never opens a transaction, and exits 2 rather than a clean 0.
+    #
+    # Those tests run in the `backend` matrix too, which is continue-on-error + `|| true`
+    # -- so deleting the interlock, or letting the refusal degrade into a 0-row "success",
+    # would ship on a green build. That is debt D29's shape, and here it guards an
+    # irreversible operation on SSNs, so it gets its own BLOCKING job: no
+    # continue-on-error, no `|| true`.
+    #
+    # test_intake.py rides along because it pins the other half of the slice -- that
+    # intake writes ssn_last4 on every submit and that the KYC hop carries last-4 instead
+    # of the full SSN. A regression there silently puts full SSNs back on the wire while
+    # every assertion about the purge still passes.
+    #
+    # Its own install line, per the kyc-persistence-gate lesson above: this job must not
+    # pass on a package an unrelated earlier step installed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: origination SSN purge interlock + intake last-4 tests
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_purge_ssn.py tests/test_intake.py -q
+
   payment-idempotency-gate:
     # D19: a retried POST /payments used to insert a second payments row and charge the
     # card again (measured 2026-08-02: one $100 intent sent eight ways captured $800.00).
