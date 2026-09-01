@@ -2,8 +2,12 @@
 
 **Owner:** maha-c
 **Date:** 2026-08-31
-**Status:** Draft — not built. Not approved for build; this is the design record to review
-before opening an implementation PR.
+**Status:** Partly built. D1 (the runtime groundedness guard) is implemented and covered
+by tests in commit `5625671` on this document's own branch — `_narration_is_grounded` in
+`services/origination-service/app/disclosure_coordinator.py`, wired into `_narrate`. D2, D3
+and D4 are designed here and not built. "Built" in this document means implemented and
+reviewed on the branch that carries this file, not present in `main`; confirm with
+`git merge-base --is-ancestor <branch> main` before citing it elsewhere.
 **Governs:** `services/origination-service/app/disclosure_coordinator.py` stage 4b
 (`_narrate`) and `services/origination-service/app/prompts/disclosure_narrate.py`, once
 implemented.
@@ -37,8 +41,11 @@ The stated reason (module docstring, `disclosure_coordinator.py:8`) is sound: a 
 to verify a regulated number can be wrong in the permissive direction, so the fix was to
 remove its ability to check a number at all. What that fix does not address: nothing stops
 the model from **stating** a number it invents. `OUTPUT_SCHEMA`
-(`prompts/disclosure_narrate.py:16`) constrains `summary` to `type: string, maxLength: 500`
-— it validates shape, not content. A schema-valid, leak-guard-passing `summary` can contain
+(`prompts/disclosure_narrate.py:16`) declares `summary` as `type: string, maxLength: 500`,
+and the validator enforces neither the length nor the content: `pattern` is the only string
+facet it checks, and its own comment records that `maxLength` "is declared by several
+prompts and is NOT enforced" (`app/llm/validator.py`). So the schema constrains the type
+and nothing else. A schema-valid, leak-guard-passing `summary` can contain
 "...at 12.4% APR..." or "...your monthly payment of $340..." with no relationship to the
 real `apr`/`monthly_payment` in `state["figures"]`, and nothing in the pipeline would catch
 it before it reaches the officer. `NARRATION_UNAVAILABLE`
@@ -93,33 +100,114 @@ Two reasons it isn't the vehicle here:
 ## Minimum Build Slice
 
 1. **Deterministic numeric-leak guard, runtime** (D1). A pure-Python check on `summary`
-   before it's returned from `_narrate`: reject if it contains a currency amount, a percent
-   figure, or a spelled-out number word, unless that figure exactly equals `term_months` or
-   `note_rate_pct` (the two numbers the model was actually given). On reject, degrade to
-   `NARRATION_UNAVAILABLE` via the same path validation/leak-guard failures already use
-   (`disclosure_coordinator.py:418`) — no new failure mode, one new rejection reason. This
-   alone is landable and testable without the judge below.
+   before it's returned from `_narrate`. The rule is **unit-aware, not value-only** — a
+   value-only allowed set passes the exact figure the guard exists to catch, because at
+   `term_months` 48 a fabricated "$48.00 monthly payment" is a dollar amount the model was
+   never given whose value is nonetheless on the list. Three unit classes:
+
+   | Unit class | Matched by | Allowed values |
+   |---|---|---|
+   | money | a `$` amount, or a figure followed by `dollars`/`cents`/`payment(s)` | none — `_narrate` is handed no dollar amount at all |
+   | rate | a figure followed by `%`, `percent`, `apr` or `rate` | `note_rate_pct` only |
+   | term | a figure followed by `month(s)` | `term_months` only |
+
+   A figure carrying no unit word is not graded: `application_id` and `checks_passed` are
+   both given to the model and both appear as bare integers.
+
+   Spelled-out numbers are read only when **directly adjacent to a unit word**. That
+   adjacency requirement is what keeps ordinary prose out of the guard — the prompt's own
+   `"<one or two sentences for the officer>"` instruction puts neither word next to a unit,
+   so compliant prose does not trip it. The recognised tokens are `zero`–`twenty` plus
+   `thirty`, `forty`, `fifty`, `sixty`, `seventy`, `eighty`, `ninety`; at most two
+   whole-number words combine and they sum (`twenty five` → 25). An optional `point` tail
+   makes a decimal: words after `point` are digits in order, so `seven point nine nine
+   percent` normalizes to `7.99` and compares equal to `note_rate_pct`. Without that rule
+   the words sum to 18 and a **truthful** spelled rate degrades the officer's brief on the
+   money path. Nothing above `ninety-nine` is recognised (no `hundred`/`thousand`) — a
+   deliberate stopping point, per Risks below.
+
+   On reject, degrade to `NARRATION_UNAVAILABLE` via the same path validation/leak-guard
+   failures already use — no new failure mode, one new rejection reason
+   (`reason=ungrounded_figure` in the degrade log line). This alone is landable and testable
+   without the judge below, and is what commit `5625671` implements.
 2. **Pinned fixture set** (D2). ~12–15 synthetic `DisclosureState` inputs spanning: normal
-   term/rate, top-of-band rate (should route `hold_for_compliance` per the system prompt's
-   own instruction), unusually long term, minimum term, a `checks_passed` count that
-   doesn't match `len(FIGURE_FIELDS)` (shouldn't reach this stage per stage 4a, but the
-   fixture exercises it defensively). No real `application_id` or applicant data — synthetic
-   IDs only, same convention as the TILA test vectors.
+   term/rate, unusually long term, minimum term, a `checks_passed` count that doesn't match
+   `len(FIGURE_FIELDS)` (shouldn't reach this stage per stage 4a, but the fixture exercises
+   it defensively). No real `application_id` or applicant data — synthetic IDs only, same
+   convention as the TILA test vectors.
+
+   **Thresholds, and why one of the prompt's two criteria is not gradeable.** The system
+   prompt asks for `hold_for_compliance` on "an unusually long term, a rate at the top of
+   the band" (`prompts/disclosure_narrate.py`) and defines neither. Fixture expectations
+   cannot be one author's guess, so:
+
+   - **Long term:** `term_months > 60` routes `hold_for_compliance`. This cutoff is defined
+     by this spec, not by a policy source — no term band exists anywhere in the repo. If one
+     is later added under `policies/`, this cutoff moves there and the fixtures cite it.
+   - **Top-of-band rate: not gradeable, and D3 does not grade it.** There is no rate band.
+     `POLICY_RATE_PCT = 7.99` (`services/origination-service/app/routers/offers.py`) is a
+     single constant applied to every offer, so no fixture can present a rate at the top of
+     a band that does not exist. Grading this axis would pin a boundary the code cannot
+     produce. The axis is deferred until a rate band exists; when it does, this section and
+     D3's axis (b) are what change.
 3. **Offline LLM judge** (D3). Reuses `ClaudeClient` (`app/llm/client.py`) already in the
-   service — no new provider dependency. Judge prompt grades each fixture's `_narrate`
-   output on two axes: (a) contains no figure beyond `term_months`/`note_rate_pct` — this is
-   a second, catch-what-regex-misses pass over the same question D1 answers at runtime, not
-   a different question; (b) `officer_action` matches what the system prompt's own criteria
-   would pick for that fixture (top-of-band rate / unusually long term →
-   `hold_for_compliance`). Fails closed: a judge call that errors or returns unparseable
-   output counts as a fixture failure, not a skip — same rule the reconciliation and
-   atomic-apply gates hold on their own inputs.
-4. **`disclosure-narration-gate`, blocking CI job** (D4). Runs D2 fixtures through D3 outside
-   the matrix (i.e., not under the tolerated `|| true`), same placement as
-   `tila-vectors-gate`. Wired through LangSmith's `evaluate()` API against the fixture
-   dataset (see *Why not reuse rag_eval* — this is the one judge in the repo positioned to
-   use it directly). A judge-prompt or `disclosure_narrate` prompt change that regresses
-   grounding or action-selection fails the gate before merge.
+   service — no new provider dependency.
+
+   **The graded artifact is the raw `disclosure_narrate` completion, before D1 runs.** This
+   is the decision that determines whether the gate has teeth. D1 replaces an ungrounded
+   `summary` with `NARRATION_UNAVAILABLE` and discards the text, so a judge reading
+   `_narrate`'s return value can only ever see a grounded summary or the canned brief — it
+   would pass every fixture whether or not the checker prompt had regressed, a blocking gate
+   proving nothing. The D3 harness therefore drives the prompt directly rather than calling
+   `_narrate`, grading the model's own completion. This requires **no change to D1's return
+   shape**: `_narrate` keeps discarding the rejected text at runtime (see Answered
+   Questions), and the raw completion exists only inside the offline harness, over synthetic
+   fixtures.
+
+   Three axes per fixture:
+
+   - **(a) Groundedness.** The raw completion states no figure beyond `term_months` and
+     `note_rate_pct`, under the unit rules in D1. This is a second, catch-what-regex-misses
+     pass over the same question D1 answers at runtime — spelled-out or paraphrased figures
+     a regex cannot enumerate.
+   - **(b) `officer_action`.** Graded against the D2 term cutoff only. The rate criterion is
+     not graded — see D2, there is no rate band.
+   - **(c) Agreement with D1.** D1's verdict on that same raw completion must match axis
+     (a). A completion the judge marks fabricated that D1 passed is a gate failure: that
+     disagreement is the regex hole D1's own Risks section predicts, and catching it is why
+     the judge grades the pre-guard text.
+
+   Fails closed: a judge call that errors or returns unparseable output counts as a fixture
+   failure, not a skip — same rule the reconciliation and atomic-apply gates hold on their
+   own inputs.
+4. **`disclosure-narration-gate`, blocking CI job** (D4). Runs outside the matrix (i.e.,
+   not under the tolerated `|| true`), same placement as `tila-vectors-gate`. It has two
+   halves, because every other blocking job in `ci.yml` is keyless and this one cannot be:
+
+   - **D4a, keyless and always blocking.** Runs the D2 fixtures through D1's guard and
+     asserts each fixture's recorded verdict, plus the D1 unit tests. No provider call, no
+     secret, runs on every pull request including a fork's. This is the half that holds the
+     shipped control.
+   - **D4b, judge-backed.** Runs D3 over the same fixtures. Requires credentials, so it is
+     governed by the contract below.
+
+   A judge-prompt or `disclosure_narrate` prompt change that regresses grounding or
+   action-selection fails the gate before merge.
+
+### CI contract for the judge-backed half (D4b)
+
+`ci.yml` currently contains **no** job that reads a secret — every blocking gate is offline
+and grades text, SQL or Python. D4b is the first exception, so its prerequisites are stated
+here rather than inherited:
+
+| Item | Value |
+|---|---|
+| Required env | `CLAUDE_PROVIDER`, `CLAUDE_MODEL`, and the provider's credential — `AWS_REGION` plus `AWS_BEARER_TOKEN_BEDROCK` on the bedrock path, `CLAUDE_API_KEY` on the anthropic path (`app/llm/config.py` validates the pair) |
+| Provisioning | Repository secrets on this repository, set by the repo owner. Not organisation-wide, not inherited |
+| Missing credentials | **Fail, never skip.** The job asserts its env is populated before the first fixture and exits non-zero if not, matching the `REQUIRE_LIVE_DB` rule `no-sad-gate` and `assistant-telemetry-gate` already use for a datastore they cannot reach |
+| Fork pull requests | GitHub withholds secrets from a fork's pull request. D4b therefore does not run on `pull_request` from a fork; it runs on `pull_request` within this repository and on `workflow_dispatch`. D4a still blocks a fork's pull request, so nothing merges with the control unexercised |
+| LangSmith | Not used. `evaluate()` would add `LANGSMITH_API_KEY` and a hosted dataset to the same job's prerequisites for no grading the harness cannot do locally, and a hosted dataset is state the repo cannot version. The fixtures are pinned files, graded in-process |
+| Trace content | The judge runs over synthetic fixtures only, so `rag_eval`'s refusal to run under `LANGSMITH_TRACING` (`evaluator.py:188`) does not bind here — but D4b sets no tracing env either, so the question does not arise |
 
 ## Out of Scope
 
@@ -138,9 +226,10 @@ Two reasons it isn't the vehicle here:
   runtime (regression test: assert the exact fixture that motivated this spec — a `summary`
   stating an invented monthly payment — degrades to `NARRATION_UNAVAILABLE`, not silently
   passes).
-- `disclosure-narration-gate` is blocking (no `continue-on-error`, no `|| true`), fails on a
-  fixture the judge marks fabricated or misrouted, and is added to the CI-gate list in
-  `CLAUDE.md`.
+- `disclosure-narration-gate` is blocking (no `continue-on-error`, no `|| true`), and is
+  added to the CI-gate list in `CLAUDE.md`. D4a fails on a fixture whose D1 verdict does not
+  match its recorded expectation; D4b fails on a fixture the judge marks fabricated or
+  misrouted, on a D1/judge disagreement (D3 axis (c)), and on absent credentials.
 - `docs/debt-log.md` gets a new entry (next available D-number) naming this gap while it's
   open, closed only once D1–D4 are all merged — per the debt-log status discipline
   (Mitigated requires something blocking; do not mark Fixed with any row still open).
@@ -157,9 +246,14 @@ Two reasons it isn't the vehicle here:
 - **Regex false negatives (D1 alone).** Named in Options #2 — mitigated by D3 running the
   same question through a judge offline, not by strengthening the regex indefinitely.
 
-## Open Questions
+## Answered Questions
 
-- Should D1's guard log the rejected `summary` text for audit, or only the rejection event?
-  Logging the text risks the same PII-in-logs concern the redactor exists for; logging only
-  the event loses the specific defect for debugging. Needs an answer before D1 lands, not
-  during review.
+- **Does D1's guard log the rejected `summary` text, or only the rejection event?** Answered
+  2026-08-31, before D1 landed: **the event only.** The degrade line carries
+  `reason=ungrounded_figure` and the `application_id`, never the text. The text that trips
+  this guard is model-authored prose about a live application — exactly what the PII
+  redactor and the leak guard exist to keep out of logs — and the debugging value it would
+  add is recoverable offline from the D2 fixtures, which carry no applicant data. See
+  `_narrate` in `disclosure_coordinator.py`.
+- **Which artifact does D3 grade?** Answered in D3 above: the raw `disclosure_narrate`
+  completion, before D1 runs. Grading post-D1 output makes the gate vacuous.
