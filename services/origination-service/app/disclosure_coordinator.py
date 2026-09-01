@@ -164,12 +164,24 @@ NARRATION_UNAVAILABLE = {
 # D1 groundedness guard (docs/specs/disclosure-narration-judge.md). Stage 4b is given none
 # of the five disclosed figures -- only `term_months` and `note_rate_pct` -- so any other
 # currency amount, percent figure, or spelled-out number word in `summary` is invented, not
-# derived. `OUTPUT_SCHEMA` validates shape only; this catches content the schema and the
-# generic PII leak guard both pass through.
+# derived. `OUTPUT_SCHEMA` declares `maxLength: 500` but the validator does not enforce it
+# (`llm/validator.py`), and what it does enforce is shape; this catches content the schema
+# and the generic PII leak guard both pass through.
+#
+# The comparison is unit-aware, not value-only. A value-only allowed set passes exactly the
+# figures this guard exists to catch: at `term_months` 48 a fabricated "$48.00 monthly
+# payment" is a dollar amount the model was never given, but its value is on the allowed
+# list. The model is handed a month count and a percent and no money at all, so a currency
+# amount is ungrounded whatever its value, and a percent may only be `note_rate_pct`.
+_MONEY_UNIT = r"dollars?|cents?|payments?(?:'s)?"
+_RATE_UNIT = r"percent|apr|rate"
+_TERM_UNIT = r"months?(?:'s)?"
+_ANY_UNIT = rf"{_MONEY_UNIT}|{_RATE_UNIT}|{_TERM_UNIT}"
+
 _CURRENCY_FIGURE = re.compile(r"\$\s?([\d,]+(?:\.\d+)?)")
-_PERCENT_FIGURE = re.compile(r"\b([\d,]+(?:\.\d+)?)\s?%")
-_BARE_NUMBER_NEAR_UNIT = re.compile(
-    r"\b([\d,]+(?:\.\d+)?)\s+(?:percent|dollars?|cents?)\b", re.IGNORECASE
+_PERCENT_SIGN_FIGURE = re.compile(r"\b([\d,]+(?:\.\d+)?)\s?%")
+_DIGITS_NEAR_UNIT = re.compile(
+    rf"\b([\d,]+(?:\.\d+)?)\s+(?:of\s+)?({_ANY_UNIT})\b", re.IGNORECASE
 )
 
 _NUMBER_WORDS = {
@@ -205,19 +217,63 @@ _NUMBER_WORDS = {
 _NUMBER_WORD_ALT = "|".join(_NUMBER_WORDS)
 # Only flags a spelled-out number directly adjacent to a unit word (the failure case named
 # in the spec's Options #2: "one month's payment" spelled out in words) rather than any
-# occurrence of "one"/"two" in ordinary prose, which would false-positive on common English.
-# Known incomplete above two words and above "ninety-nine" (no "hundred"/"thousand") -- the
-# spec's own Risks section accepts this: D1 is a best-effort runtime layer backed by D3's
-# offline judge, not strengthened indefinitely.
-_SPELLED_NUMBER_NEAR_UNIT = re.compile(
-    rf"\b((?:{_NUMBER_WORD_ALT})(?:[\s-]+(?:{_NUMBER_WORD_ALT}))?)\s+"
-    r"(?:of\s+)?(?:percent|dollars?|cents?|months?(?:'s)?|payments?(?:'s)?|apr|rate)\b",
-    re.IGNORECASE,
+# occurrence of "one"/"two" in ordinary prose, which would false-positive on common English
+# -- including the prompt's own "one or two sentences" instruction, where neither word sits
+# next to a unit. The optional "point" tail is what makes a truthful spelled rate readable:
+# without it "seven point nine nine percent" is summed rather than parsed and a correct
+# narration degrades on the money path.
+# Known incomplete above two whole-number words and above "ninety-nine" (no "hundred" or
+# "thousand") -- the spec's own Risks section accepts this: D1 is a best-effort runtime
+# layer backed by D3's offline judge, not strengthened indefinitely.
+_SPELLED_NUMBER = (
+    rf"(?:{_NUMBER_WORD_ALT})(?:[\s-]+(?:{_NUMBER_WORD_ALT}))?"
+    rf"(?:\s+point(?:\s+(?:{_NUMBER_WORD_ALT}))+)?"
+)
+_SPELLED_NEAR_UNIT = re.compile(
+    rf"\b({_SPELLED_NUMBER})\s+(?:of\s+)?({_ANY_UNIT})\b", re.IGNORECASE
 )
 
 
-def _spelled_number_value(phrase: str) -> int:
-    return sum(_NUMBER_WORDS[word.lower()] for word in re.split(r"[\s-]+", phrase))
+def _digit_value(figure: str) -> Decimal | None:
+    """Decimal for a written-out digit run, or None when it does not parse as one."""
+    try:
+        return Decimal(figure.replace(",", ""))
+    except InvalidOperation:
+        return None
+
+
+def _spelled_number_value(phrase: str) -> Decimal | None:
+    """Decimal for a spelled-out number, or None when it is not one this guard reads.
+
+    Words before "point" sum ("twenty five" -> 25); words after it are digits in order
+    ("seven point nine nine" -> 7.99), so a truthful spelled rate compares equal to
+    `note_rate_pct` instead of summing to a value that could never match it.
+    """
+    head, _, tail = phrase.lower().partition("point")
+    try:
+        whole = sum(_NUMBER_WORDS[w] for w in re.split(r"[\s-]+", head.strip()) if w)
+        if not tail.strip():
+            return Decimal(whole)
+        digits = "".join(
+            str(_NUMBER_WORDS[w]) for w in re.split(r"[\s-]+", tail.strip()) if w
+        )
+        return Decimal(f"{whole}.{digits}")
+    except (KeyError, InvalidOperation):
+        return None
+
+
+def _allowed_for_unit(unit: str, *, term: Decimal, rate: Decimal) -> set[Decimal]:
+    """Which of the two given numbers a figure carrying `unit` may legitimately be.
+
+    Money is deliberately empty: `_narrate` is handed no dollar amount at all, so there is
+    no value a currency figure could carry that the model was given.
+    """
+    unit = unit.lower()
+    if re.fullmatch(_RATE_UNIT, unit):
+        return {rate}
+    if re.fullmatch(_TERM_UNIT, unit):
+        return {term}
+    return set()
 
 
 def _narration_is_grounded(
@@ -225,21 +281,29 @@ def _narration_is_grounded(
 ) -> bool:
     """False if `summary` states a figure other than the two numbers the model was given."""
     try:
-        allowed = {Decimal(str(term_months)), Decimal(str(note_rate_pct))}
+        term = Decimal(str(term_months))
+        rate = Decimal(str(note_rate_pct))
     except InvalidOperation:
         return False
 
-    for pattern in (_CURRENCY_FIGURE, _PERCENT_FIGURE, _BARE_NUMBER_NEAR_UNIT):
-        for match in pattern.finditer(summary):
-            try:
-                if Decimal(match.group(1).replace(",", "")) not in allowed:
-                    return False
-            except InvalidOperation:
-                return False
+    if _CURRENCY_FIGURE.search(summary):
+        return False
 
-    for match in _SPELLED_NUMBER_NEAR_UNIT.finditer(summary):
-        if Decimal(_spelled_number_value(match.group(1))) not in allowed:
+    for match in _PERCENT_SIGN_FIGURE.finditer(summary):
+        value = _digit_value(match.group(1))
+        if value is None or value != rate:
             return False
+
+    for pattern, to_value in (
+        (_DIGITS_NEAR_UNIT, _digit_value),
+        (_SPELLED_NEAR_UNIT, _spelled_number_value),
+    ):
+        for match in pattern.finditer(summary):
+            value = to_value(match.group(1))
+            if value is None or value not in _allowed_for_unit(
+                match.group(2), term=term, rate=rate
+            ):
+                return False
 
     return True
 

@@ -334,6 +334,61 @@ def test_a_fabricated_dollar_figure_in_the_summary_is_rejected():
     assert calls == {"compute": 1, "persist": 1, "provenance": 1}
 
 
+def _narration_saying(summary: str) -> str:
+    return json.dumps({"summary": summary, "officer_action": "review_and_send"})
+
+
+def test_a_dollar_figure_equal_to_the_term_count_is_still_rejected():
+    """D1's allowed set is unit-aware, not value-only.
+
+    `_narrate` is given `term_months` 48 and `note_rate_pct` 7.99 and no money at all, so
+    "$48.00" is a fabricated dollar amount even though 48 is one of the two numbers the
+    model was handed. A value-only comparison passes it — exactly the figure the guard
+    exists to catch.
+    """
+    coordinator, _ = _coordinator(
+        [_document(), _narration_saying("Monthly payment of $48.00 begins next month.")]
+    )
+    result = coordinator.run(1)
+
+    assert result["narration_degraded"] is True
+    assert "unavailable" in result["narration"]["summary"].lower()
+
+
+def test_a_percent_figure_equal_to_the_term_count_is_rejected():
+    """Same unit-awareness on the rate side: 48 is the term, never the rate.
+
+    The only percent this stage may state is `note_rate_pct` (7.99). "48% APR" is a
+    fabricated rate whose value happens to equal the term count.
+    """
+    coordinator, _ = _coordinator(
+        [_document(), _narration_saying("The loan carries a 48% APR over the term.")]
+    )
+    result = coordinator.run(1)
+
+    assert result["narration_degraded"] is True
+    assert "unavailable" in result["narration"]["summary"].lower()
+
+
+def test_a_spelled_out_note_rate_is_not_flagged_as_ungrounded():
+    """A truthful spelled-out rate must not degrade the brief.
+
+    "seven point nine nine percent" is `note_rate_pct` written in words. Summing the
+    number words instead of reading the decimal yields a value that can never equal 7.99,
+    so a correct narration would degrade to NARRATION_UNAVAILABLE on the money path.
+    """
+    coordinator, _ = _coordinator(
+        [
+            _document(),
+            _narration_saying("The note rate is seven point nine nine percent."),
+        ]
+    )
+    result = coordinator.run(1)
+
+    assert result["narration_degraded"] is False
+    assert result["narration"]["officer_action"] == "review_and_send"
+
+
 def test_missing_figure_from_compute_blocks_without_calling_the_maker():
     coordinator, calls = _coordinator(
         [], offer={"offer_id": 11, "disclosure": {"apr": "9.584"}}
