@@ -207,6 +207,7 @@ A job is BLOCKING unless its body carries `continue-on-error` or `|| true`.
 - **BLOCKING** — `assistant-telemetry-gate`
 - **BLOCKING** — `no-sad-gate`
 - **BLOCKING** — `tila-vectors-gate`
+- **BLOCKING** — `disclosure-narration-gate`
 - **BLOCKING** — `reconciliation-gate`
 - **BLOCKING** — `agentic-loop-gate`
 - **BLOCKING** — `atomic-apply-gate`
