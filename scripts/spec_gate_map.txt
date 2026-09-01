@@ -333,17 +333,9 @@ services/servicing-service/app/payments.py => docs/specs/log-aggregation.md
 # reviewer. Decide before the surface changes -- an unwritten rule is not
 # inheritable.
 
-# D33 (applicants.ssn at rest) -- ADR 0023. Mapped to intake.py, the write path that
-# persists the column the ADR governs, and NOT to the purge mechanism the decision most
-# directly constrains: spec_diff_gate is an existence check, so mapping a path that ships
-# in a sibling PR would fail this gate for a docs-only change and force a stack. intake.py
-# is already on main, so this line resolves the day the ADR lands. Tighten it to
-# services/origination-service/app/purge_ssn.py once that file is on main -- that is the
-# file whose eligibility rule, destroy-full-keep-last-4 behaviour and inertness the ADR
-# actually obligates.
-#
-# This comment is not the record of that obligation -- no gate grades comments, so a
-# comment cannot make the remap happen. It is carded as an Open subtask on D33 in
-# docs/debt-log.md and as step 9 of the implementation plan in
-# adr/0023-applicant-ssn-at-rest.md. Change those too if this line changes.
-services/origination-service/app/intake.py => adr/0023-applicant-ssn-at-rest.md
+# D33 (applicants.ssn at rest) -- ADR 0023. Mapped to purge_ssn.py, the file whose
+# eligibility rule, destroy-full-keep-last-4 behaviour and inertness the ADR actually
+# obligates. Previously mapped to intake.py because purge_ssn.py did not exist on main yet
+# (spec_diff_gate is an existence check); remapped now that PR #142 (25157e4) put
+# purge_ssn.py on main.
+services/origination-service/app/purge_ssn.py => adr/0023-applicant-ssn-at-rest.md

@@ -1,20 +1,14 @@
 # ADR 0023: Applicant SSN at Rest
 
-- **Status:** **Proposed** — partly built, and not built *here*. Decision 1 (reduce internal
-  exposure, independent of retention) is implemented, covered by tests, and held by the
-  blocking `ssn-purge-gate` (the last-4 hop at intake, and the purge scaffold's refusal) and
-  the blocking `db-readiness-gate` (the `ssn_last4` rung) — **on the `fix/ssn-at-rest`
-  branch, which as of 2026-08-31 is not merged to `main` and has no PR open.** This ADR ships
-  separately on purpose: `spec-diff-gate` is an existence check, so a map line pointing at a
-  path that only exists on that branch would fail this change (see
-  `scripts/spec_gate_map.txt`). Decision 2 (the retention-contingent remediation) is not
-  built anywhere; it is blocked on a client answer.
-- **Reading the "Built" markers below:** **Built** in this ADR means *implemented and
-  reviewed on `fix/ssn-at-rest`*, not *present in the tree you are reading*. Neither
-  `db/migrations/0023_applicants_ssn_last4.sql`, `services/origination-service/app/purge_ssn.py`,
-  nor the `ssn-purge-gate` job exists on `main` on this ADR's date. Confirm with
-  `git merge-base --is-ancestor fix/ssn-at-rest origin/main` before citing any of them as
-  shipped.
+- **Status:** **Proposed** — partly built. Decision 1 (reduce internal exposure, independent
+  of retention) is implemented, covered by tests, merged to `main` as
+  [PR #142](https://github.com/2463-FDE/MC-meridian-lending/pull/142) (`25157e4`), and held by
+  the blocking `ssn-purge-gate` (the last-4 hop at intake, and the purge scaffold's refusal)
+  and the blocking `db-readiness-gate` (the `ssn_last4` rung). Decision 2 (the
+  retention-contingent remediation) is not built anywhere; it is blocked on a client answer.
+- **Reading the "Built" markers below:** **Built** in this ADR means *merged to `main`* —
+  `db/migrations/0023_applicants_ssn_last4.sql`, `services/origination-service/app/purge_ssn.py`
+  and the `ssn-purge-gate` job all ship there as of PR #142 (`25157e4`).
 - **Date:** 2026-08-31
 - **Author:** Claude Code
 - **Related:** ADR 0002 (single shared database — why every service reads `applicants.ssn`
@@ -171,7 +165,7 @@ applications-terminal-state join.
   oversight.
 - **The purge scaffold exists but cannot be enabled.** Shipping an inert, documented-wrong
   placeholder is a deliberate choice — it reuses safety gates and shape later — but it is
-  still unfinished work, and it lands in the tree the moment `fix/ssn-at-rest` merges.
+  still unfinished work.
 - **Encryption, if selected, is a second build that waits on a deployment existing.** The
   same dependency already blocks D35; this ADR does not remove it.
 
@@ -217,8 +211,8 @@ question. Encryption's operational cost is key rotation and incident-response ke
 neither designed yet.
 
 **Testing impact.** Decision 1 is covered, and every one of its tests sits under a blocking
-job rather than the tolerated `backend` matrix — on `fix/ssn-at-rest`; none of these jobs
-exists in this tree's `.github/workflows/ci.yml`: `ssn-purge-gate` runs `test_intake.py` (intake
+job rather than the tolerated `backend` matrix, held on `main` since PR #142 (`25157e4`):
+`ssn-purge-gate` runs `test_intake.py` (intake
 writes `ssn_last4`; the KYC hop carries last-4, not the full value) and `test_purge_ssn.py`;
 `db-readiness-gate` runs `test_db_readiness.py` (the rung fires on an unmigrated volume);
 `adr-0010-authz-gate` runs `test_authz.py` and `kyc-enforcement-gate` runs `test_kyc_gate.py`,
@@ -266,15 +260,12 @@ because it is known-wrong and unfinished by design.
    real migration. **Not started, contingent on step 6.**
 8. If the answer instead requires retention, scope the encryption build (key source, rotation,
    both read sites) as its own change. **Not started, contingent on step 6.**
-9. **Tighten the `spec-diff-gate` mapping for this ADR.** `scripts/spec_gate_map.txt` maps ADR
-   0023 to `services/origination-service/app/intake.py`, not to
+9. **Tighten the `spec-diff-gate` mapping for this ADR.** `scripts/spec_gate_map.txt` mapped ADR
+   0023 to `services/origination-service/app/intake.py` instead of
    `services/origination-service/app/purge_ssn.py` — the file whose eligibility rule, keep-last-4
-   behaviour and inertness this ADR actually constrains. The imprecise mapping is a deliberate
-   consequence of `spec-diff-gate` being an existence check: mapping a path that ships on
-   `fix/ssn-at-rest` would fail this docs-only change and force a stack. Remap it the day
-   `purge_ssn.py` is on `main`. Recorded here and on D33's entry in `docs/debt-log.md` rather
-   than only in a comment beside the map line, because no gate grades comments.
-   **Not started, contingent on `fix/ssn-at-rest` merging.**
+   behaviour and inertness this ADR actually constrains — because `purge_ssn.py` did not exist on
+   `main` yet and `spec-diff-gate` is an existence check. **Done**, now that `purge_ssn.py` is on
+   `main` (PR #142, `25157e4`): remapped in the same commit as this doc fix.
 
 ## Rollback strategy
 
@@ -335,11 +326,10 @@ carry, not a rollback strategy this ADR can specify in advance.
 
 ## Sign-off status
 
-**Proposed, partly built — and not built on this base.** Decision 1 is implemented, covered by
-tests, and held by the blocking `ssn-purge-gate` and `db-readiness-gate` on the
-`fix/ssn-at-rest` branch, which as of 2026-08-31 is not merged to `main`. Nothing in the tree
-carrying this ADR asserts anything about `applicants.ssn`. Decision 2 is engineering position
-only — purge preferred, encryption as the named fallback — with the retention-window question
+**Proposed, partly built.** Decision 1 is implemented, covered by tests, merged to `main` as
+PR #142 (`25157e4`), and held by the blocking `ssn-purge-gate` and `db-readiness-gate`.
+Decision 2 is engineering position only — purge preferred, encryption as the named fallback —
+with the retention-window question
 still open with Priya and Dana. This ADR does not resolve that question; it records what each
 answer selects and why, so the answer costs a path choice rather than a design exercise.
 
