@@ -1,17 +1,28 @@
 # ADR 0023: Applicant SSN at Rest
 
-- **Status:** **Proposed** — partly built. Decision 1 (reduce internal exposure, independent
-  of retention) is built and covered by tests, held by the blocking `ssn-purge-gate` (the
-  last-4 hop at intake, and the purge scaffold's refusal) and the blocking `db-readiness-gate`
-  (the `ssn_last4` rung). Decision 2 (the retention-contingent remediation) is not built; it
-  is blocked on a client answer.
+- **Status:** **Proposed** — partly built, and not built *here*. Decision 1 (reduce internal
+  exposure, independent of retention) is implemented, covered by tests, and held by the
+  blocking `ssn-purge-gate` (the last-4 hop at intake, and the purge scaffold's refusal) and
+  the blocking `db-readiness-gate` (the `ssn_last4` rung) — **on the `fix/ssn-at-rest`
+  branch, which as of 2026-08-31 is not merged to `main` and has no PR open.** This ADR ships
+  separately on purpose: `spec-diff-gate` is an existence check, so a map line pointing at a
+  path that only exists on that branch would fail this change (see
+  `scripts/spec_gate_map.txt`). Decision 2 (the retention-contingent remediation) is not
+  built anywhere; it is blocked on a client answer.
+- **Reading the "Built" markers below:** **Built** in this ADR means *implemented and
+  reviewed on `fix/ssn-at-rest`*, not *present in the tree you are reading*. Neither
+  `db/migrations/0023_applicants_ssn_last4.sql`, `services/origination-service/app/purge_ssn.py`,
+  nor the `ssn-purge-gate` job exists on `main` on this ADR's date. Confirm with
+  `git merge-base --is-ancestor fix/ssn-at-rest origin/main` before citing any of them as
+  shipped.
 - **Date:** 2026-08-31
 - **Author:** Claude Code
 - **Related:** ADR 0002 (single shared database — why every service reads `applicants.ssn`
   under the same credential), ADR 0006 (logging redaction), ADR 0013 Decision 2 (the CVV/PAN
   purge — precedent for technique, explicitly **not** for shape; see *Assumptions challenged*).
-  Debt D33 (this entry), D35 (SSN in transit, deferred separately), D5 (unencrypted
-  backup/WAL residual), D13b (PAN tokenization, same purge-vs-encrypt fork).
+  Debt D33 (this entry), D35 (SSN in transit, deferred separately), D5 (the pre-redaction
+  log-file residual — note D5 does *not* cover database backups or WAL; see implementation
+  plan step 5), D13b (PAN tokenization, same purge-vs-encrypt fork).
 - **Source:** `docs/debt-log.md` D33, `docs/handoffs/2026-08-31-docs-glba-encryption-framing.md`.
 
 ---
@@ -36,7 +47,9 @@ approved **in writing** by the institution's designated Qualified Individual. No
 that. Depending on where the client lends, NY DFS Part 500 (23 NYCRR 500.15) may add a second,
 overlapping encryption-at-rest requirement. State breach-notification statutes near-universally
 treat an SSN as a notification trigger and most provide a safe harbor for encrypted data, so
-this control also decides whether a future incident is reportable.
+this control also decides whether a future incident is reportable. Every citation in this
+paragraph is engineering's reading of the rules, not counsel's — *Regulatory basis and review
+status* below separates what was cited from what is assumed, and names who confirms it.
 
 Nothing prohibits *storing* a full SSN — bureau furnishing under FCRA, TIN reporting, and the
 CIP flow this platform implements all need it at some point. The question this ADR answers is
@@ -51,6 +64,24 @@ value for its stated purpose. `kyc-service` (`app/kyc.py:28`) does not: its chec
 `bool(applicant.get("ssn"))`, a presence check, not a verification against the value. That gap
 is what makes a partial remediation available immediately, without waiting on the retention
 answer below.
+
+### Regulatory basis and review status
+
+**None of the legal reading in this ADR has been reviewed by counsel or by the client's
+Compliance Officer.** It is an engineering assumption about which rules are on point, written
+so the question can be put to someone qualified to answer it — not a legal conclusion. Who
+confirms it: Priya (Compliance Officer) for the client's own regulatory posture, and the
+client's outside counsel for anything turning on scope or interpretation. Until one of them
+signs off, treat the obligation framing below as *the reason to ask*, not as the answer.
+
+| Claim in this ADR | Citation | Status |
+|---|---|---|
+| Encryption of customer information at rest is required, with no network-topology qualifier | GLBA Safeguards Rule, 16 CFR Part 314 § 314.4(c)(3) (added by the 2021 amendments) | Cited; text read directly. **Whether this client is a "financial institution" under Part 314, and whether an applicant SSN is "customer information" pre-decision, are both unreviewed.** |
+| The only exception is a compensating control approved in writing by the Qualified Individual | 16 CFR Part 314 § 314.4(c)(3) | Cited. Whether an equivalent control could be argued here is unreviewed. |
+| A second, overlapping at-rest requirement may apply depending on where the client lends | 23 NYCRR 500.15 (NY DFS Part 500) | Cited. **Applicability is unknown** — nobody has established where the client is licensed. Engineering assumption. |
+| Record retention bounds the window if retention is required | ECOA / Reg B, 12 CFR 1002.12 (25 months) | Cited. **Whether the *raw* SSN is in scope of that rule is counsel's read, not engineering's** — stated as unresolved throughout this ADR. |
+| Nothing prohibits storing the SSN; FCRA furnishing, TIN reporting and CIP need it | FCRA (15 U.S.C. § 1681 et seq.); IRS TIN reporting; the CIP flow this platform implements | Engineering assumption from the platform's own data flow. Not counsel-reviewed. |
+| State breach-notification statutes treat an SSN as a trigger and commonly provide an encryption safe harbor | State statutes, not enumerated here | **Engineering assumption.** No specific state statute was read; the generalization is offered as a reason the control matters, not as a finding. |
 
 ## Decision
 
@@ -122,8 +153,9 @@ applications-terminal-state join.
 
 ### Positive
 
-- The number of services that see the full SSN on the wire drops from two to one today,
-  with no dependency on any external answer (Decision 1).
+- The number of services that see the full SSN on the wire drops from two to one as soon as
+  Decision 1 merges, with no dependency on any external answer. Until it does, it is still
+  two: `main` sends `kyc-service` the full value.
 - Whichever path Decision 2 resolves to, the fork is already named with its trade-offs
   recorded, so the client's answer selects a path rather than triggering a design exercise.
 - The purge scaffold's safety shape (three independent gates, dry-run default, reporting
@@ -139,7 +171,7 @@ applications-terminal-state join.
   oversight.
 - **The purge scaffold exists but cannot be enabled.** Shipping an inert, documented-wrong
   placeholder is a deliberate choice — it reuses safety gates and shape later — but it is
-  still unfinished work sitting in the tree.
+  still unfinished work, and it lands in the tree the moment `fix/ssn-at-rest` merges.
 - **Encryption, if selected, is a second build that waits on a deployment existing.** The
   same dependency already blocks D35; this ADR does not remove it.
 
@@ -185,7 +217,8 @@ question. Encryption's operational cost is key rotation and incident-response ke
 neither designed yet.
 
 **Testing impact.** Decision 1 is covered, and every one of its tests sits under a blocking
-job rather than the tolerated `backend` matrix: `ssn-purge-gate` runs `test_intake.py` (intake
+job rather than the tolerated `backend` matrix — on `fix/ssn-at-rest`; none of these jobs
+exists in this tree's `.github/workflows/ci.yml`: `ssn-purge-gate` runs `test_intake.py` (intake
 writes `ssn_last4`; the KYC hop carries last-4, not the full value) and `test_purge_ssn.py`;
 `db-readiness-gate` runs `test_db_readiness.py` (the rung fires on an unmigrated volume);
 `adr-0010-authz-gate` runs `test_authz.py` and `kyc-enforcement-gate` runs `test_kyc_gate.py`,
@@ -204,14 +237,44 @@ because it is known-wrong and unfinished by design.
 4. Purge CLI scaffold (`app/purge_ssn.py`) — safety gates and reporting shape only, eligibility
    query is a documented placeholder; the refusal is held by the blocking `ssn-purge-gate`.
    **Built, not enabled.**
-5. Get the retention-window answer from Priya/Dana. **Not started — the actual blocker.**
-6. Rework the purge eligibility query to a terminal-state, per-applicant trigger; resolve the
+5. **Where each residual a purge cannot reach is tracked.** Sequenced here, ahead of the
+   remediation, because this ADR already relies on these residuals to argue that nulling the
+   column does not close D33 — if they are only named after the remediation lands, that
+   argument has no destination while it is being made. Destinations as of this ADR:
+   - **Pre-redaction log files** — D5's existing open residual, "flagged here but not
+     audited". No new entry; D5 owns it, and D5 is Mitigated-not-Fixed precisely because rows
+     like this one are still open.
+   - **Database backups and WAL segments** — **no owner before this ADR.** D5's backup
+     residual reads on its own terms as backups *of the log files*, not of the database, so
+     citing D5 here would claim coverage D5 does not have. Carded instead as an Open subtask
+     on D33 in `docs/debt-log.md`. Migration `0020_payments_drop_cvv.sql` already records the
+     same residual for cardholder data, so this is the second entry against it, not the first
+     sighting.
+   - **Replicas** — **explicit non-goal for this ADR.** No replica exists in any committed
+     deployment (`docker-compose.yml` and `docker-compose.demo.yml` run a single `postgres`
+     with no standby and no `wal_level` set for replication). It joins the backup/WAL subtask
+     the day one exists; that trigger is recorded here so it is not rediscovered.
+   - **The `ssn_last4` column itself** — deliberately out of scope for any purge: it is the
+     value the purge preserves (Decision 1, Option B records the live question about whether
+     it should exist at all).
+
+   **Not started as a retention action** — this step tracks where each residual lives, which
+   is done; taking the action for each is owned by D5 or by the trigger above, not by this ADR.
+6. Get the retention-window answer from Priya/Dana. **Not started — the actual blocker.**
+7. Rework the purge eligibility query to a terminal-state, per-applicant trigger; resolve the
    autovacuum-vs-scheduled-maintenance question named in *Assumptions challenged*; write the
-   real migration. **Not started, contingent on step 5.**
-7. If the answer instead requires retention, scope the encryption build (key source, rotation,
-   both read sites) as its own change. **Not started, contingent on step 5.**
-8. Name the residuals a purge cannot reach — pre-redaction logs (D5), backups, WAL, replicas —
-   as their own retention action once step 6 or 7 lands. **Not started.**
+   real migration. **Not started, contingent on step 6.**
+8. If the answer instead requires retention, scope the encryption build (key source, rotation,
+   both read sites) as its own change. **Not started, contingent on step 6.**
+9. **Tighten the `spec-diff-gate` mapping for this ADR.** `scripts/spec_gate_map.txt` maps ADR
+   0023 to `services/origination-service/app/intake.py`, not to
+   `services/origination-service/app/purge_ssn.py` — the file whose eligibility rule, keep-last-4
+   behaviour and inertness this ADR actually constrains. The imprecise mapping is a deliberate
+   consequence of `spec-diff-gate` being an existence check: mapping a path that ships on
+   `fix/ssn-at-rest` would fail this docs-only change and force a stack. Remap it the day
+   `purge_ssn.py` is on `main`. Recorded here and on D33's entry in `docs/debt-log.md` rather
+   than only in a comment beside the map line, because no gate grades comments.
+   **Not started, contingent on `fix/ssn-at-rest` merging.**
 
 ## Rollback strategy
 
@@ -235,7 +298,7 @@ carry, not a rollback strategy this ADR can specify in advance.
 | Risk | Mitigation |
 |---|---|
 | The purge scaffold is enabled before its eligibility query is corrected, purging the SSN of an applicant still awaiting a decision | Three gates, not two: `SSN_PURGE_ENABLED` and `--execute` are both required and neither is set, and even with both set `run()` raises `PurgeAbort` (exit 2, not a clean 0) while the in-code `_ELIGIBILITY_IS_PLACEHOLDER` constant stands — an env var and a CLI flag are both operator-flippable with no review, so the refusal that actually matters is the one that needs a reviewed diff to lift. The blocking `ssn-purge-gate` is what keeps that constant load-bearing rather than decorative: it proves `--execute` with the env gate open still refuses, never opens a transaction, and exits 2 rather than a clean 0. |
-| Decision 2 stalls indefinitely on the client answer, leaving `applicants.ssn` plaintext with no forcing function | D33 is already recorded as the highest-priority item among the entries this sweep found (`docs/debt-log.md`), and this ADR names the exact question blocking it so it is not rediscovered by a future session. |
+| Decision 2 stalls indefinitely on the client answer, leaving `applicants.ssn` plaintext with no forcing function | D33 is carded High in `docs/debt-log.md` — note that entry ranks it *below* D21b on exploitability and explicitly says it is "not the thing to do first", so priority alone is not the forcing function. What forces it is the obligation recorded under *Sign-off status*, and this ADR names the exact question blocking it so it is not rediscovered by a future session. |
 | The eventual purge migration ships without solving the dead-tuple reclaim question, so "purged" means only "nulled in the live row" | Named explicitly in *Assumptions challenged* and in the Implementation plan as a precondition of step 6, not an afterthought to discover during that migration's review. |
 | Encryption is selected and ships with a placeholder or hardcoded key, the same class of defect this rule exists to prevent | `decision-service`'s `_ssn_fingerprint` pepper pattern (`app/config.py`) is the precedent to mirror: refuse a known-placeholder value, report unhealthy outside development without a real one. Cite this ADR's Decision 2 when that build starts. |
 | `ssn_last4` is later judged to have been the wrong call (Decision 1, Option B) after CSR-verification requirements turn out not to need it | Removing a column is a strictly smaller change than adding one under a readiness rung already in place; the option was recorded as live, not closed, for exactly this reason. |
@@ -272,13 +335,25 @@ carry, not a rollback strategy this ADR can specify in advance.
 
 ## Sign-off status
 
-**Proposed, partly built.** Decision 1 is built, covered by tests, and held by the blocking
-`ssn-purge-gate` and `db-readiness-gate`. Decision 2 is engineering position only —
-purge preferred, encryption as the named fallback — with the retention-window question still
-open with Priya and Dana. This ADR does not resolve that question; it records what each
+**Proposed, partly built — and not built on this base.** Decision 1 is implemented, covered by
+tests, and held by the blocking `ssn-purge-gate` and `db-readiness-gate` on the
+`fix/ssn-at-rest` branch, which as of 2026-08-31 is not merged to `main`. Nothing in the tree
+carrying this ADR asserts anything about `applicants.ssn`. Decision 2 is engineering position
+only — purge preferred, encryption as the named fallback — with the retention-window question
+still open with Priya and Dana. This ADR does not resolve that question; it records what each
 answer selects and why, so the answer costs a path choice rather than a design exercise.
 
-Decision 2 carries no active remediation obligation the way ADR 0013's Decision 2 did (an
-already-prohibited value being retained today): storing the full SSN is lawful here, so the
-open item is a hardening deadline, not an ongoing violation. It is still, per the Regulatory
-finding in `docs/debt-log.md` D33, not a deadline this register can decide to skip.
+**Two separate questions, and only the first is settled.** *May the platform store a full
+SSN?* Yes — nothing prohibits it, so there is no "stop storing it" obligation, and this is
+where ADR 0013's Decision 2 differs: that one faced a value whose retention is prohibited
+outright, and this one does not. *Must the stored value be protected at rest?* Yes, on the
+reading recorded above — § 314.4(c)(3) carries no topology qualifier and its only exception is
+a written, Qualified-Individual-approved compensating control that nobody has produced. The
+client's retention answer therefore selects **which** remediation ships — purge or encryption —
+not **whether** one ships. Decision 2 must not be closed on the ground that storing the SSN is
+lawful; lawful storage is the premise of the obligation, not a defence against it.
+
+The one thing that could change that conclusion is the review named in *Regulatory basis and
+review status*: the obligation rests on engineering's reading of which rules are on point, and
+Priya or counsel can narrow it. Absent that review, Decision 2 stays an open obligation, not a
+discretionary hardening item.

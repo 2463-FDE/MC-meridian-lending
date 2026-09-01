@@ -335,4 +335,9 @@ services/servicing-service/app/payments.py => docs/specs/log-aggregation.md
 # services/origination-service/app/purge_ssn.py once that file is on main -- that is the
 # file whose eligibility rule, destroy-full-keep-last-4 behaviour and inertness the ADR
 # actually obligates.
+#
+# This comment is not the record of that obligation -- no gate grades comments, so a
+# comment cannot make the remap happen. It is carded as an Open subtask on D33 in
+# docs/debt-log.md and as step 9 of the implementation plan in
+# adr/0023-applicant-ssn-at-rest.md. Change those too if this line changes.
 services/origination-service/app/intake.py => adr/0023-applicant-ssn-at-rest.md

@@ -1,7 +1,17 @@
 # Handoff — D33 (SSN at rest) and D35 (nothing in transit), with the GLBA framing carded (2026-08-31)
 
-**Branch:** `docs/glba-encryption-framing` · **Base:** `origin/main` (`52723c1`) · **Repo:** `/Users/maha/Desktop/revature/MC-meridian-lending`
-**Status:** Docs-only change committed, unpushed, no PR. The *build* for D33 has not started and is what this handoff is for.
+> **This is a point-in-time record, not a statement of current repo state.** Everything below
+> describes one session as it stood on **2026-08-31**, before the D33 build started. Branch
+> names, tip shas, absolute filesystem paths, worktree/stash counts and the process warning at
+> the end are all **session-local and historical** — they were true of that session's machine
+> and that session's checkout, and none of them should be read as describing the repository
+> now. In particular: "the build for D33 has not started" was true when written and is no
+> longer — the reversible slice this handoff scopes was subsequently built on
+> `fix/ssn-at-rest`. **ADR 0023 supersedes this document as the record of the D33 decision;**
+> read this only for the investigation behind it. Nothing here is re-verified on read.
+
+**Branch:** `docs/glba-encryption-framing` · **Base:** `origin/main` (`52723c1`) · **Repo:** the primary checkout on the author's machine (absolute path elided — machine-local)
+**Status (as of 2026-08-31):** Docs-only change committed, unpushed, no PR. The *build* for D33 had not started and is what this handoff was written to hand off.
 
 ## What's done
 
@@ -106,7 +116,7 @@ All three green as of `21ed47f`. No code changed, so no service suite or gate ap
 - **D34** — Open; unpeppered `sha256(pan)` fingerprint, to be fixed *inside* D13b.
 - **D13b**, **D5** (backup/WAL residual) — unchanged.
 
-## ⚠️ Process warning for the next session
+## ⚠️ Process warning for the next session (session-local, 2026-08-31)
 
 **This branch's edits were destroyed once already.** A parallel Claude Code session ran a reset in the shared checkout while these files were modified-but-unstaged, then switched branches:
 
@@ -122,6 +132,8 @@ git worktree add <scratch>/wt-glba docs/glba-encryption-framing
 
 Twelve stashes and fourteen worktrees are live; several sessions are moving `HEAD` in the primary checkout. Check `git log -3` before any amend or reset, and recover additively rather than force-pushing.
 
-## Next session: start here
+## Next session: start here (as written on 2026-08-31 — step 2 is now done)
+
+*Superseded in part: the reversible slice below was subsequently built on `fix/ssn-at-rest`. The client question in step 1 is still open.*
 
 Ask Dana/Priya question 1 (bureau re-pull window). While waiting, build the reversible slice in step 2 above on a fresh `fix/ssn-at-rest` cut from `main` — none of it depends on the answer, and it is the whole change minus the one irreversible step.
