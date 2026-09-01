@@ -8,12 +8,14 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (25157e4)` — 25157e4 2026-09-01 Merge pull request #142 from 2463-FDE/fix/ssn-at-rest
+Base: `origin/main (a847abd)` — a847abd 2026-09-01 Merge pull request #144 from 2463-FDE/fix/adjust-balance-compare-and-set
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #144 | `a847abd` | 2026-09-01 | Merge pull request #144 from 2463-FDE/fix/adjust-balance-compare-and-set |
+| #145 | `558d048` | 2026-09-01 | Merge pull request #145 from 2463-FDE/test/disclosure-narration-fixtures |
 | #142 | `25157e4` | 2026-09-01 | Merge pull request #142 from 2463-FDE/fix/ssn-at-rest |
 | #143 | `6aee0f4` | 2026-09-01 | Merge pull request #143 from 2463-FDE/docs/narration-judge-handoff-fix |
 | #141 | `18cc928` | 2026-09-01 | Merge pull request #141 from 2463-FDE/docs/disclosure-narration-judge |
@@ -205,6 +207,7 @@ A job is BLOCKING unless its body carries `continue-on-error` or `|| true`.
 - **BLOCKING** — `assistant-telemetry-gate`
 - **BLOCKING** — `no-sad-gate`
 - **BLOCKING** — `tila-vectors-gate`
+- **BLOCKING** — `disclosure-narration-gate`
 - **BLOCKING** — `reconciliation-gate`
 - **BLOCKING** — `agentic-loop-gate`
 - **BLOCKING** — `atomic-apply-gate`

@@ -680,6 +680,45 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_tila_vectors.py tests/test_apr.py tests/test_rules.py -q
 
+  disclosure-narration-gate:
+    # D37 (docs/debt-log.md), Minimum Build Slice #4 (docs/specs/disclosure-narration-judge.md).
+    # D1's deterministic guard (`_narration_is_grounded`, disclosure_coordinator.py) already
+    # blocks a fabricated figure from reaching the officer, but origination-service's pytest
+    # runs under the tolerated `backend` matrix `|| true` -- same shape that let the D2
+    # add-on-vs-actuarial APR defect through before tila-vectors-gate existed. This job takes
+    # the guard, its pinned fixture set (D2), and the offline judge that grades the raw
+    # completion against them (D3) out of that tolerance. All three test files run entirely
+    # on FakeAdapter -- no network call, no live model key, same offline shape as the D2/D3
+    # split the spec requires.
+    #
+    # test_disclosure_coordinator.py is a 700+ line file covering the whole coordinator, most
+    # of it outside this debt entry's scope, so this job selects only the D1 groundedness
+    # tests by name rather than promoting the whole file to blocking.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: origination-service narration groundedness guard (D1) + fixtures (D2) + offline judge (D3)
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          D1_FILTER="rejected_narration or healthy_narration or fabricated_dollar_figure or \
+            dollar_figure_equal_to_the_term_count or percent_figure_equal_to_the_term_count or \
+            spelled_out_note_rate"
+          # -k selects by name out of a 700+ line file that is mostly out of scope for this
+          # gate (see job comment); a future rename of any of these six tests would make -k
+          # match nothing and pytest would exit 0 having verified none of them, so the count
+          # is asserted explicitly rather than trusted to the exit code alone.
+          COLLECTED=$(python -m pytest tests/test_disclosure_coordinator.py -k "$D1_FILTER" --collect-only -q | grep -c "::test_")
+          if [ "$COLLECTED" -ne 6 ]; then
+            echo "expected 6 D1 groundedness tests selected by name, got $COLLECTED -- a test was likely renamed; update the -k filter in this job" >&2
+            exit 1
+          fi
+          python -m pytest tests/test_disclosure_coordinator.py -k "$D1_FILTER" -q
+          python -m pytest tests/test_disclosure_narration_fixtures.py tests/test_narration_judge.py -q
+
   reconciliation-gate:
     # Settlement reconciliation is the only thing that compares what the processor captured
     # against what a loan was credited (ADR 0015). D19 now prevents the exact-retry case at
