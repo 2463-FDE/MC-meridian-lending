@@ -326,13 +326,3 @@ services/servicing-service/app/payments.py => docs/specs/log-aggregation.md
 # into a mapped line, or the exception is accepted explicitly by a second
 # reviewer. Decide before the surface changes -- an unwritten rule is not
 # inheritable.
-
-# D33 (applicants.ssn at rest) -- ADR 0023. The mapped path is the purge mechanism,
-# because that is the file the ADR's decision actually constrains: which rows become
-# eligible, that the full value is destroyed while last-4 survives, and that the
-# mechanism stays inert until the retention answer lands. ssn_last4 / the KYC hop are
-# the reversible half and would survive any of the ADR's three options, so they are not
-# what the decision record obligates. Both sides ship together here, so the existence
-# check resolves on this branch; if the ADR is ever split out ahead of the code, this
-# line has to wait for the code to land or it fails the gate for a docs-only change.
-services/origination-service/app/purge_ssn.py => adr/0023-applicant-ssn-at-rest.md
