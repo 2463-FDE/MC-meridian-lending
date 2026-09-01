@@ -580,6 +580,24 @@ what rate. `RATIONALE_MAX_CHARS = 240` reads as a formatting nicety; it is a gra
 
 ---
 
+### D37: A disclosure narration can state a fabricated figure with nothing to catch it before D1
+
+*(Carded 2026-08-31, `docs/specs/disclosure-narration-judge.md`. D1 of that spec's four-part
+build slice landed the same day this entry was opened — see Status.)*
+
+| Field | Value |
+|---|---|
+| **ID** | D37 |
+| **Finding** | Disclosure stage 4b (`_narrate`) briefs the officer without being given any of the five disclosed figures — only `term_months` and `note_rate_pct`. `OUTPUT_SCHEMA` declares `summary` as `type: string, maxLength: 500`, but the validator enforces `pattern` and nothing else — its own comment records that `maxLength` is declared by several prompts and is not enforced (`services/origination-service/app/llm/validator.py`). The schema constrains the type and no more. A schema-valid, leak-guard-passing `summary` could state a fabricated APR or dollar figure with no relationship to the real figures, and nothing in the pipeline would catch it before it reached the officer. Same shape as the D2 add-on-vs-actuarial APR defect (`docs/specs/disclosure-week4.md`): a wrong number reaching a human with no test exercising the failure mode. |
+| **Location** | `services/origination-service/app/disclosure_coordinator.py` (`_narrate`, and the `_narration_is_grounded` guard above it); prompt/schema at `services/origination-service/app/prompts/disclosure_narrate.py`. |
+| **Trigger** | Any model completion for the `disclosure_narrate` prompt that includes a currency amount, percent figure, or spelled-out number in `summary` — no report of this happening in a live narration; the gap is that nothing would have noticed if it had. |
+| **Risk** | **Medium.** The deterministic gate (stage 4a) still holds — no wrong figure can reach the persisted record or the borrower-facing document. The exposure is narrower: an officer-facing brief stating a number that doesn't match the disclosure they're looking at, which could mislead the officer's own review rather than the borrower's terms. |
+| **Attribution** | Self-inflicted, found in code review rather than a live incident (spec, "Verified in code, 2026-08-31"). The design that removed the model's ability to check a number was sound; it didn't also block the model from stating one. |
+| **Mitigation Path** | Four parts per the spec's Minimum Build Slice, each landable on its own: (1) D1, a deterministic runtime guard on `summary` — reject a figure other than the two given, degrade to `NARRATION_UNAVAILABLE`. (2) D2, a pinned fixture set of synthetic `DisclosureState` cases. (3) D3, an offline LLM judge (reusing `ClaudeClient`) grading groundedness and `officer_action` correctness against the fixtures. (4) D4, `disclosure-narration-gate` — a blocking CI job running D3 over D2, same placement pattern as `tila-vectors-gate`. |
+| **Status** | **Open — D1 landed, not yet Mitigated.** `services/origination-service/app/disclosure_coordinator.py` (`_narration_is_grounded`, wired into `_narrate`) is built and proven via `make prove` — the regression test (`test_a_fabricated_dollar_figure_in_the_summary_is_rejected`, `tests/test_disclosure_coordinator.py`) fails without the guard and passes with it. It does not yet meet the debt-log bar for Mitigated: `origination-service`'s pytest runs under the tolerated `backend` matrix `|| true`, so nothing blocking keeps this guard from regressing — D4's `disclosure-narration-gate` is what would make it so. D2 (fixtures) and D3 (offline judge) are not built. Close this entry only once D1–D4 are all merged and the gate is blocking. |
+
+---
+
 ## Week 1 Actions
 
 ✓ **D1:** Documented; flagged for rotation (Week 2).  

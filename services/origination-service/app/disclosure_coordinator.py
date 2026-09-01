@@ -71,6 +71,8 @@ transition stays suppressed.
 from __future__ import annotations
 
 import os
+import re
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Protocol, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -158,6 +160,152 @@ NARRATION_UNAVAILABLE = {
     ),
     "officer_action": "hold_for_compliance",
 }
+
+# D1 groundedness guard (docs/specs/disclosure-narration-judge.md). Stage 4b is given none
+# of the five disclosed figures -- only `term_months` and `note_rate_pct` -- so any other
+# currency amount, percent figure, or spelled-out number word in `summary` is invented, not
+# derived. `OUTPUT_SCHEMA` declares `maxLength: 500` but the validator does not enforce it
+# (`llm/validator.py`), and what it does enforce is shape; this catches content the schema
+# and the generic PII leak guard both pass through.
+#
+# The comparison is unit-aware, not value-only. A value-only allowed set passes exactly the
+# figures this guard exists to catch: at `term_months` 48 a fabricated "$48.00 monthly
+# payment" is a dollar amount the model was never given, but its value is on the allowed
+# list. The model is handed a month count and a percent and no money at all, so a currency
+# amount is ungrounded whatever its value, and a percent may only be `note_rate_pct`.
+_MONEY_UNIT = r"dollars?|cents?|payments?(?:'s)?"
+_RATE_UNIT = r"percent|apr|rate"
+_TERM_UNIT = r"months?(?:'s)?"
+_ANY_UNIT = rf"{_MONEY_UNIT}|{_RATE_UNIT}|{_TERM_UNIT}"
+
+_CURRENCY_FIGURE = re.compile(r"\$\s?([\d,]+(?:\.\d+)?)")
+_PERCENT_SIGN_FIGURE = re.compile(r"\b([\d,]+(?:\.\d+)?)\s?%")
+_DIGITS_NEAR_UNIT = re.compile(
+    rf"\b([\d,]+(?:\.\d+)?)\s+(?:of\s+)?({_ANY_UNIT})\b", re.IGNORECASE
+)
+
+_NUMBER_WORDS = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+_NUMBER_WORD_ALT = "|".join(_NUMBER_WORDS)
+# Only flags a spelled-out number directly adjacent to a unit word (the failure case named
+# in the spec's Options #2: "one month's payment" spelled out in words) rather than any
+# occurrence of "one"/"two" in ordinary prose, which would false-positive on common English
+# -- including the prompt's own "one or two sentences" instruction, where neither word sits
+# next to a unit. The optional "point" tail is what makes a truthful spelled rate readable:
+# without it "seven point nine nine percent" is summed rather than parsed and a correct
+# narration degrades on the money path.
+# Known incomplete above two whole-number words and above "ninety-nine" (no "hundred" or
+# "thousand") -- the spec's own Risks section accepts this: D1 is a best-effort runtime
+# layer backed by D3's offline judge, not strengthened indefinitely.
+_SPELLED_NUMBER = (
+    rf"(?:{_NUMBER_WORD_ALT})(?:[\s-]+(?:{_NUMBER_WORD_ALT}))?"
+    rf"(?:\s+point(?:\s+(?:{_NUMBER_WORD_ALT}))+)?"
+)
+_SPELLED_NEAR_UNIT = re.compile(
+    rf"\b({_SPELLED_NUMBER})\s+(?:of\s+)?({_ANY_UNIT})\b", re.IGNORECASE
+)
+
+
+def _digit_value(figure: str) -> Decimal | None:
+    """Decimal for a written-out digit run, or None when it does not parse as one."""
+    try:
+        return Decimal(figure.replace(",", ""))
+    except InvalidOperation:
+        return None
+
+
+def _spelled_number_value(phrase: str) -> Decimal | None:
+    """Decimal for a spelled-out number, or None when it is not one this guard reads.
+
+    Words before "point" sum ("twenty five" -> 25); words after it are digits in order
+    ("seven point nine nine" -> 7.99), so a truthful spelled rate compares equal to
+    `note_rate_pct` instead of summing to a value that could never match it.
+    """
+    head, _, tail = phrase.lower().partition("point")
+    try:
+        whole = sum(_NUMBER_WORDS[w] for w in re.split(r"[\s-]+", head.strip()) if w)
+        if not tail.strip():
+            return Decimal(whole)
+        digits = "".join(
+            str(_NUMBER_WORDS[w]) for w in re.split(r"[\s-]+", tail.strip()) if w
+        )
+        return Decimal(f"{whole}.{digits}")
+    except (KeyError, InvalidOperation):
+        return None
+
+
+def _allowed_for_unit(unit: str, *, term: Decimal, rate: Decimal) -> set[Decimal]:
+    """Which of the two given numbers a figure carrying `unit` may legitimately be.
+
+    Money is deliberately empty: `_narrate` is handed no dollar amount at all, so there is
+    no value a currency figure could carry that the model was given.
+    """
+    unit = unit.lower()
+    if re.fullmatch(_RATE_UNIT, unit):
+        return {rate}
+    if re.fullmatch(_TERM_UNIT, unit):
+        return {term}
+    return set()
+
+
+def _narration_is_grounded(
+    summary: str, *, term_months: int, note_rate_pct: float
+) -> bool:
+    """False if `summary` states a figure other than the two numbers the model was given."""
+    try:
+        term = Decimal(str(term_months))
+        rate = Decimal(str(note_rate_pct))
+    except InvalidOperation:
+        return False
+
+    if _CURRENCY_FIGURE.search(summary):
+        return False
+
+    for match in _PERCENT_SIGN_FIGURE.finditer(summary):
+        value = _digit_value(match.group(1))
+        if value is None or value != rate:
+            return False
+
+    for pattern, to_value in (
+        (_DIGITS_NEAR_UNIT, _digit_value),
+        (_SPELLED_NEAR_UNIT, _spelled_number_value),
+    ):
+        for match in pattern.finditer(summary):
+            value = to_value(match.group(1))
+            if value is None or value not in _allowed_for_unit(
+                match.group(2), term=term, rate=rate
+            ):
+                return False
+
+    return True
 
 
 class Coordinator(Protocol):
@@ -418,6 +566,12 @@ class LangGraphDisclosureCoordinator:
         deliverable. `fallback` covers validation and leak-guard rejections only; a
         transport failure or an exhausted token budget still raises, since those say the
         model was never reached and the officer should see an outage.
+
+        A schema-valid, leak-guard-passing `summary` can still state a figure the model was
+        never given — neither of those checks looks at content, only shape and PII (D1,
+        docs/specs/disclosure-narration-judge.md). Caught here, after `_complete` returns,
+        rather than inside the generic validator: the check needs `term_months`/
+        `note_rate_pct`, which only this call site has.
         """
         narration = self._complete(
             "disclosure_narrate",
@@ -428,10 +582,23 @@ class LangGraphDisclosureCoordinator:
             fallback=NARRATION_UNAVAILABLE,
         )
         degraded = narration is NARRATION_UNAVAILABLE
+        reason = "validation_or_leak_guard" if degraded else None
+        if not degraded and not _narration_is_grounded(
+            narration["summary"],
+            term_months=state["term_months"],
+            note_rate_pct=state["annual_rate"],
+        ):
+            narration = NARRATION_UNAVAILABLE
+            degraded = True
+            reason = "ungrounded_figure"
         if degraded:
+            # Event only, never the summary text itself: the text that tripped this is
+            # exactly the kind of content the PII leak guard and this guard exist to keep
+            # out of logs (spec's Open Questions, answered 2026-08-31).
             log.warning(
-                "disclosure narration degraded app_id=%s: serving the canned brief",
+                "disclosure narration degraded app_id=%s reason=%s: serving the canned brief",
                 state["application_id"],
+                reason,
             )
         return {"narration": dict(narration), "narration_degraded": degraded}
 
