@@ -1,9 +1,10 @@
 # ADR 0023: Applicant SSN at Rest
 
 - **Status:** **Proposed** — partly built. Decision 1 (reduce internal exposure, independent
-  of retention) is built and covered by tests, held by the blocking `db-readiness-gate`.
-  Decision 2 (the retention-contingent remediation) is not built; it is blocked on a client
-  answer.
+  of retention) is built and covered by tests, held by the blocking `ssn-purge-gate` (the
+  last-4 hop at intake, and the purge scaffold's refusal) and the blocking `db-readiness-gate`
+  (the `ssn_last4` rung). Decision 2 (the retention-contingent remediation) is not built; it
+  is blocked on a client answer.
 - **Date:** 2026-08-31
 - **Author:** Claude Code
 - **Related:** ADR 0002 (single shared database — why every service reads `applicants.ssn`
@@ -61,9 +62,13 @@ not share a numbering space), populated at intake and backfilled on existing row
 sites that previously sent `kyc-service` the full SSN (`applications.py` submit and
 `recheck-kyc`) now send only the last four characters. `kyc-service`'s own check is
 `bool(value)`; a non-empty last-4 satisfies it identically to a non-empty full value, so this
-is not a behaviour change. The origination readiness rung (`app/config.py`,
-`db-readiness-gate`) asserts the column exists and is `text`, so a volume that predates the
-migration reports unhealthy rather than 500ing intake or recheck on a missing column.
+is not a behaviour change. The blocking `ssn-purge-gate` runs `test_intake.py`, which pins
+that intake writes `ssn_last4` on every submit and that the KYC hop carries last-4 — those
+assertions also run in the `backend` matrix, which is `continue-on-error` + `|| true`, so
+without a blocking job a regression would put full SSNs back on the wire on a green build.
+The origination readiness rung (`app/config.py`, held by the blocking `db-readiness-gate`)
+asserts the column exists and is `text`, so a volume that predates the migration reports
+unhealthy rather than 500ing intake or recheck on a missing column.
 `decision-service`'s bureau pull is untouched — it still reads the full column, because it
 must.
 
@@ -179,22 +184,26 @@ whatever reclaims dead tuples on a schedule that does not lock `applicants` the 
 question. Encryption's operational cost is key rotation and incident-response key recovery,
 neither designed yet.
 
-**Testing impact.** Decision 1 is covered: `test_intake.py`, `test_db_readiness.py`,
-`test_authz.py`, `test_kyc_gate.py` assert the presence-check behaviour is unchanged and the
-readiness rung fires correctly. Decision 2 has no tests beyond the purge scaffold's own
-gate-and-dry-run unit tests (`test_purge_ssn.py`) — its eligibility logic is untested because
-it is known-wrong and unfinished by design.
+**Testing impact.** Decision 1 is covered, and every one of its tests sits under a blocking
+job rather than the tolerated `backend` matrix: `ssn-purge-gate` runs `test_intake.py` (intake
+writes `ssn_last4`; the KYC hop carries last-4, not the full value) and `test_purge_ssn.py`;
+`db-readiness-gate` runs `test_db_readiness.py` (the rung fires on an unmigrated volume);
+`adr-0010-authz-gate` runs `test_authz.py` and `kyc-enforcement-gate` runs `test_kyc_gate.py`,
+both of which assert the presence-check behaviour is unchanged. Decision 2 has no tests beyond
+the purge scaffold's own gate-and-dry-run unit tests — its eligibility logic is untested
+because it is known-wrong and unfinished by design.
 
 ## Implementation plan
 
 1. `ssn_last4` column — migration `db/migrations/0023_applicants_ssn_last4.sql`, backfilled.
    **Built.**
 2. Submit and recheck-kyc send `kyc-service` last-4 instead of the full value
-   (`app/intake.py::ssn_last4`). **Built.**
+   (`app/intake.py::ssn_last4`), held by the blocking `ssn-purge-gate`. **Built.**
 3. Readiness rung for `applicants.ssn_last4` in `app/config.py`, covered by the existing
    blocking `db-readiness-gate`. **Built.**
 4. Purge CLI scaffold (`app/purge_ssn.py`) — safety gates and reporting shape only, eligibility
-   query is a documented placeholder. **Built, not enabled.**
+   query is a documented placeholder; the refusal is held by the blocking `ssn-purge-gate`.
+   **Built, not enabled.**
 5. Get the retention-window answer from Priya/Dana. **Not started — the actual blocker.**
 6. Rework the purge eligibility query to a terminal-state, per-applicant trigger; resolve the
    autovacuum-vs-scheduled-maintenance question named in *Assumptions challenged*; write the
@@ -225,7 +234,7 @@ carry, not a rollback strategy this ADR can specify in advance.
 
 | Risk | Mitigation |
 |---|---|
-| The purge scaffold is enabled before its eligibility query is corrected, purging the SSN of an applicant still awaiting a decision | Three gates, not two: `SSN_PURGE_ENABLED` and `--execute` are both required and neither is set, and even with both set `run()` raises `PurgeAbort` (exit 2, not a clean 0) while the in-code `_ELIGIBILITY_IS_PLACEHOLDER` constant stands — an env var and a CLI flag are both operator-flippable with no review, so the refusal that actually matters is the one that needs a reviewed diff to lift. |
+| The purge scaffold is enabled before its eligibility query is corrected, purging the SSN of an applicant still awaiting a decision | Three gates, not two: `SSN_PURGE_ENABLED` and `--execute` are both required and neither is set, and even with both set `run()` raises `PurgeAbort` (exit 2, not a clean 0) while the in-code `_ELIGIBILITY_IS_PLACEHOLDER` constant stands — an env var and a CLI flag are both operator-flippable with no review, so the refusal that actually matters is the one that needs a reviewed diff to lift. The blocking `ssn-purge-gate` is what keeps that constant load-bearing rather than decorative: it proves `--execute` with the env gate open still refuses, never opens a transaction, and exits 2 rather than a clean 0. |
 | Decision 2 stalls indefinitely on the client answer, leaving `applicants.ssn` plaintext with no forcing function | D33 is already recorded as the highest-priority item among the entries this sweep found (`docs/debt-log.md`), and this ADR names the exact question blocking it so it is not rediscovered by a future session. |
 | The eventual purge migration ships without solving the dead-tuple reclaim question, so "purged" means only "nulled in the live row" | Named explicitly in *Assumptions challenged* and in the Implementation plan as a precondition of step 6, not an afterthought to discover during that migration's review. |
 | Encryption is selected and ships with a placeholder or hardcoded key, the same class of defect this rule exists to prevent | `decision-service`'s `_ssn_fingerprint` pepper pattern (`app/config.py`) is the precedent to mirror: refuse a known-placeholder value, report unhealthy outside development without a real one. Cite this ADR's Decision 2 when that build starts. |
@@ -264,7 +273,7 @@ carry, not a rollback strategy this ADR can specify in advance.
 ## Sign-off status
 
 **Proposed, partly built.** Decision 1 is built, covered by tests, and held by the blocking
-`db-readiness-gate`. Decision 2 is engineering position only —
+`ssn-purge-gate` and `db-readiness-gate`. Decision 2 is engineering position only —
 purge preferred, encryption as the named fallback — with the retention-window question still
 open with Priya and Dana. This ADR does not resolve that question; it records what each
 answer selects and why, so the answer costs a path choice rather than a design exercise.
