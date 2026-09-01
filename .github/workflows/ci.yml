@@ -430,6 +430,11 @@ jobs:
     # of the full SSN. A regression there silently puts full SSNs back on the wire while
     # every assertion about the purge still passes.
     #
+    # test_seed_ssn_last4_backfill.py rides along too (B1, fix/ssn-at-rest review): a
+    # fresh volume never runs migration 0023, only db/init/*.sql, so the seed's own
+    # ssn_last4 backfill is what keeps a freshly-seeded applicant out of the same
+    # ssn_last4-NULL state the purge/intake tests above assume never happens.
+    #
     # Its own install line, per the kyc-persistence-gate lesson above: this job must not
     # pass on a package an unrelated earlier step installed.
     runs-on: ubuntu-latest
@@ -442,7 +447,7 @@ jobs:
         run: |
           cd services/origination-service
           pip install -r requirements.txt pytest
-          python -m pytest tests/test_purge_ssn.py tests/test_intake.py -q
+          python -m pytest tests/test_purge_ssn.py tests/test_intake.py tests/test_seed_ssn_last4_backfill.py -q
 
   payment-idempotency-gate:
     # D19: a retried POST /payments used to insert a second payments row and charge the

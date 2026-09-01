@@ -11,6 +11,11 @@ replaying the migrations.
 
 Grades the SQL as text, same as the no-sad vectors: no live Postgres needed to prove a
 backfill statement is present and ordered after every applicant INSERT.
+
+Ordering is graded at STATEMENT granularity, not file granularity: postgres's
+docker-entrypoint-initdb.d runner executes each file's statements top-to-bottom, so a
+backfill placed ahead of its own file's INSERT (same file, wrong order) still leaves
+those rows NULL -- a file-index comparison alone cannot see that.
 """
 
 import re
@@ -26,30 +31,37 @@ _SSN_LAST4_BACKFILL = re.compile(
 )
 
 
-def test_every_init_file_that_seeds_applicants_is_followed_by_a_backfill():
-    last_insert_file = None
-    last_insert_index = None
-    for i, path in enumerate(INIT_FILES):
-        if _APPLICANTS_INSERT.search(path.read_text()):
-            last_insert_file = path
-            last_insert_index = i
-    assert last_insert_file is not None, (
+def _ordered_seed_text() -> str:
+    """Every db/init file's SQL, concatenated in the filename order postgres runs
+    them in. A single offset space lets a regex match's position compare across file
+    boundaries, which comparing per-file indices cannot do."""
+    return "\n".join(path.read_text() for path in INIT_FILES)
+
+
+def test_every_applicants_insert_is_followed_by_the_backfill():
+    seed_text = _ordered_seed_text()
+
+    last_insert_end = None
+    for m in _APPLICANTS_INSERT.finditer(seed_text):
+        last_insert_end = m.end()
+    assert last_insert_end is not None, (
         "no db/init file seeds applicants -- update this vector"
     )
 
-    backfill_index = None
-    for i, path in enumerate(INIT_FILES):
-        if _SSN_LAST4_BACKFILL.search(path.read_text()):
-            backfill_index = i
-    assert backfill_index is not None, (
+    backfill_start = None
+    for m in _SSN_LAST4_BACKFILL.finditer(seed_text):
+        backfill_start = m.start()
+    assert backfill_start is not None, (
         "no db/init file backfills ssn_last4 -- a fresh volume seeds natural-person "
         "applicants with ssn set and ssn_last4 NULL, which flips kyc_checks.ssn_verified "
         "to false on the next recheck_kyc call"
     )
-    assert backfill_index >= last_insert_index, (
-        f"{INIT_FILES[backfill_index].name} backfills ssn_last4 before "
-        f"{last_insert_file.name} seeds applicants -- db/init files run in filename "
-        "order, so a backfill ahead of the last applicant INSERT misses those rows"
+    assert backfill_start > last_insert_end, (
+        "the ssn_last4 backfill sits before the last `INSERT INTO applicants` in "
+        "filename-execution order -- db/init statements run top-to-bottom within each "
+        "file and file-by-file across files, so a backfill ahead of an applicants "
+        "INSERT (even in the same file) runs against rows that don't exist yet and "
+        "leaves them NULL"
     )
 
 
