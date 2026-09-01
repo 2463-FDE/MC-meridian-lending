@@ -75,6 +75,34 @@ def test_create_application_persists_model_inputs(monkeypatch):
     assert "continuation_token" in app_insert[0]
 
 
+def test_ssn_last4_preserves_truthiness():
+    # D33: kyc-service checks bool(applicant.get("ssn")) as a presence check. The slice
+    # must be truthy iff the input was truthy, for ANY non-empty input -- not just a
+    # real 9-digit SSN -- or routing KYC through last-4 changes ssn_verified.
+    assert intake.ssn_last4(None) is None
+    assert intake.ssn_last4("") is None
+    assert intake.ssn_last4("123456789") == "6789"
+    assert intake.ssn_last4("12") == "12"  # shorter than 4: whole value, still truthy
+
+
+def test_create_application_persists_ssn_last4(monkeypatch):
+    captured = []
+    _capturing_transaction(monkeypatch, captured)
+    intake.create_application(
+        {
+            "name": "Test Borrower",
+            "amount": 15000,
+            "monthly_debt": 500,
+            "ssn": "123456789",
+        }
+    )
+    applicant_insert = next(c for c in captured if "INSERT INTO applicants" in c[0])
+    assert "ssn_last4" in applicant_insert[0]
+    # (name, dob, ssn, ssn_last4, ein, is_entity, address)
+    assert applicant_insert[1][2] == "123456789"
+    assert applicant_insert[1][3] == "6789"
+
+
 def test_create_application_writes_nothing_when_token_hash_misconfigured(monkeypatch):
     # PR #7 review: hash_token is computed BEFORE any write, so a misconfigured continuation
     # pepper aborts submit with NO applicant PII persisted -- no orphaned row.
@@ -225,6 +253,38 @@ def test_kyc_success_sets_kyc_checked_true(monkeypatch):
     assert body["kyc_checked"] is True
     assert body["kyc"]["name_verified"] is True
     assert audit == []  # no failure audit row on the success path
+
+
+def test_submit_sends_kyc_service_only_last4_not_full_ssn(monkeypatch):
+    # D33: kyc-service only needs a presence check, so the full SSN must never leave
+    # origination on this call -- confirm the wire payload carries last-4, not the
+    # value the applicant actually typed.
+    monkeypatch.setattr(
+        applications.intake,
+        "create_application",
+        lambda payload, submitted_by_user_id=None: (1, "tok-test"),
+    )
+    audit = []
+    monkeypatch.setattr(applications.db, "query", _kyc_test_db(audit))
+    sent = {}
+
+    def _capture_post(base, path, payload):
+        sent.update(payload)
+        return {"cip_passed": True}
+
+    monkeypatch.setattr(applications.clients, "post", _capture_post)
+    resp = TestClient(app).post(
+        "/applications",
+        json={
+            "name": "Test Borrower",
+            "amount": 10000,
+            "monthly_debt": 500,
+            "ssn": "412-55-9981",
+        },
+    )
+    assert resp.status_code == 200
+    assert sent["ssn"] == "9981"
+    assert sent["ssn"] != "412-55-9981"
 
 
 def test_api_rejects_missing_monthly_debt():

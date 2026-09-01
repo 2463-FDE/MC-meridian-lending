@@ -210,7 +210,7 @@ _APPLICANT_ROW = {
     "applicant_id": 42,
     "name": "Jane Doe",
     "dob": None,
-    "ssn": None,
+    "ssn_last4": None,
     "address": "10 Main St",
     "is_entity": False,
 }

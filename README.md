@@ -92,12 +92,18 @@ and a borrower login `maria`.
 
 ## Compliance
 
-**Current posture — under remediation, not a compliance attestation.** Card data (PAN/CVV)
+**Current posture — under remediation, not a compliance attestation.** The full PAN
 is stored in plaintext, so the payment path is **not** compliant with PCI-DSS — tracked as
-open debt (ADR 0003; tokenization is the week-5 plan). Adverse-action notices follow
-ECOA/Reg B. TILA/Reg-Z APR is computed actuarially against pinned test vectors
-(`tila-vectors-gate`). SOX audit coverage is partial: credit decisions are append-only,
-money movement is not yet a full ledger.
+open debt D13b (ADR 0013, which supersedes ADR 0003; tokenization needs a provider decision
+and a card-entry surface, and neither exists). The CVV column was deleted by migration
+`db/migrations/0020_payments_drop_cvv.sql`, held by the blocking `no-sad-gate`. Applicant
+SSNs are also stored in plaintext (debt D33), which the **GLBA Safeguards Rule**
+(16 CFR Part 314 §314.4(c)(3), encryption of customer information at rest) is the rule on
+point for — the most directly applicable regime to this platform's data and the one this
+section previously did not name at all. Adverse-action notices follow ECOA/Reg B.
+TILA/Reg-Z APR is computed actuarially against pinned test vectors (`tila-vectors-gate`).
+SOX audit coverage is partial: credit decisions are append-only, money movement is not yet
+a full ledger.
 Compliance contact: Dana (VP Lending Ops). For SOX/reconciliation questions: Sam
 (Controller). For fair-lending/BSA: Priya (Compliance Officer).
 
