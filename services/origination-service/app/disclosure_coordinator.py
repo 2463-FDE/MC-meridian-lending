@@ -71,6 +71,8 @@ transition stays suppressed.
 from __future__ import annotations
 
 import os
+import re
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Protocol, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -158,6 +160,88 @@ NARRATION_UNAVAILABLE = {
     ),
     "officer_action": "hold_for_compliance",
 }
+
+# D1 groundedness guard (docs/specs/disclosure-narration-judge.md). Stage 4b is given none
+# of the five disclosed figures -- only `term_months` and `note_rate_pct` -- so any other
+# currency amount, percent figure, or spelled-out number word in `summary` is invented, not
+# derived. `OUTPUT_SCHEMA` validates shape only; this catches content the schema and the
+# generic PII leak guard both pass through.
+_CURRENCY_FIGURE = re.compile(r"\$\s?([\d,]+(?:\.\d+)?)")
+_PERCENT_FIGURE = re.compile(r"\b([\d,]+(?:\.\d+)?)\s?%")
+_BARE_NUMBER_NEAR_UNIT = re.compile(
+    r"\b([\d,]+(?:\.\d+)?)\s+(?:percent|dollars?|cents?)\b", re.IGNORECASE
+)
+
+_NUMBER_WORDS = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+_NUMBER_WORD_ALT = "|".join(_NUMBER_WORDS)
+# Only flags a spelled-out number directly adjacent to a unit word (the failure case named
+# in the spec's Options #2: "one month's payment" spelled out in words) rather than any
+# occurrence of "one"/"two" in ordinary prose, which would false-positive on common English.
+# Known incomplete above two words and above "ninety-nine" (no "hundred"/"thousand") -- the
+# spec's own Risks section accepts this: D1 is a best-effort runtime layer backed by D3's
+# offline judge, not strengthened indefinitely.
+_SPELLED_NUMBER_NEAR_UNIT = re.compile(
+    rf"\b((?:{_NUMBER_WORD_ALT})(?:[\s-]+(?:{_NUMBER_WORD_ALT}))?)\s+"
+    r"(?:of\s+)?(?:percent|dollars?|cents?|months?(?:'s)?|payments?(?:'s)?|apr|rate)\b",
+    re.IGNORECASE,
+)
+
+
+def _spelled_number_value(phrase: str) -> int:
+    return sum(_NUMBER_WORDS[word.lower()] for word in re.split(r"[\s-]+", phrase))
+
+
+def _narration_is_grounded(
+    summary: str, *, term_months: int, note_rate_pct: float
+) -> bool:
+    """False if `summary` states a figure other than the two numbers the model was given."""
+    try:
+        allowed = {Decimal(str(term_months)), Decimal(str(note_rate_pct))}
+    except InvalidOperation:
+        return False
+
+    for pattern in (_CURRENCY_FIGURE, _PERCENT_FIGURE, _BARE_NUMBER_NEAR_UNIT):
+        for match in pattern.finditer(summary):
+            try:
+                if Decimal(match.group(1).replace(",", "")) not in allowed:
+                    return False
+            except InvalidOperation:
+                return False
+
+    for match in _SPELLED_NUMBER_NEAR_UNIT.finditer(summary):
+        if Decimal(_spelled_number_value(match.group(1))) not in allowed:
+            return False
+
+    return True
 
 
 class Coordinator(Protocol):
@@ -418,6 +502,12 @@ class LangGraphDisclosureCoordinator:
         deliverable. `fallback` covers validation and leak-guard rejections only; a
         transport failure or an exhausted token budget still raises, since those say the
         model was never reached and the officer should see an outage.
+
+        A schema-valid, leak-guard-passing `summary` can still state a figure the model was
+        never given — neither of those checks looks at content, only shape and PII (D1,
+        docs/specs/disclosure-narration-judge.md). Caught here, after `_complete` returns,
+        rather than inside the generic validator: the check needs `term_months`/
+        `note_rate_pct`, which only this call site has.
         """
         narration = self._complete(
             "disclosure_narrate",
@@ -428,10 +518,23 @@ class LangGraphDisclosureCoordinator:
             fallback=NARRATION_UNAVAILABLE,
         )
         degraded = narration is NARRATION_UNAVAILABLE
+        reason = "validation_or_leak_guard" if degraded else None
+        if not degraded and not _narration_is_grounded(
+            narration["summary"],
+            term_months=state["term_months"],
+            note_rate_pct=state["annual_rate"],
+        ):
+            narration = NARRATION_UNAVAILABLE
+            degraded = True
+            reason = "ungrounded_figure"
         if degraded:
+            # Event only, never the summary text itself: the text that tripped this is
+            # exactly the kind of content the PII leak guard and this guard exist to keep
+            # out of logs (spec's Open Questions, answered 2026-08-31).
             log.warning(
-                "disclosure narration degraded app_id=%s: serving the canned brief",
+                "disclosure narration degraded app_id=%s reason=%s: serving the canned brief",
                 state["application_id"],
+                reason,
             )
         return {"narration": dict(narration), "narration_degraded": degraded}
 

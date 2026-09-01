@@ -306,6 +306,34 @@ def test_a_healthy_narration_is_not_flagged_as_degraded():
     assert result["narration"]["officer_action"] == "review_and_send"
 
 
+def _fabricated_narration() -> str:
+    return json.dumps(
+        {
+            "summary": "Your monthly payment of $340.00 is due on the first of the month.",
+            "officer_action": "review_and_send",
+        }
+    )
+
+
+def test_a_fabricated_dollar_figure_in_the_summary_is_rejected():
+    """D1 groundedness guard (spec: disclosure-narration-judge.md).
+
+    Stage 4b is given none of the five disclosed figures — only `term_months` and
+    `note_rate_pct` (here 48 and 7.99). A `summary` stating a dollar amount is
+    schema-valid and leak-guard-passing, so nothing before this guard catches it.
+    It must degrade to NARRATION_UNAVAILABLE via the same path validation/leak-guard
+    rejections already use, not reach the officer verbatim.
+    """
+    coordinator, calls = _coordinator([_document(), _fabricated_narration()])
+    result = coordinator.run(1)
+
+    assert result["status"] == "ok"
+    assert result["narration_degraded"] is True
+    assert result["narration"]["officer_action"] == "hold_for_compliance"
+    assert "unavailable" in result["narration"]["summary"].lower()
+    assert calls == {"compute": 1, "persist": 1, "provenance": 1}
+
+
 def test_missing_figure_from_compute_blocks_without_calling_the_maker():
     coordinator, calls = _coordinator(
         [], offer={"offer_id": 11, "disclosure": {"apr": "9.584"}}
