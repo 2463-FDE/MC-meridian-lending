@@ -333,9 +333,14 @@ services/servicing-service/app/payments.py => docs/specs/log-aggregation.md
 # reviewer. Decide before the surface changes -- an unwritten rule is not
 # inheritable.
 
-# D33 (applicants.ssn at rest) -- ADR 0023. Mapped to purge_ssn.py, the file whose
-# eligibility rule, destroy-full-keep-last-4 behaviour and inertness the ADR actually
-# obligates. Previously mapped to intake.py because purge_ssn.py did not exist on main yet
-# (spec_diff_gate is an existence check); remapped now that PR #142 (25157e4) put
-# purge_ssn.py on main.
+# D33 (applicants.ssn at rest) -- ADR 0023, mapped to BOTH code paths it obligates.
+# purge_ssn.py is the file whose eligibility rule, destroy-full-keep-last-4 behaviour and
+# inertness Decision 2 constrains; it could not be listed until PR #142 (25157e4) put it on
+# main, because spec_diff_gate is an existence check. intake.py carries Decision 1's built
+# obligation (implementation plan step 2: submit and recheck-kyc send kyc-service last-4,
+# app/intake.py::ssn_last4) and keeps its line: purge_ssn.py is an inert, documented-wrong
+# scaffold that may yet be retired, and if it were the only line, deleting it would leave
+# ADR 0023 unmapped and invite an "# EXEMPT: ... no code path" that is false while intake's
+# last-4 hop still ships.
+services/origination-service/app/intake.py => adr/0023-applicant-ssn-at-rest.md
 services/origination-service/app/purge_ssn.py => adr/0023-applicant-ssn-at-rest.md

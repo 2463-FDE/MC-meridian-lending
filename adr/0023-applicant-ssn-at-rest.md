@@ -261,11 +261,16 @@ because it is known-wrong and unfinished by design.
 8. If the answer instead requires retention, scope the encryption build (key source, rotation,
    both read sites) as its own change. **Not started, contingent on step 6.**
 9. **Tighten the `spec-diff-gate` mapping for this ADR.** `scripts/spec_gate_map.txt` mapped ADR
-   0023 to `services/origination-service/app/intake.py` instead of
+   0023 to `services/origination-service/app/intake.py` alone, not to
    `services/origination-service/app/purge_ssn.py` — the file whose eligibility rule, keep-last-4
-   behaviour and inertness this ADR actually constrains — because `purge_ssn.py` did not exist on
+   behaviour and inertness Decision 2 constrains — because `purge_ssn.py` did not exist on
    `main` yet and `spec-diff-gate` is an existence check. **Done**, now that `purge_ssn.py` is on
-   `main` (PR #142, `25157e4`): remapped in the same commit as this doc fix.
+   `main` (PR #142, `25157e4`): `purge_ssn.py` is mapped in the same commit as this doc fix.
+   `intake.py` keeps its line rather than being replaced — step 2's last-4 hop is a built
+   obligation of this ADR, and `purge_ssn.py` is an inert scaffold that may yet be retired, so a
+   single line on it would let a future deletion leave this ADR unmapped and invite a false
+   `# EXEMPT` while intake's obligation still ships. A regression assertion in
+   `scripts/test_spec_diff_gate.sh` (blocking job `spec-diff-gate-tests`) pins both lines.
 
 ## Rollback strategy
 

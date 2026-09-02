@@ -10,6 +10,10 @@
 # without it the gate could pass unconditionally and nothing here would
 # notice.
 #
+# Two cases at the end break that fixture pattern on purpose: they assert claims
+# about THIS repo's tree and map, which no throwaway fixture can make. Each says
+# in place why.
+#
 # Usage: ./scripts/test_spec_diff_gate.sh      Exit 0 = all pass, 1 = a failure.
 set -uo pipefail
 
@@ -277,6 +281,37 @@ if [ -n "$real_docs" ]; then
   pass=$((pass + 1))
 else
   echo "FAIL  audit globs match nothing in this repo — the coverage audit grades zero docs"
+  fail=$((fail + 1))
+fi
+
+# ADR 0023 obligates TWO code paths that both ship on `main`: intake.py carries
+# Decision 1's last-4 hop (`app/intake.py::ssn_last4`) and purge_ssn.py carries
+# Decision 2's purge mechanism. The coverage audit above grades docs, not code
+# paths, so a code path can be dropped from the map — replaced by a sibling
+# rather than joined by one — and every case in this file still passes while the
+# gate reports clean. That is not hypothetical: the map line for intake.py was
+# the ADR's only line until purge_ssn.py landed. Were purge_ssn.py (an inert,
+# documented-wrong scaffold) later retired as the ADR's sole line, the ADR would
+# go UNMAPPED and the cheap fix would be an `# EXEMPT: ... no code path` that is
+# false while intake's hop still ships. Assert both lines against the real map.
+real_root=$(cd "$(dirname "$SCRIPT")/.." && pwd)
+real_map="$real_root/scripts/spec_gate_map.txt"
+adr_0023="adr/0023-applicant-ssn-at-rest.md"
+missing=""
+for code_path in services/origination-service/app/intake.py \
+                 services/origination-service/app/purge_ssn.py; do
+  # Only a path that still exists is owed a line — deleting the code is a
+  # legitimate way to drop it, replacing its mapping is not.
+  [ -e "$real_root/$code_path" ] || continue
+  if ! grep -qxF "$code_path => $adr_0023" "$real_map"; then
+    missing="$missing $code_path"
+  fi
+done
+if [ -z "$missing" ]; then
+  echo "ok    ADR 0023 keeps a map line for every code path it obligates"
+  pass=$((pass + 1))
+else
+  echo "FAIL  ADR 0023 lost its map line for:$missing — spec-diff-gate no longer pairs that code with the ADR, and the doc-side coverage audit cannot see it"
   fail=$((fail + 1))
 fi
 
