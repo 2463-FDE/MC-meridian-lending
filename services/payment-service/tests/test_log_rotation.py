@@ -157,6 +157,56 @@ def test_a_rotated_file_is_deleted_once_its_oldest_line_reaches_the_window(
             assert name not in doomed, f"a file holding {age}-day-old lines was deleted"
 
 
+def _plant_active_log(temp_log_dir: str, subdir: str, age_days: int) -> "Path":
+    """An active log file in a fresh LOG_DIR whose newest line is `age_days` old.
+
+    Learn the service's log file name from a handler in one directory, then plant the
+    active file in a second one and build the handler there -- one path gets one
+    handler, so the construction under test has to run on a path not yet used.
+    """
+    probe = _file_handler(_fresh_logger(f"probe_{subdir}"))
+    base_name = Path(probe.baseFilename).name
+
+    fresh = Path(temp_log_dir) / subdir
+    fresh.mkdir()
+    active = fresh / base_name
+    active.write_text("plaintext PAN from before redaction\n")
+    planted = time.time() - age_days * 86400
+    os.utime(active, (planted, planted))
+
+    os.environ["LOG_DIR"] = str(fresh)
+    return active
+
+
+def test_an_overdue_active_log_is_disposed_when_the_handler_is_created(temp_log_dir):
+    # The active file is the one no backup glob can match (it has no dated suffix),
+    # and stdlib rotates only from emit() -- so a service that restarts and then logs
+    # nothing keeps lines past the window forever. No record is emitted in this test
+    # for exactly that reason.
+    active = _plant_active_log(temp_log_dir, "idle", RETENTION_DAYS + 1)
+
+    handler = _file_handler(_fresh_logger("active_purge"))
+    assert Path(handler.baseFilename) == active
+
+    assert "plaintext PAN" not in active.read_text(), (
+        "the active log kept lines older than the retention window"
+    )
+    # Disposed, then reopened by the handler: the writer still has a usable file.
+    assert active.exists() and active.stat().st_size == 0
+
+
+def test_an_active_log_inside_the_window_survives_handler_creation(temp_log_dir):
+    # The other direction: mtime is the NEWEST line's time, so a file still being
+    # written to must not be disposed of on the strength of the age rule.
+    active = _plant_active_log(temp_log_dir, "recent", RETENTION_DAYS - 1)
+
+    _file_handler(_fresh_logger("active_keep"))
+
+    assert "plaintext PAN" in active.read_text(), (
+        "an active log inside the retention window was disposed of"
+    )
+
+
 def test_an_expired_file_is_deleted_when_the_handler_is_created(temp_log_dir):
     # stdlib deletes only inside doRollover(), so an idle process disposes of
     # nothing. Learn the service's log file name from a handler in one directory,

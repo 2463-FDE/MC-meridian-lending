@@ -7,7 +7,7 @@ import logging
 import logging.handlers
 import os
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from .redactor import PiiRedactor, _RedactWrapper, configure_uvicorn
 
@@ -17,6 +17,44 @@ from .redactor import PiiRedactor, _RedactWrapper, configure_uvicorn
 # plaintext PAN/CVV/SSN. GLBA Safeguards Rule 314.4(c)(6) and PCI-DSS 3.1 both
 # require a disposal procedure; an unbounded file cannot satisfy one.
 LOG_RETENTION_DAYS = 30
+
+
+def _retention_cutoff() -> date:
+    """The oldest date a retained line may carry."""
+    return datetime.now(timezone.utc).date() - timedelta(days=LOG_RETENTION_DAYS)
+
+
+def _dispose_overdue_active_file(path: str) -> None:
+    """Delete the ACTIVE log file when its newest line is already past the window.
+
+    The rotated-backup purge globs `baseFilename + "."`, which the active file's own
+    name cannot match, and stdlib rotates only from emit() -- so a service that
+    restarts and then logs nothing (or logs nothing ever again) keeps an active file
+    holding lines older than LOG_RETENTION_DAYS indefinitely, and the retention claim
+    in docs/debt-log.md does not hold for it.
+
+    mtime is the NEWEST line's time, so mtime past the cutoff means every line in the
+    file is past it and the whole file goes. The opposite case -- a file whose lines
+    straddle the boundary -- is left alone here and self-heals on the next record:
+    stdlib computes rolloverAt from that same mtime, so the first emit crosses it and
+    doRollover() names the backup for the elapsed period, which _expired_files() then
+    nominates. Truncating a straddling file instead would destroy lines inside the
+    window, which is the same loss retention exists to bound.
+    """
+    try:
+        mtime = os.stat(path).st_mtime
+    except OSError:
+        # No active file yet, or an unreadable log directory: nothing to dispose, and
+        # it must not take the handler (or the process) down.
+        return
+    if datetime.fromtimestamp(mtime, timezone.utc).date() > _retention_cutoff():
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        # Another process's handler on the same file may have removed it first.
+        # Disposal is the goal; who performed it does not matter.
+        pass
 
 
 class ExpiringTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
@@ -34,12 +72,19 @@ class ExpiringTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler
     is sparse, and it is the one the retention claim in docs/debt-log.md states.
 
     Residual, stated because the claim depends on it: stdlib deletes only inside
-    doRollover(), so an idle process disposes of nothing. __init__ purges once for
-    that reason -- every service builds its loggers at import -- which bounds the
-    gap to one process lifetime rather than to the next record written.
+    doRollover(), which runs from emit(), so an idle process disposes of nothing.
+    __init__ therefore disposes twice for that reason -- every service builds its
+    loggers at import -- once for the rotated backups and once for the ACTIVE file,
+    which no backup glob can match. That bounds the gap to one process lifetime
+    rather than to the next record written.
     """
 
     def __init__(self, *args, **kwargs) -> None:
+        # Before super() opens the stream: removing an already-open file leaves the
+        # handler appending to an unlinked inode, so the active file is graded first.
+        filename = kwargs.get("filename", args[0] if args else None)
+        if filename is not None:
+            _dispose_overdue_active_file(os.fspath(filename))
         super().__init__(*args, **kwargs)
         for path in self._expired_files():
             try:
@@ -51,7 +96,7 @@ class ExpiringTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler
 
     def _expired_files(self) -> list[str]:
         """Rotated files whose oldest line is at least LOG_RETENTION_DAYS old."""
-        cutoff = datetime.now(timezone.utc).date() - timedelta(days=LOG_RETENTION_DAYS)
+        cutoff = _retention_cutoff()
         directory = os.path.dirname(self.baseFilename)
         prefix = os.path.basename(self.baseFilename) + "."
         expired: list[str] = []
