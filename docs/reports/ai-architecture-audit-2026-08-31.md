@@ -1,6 +1,6 @@
 # AI Systems Architecture Audit — Meridian Lending Platform
 
-Date: 2026-08-31 · Auditor: Claude (Principal AI Systems Architect / SRE role) · Base: `origin/main` @ `f4fb151`
+Date: 2026-08-31 · Auditor: Claude (Principal AI Systems Architect / SRE role) · Base: `origin/main` @ `8de18b1`
 
 Scope: the officer-assistant agentic loop (`services/origination-service/app/assistant.py`),
 RAG policy retrieval (`policy_retrieval.py`, `rag_eval/`), the LLM transport layer
@@ -233,7 +233,7 @@ itself documented as non-portable across corpus or embedder changes).
 
 ---
 
-## 3. Status (verified against `origin/main` git history at `f4fb151`, not memory)
+## 3. Status (verified against `origin/main` git history at `8de18b1`, not memory)
 
 Between this report's first draft and this update, seven of the eight immediate/medium-term
 items landed on `main` — not by this session; ground-truthed via `git log`/`git show` against
@@ -280,7 +280,7 @@ Each entry cites the real commit and PR; none of this is credited to the wrong a
 
 ### Remaining
 
-Every item below was re-verified against `origin/main` at `f4fb151` on 2026-09-02, after four
+Every item below was re-verified against `origin/main` at `8de18b1` on 2026-09-02, after
 further merges moved the tip past the one this section was first written against. Item 10
 changed in that window; the other four did not.
 
