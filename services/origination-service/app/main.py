@@ -14,7 +14,8 @@ import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from langsmith.run_helpers import trace
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError, field_validator
+from sqlalchemy.orm import Session
 
 from . import (
     assistant,
@@ -28,6 +29,7 @@ from . import (
     policy_retrieval,
     rate_limit,
 )
+from .database import get_session
 from .llm import ClaudeClient, load_llm_config
 from .llm.config import harden_trace_client
 from .llm.errors import LLMError
@@ -217,15 +219,37 @@ def assistant_explain(
     return _run_assistant(app_id, client, "explain", policy_topic=policy_topic)
 
 
+_METRIC_VOCABULARIES = {
+    "task": assistant_runs.TASKS,
+    "refusal_code": assistant_runs.REFUSAL_CODES,
+    "outcome": assistant_runs.OUTCOMES,
+    "policy_band": assistant_runs.POLICY_BANDS,
+}
+
+
 class AssistantMetricsGroup(BaseModel):
-    """One GROUP BY row. Enum codes, integers and booleans only -- the content rule
-    app/assistant_runs.py states for the write path, re-stated at the read boundary.
+    """One GROUP BY row. Enum codes and integers only -- the content rule
+    app/assistant_runs.py states for the write path, ENFORCED here rather than restated.
+
+    Two of the four coded columns are CHECK-constrained in the database
+    (`ck_assistant_runs_task`, `ck_assistant_runs_refusal_code`); `outcome` and
+    `policy_band` are bare TEXT. So this boundary is the only thing standing between an
+    unconstrained write -- a hand-applied fix, a backfill, a restored volume -- and an
+    officer reading whatever it put there. A proven case: a row whose `outcome` held a
+    borrower name and an SSN was served verbatim while these fields were `str | None`.
+    A value off the vocabulary is now masked to `assistant_runs.UNRECOGNISED`; masking
+    rather than raising keeps the rest of the aggregate readable, and the masked value is
+    itself the signal that something wrote outside the vocabulary.
 
     Declared as a model rather than passed through as a dict so `application_id` and
     `trace_id` cannot re-enter this response by being added to the SELECT: FastAPI drops
     any key the model does not name. The query already omits them; this is the second
     lock, because the change that would break it ("just add the app id for debugging")
     edits the SQL and not this file.
+
+    `record_status` is stored by the write path but deliberately NOT selected or served:
+    it duplicates what `outcome` already says for the aggregate's purpose, and every
+    column served here is a column that has to be vocabulary-checked.
     """
 
     task: str
@@ -236,6 +260,18 @@ class AssistantMetricsGroup(BaseModel):
     runs: int
     p50_ms: int | None
     p95_ms: int | None
+
+    @field_validator("task", "refusal_code", "outcome", "policy_band", mode="before")
+    @classmethod
+    def _only_known_codes(cls, value, info):
+        """Mask any value outside the column's vocabulary. Fails closed by construction:
+        a value this service does not recognise cannot reach the response even if a
+        writer put it in the column, and NULL stays NULL (`_charted` omits a field the
+        run did not carry, which is not the same as an unrecognised one)."""
+        if value is None:
+            return None
+        allowed = _METRIC_VOCABULARIES[info.field_name]
+        return value if value in allowed else assistant_runs.UNRECOGNISED
 
 
 class AssistantMetrics(BaseModel):
@@ -250,20 +286,29 @@ class AssistantMetrics(BaseModel):
     long name lives in the response key rather than in a comment.
 
     NULL, not 0.0, when nothing was recorded: a zero rate over a zero denominator is a
-    claim about a population that was never observed. `config._run_database_probe` carries
-    the readiness rung for the table, so an unapplied migration 0021 surfaces at /health --
-    that is the thing to check first when this reads empty.
+    claim about a population that was never observed. An empty read is a telemetry outage
+    as readily as a quiet week, because `record()` swallows -- but it is NOT how an
+    unapplied migration 0021 presents: that route returns 503 naming the readiness rung's
+    own reason, so "the table is not there" and "nothing happened" are distinguishable
+    before the numbers are read at all.
+
+    `truncated` is True when the window held more distinct groups than
+    `assistant_runs.MAX_GROUPS`, in which case every count in this response -- including
+    `recorded_runs` -- describes the largest groups in the window and not the whole
+    window.
     """
 
     window: str
     recorded_runs: int
     refusals_among_recorded_runs: int
     refusal_rate_among_recorded_runs: float | None
+    truncated: bool
     groups: list[AssistantMetricsGroup]
 
 
 @app.get("/assistant/metrics", response_model=AssistantMetrics)
 def assistant_metrics(
+    session: Session = Depends(get_session),
     window: str = Query(default="7 days"),
     x_user_role: str | None = Header(default=None, alias="X-User-Role"),
 ):
@@ -275,30 +320,68 @@ def assistant_metrics(
     unauthenticated caller. What would leak is operational rather than PII -- the table is
     PII-free by construction -- but five sibling routes already carry the same line.
 
-    The 403 and the 422 below are pre-funnel refusals: they are not `_refused_before_loop`
-    calls, because that helper records an assistant run, and neither of these is one. So
-    this route's own refusals are invisible to the numbers it serves, which is exactly what
-    `refusal_rate_among_recorded_runs` is named for.
+    No `check_llm_rate_limit`, unlike those five: they each spend a provider call, and this
+    one spends a database read. The bound that matters here is on the read itself --
+    `assistant_runs.STATEMENT_TIMEOUT_MS` and `MAX_GROUPS`, on a pooled connection so a
+    slow aggregate cannot sit on the shared psycopg2 connection the money paths use.
+
+    The 403, the 503 and the 422 below are pre-funnel refusals: they are not
+    `_refused_before_loop` calls, because that helper records an assistant run, and none of
+    these is one. So this route's own refusals are invisible to the numbers it serves,
+    which is exactly what `refusal_rate_among_recorded_runs` is named for.
     """
     authz.require_officer(x_user_role)
+    # Fail closed on a schema this read cannot answer over, and name WHY. /health runs the
+    # same rungs, but /health is advisory: on a volume that never had migration 0021
+    # applied the SELECT below raises UndefinedTable and `unhandled` flattens it to
+    # {"detail": "internal error"}, which an operator cannot tell from the database being
+    # down or from a bug in this route. database_reachable() is TTL-cached and
+    # single-flight, so this costs one probe per 5-second window across all callers.
+    schema_ok, not_ready = config.database_reachable()
+    if not schema_ok:
+        raise HTTPException(
+            status_code=503,
+            detail=f"database not ready for assistant metrics ({not_ready})",
+        )
     if window not in assistant_runs.WINDOWS:
         raise HTTPException(
             status_code=422,
-            detail="unknown window; choose one of: " + ", ".join(assistant_runs.WINDOWS),
+            detail="unknown window; choose one of: "
+            + ", ".join(assistant_runs.WINDOWS),
         )
-    rows = assistant_runs.aggregate(window)
+    rows, truncated = assistant_runs.aggregate(session, window)
     recorded = sum(row["runs"] for row in rows)
     # `ck_assistant_runs_refusal_matches_status` makes http_status = 200 true if and only
-    # if refusal_code IS NULL, so either column alone counts refusals exactly.
+    # if refusal_code IS NULL, so either column alone counts refusals exactly. Counted off
+    # the raw row, before the vocabulary mask: a refusal_code outside REFUSAL_CODES is
+    # still a refusal, and masking it to UNRECOGNISED must not move it into the served
+    # population.
     refusals = sum(row["runs"] for row in rows if row["refusal_code"] is not None)
+    try:
+        groups = [AssistantMetricsGroup(**row) for row in rows]
+    except ValidationError as exc:
+        # The class name and the offending FIELD NAMES only. ValidationError's own text
+        # embeds `input_value={...}` -- the entire row -- so `log.error("%s", exc)` here
+        # would put the recorded values in a log line, which is the reason `record()`
+        # logs `exc.__class__.__name__` and nothing else. This fires when the SELECT and
+        # the model disagree about the row's shape, so the field names are the whole
+        # diagnostic.
+        fields = sorted({str(err["loc"][0]) for err in exc.errors() if err.get("loc")})
+        log.error(
+            "assistant metrics row does not match %s: %s on %s",
+            AssistantMetricsGroup.__name__,
+            exc.__class__.__name__,
+            ", ".join(fields) or "an unnamed field",
+        )
+        raise HTTPException(status_code=500, detail="internal error") from None
     return AssistantMetrics(
         window=window,
         recorded_runs=recorded,
         refusals_among_recorded_runs=refusals,
         refusal_rate_among_recorded_runs=(refusals / recorded) if recorded else None,
-        groups=[AssistantMetricsGroup(**row) for row in rows],
+        truncated=truncated,
+        groups=groups,
     )
-
 
 
 @app.get("/applications/{app_id}/summary")
