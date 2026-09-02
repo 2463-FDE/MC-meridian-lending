@@ -8,12 +8,14 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (10d13ca)` — 10d13ca 2026-09-02 Merge pull request #158 from 2463-FDE/docs/policy-corpus-residuals
+Base: `origin/main (75c6f87)` — 75c6f87 2026-09-02 Merge pull request #160 from 2463-FDE/docs/fde-project-handoff
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #160 | `75c6f87` | 2026-09-02 | Merge pull request #160 from 2463-FDE/docs/fde-project-handoff |
+| #159 | `00211db` | 2026-09-02 | Merge pull request #159 from 2463-FDE/docs/kb-adr-0023-sync |
 | #158 | `10d13ca` | 2026-09-02 | Merge pull request #158 from 2463-FDE/docs/policy-corpus-residuals |
 | #157 | `2fed18c` | 2026-09-02 | Merge pull request #157 from 2463-FDE/docs/ai-architecture-audit |
 | #156 | `f8a2de8` | 2026-09-02 | Merge pull request #156 from 2463-FDE/docs/assistant-metrics-endpoint |
