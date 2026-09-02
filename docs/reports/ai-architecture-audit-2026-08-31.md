@@ -1,6 +1,6 @@
 # AI Systems Architecture Audit — Meridian Lending Platform
 
-Date: 2026-08-31 · Auditor: Claude (Principal AI Systems Architect / SRE role) · Base: `origin/main`
+Date: 2026-08-31 · Auditor: Claude (Principal AI Systems Architect / SRE role) · Base: `origin/main` @ `f4fb151`
 
 Scope: the officer-assistant agentic loop (`services/origination-service/app/assistant.py`),
 RAG policy retrieval (`policy_retrieval.py`, `rag_eval/`), the LLM transport layer
@@ -36,11 +36,12 @@ and supersedes them.
 
 ## 2. Deep-Dive Gap Analysis
 
-> **This section is the analysis as of 2026-08-31 and is not re-written as findings close.**
-> Six of the fourteen matrix rows above have since been closed, three of them by work this
-> audit prompted. Where section 2 argues a gap and the Status column says **Closed**, section
-> 3 governs — it names the commit and PR. The two paragraphs whose factual claims the fixes
-> reversed outright are corrected in place below and marked.
+> **This section is the analysis as of 2026-08-31; its argument is not rewritten as findings
+> close, only its reversed factual claims are.**
+> Seven of the fourteen matrix rows above have since been closed. Where section 2 argues a
+> gap and the Status column says **Closed**, section 3 governs — it names the commit and PR.
+> Every paragraph whose factual claims the fixes reversed outright is corrected in place
+> below and marked.
 
 ### 2.1 System Reliability & Fault Tolerance
 
@@ -117,8 +118,10 @@ regulated decision is recorded but the officer receives a refusal, not the outco
 `_validated_final` would show it correctly on a subsequent request (idempotency key
 permitting), but the immediate UX is "the assistant failed" over a decision that actually
 succeeded and was recorded. This is a UX/observability gap, not a correctness one — the record
-is safe — but nothing surfaces "a decision was recorded on this failed run" to the officer or
-to a log line at refusal time. Still open — see the immediate handoff.
+is safe. (**Corrected 2026-09-02:** this originally read that nothing surfaces "a decision was
+recorded on this failed run" to the officer or to a log line at refusal time. The refusal now
+carries `scored=True/False`, so a decision recorded on a failed run is visible at refusal
+time — §3 item 3, `87bd68c`, PR #136.)
 
 **Silent degradation & recovery.** The strongest control in the whole system: `_validated_final`
 (`assistant.py:528-654`) never trusts the model's narration. It re-fetches the persisted
@@ -129,12 +132,14 @@ posture appears in `_policy_section` — the model never even receives the corpu
 structurally cannot paraphrase or misquote a policy passage; the officer reads code-rendered
 verbatim text.
 
-The corresponding gap is that this pattern is not applied to the two ungated servicing writes:
-`adjust_balance` and `waive_fee` (D32) keep the unlocked read-modify-write shape the D3 fix
+The corresponding gap was that this pattern is not applied to the two ungated servicing writes:
+`adjust_balance` and `waive_fee` (D32) kept the unlocked read-modify-write shape the D3 fix
 eliminated from `apply_payment`. This is not an LLM problem, but it is the same "silent
 degradation" class — a concurrent write loses an update and nothing detects it until
-reconciliation, which does not cover balance adjustments the way it covers payment
-capture-vs-ledger.
+reconciliation. (**Corrected 2026-09-02:** both writes are now atomic — `waive_fee` by atomic
+decrement, `adjust_balance` by compare-and-set — §3 item 6, `cd71243` PR #138 and `2452f80`
+PR #144. What remains of this paragraph is the detection side: reconciliation still does not
+cover balance adjustments the way it covers payment capture-vs-ledger.)
 
 ### 2.2 Observability & Telemetry Infrastructure
 
@@ -154,7 +159,10 @@ The documented gap (already known, in CLAUDE.md/ADR 0021): trace coverage starts
 `assistant.entry`, the route funnel — the gateway hop and any refusal thrown before that funnel
 (auth, pre-funnel 403/422) are untraced. For a compliance audit trying to reconstruct "why was
 this officer request refused," that is a real blind spot, distinct from the LLM-specific
-content-boundary gaps above. Still open — see the medium-term handoff.
+content-boundary gaps above. (**Corrected 2026-09-02:** closed and scoped down — investigation
+found most of the apparent gap deliberate and pinned by an existing test, and the one genuine
+case, `get_llm_client`'s 503 when `LLM_ENABLED` is off, got a structured log line rather than a
+span — §3 item 8, `9a52f2f`, PR #137.)
 
 **Key telemetry metrics.** Present: token usage and cost (via LangSmith's
 `ls_provider`/`ls_model_name` tagging, `transport.py:36-57`, with a documented
@@ -165,12 +173,14 @@ canonicalization fix so Bedrock inference-profile ids still price correctly), re
 cache-hit/served-from-cache marks (`_tool_span`'s `served_from_cache` marker — a de facto
 cache-hit-rate signal, just not aggregated into a dashboard metric).
 
-Absent: no p95/p99 latency aggregation visible outside whatever LangSmith's own dashboard
-computes (this is a log-line/span-level story, not a metrics-pipeline one — no
-Prometheus/StatsD emission point exists in this service). No guardrail refusal *rate* as a
-first-class metric — refusals exist as typed exceptions and log lines, but nothing counts
-"refusals per hour by type" for alerting. No evaluation-score-delta-over-time signal wired into
-the CI or runtime path — `rag_eval`'s graded pass is a point-in-time run, not a continuously
+Absent: this originally read that there is no p95/p99 latency aggregation and no guardrail
+refusal *rate* as a first-class metric. (**Corrected 2026-09-02:** both ship — the officer-gated
+`GET /assistant/metrics` serves p50/p95 latency and `refusal_rate_among_recorded_runs` over
+`assistant_runs`, §3 item 10, PR #151, `d4d9efb`.) The residual gap is narrower: no scheduled
+pipeline — nothing reads that endpoint on a cadence and no Prometheus/StatsD emission point
+exists in this service — and no cache-hit or retry metrics, though both underlying signals are
+recorded (`served_from_cache` on tool spans, `retries["n"]` on the transport). No
+evaluation-score-delta-over-time signal is wired into the CI or runtime path — `rag_eval`'s graded pass is a point-in-time run, not a continuously
 tracked trend, and (per the risk matrix above) it defaults to *not evaluating* anything unless
 `RAG_JUDGE` is explicitly set.
 
@@ -216,14 +226,14 @@ pass/fail. The one full graded pass on record used an explicit judge and pinned 
 abstention checks, and it caught something real (Haiku fencing its JSON output, PR #119) —
 proving the harness works when actually invoked with a judge. But "works when invoked" and
 "gates every merge" are different claims, and right now the CI default is the former, not the
-latter. Still open — see the immediate handoff. There is no live-production monitoring loop
-feeding back into this evaluator (no shadow-eval on real officer traffic, no drift alarm
+latter. Still open — §3 item 1. There is no live-production monitoring loop feeding back
+into this evaluator (no shadow-eval on real officer traffic, no drift alarm
 comparing live retrieval score distributions against the offline-measured threshold, which is
 itself documented as non-portable across corpus or embedder changes).
 
 ---
 
-## 3. Status (verified against `origin/main` git history, not memory)
+## 3. Status (verified against `origin/main` git history at `f4fb151`, not memory)
 
 Between this report's first draft and this update, seven of the eight immediate/medium-term
 items landed on `main` — not by this session; ground-truthed via `git log`/`git show` against
@@ -270,9 +280,9 @@ Each entry cites the real commit and PR; none of this is credited to the wrong a
 
 ### Remaining
 
-Every item below was re-verified against `origin/main` on 2026-09-02, after four further
-merges moved the tip past the one this section was first written against. Item 10 changed in
-that window; the other four did not.
+Every item below was re-verified against `origin/main` at `f4fb151` on 2026-09-02, after four
+further merges moved the tip past the one this section was first written against. Item 10
+changed in that window; the other four did not.
 
 > **Immediate:**
 > 1. Default `rag-eval-gate` to an actual judge (`RAG_JUDGE=bedrock` or equivalent). Still
@@ -289,9 +299,10 @@ that window; the other four did not.
 >     `assistant_runs` (PR #151, `d4d9efb`), which serves
 >     `refusal_rate_among_recorded_runs` plus p50/p95 latency. Tool cache-hit rate and retry
 >     rate are still unserved, and there is still no pipeline: the endpoint answers on demand
->     and nothing reads it on a schedule. The decision behind that surface is unwritten — see
->     `docs/plans/assistant-metrics-endpoint.md` and the open `scripts/spec_gate_map.txt`
->     exception for `assistant_runs.py`.
+>     and nothing reads it on a schedule. The decision behind that surface is unwritten:
+>     `scripts/spec_gate_map.txt` carries a recorded no-spec/no-ADR exception for
+>     `assistant_runs.py`, leaving the module docstring and migration 0021's header as the
+>     whole design record.
 > 11. Wire live-traffic sampling into `rag_eval`'s evaluator for a production drift signal.
 >     Still open, still unscoped.
 > 12. Resolve the gateway's documented "no role authz on money actions" gap. Still open, and
