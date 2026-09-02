@@ -3,8 +3,9 @@
 **Date:** 2026-09-02
 **Outgoing FDE:** maha-c
 **Repo:** `2463-FDE/MC-meridian-lending` (a fork — every PR base defaults to the parent repo)
-**Base at handoff:** cut from `origin/main` at `10d13ca` (Merge PR #158). The base has moved since — read the
-live tip from `docs/state.md`, which `make kb` regenerates, and the live open-PR count from the GitHub API.
+**Base at handoff:** cut from `origin/main` at `10d13ca` (Merge PR #158). Assume the base is behind that by the
+time you read this — take the live tip from `docs/state.md` as it stands on `main` (`make kb` regenerates it),
+and the live open-PR count from the GitHub API.
 Do not trust a PR count written into any file here, this one included: a document that describes its own open
 state is false the moment it merges.
 **Incoming target spec:** the "AI Lending Risk & Compliance Agent" system prompt, reproduced in §7 below.
@@ -32,7 +33,9 @@ Merged is not the same as built. **Week 5 and the original week 6 landed as spec
 unbuilt. Week 6's follow-on authz fix is real code (`services/servicing-service/app/authz.py`), so what stays
 unbuilt from that week is maker-checker and the append-only ledger. Weeks 1–4, 7, 8, 9 and 10 are real code.
 
-There are 23 ADRs, `adr/0001-record-architecture-decisions.md` through `adr/0023-applicant-ssn-at-rest.md`. **The next free number is 0024.**
+As of base `10d13ca` there were 23 ADRs, `adr/0001-record-architecture-decisions.md` through
+`adr/0023-applicant-ssn-at-rest.md`, so 0024 was next free. **Re-check the generated ADR list in `docs/state.md`
+on `main` before you create one** — a sibling PR may have taken the number since.
 
 ---
 
@@ -78,7 +81,8 @@ The module's own comment at `model_vendor.py:17` cites the policy file and trans
 rests entirely on a DTI band that this platform does not evaluate. Building the trigger on top of the current
 scorecard would produce a control that never fires for the reason its author intended.
 
-**Recommended first action for the incoming FDE:** open a debt entry for this (next free number after D40), and
+**Recommended first action for the incoming FDE:** open a debt entry for this — D40 was the last entry at base
+`10d13ca`, so re-read the tail of `docs/debt-log.md` on `main` for the current last number before assigning one — and
 decide with the client whether the fix is (a) enforce the policy file's DTI gate as a hard band alongside
 `policy_band`, or (b) amend the policy file to describe the score-only behaviour that actually ships. Do not
 build the §4 DTI trigger until that is settled — it would encode the ambiguity rather than resolve it.
@@ -289,9 +293,11 @@ Do not write from memory of those rules. Edit that file surgically — parallel 
 ## 6. Suggested sequence for the incoming FDE
 
 1. Read `docs/kb.md`, then `docs/debt-log.md`, then this document's §2.
-2. Read the live open-PR count from the API before starting new work — the working agreement caps it at two,
-   and this handoff's own PR counts toward it.
-3. Open the DTI-band debt entry (§2) and the autonomy ADR (0024, §3 §1). Both are decisions, not code.
+2. Read the live open-PR count from the API before starting new work — the working agreement caps it at two.
+   Take the count from the API only: while this handoff's own PR is open it counts toward the cap, and once it
+   merges it does not.
+3. Open the DTI-band debt entry (§2) and the autonomy ADR (§3 §1) — take both numbers live per §1 and §2, not
+   from this document. Both are decisions, not code.
 4. Take the six items in §4 to the client in one pass.
 5. Give the AML/sanctions gap a real debt number — it is the single largest dependency of the incoming spec and
    it currently lives only in code comments under an unresolved "D11".
