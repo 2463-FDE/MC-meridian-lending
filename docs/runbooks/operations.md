@@ -320,6 +320,55 @@ present the alert as covered until then.
 `MISSING_IN_LEDGER`; what a double-charged borrower is told, whether a refund is submitted, and
 who owns that refund is an open question and not a gap in this runbook.
 
+### Reading the officer assistant's run telemetry
+
+Every officer assistant request writes one `assistant_runs` row at the entry span
+(migration 0021). `GET /assistant/metrics` on origination-service is the only way those
+rows are meant to leave the database: an officer-gated aggregate of counts and enum codes.
+
+```bash
+curl -s -H 'X-User-Role: underwriter' 'http://localhost:8001/assistant/metrics?window=7 days'
+```
+
+`window` is one of `1 day`, `7 days`, `30 days`. Anything else is a `422` listing the
+three — it is never silently defaulted, because a fall back would answer a different
+question than the one asked.
+
+What the response means:
+
+- `recorded_runs` is the denominator, and it is **recorded runs, not requests**.
+  `assistant_runs.record` swallows every write failure by design, and a refusal raised
+  above the assistant loop (including this endpoint's own `403`) is never recorded at all.
+  So `refusal_rate_among_recorded_runs` is a rate among rows that exist, not among
+  officer requests that happened.
+- `refusal_rate_among_recorded_runs` is `null`, never `0.0`, when nothing was recorded. A
+  zero rate over a zero denominator is a claim about a population nobody observed.
+- `truncated: true` means the window held more distinct groups than the endpoint serves,
+  so every count in that response — `recorded_runs` included — describes the largest
+  groups and not the whole window.
+- `unrecognised` in `task`, `refusal_code`, `outcome` or `policy_band` means a row held a
+  value outside the vocabulary this service knows. `outcome` and `policy_band` carry no
+  CHECK constraint, so the endpoint masks rather than serves it. Treat it as a signal that
+  something wrote to the table outside the normal path — a hand-applied fix, a backfill, a
+  restored volume — and go look at the row.
+
+Failure modes, and how to tell them apart:
+
+- **`503 database not ready for assistant metrics (schema_not_ready:assistant_runs...)`** —
+  the volume never had migration 0021 applied. Apply it (`db/migrations/0021_assistant_runs.sql`)
+  and re-check `/health`. This is also the state in which the write path has been silently
+  recording nothing: `record()` swallows, so there is no other symptom.
+- **An empty aggregate with a `200`** — either a quiet week or a telemetry fault. The two
+  are not distinguishable from this endpoint, by design; `/health` answers whether the
+  table and its constraints are there.
+- **`500 internal error`** — the log line names the model and the field names that
+  disagreed with the SELECT, never the row's values.
+
+The rows themselves keep `application_id` and `trace_id` and have **no retention policy**
+(`docs/debt-log.md` D5 carries the rotation/retention row). This endpoint is the export
+boundary; direct SQL against the table is not, and puts an applicant-linkable identifier
+in whatever consumes it.
+
 ## Known operational pain (unresolved)
 
 - **Self-decision guard can't see a pre-migration or anonymous self-submit (D24).**

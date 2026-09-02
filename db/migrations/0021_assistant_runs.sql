@@ -240,8 +240,14 @@ $mig$;
 -- NOT CLOSED BY THIS MIGRATION, tracked rather than implied:
 --   * Retention. These rows are applicant-linkable through application_id and accumulate
 --     without bound; no retention policy exists yet (docs/debt-log.md D5 still carries
---     the rotation/retention row). The aggregate CLI is the export boundary -- it emits
---     counts, never application_id or trace_id -- but the table itself keeps them.
+--     the rotation/retention row). GET /assistant/metrics on origination-service is the
+--     export boundary -- an officer-gated aggregate that emits counts and enum codes,
+--     never application_id or trace_id -- but the table itself keeps them. That boundary
+--     is also why `outcome`, `record_status` and `policy_band` having no CHECK here is
+--     not the whole story: the endpoint masks any value outside the vocabulary it knows,
+--     so an unconstrained write to those columns is visible in the aggregate rather than
+--     served through it. The write path is still the place to constrain them; until it
+--     does, the read boundary is the control.
 --   * steps_used and `scored` are computed inside assistant.run() and never returned, so
 --     they are not persisted here. Adding them would change the officer response shape
 --     that the trace-surface work deliberately left alone.

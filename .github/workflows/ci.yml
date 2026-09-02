@@ -519,6 +519,12 @@ jobs:
     # response, and no rows at all. Nothing fails. The reports simply get quieter, and a
     # quiet report reads like a good week.
     #
+    # The READ path is here for a different reason. /assistant/metrics is the only export
+    # boundary this table has, and two of the four coded columns it serves carry no CHECK,
+    # so its own vocabulary mask -- not the schema -- is what keeps an unconstrained write
+    # off an officer's screen. That is a control, and a control whose test inherits
+    # `|| true` is not one.
+    #
     # These suites also run in the `backend` matrix job, which is continue-on-error with
     # `python -m pytest -q || true`, so they cannot hold anything there. Same precedent as
     # tila-vectors-gate, reconciliation-gate, atomic-apply-gate and no-sad-gate. This job
@@ -542,6 +548,18 @@ jobs:
     #                              a table CREATE TABLE IF NOT EXISTS would have accepted,
     #                              or whether the CHECKs reject the rows they claim to. A
     #                              constraint nobody has watched refuse a row is a comment.
+    # test_assistant_metrics.py    the READ path. /assistant/metrics is the export
+    #                              boundary for this table, so its officer gate, its
+    #                              window allowlist (the only string reaching a Postgres
+    #                              interval cast) and the no-application_id/no-trace_id
+    #                              assertion are the same class of control as the write
+    #                              rules above. It also holds the vocabulary mask:
+    #                              `outcome` and `policy_band` have NO CHECK behind them,
+    #                              so the response model is the only thing between an
+    #                              unconstrained write and an officer's screen -- a row
+    #                              whose outcome carried a name and an SSN was served
+    #                              verbatim before it existed. In the backend matrix all
+    #                              of that runs under `|| true`.
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -561,12 +579,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: origination-service assistant_runs write path, DDL parity, readiness rung
+      - name: origination-service assistant_runs write and read paths, DDL parity, readiness rung
         run: |
           cd services/origination-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_assistant_runs.py \
                            tests/test_assistant_runs_ddl.py \
+                           tests/test_assistant_metrics.py \
                            tests/test_db_readiness.py -q
       - name: migration 0021 against a real Postgres
         env:
@@ -916,16 +935,19 @@ jobs:
                            tests/test_atomic_apply.py \
                            tests/test_payment_applications_ddl.py \
                            tests/test_waive_fee_lost_update.py -q
-      # Selected, not the whole file: test_characterization_balance.py also pins the
-      # ADR 0014 authorization gaps, which are still open and still red on purpose. Only
-      # the D3/D32 assertions belong in a blocking gate -- the apply's shape, its record,
-      # and both D32 halves' now-atomic shapes (waive_fee's decrement, adjust_balance's
-      # compare-and-set).
+      # Selected, not the whole file: only the D3/D32 assertions belong in a blocking
+      # gate -- the apply's shape, its record, and both D32 halves' now-atomic shapes
+      # (waive_fee's decrement, adjust_balance's compare-and-set). The two excluded
+      # tests pin route signatures (ADR 0013's internal-caller headers), which D3/D32
+      # did not change. Nothing in this file is red on purpose: the earlier wording here
+      # said the ADR 0014 authorization gaps were, but PR #32 enforced them and those
+      # tests are green -- the only red tests in the file were the two excluded ones,
+      # stale against the signature ADR 0013 shipped, and this change corrects them.
       - name: servicing-service characterization of what D3/D32 changed and what they did not
         run: |
           cd services/servicing-service
           python -m pytest tests/test_characterization_balance.py -q \
-            -k "(apply_payment or adjust_balance_is_now or adjust_balance_refuses_when_balance_moved or waive_fee_is_now) and not route_takes_no_caller_identity"
+            -k "(apply_payment or adjust_balance_is_now or adjust_balance_refuses_when_balance_moved or waive_fee_is_now) and not route_requires_internal_caller_identity"
       - name: payment-service sends payment_id only, and cannot retire an unapplied capture
         run: |
           cd services/payment-service
