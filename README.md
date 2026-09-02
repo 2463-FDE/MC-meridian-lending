@@ -1,9 +1,12 @@
 # Meridian Lending Platform
 
-> **Brownfield platform under active remediation.** Card data (PAN/CVV) is currently
-> stored in plaintext, so the payment path is **not** compliant with PCI-DSS — tracked as
-> open debt (ADR 0003; tokenization is the week-5 plan). Credit decisions are recorded to
-> an append-only decision log.
+> **Brownfield platform under active remediation.** The full PAN is stored in plaintext, so
+> the payment path is **not** compliant with PCI-DSS — tracked as open debt D13b (ADR 0013,
+> which supersedes ADR 0003): tokenization needs a provider decision and a card-entry
+> surface, and neither exists. The CVV column was deleted by migration
+> `db/migrations/0020_payments_drop_cvv.sql`, held by the blocking `no-sad-gate`, so card
+> data is no longer PAN *and* CVV. Applicant SSNs are stored in plaintext too (debt D33,
+> ADR 0023). Credit decisions are recorded to an append-only decision log.
 
 The Meridian Lending Co. loan origination + servicing platform. Originally delivered by
 Halcyon Software Group (now dissolved) as **three** backend services — `gateway`,
