@@ -22,14 +22,24 @@ REASON_MAP = {
 # Reg B custom: state up to four principal reasons.
 MAX_REASONS = 4
 
-# D26: only delinquency_history comes from the bureau pull. The other three are
-# computed from applicant-typed income, debt and tenure that nothing in this platform
-# verifies. Keys must cover every feature model_vendor can emit, same rule as REASON_MAP.
-PROVENANCE_MAP = {
-    "delinquency_history": "bureau_verified",
-    "payment_burden": "applicant_stated",
-    "income_sufficiency": "applicant_stated",
-    "employment_tenure": "applicant_stated",
+# D26: delinquency_history is the one feature derived from the credit score, so its
+# provenance is whatever that score's REAL source was. Synthetic scoring is reachable on
+# the accepted demo path (ALLOW_SYNTHETIC_CREDIT in docker-compose.demo.yml) and
+# _pull_credit also falls back to it when a configured bureau call fails, so labelling
+# delinquency_history bureau_verified unconditionally writes a false claim onto the
+# decision record. The other three features are computed from applicant-typed income,
+# debt and tenure that nothing in this platform verifies. Together these two sets must
+# cover every feature model_vendor can emit, same rule as REASON_MAP.
+CREDIT_DERIVED_FEATURES = frozenset({"delinquency_history"})
+APPLICANT_STATED_FEATURES = frozenset(
+    {"payment_burden", "income_sufficiency", "employment_tenure"}
+)
+
+# Provenance label per credit-score source, as returned by decision._pull_credit.
+CREDIT_SOURCE_PROVENANCE = {
+    "bureau": "bureau_verified",
+    "synthetic": "synthetic_credit",
+    "synthetic_after_bureau_failure": "synthetic_credit_bureau_failed",
 }
 
 
@@ -67,17 +77,32 @@ def principal_reasons(attributions: list) -> list:
     ]
 
 
-def feature_provenance(attributions: list) -> dict:
+def feature_provenance(attributions: list, credit_source: str) -> dict:
     """Per-feature data provenance for the decision record (D26 rung 1).
 
-    Fail closed on any unmapped feature, same rule as principal_reasons — a feature
-    whose data source we cannot classify must not decide silently."""
-    unmapped = [
-        a["feature"] for a in attributions if a["feature"] not in PROVENANCE_MAP
-    ]
+    credit_source is the real origin of the score (decision._pull_credit): a synthetic
+    run is recorded as synthetic_credit, never as bureau_verified.
+
+    Fails closed on an unmapped feature AND on an unrecognised credit source, same rule
+    as principal_reasons — a feature or a score whose origin we cannot classify must not
+    decide silently, and an unknown source must not be labelled by guesswork."""
+    if credit_source not in CREDIT_SOURCE_PROVENANCE:
+        raise UnmappedFeatureError(
+            f"unrecognised credit-score source {credit_source!r} — refusing to issue a "
+            "decision rather than record an unverifiable provenance claim (D26)"
+        )
+    classified = CREDIT_DERIVED_FEATURES | APPLICANT_STATED_FEATURES
+    unmapped = [a["feature"] for a in attributions if a["feature"] not in classified]
     if unmapped:
         raise UnmappedFeatureError(
             f"model features with no provenance classification: {unmapped} — "
             "refusing to issue a decision (D26 fail-closed rule)"
         )
-    return {a["feature"]: PROVENANCE_MAP[a["feature"]] for a in attributions}
+    return {
+        a["feature"]: (
+            CREDIT_SOURCE_PROVENANCE[credit_source]
+            if a["feature"] in CREDIT_DERIVED_FEATURES
+            else "applicant_stated"
+        )
+        for a in attributions
+    }

@@ -61,9 +61,16 @@ def _synthetic_score(ssn: str) -> int:
     return 680 if ssn and ssn[-1] in "02468" else 612
 
 
-def _pull_credit(ssn: str) -> int:
+def _pull_credit(ssn: str) -> tuple[int, str]:
     """Synchronous bureau call. Blocks the request thread. Bounded by _BUREAU_TIMEOUT,
     kept below origination's own outer HTTP budget for this hop (D28).
+
+    Returns (score, source) where source is a key of
+    reasons.CREDIT_SOURCE_PROVENANCE — "bureau", "synthetic", or
+    "synthetic_after_bureau_failure". D26: the caller records the score's real origin
+    on the decision event, so a synthetic run is never claimed as bureau-verified. The
+    fallback case is distinguished from a keyless one because a bureau WAS contacted
+    and failed, which is a different audit fact.
 
     Fails CLOSED: with no EXPERIAN_KEY (or on any bureau failure) it raises
     CreditPullError unless synthetic credit is explicitly enabled for a dev
@@ -73,7 +80,7 @@ def _pull_credit(ssn: str) -> int:
     """
     if not config.EXPERIAN_KEY:
         if config.synthetic_credit_enabled():
-            return _synthetic_score(ssn)
+            return _synthetic_score(ssn), "synthetic"
         raise CreditPullError(
             "EXPERIAN_KEY not configured — refusing to issue a decision without a "
             "real credit pull. Synthetic scoring requires ENVIRONMENT=development "
@@ -90,10 +97,16 @@ def _pull_credit(ssn: str) -> int:
         score = resp.json().get("score")
         if score is None:
             raise ValueError("bureau response missing 'score'")
-        return score
+        return score, "bureau"
     except Exception as e:
         if config.synthetic_credit_enabled():
-            return _synthetic_score(ssn)
+            log.warning(
+                "bureau pull failed (%s), falling back to a synthetic score — the "
+                "decision record labels this synthetic_credit_bureau_failed, not "
+                "bureau_verified",
+                type(e).__name__,
+            )
+            return _synthetic_score(ssn), "synthetic_after_bureau_failure"
         # Fail closed — do NOT fall back to a stub in a real environment.
         raise CreditPullError(f"bureau credit pull failed: {type(e).__name__}") from e
 
@@ -336,7 +349,7 @@ def decide(application: dict) -> dict:
 def _run_decision(application: dict, request_id: str | None) -> dict:
     """Perform the bureau pull, score, and persist the decision event. Called with the
     idempotency lock held (keyed path) or directly (explicit re-decision, no key)."""
-    bureau_score = _pull_credit(application.get("ssn", ""))
+    bureau_score, credit_source = _pull_credit(application.get("ssn", ""))
 
     # Identifier-free model inputs (ADR 0007 rule 1) — the SIX declared fields only.
     # A SEPARATE dict from the persisted/replay metadata below (PR review): a
@@ -369,8 +382,12 @@ def _run_decision(application: dict, request_id: str | None) -> dict:
     # reasons are only attached to non-approve outcomes.
     mapped_reasons = reasons.principal_reasons(model_out["attributions"])
     principal_reasons = [] if outcome == "approve" else mapped_reasons
-    # D26 rung 1: record which features are bureau-verified vs applicant-stated.
-    inputs["feature_provenance"] = reasons.feature_provenance(model_out["attributions"])
+    # D26 rung 1: record which features are bureau-verified vs applicant-stated, with
+    # the credit-derived one labelled by the score's REAL source — bureau_score above is
+    # synthetic whenever _pull_credit fell back, and the record must say so.
+    inputs["feature_provenance"] = reasons.feature_provenance(
+        model_out["attributions"], credit_source
+    )
     drivers = {
         "model_id": model_out["model_id"],
         "model_version": model_out["model_version"],

@@ -153,12 +153,18 @@ def run_decision(
             status_code=503, detail="decision could not be recorded"
         ) from e
     except UnmappedFeatureError as e:
-        # Fail closed: the model's vocabulary cannot be explained (ADR 0009 §3 gate).
+        # Fail closed: the model's vocabulary cannot be explained (ADR 0009 §3 gate) or
+        # its data provenance cannot be classified (D26). Both reasons.principal_reasons
+        # and reasons.feature_provenance raise this type, so the detail names the class
+        # of refusal rather than only the adverse-action mapping — the logged exception
+        # carries which one it was.
         # A typed refusal, not a 500 — the model integration is unfit, not the service.
-        log.error("decision refused, unmapped model feature: %s", e)
+        log.error("decision refused, unmapped model metadata: %s", e)
         raise HTTPException(
             status_code=503,
-            detail="decision refused: model feature has no mapped adverse-action reason",
+            detail=(
+                "decision refused: model feature or credit-score source is not mapped"
+            ),
         ) from e
     principal_reasons = result.get("principal_reasons") or []
     return DecisionOut(

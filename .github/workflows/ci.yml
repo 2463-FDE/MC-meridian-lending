@@ -140,6 +140,13 @@ jobs:
     # is continue-on-error, so a reopened gate would otherwise stay green. Guards
     # the template a deploy inherits: exactly one ENVIRONMENT, not development, and
     # no ALLOW_SYNTHETIC_CREDIT default. No continue-on-error, no `|| true`.
+    #
+    # D26: also grades the OTHER half of the same control — a synthetic score must
+    # not be recorded as bureau_verified on the decision event. The runtime
+    # fail-closed guards in reasons.py only fire on a live decision, so without this
+    # job the reason/provenance vocabulary could drift and CI would stay green.
+    # Both steps are the same service with the same install line, so neither can pass
+    # on a dependency the other declared.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -151,6 +158,11 @@ jobs:
           cd services/decision-service
           pip install -r requirements.txt pytest
           python -m pytest tests/test_decision.py -k "env_example or pepper" -q
+      - name: decision-service feature-provenance + vocabulary-drift regression tests
+        run: |
+          cd services/decision-service
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_reasons.py -q
 
   decision-idempotency-gate:
     # Decision idempotency is a regulatory control: a reused Idempotency-Key must
@@ -160,6 +172,9 @@ jobs:
     # the regulated record. The tests live in test_decision_record.py, which the
     # `backend` job runs under continue-on-error/|| true, so a reopened gap would stay
     # green. This job MUST block — no continue-on-error, no `|| true`.
+    # Runs the WHOLE file deliberately: it also carries D26's persisted-provenance
+    # assertions (a synthetic score is never recorded bureau_verified), so do not
+    # narrow this to a -k selector.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
