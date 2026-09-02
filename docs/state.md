@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (161974c)` — 161974c 2026-09-02 Merge pull request #150 from 2463-FDE/docs/backup-retention-debt
+Base: `origin/main (8f35c6f)` — 8f35c6f 2026-09-02 Merge pull request #152 from 2463-FDE/docs/limiter-fleet-residual
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #152 | `8f35c6f` | 2026-09-02 | Merge pull request #152 from 2463-FDE/docs/limiter-fleet-residual |
 | #150 | `161974c` | 2026-09-02 | Merge pull request #150 from 2463-FDE/docs/backup-retention-debt |
 | #149 | `d107323` | 2026-09-02 | Merge pull request #149 from 2463-FDE/feat/decision-input-provenance |
 | #148 | `021789a` | 2026-09-01 | Merge pull request #148 from 2463-FDE/docs/adr23-merge-status |
@@ -198,6 +199,7 @@ A job is BLOCKING unless its body carries `continue-on-error` or `|| true`.
 - **soft** — `backend`
 - **BLOCKING** — `redactor-drift`
 - **BLOCKING** — `redaction-tests`
+- **BLOCKING** — `log-rotation-gate`
 - **BLOCKING** — `synthetic-credit-gate`
 - **BLOCKING** — `decision-idempotency-gate`
 - **BLOCKING** — `offer-guard-gate`
