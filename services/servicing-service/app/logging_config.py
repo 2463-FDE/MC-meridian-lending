@@ -4,9 +4,17 @@ Redacts PAN, CVV, SSN, email, phone before writing to logs.
 Addresses PCI-DSS 3.4 (plaintext PII in logs).
 """
 import logging
+import logging.handlers
 import os
 
 from .redactor import PiiRedactor, _RedactWrapper, configure_uvicorn
+
+# Debt D5 residual: rotated at UTC midnight, and only this many days of rotated
+# files are kept. The redactor masks a log LINE; retention is what disposes of the
+# FILE, which nothing did -- including the pre-redaction files that still hold
+# plaintext PAN/CVV/SSN. GLBA Safeguards Rule 314.4(c)(6) and PCI-DSS 3.1 both
+# require a disposal procedure; an unbounded file cannot satisfy one.
+LOG_RETENTION_DAYS = 30
 
 
 
@@ -68,7 +76,12 @@ def get_logger(name: str) -> logging.Logger:
         try:
             log_dir = os.getenv("LOG_DIR", "logs")
             os.makedirs(log_dir, exist_ok=True)
-            fh = logging.FileHandler(os.path.join(log_dir, "servicing-service.log"))
+            fh = logging.handlers.TimedRotatingFileHandler(
+                os.path.join(log_dir, "servicing-service.log"),
+                when="midnight",
+                backupCount=LOG_RETENTION_DAYS,
+                utc=True,
+            )
             fh.setFormatter(fmt)
             logger.addHandler(fh)
         except OSError:
