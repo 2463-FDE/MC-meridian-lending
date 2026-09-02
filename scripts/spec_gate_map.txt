@@ -321,17 +321,24 @@ services/servicing-service/app/payments.py => docs/specs/log-aggregation.md
 # (docs/plans/freeze-demo-script-week10.md section 8).
 # Why an exception is tolerable for now: the BEHAVIOUR is held by the blocking
 # assistant-telemetry-gate -- the write path at the entry span, init-DDL vs
-# migration parity, the readiness rung, and migration 0021 against a real
-# Postgres. A regression is caught. What is unwritten is the DECISION: the
-# privacy and export rules (application_id stored with no FK, aggregation as
-# the export boundary), the hand-applied-migration parity requirement, and
-# failure detection existing only on the readiness rung because the write is
-# swallowed by design.
+# migration parity, the readiness rung, migration 0021 against a real Postgres,
+# and (since the aggregate shipped) the READ path: the officer gate, the window
+# allowlist, the no-application_id/no-trace_id assertion and the vocabulary
+# mask. A regression is caught, on both sides.
+# What is unwritten is still the DECISION, and the surface has grown since this
+# block was written: the privacy and export rules (application_id stored with no
+# FK, aggregation as the export boundary -- now an HTTP endpoint,
+# GET /assistant/metrics, not the CLI the migration's tail first named), the
+# hand-applied-migration parity requirement, failure detection existing only on
+# the readiness rung because the write is swallowed by design, and the
+# read-boundary rule that follows from two of the four coded columns carrying no
+# CHECK: an aggregate may serve only values in a vocabulary it knows, and masks
+# anything else.
 # OPEN, and owed to whoever inherits this: either those rules become an ADR
 # (taking the next free number at the time it is written) and this block turns
 # into a mapped line, or the exception is accepted explicitly by a second
-# reviewer. Decide before the surface changes -- an unwritten rule is not
-# inheritable.
+# reviewer. Decide before the surface changes again -- an unwritten rule is not
+# inheritable, and this is the second time the surface moved ahead of it.
 
 # D33 (applicants.ssn at rest) -- ADR 0023, mapped to BOTH code paths it obligates.
 # purge_ssn.py is the file whose eligibility rule, destroy-full-keep-last-4 behaviour and
