@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (f4fb151)` — f4fb151 2026-09-02 Merge pull request #153 from 2463-FDE/docs/red-team-2026-09-02
+Base: `origin/main (8de18b1)` — 8de18b1 2026-09-02 Merge pull request #154 from 2463-FDE/fix/log-rotation-retention
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #154 | `8de18b1` | 2026-09-02 | Merge pull request #154 from 2463-FDE/fix/log-rotation-retention |
 | #153 | `f4fb151` | 2026-09-02 | Merge pull request #153 from 2463-FDE/docs/red-team-2026-09-02 |
 | #155 | `5a46acf` | 2026-09-02 | Merge pull request #155 from 2463-FDE/test/characterization-signatures |
 | #151 | `d4d9efb` | 2026-09-02 | Merge pull request #151 from 2463-FDE/feat/assistant-metrics |
