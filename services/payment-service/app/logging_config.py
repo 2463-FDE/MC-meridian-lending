@@ -6,6 +6,8 @@ Now redacts PII before writing to logs/payment-service.log. Addresses PCI-DSS 3.
 import logging
 import logging.handlers
 import os
+import threading
+from datetime import datetime, timedelta, timezone
 
 from .redactor import PiiRedactor, _RedactWrapper, configure_uvicorn
 
@@ -16,6 +18,98 @@ from .redactor import PiiRedactor, _RedactWrapper, configure_uvicorn
 # require a disposal procedure; an unbounded file cannot satisfy one.
 LOG_RETENTION_DAYS = 30
 
+
+class ExpiringTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
+    """Daily rotation that disposes by AGE as well as by file count.
+
+    `backupCount` bounds the NUMBER of rotated files, which equals a number of days
+    only while the service rotates every day. Rotation happens when a record is
+    emitted after the boundary, so a service that is down -- or one that logs
+    nothing for a stretch -- rotates less often, and `backupCount` files then hold
+    lines far older than the window. The disposal duty D5 is open for is stated in
+    days (GLBA Safeguards Rule 314.4(c)(6), PCI-DSS 3.1), so nominate by the file's
+    own date too: a rotated file goes at the first rollover on or after the day its
+    oldest line turns LOG_RETENTION_DAYS old. Under daily rotation the date rule and
+    `backupCount` nominate the same file; the date rule is what holds when rotation
+    is sparse, and it is the one the retention claim in docs/debt-log.md states.
+
+    Residual, stated because the claim depends on it: stdlib deletes only inside
+    doRollover(), so an idle process disposes of nothing. __init__ purges once for
+    that reason -- every service builds its loggers at import -- which bounds the
+    gap to one process lifetime rather than to the next record written.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        for path in self._expired_files():
+            try:
+                os.remove(path)
+            except OSError:
+                # Another process's handler on the same file may have removed it
+                # first. Disposal is the goal; who performed it does not matter.
+                pass
+
+    def _expired_files(self) -> list[str]:
+        """Rotated files whose oldest line is at least LOG_RETENTION_DAYS old."""
+        cutoff = datetime.now(timezone.utc).date() - timedelta(days=LOG_RETENTION_DAYS)
+        directory = os.path.dirname(self.baseFilename)
+        prefix = os.path.basename(self.baseFilename) + "."
+        expired: list[str] = []
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            # Unreadable log directory disposes of nothing; it must not take the
+            # rollover (or the process) down with it.
+            return expired
+        for name in names:
+            if not name.startswith(prefix):
+                continue
+            try:
+                # self.suffix, not a literal: it is what named the file.
+                stamped = datetime.strptime(name[len(prefix) :], self.suffix).date()
+            except ValueError:
+                continue  # not one of our dated backups
+            if stamped <= cutoff:
+                expired.append(os.path.join(directory, name))
+        return expired
+
+    def getFilesToDelete(self) -> list[str]:
+        return sorted(set(super().getFilesToDelete()) | set(self._expired_files()))
+
+
+# One rotating writer per log path, shared by every logger in this process.
+# get_logger installs handlers per LOGGER, and a service creates several named
+# loggers (intake, assistant, clients, ...), so a handler each meant several
+# rotating writers on one file. The first to cross midnight renames the file and
+# reopens it; the others keep the old file descriptor -- now the dated backup --
+# and stdlib doRollover() returns early once that backup exists, BEFORE closing the
+# stream and BEFORE advancing rolloverAt, so they keep appending to the rotated
+# file and retry the rollover on every record. Retention then holds nothing: the
+# lines sit in a file named for a day they were not written on, and disposal of
+# that file destroys current logs while the active file is missing them.
+#
+# The cache's scope is the process, and that is the whole fix only because every
+# service runs a single uvicorn process (no --workers, no gunicorn, in any
+# services/*/Dockerfile). Adding a worker flag puts one writer per worker back on
+# one file and needs a per-worker log path or a QueueHandler, not this dict.
+_FILE_HANDLERS: dict[str, ExpiringTimedRotatingFileHandler] = {}
+_FILE_HANDLERS_LOCK = threading.Lock()
+
+
+def _shared_file_handler(
+    path: str, fmt: logging.Formatter
+) -> ExpiringTimedRotatingFileHandler:
+    """The one handler for `path`, creating it on first use. Thread-safe: two
+    loggers built concurrently must not each create a writer on the same file."""
+    with _FILE_HANDLERS_LOCK:
+        handler = _FILE_HANDLERS.get(path)
+        if handler is None:
+            handler = ExpiringTimedRotatingFileHandler(
+                path, when="midnight", backupCount=LOG_RETENTION_DAYS, utc=True
+            )
+            handler.setFormatter(fmt)
+            _FILE_HANDLERS[path] = handler
+        return handler
 
 
 class RedactingFormatter(logging.Formatter):
@@ -76,14 +170,9 @@ def get_logger(name: str) -> logging.Logger:
         try:
             log_dir = os.getenv("LOG_DIR", "logs")
             os.makedirs(log_dir, exist_ok=True)
-            fh = logging.handlers.TimedRotatingFileHandler(
-                os.path.join(log_dir, "payment-service.log"),
-                when="midnight",
-                backupCount=LOG_RETENTION_DAYS,
-                utc=True,
+            logger.addHandler(
+                _shared_file_handler(os.path.join(log_dir, "payment-service.log"), fmt)
             )
-            fh.setFormatter(fmt)
-            logger.addHandler(fh)
         except OSError:
             pass
 
