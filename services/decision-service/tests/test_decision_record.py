@@ -115,6 +115,20 @@ def test_persisted_inputs_are_identifier_free(synthetic_mode, captured_events):
     assert inputs["bureau_score"] == 612  # model inputs are recorded
 
 
+def test_persisted_inputs_carry_feature_provenance(synthetic_mode, captured_events):
+    """D26 rung 1: the record must distinguish the one bureau-verified feature from
+    the three applicant-stated ones — nothing on the row did before."""
+    decision.decide(STRONG_APP)
+    (params,) = captured_events
+    inputs = json.loads(params[5])
+    assert inputs["feature_provenance"] == {
+        "delinquency_history": "bureau_verified",
+        "payment_burden": "applicant_stated",
+        "income_sufficiency": "applicant_stated",
+        "employment_tenure": "applicant_stated",
+    }
+
+
 def test_persist_failure_refuses_the_decision(synthetic_mode, monkeypatch):
     def _db_down(sql, params=None):
         raise RuntimeError("connection refused")

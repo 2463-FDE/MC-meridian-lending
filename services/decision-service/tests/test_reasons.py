@@ -2,7 +2,13 @@
 
 import pytest
 
-from app.reasons import MAX_REASONS, REASON_MAP, UnmappedFeatureError, principal_reasons
+from app.reasons import (
+    MAX_REASONS,
+    REASON_MAP,
+    UnmappedFeatureError,
+    feature_provenance,
+    principal_reasons,
+)
 
 
 def test_top_negative_attributions_become_specific_reasons_most_negative_first():
@@ -39,3 +45,23 @@ def test_reasons_capped_at_reg_b_maximum():
 def test_generic_purchasing_history_is_not_in_the_vocabulary():
     texts = [text.lower() for _, text in REASON_MAP.values()]
     assert not any("purchasing history" in t for t in texts)
+
+
+def test_feature_provenance_classifies_bureau_vs_applicant_stated():
+    attributions = [
+        {"feature": "delinquency_history", "contribution": 10.0},
+        {"feature": "payment_burden", "contribution": -5.0},
+        {"feature": "income_sufficiency", "contribution": -3.0},
+        {"feature": "employment_tenure", "contribution": 1.0},
+    ]
+    assert feature_provenance(attributions) == {
+        "delinquency_history": "bureau_verified",
+        "payment_burden": "applicant_stated",
+        "income_sufficiency": "applicant_stated",
+        "employment_tenure": "applicant_stated",
+    }
+
+
+def test_feature_provenance_fails_closed_on_unmapped_feature():
+    with pytest.raises(UnmappedFeatureError):
+        feature_provenance([{"feature": "zodiac_sign", "contribution": 5.0}])

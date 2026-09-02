@@ -22,6 +22,16 @@ REASON_MAP = {
 # Reg B custom: state up to four principal reasons.
 MAX_REASONS = 4
 
+# D26: only delinquency_history comes from the bureau pull. The other three are
+# computed from applicant-typed income, debt and tenure that nothing in this platform
+# verifies. Keys must cover every feature model_vendor can emit, same rule as REASON_MAP.
+PROVENANCE_MAP = {
+    "delinquency_history": "bureau_verified",
+    "payment_burden": "applicant_stated",
+    "income_sufficiency": "applicant_stated",
+    "employment_tenure": "applicant_stated",
+}
+
 
 class UnmappedFeatureError(RuntimeError):
     """The model emitted a feature with no adverse-action reason mapping. Fail closed:
@@ -55,3 +65,19 @@ def principal_reasons(attributions: list) -> list:
         }
         for a in negatives[:MAX_REASONS]
     ]
+
+
+def feature_provenance(attributions: list) -> dict:
+    """Per-feature data provenance for the decision record (D26 rung 1).
+
+    Fail closed on any unmapped feature, same rule as principal_reasons — a feature
+    whose data source we cannot classify must not decide silently."""
+    unmapped = [
+        a["feature"] for a in attributions if a["feature"] not in PROVENANCE_MAP
+    ]
+    if unmapped:
+        raise UnmappedFeatureError(
+            f"model features with no provenance classification: {unmapped} — "
+            "refusing to issue a decision (D26 fail-closed rule)"
+        )
+    return {a["feature"]: PROVENANCE_MAP[a["feature"]] for a in attributions}

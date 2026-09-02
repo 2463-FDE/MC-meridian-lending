@@ -369,6 +369,8 @@ def _run_decision(application: dict, request_id: str | None) -> dict:
     # reasons are only attached to non-approve outcomes.
     mapped_reasons = reasons.principal_reasons(model_out["attributions"])
     principal_reasons = [] if outcome == "approve" else mapped_reasons
+    # D26 rung 1: record which features are bureau-verified vs applicant-stated.
+    inputs["feature_provenance"] = reasons.feature_provenance(model_out["attributions"])
     drivers = {
         "model_id": model_out["model_id"],
         "model_version": model_out["model_version"],
