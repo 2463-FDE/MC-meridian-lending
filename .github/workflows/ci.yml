@@ -680,6 +680,45 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_tila_vectors.py tests/test_apr.py tests/test_rules.py -q
 
+  disclosure-narration-gate:
+    # D37 (docs/debt-log.md), Minimum Build Slice #4 (docs/specs/disclosure-narration-judge.md).
+    # D1's deterministic guard (`_narration_is_grounded`, disclosure_coordinator.py) already
+    # blocks a fabricated figure from reaching the officer, but origination-service's pytest
+    # runs under the tolerated `backend` matrix `|| true` -- same shape that let the D2
+    # add-on-vs-actuarial APR defect through before tila-vectors-gate existed. This job takes
+    # the guard, its pinned fixture set (D2), and the offline judge that grades the raw
+    # completion against them (D3) out of that tolerance. All three test files run entirely
+    # on FakeAdapter -- no network call, no live model key, same offline shape as the D2/D3
+    # split the spec requires.
+    #
+    # test_disclosure_coordinator.py is a 700+ line file covering the whole coordinator, most
+    # of it outside this debt entry's scope, so this job selects only the D1 groundedness
+    # tests by name rather than promoting the whole file to blocking.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: origination-service narration groundedness guard (D1) + fixtures (D2) + offline judge (D3)
+        run: |
+          cd services/origination-service
+          pip install -r requirements.txt pytest
+          D1_FILTER="rejected_narration or healthy_narration or fabricated_dollar_figure or \
+            dollar_figure_equal_to_the_term_count or percent_figure_equal_to_the_term_count or \
+            spelled_out_note_rate"
+          # -k selects by name out of a 700+ line file that is mostly out of scope for this
+          # gate (see job comment); a future rename of any of these six tests would make -k
+          # match nothing and pytest would exit 0 having verified none of them, so the count
+          # is asserted explicitly rather than trusted to the exit code alone.
+          COLLECTED=$(python -m pytest tests/test_disclosure_coordinator.py -k "$D1_FILTER" --collect-only -q | grep -c "::test_")
+          if [ "$COLLECTED" -ne 6 ]; then
+            echo "expected 6 D1 groundedness tests selected by name, got $COLLECTED -- a test was likely renamed; update the -k filter in this job" >&2
+            exit 1
+          fi
+          python -m pytest tests/test_disclosure_coordinator.py -k "$D1_FILTER" -q
+          python -m pytest tests/test_disclosure_narration_fixtures.py tests/test_narration_judge.py -q
+
   reconciliation-gate:
     # Settlement reconciliation is the only thing that compares what the processor captured
     # against what a loan was credited (ADR 0015). D19 now prevents the exact-retry case at
@@ -839,9 +878,11 @@ jobs:
     #   test_payment_applications_ddl.py  the init DDL and migration 0019 declare one table,
     #                                byte-for-byte, and the migration RAISE EXCEPTIONs on a
     #                                shape it did not create.
-    #   test_characterization_balance.py  pins that adjust_balance still holds the unlocked
-    #                                shape -- a decision, not an oversight (D32).
-    #   test_waive_fee_lost_update.py  D32's other half: waive_fee is now the same
+    #   test_characterization_balance.py  pins that adjust_balance is now one atomic
+    #                                compare-and-set (D32's second half) and refuses --
+    #                                writes nothing -- when the caller's expected_balance
+    #                                no longer matches the stored one.
+    #   test_waive_fee_lost_update.py  D32's first half: waive_fee is now the same
     #                                atomic-UPDATE shape as apply_payment, and this is the
     #                                before-number for it, same role as test_lost_update.py.
     #   payment-service tests/test_apply_via_servicing.py  the caller sends payment_id only.
@@ -863,13 +904,13 @@ jobs:
       # Selected, not the whole file: test_characterization_balance.py also pins the
       # ADR 0014 authorization gaps, which are still open and still red on purpose. Only
       # the D3/D32 assertions belong in a blocking gate -- the apply's shape, its record,
-      # waive_fee's now-atomic shape, and the one mutation (adjust_balance) that
-      # deliberately keeps the old shape.
+      # and both D32 halves' now-atomic shapes (waive_fee's decrement, adjust_balance's
+      # compare-and-set).
       - name: servicing-service characterization of what D3/D32 changed and what they did not
         run: |
           cd services/servicing-service
           python -m pytest tests/test_characterization_balance.py -q \
-            -k "(apply_payment or adjust_balance_is_still or waive_fee_is_now) and not route_takes_no_caller_identity"
+            -k "(apply_payment or adjust_balance_is_now or adjust_balance_refuses_when_balance_moved or waive_fee_is_now) and not route_takes_no_caller_identity"
       - name: payment-service sends payment_id only, and cannot retire an unapplied capture
         run: |
           cd services/payment-service
