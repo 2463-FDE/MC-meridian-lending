@@ -3,9 +3,11 @@
 > **Brownfield platform under active remediation.** The full PAN is stored in plaintext, so
 > the payment path is **not** compliant with PCI-DSS — tracked as open debt D13b (ADR 0013,
 > which supersedes ADR 0003): tokenization needs a provider decision and a card-entry
-> surface, and neither exists. The CVV column was deleted by migration
-> `db/migrations/0020_payments_drop_cvv.sql`, held by the blocking `no-sad-gate`, so card
-> data is no longer PAN *and* CVV. Applicant SSNs are stored in plaintext too (debt D33,
+> surface, and neither exists. The CVV column was deleted **from the live table** by
+> migration `db/migrations/0020_payments_drop_cvv.sql`, held by the blocking `no-sad-gate`;
+> backups, WAL segments and any replica taken before that rewrite still hold the CVVs and
+> no retention procedure owns them (debt D38), so a restore reinstates data PCI-DSS 3.2
+> prohibits retaining at all. Applicant SSNs are stored in plaintext too (debt D33,
 > ADR 0023). Credit decisions are recorded to an append-only decision log.
 
 The Meridian Lending Co. loan origination + servicing platform. Originally delivered by
