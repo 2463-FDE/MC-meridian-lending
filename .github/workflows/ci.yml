@@ -935,16 +935,19 @@ jobs:
                            tests/test_atomic_apply.py \
                            tests/test_payment_applications_ddl.py \
                            tests/test_waive_fee_lost_update.py -q
-      # Selected, not the whole file: test_characterization_balance.py also pins the
-      # ADR 0014 authorization gaps, which are still open and still red on purpose. Only
-      # the D3/D32 assertions belong in a blocking gate -- the apply's shape, its record,
-      # and both D32 halves' now-atomic shapes (waive_fee's decrement, adjust_balance's
-      # compare-and-set).
+      # Selected, not the whole file: only the D3/D32 assertions belong in a blocking
+      # gate -- the apply's shape, its record, and both D32 halves' now-atomic shapes
+      # (waive_fee's decrement, adjust_balance's compare-and-set). The two excluded
+      # tests pin route signatures (ADR 0013's internal-caller headers), which D3/D32
+      # did not change. Nothing in this file is red on purpose: the earlier wording here
+      # said the ADR 0014 authorization gaps were, but PR #32 enforced them and those
+      # tests are green -- the only red tests in the file were the two excluded ones,
+      # stale against the signature ADR 0013 shipped, and this change corrects them.
       - name: servicing-service characterization of what D3/D32 changed and what they did not
         run: |
           cd services/servicing-service
           python -m pytest tests/test_characterization_balance.py -q \
-            -k "(apply_payment or adjust_balance_is_now or adjust_balance_refuses_when_balance_moved or waive_fee_is_now) and not route_takes_no_caller_identity"
+            -k "(apply_payment or adjust_balance_is_now or adjust_balance_refuses_when_balance_moved or waive_fee_is_now) and not route_requires_internal_caller_identity"
       - name: payment-service sends payment_id only, and cannot retire an unapplied capture
         run: |
           cd services/payment-service
