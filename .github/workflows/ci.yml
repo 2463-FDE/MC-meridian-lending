@@ -1244,9 +1244,13 @@ jobs:
     # repo in $TMPDIR — so it asserts the gate's own logic, never the state of the
     # repo's specs. The load-bearing case is `code area without required spec fails`:
     # without it the gate could pass unconditionally and nothing here would notice.
-    # One case is deliberately NOT hermetic (`audit globs still match this repo's
-    # tree`): the coverage audit's `adr/*.md` / `docs/specs/*.md` globs are a claim
-    # about THIS layout, and a fixture cannot catch them drifting off it.
+    # Two cases are deliberately NOT hermetic, both because they assert a claim about
+    # THIS repo that a fixture cannot make: `audit globs still match this repo's tree`
+    # (the coverage audit's `adr/*.md` / `docs/specs/*.md` globs must keep matching
+    # this layout) and `ADR 0023 keeps a map line for every code path it obligates`
+    # (the gate's coverage audit grades docs, not code paths, so a code path can be
+    # dropped from scripts/spec_gate_map.txt -- replaced by a sibling rather than
+    # joined by one -- with spec_diff_gate.sh still exiting 0).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
