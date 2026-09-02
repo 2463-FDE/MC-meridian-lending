@@ -4,10 +4,157 @@ Redacts PAN, CVV, SSN, email, phone before writing to logs.
 Addresses PCI-DSS 3.4 (plaintext PII in logs).
 """
 import logging
+import logging.handlers
 import os
+import threading
+from datetime import date, datetime, timedelta, timezone
 
 from .redactor import PiiRedactor, _RedactWrapper, configure_uvicorn
 
+# Debt D5 residual: rotated at UTC midnight, and only this many days of rotated
+# files are kept. The redactor masks a log LINE; retention is what disposes of the
+# FILE, which nothing did -- including the pre-redaction files that still hold
+# plaintext PAN/CVV/SSN. GLBA Safeguards Rule 314.4(c)(6) and PCI-DSS 3.1 both
+# require a disposal procedure; an unbounded file cannot satisfy one.
+LOG_RETENTION_DAYS = 30
+
+
+def _retention_cutoff() -> date:
+    """The oldest date a retained line may carry."""
+    return datetime.now(timezone.utc).date() - timedelta(days=LOG_RETENTION_DAYS)
+
+
+def _dispose_overdue_active_file(path: str) -> None:
+    """Delete the ACTIVE log file when its newest line is already past the window.
+
+    The rotated-backup purge globs `baseFilename + "."`, which the active file's own
+    name cannot match, and stdlib rotates only from emit() -- so a service that
+    restarts and then logs nothing (or logs nothing ever again) keeps an active file
+    holding lines older than LOG_RETENTION_DAYS indefinitely, and the retention claim
+    in docs/debt-log.md does not hold for it.
+
+    mtime is the NEWEST line's time, so mtime past the cutoff means every line in the
+    file is past it and the whole file goes. The opposite case -- a file whose lines
+    straddle the boundary -- is left alone here and self-heals on the next record:
+    stdlib computes rolloverAt from that same mtime, so the first emit crosses it and
+    doRollover() names the backup for the elapsed period, which _expired_files() then
+    nominates. Truncating a straddling file instead would destroy lines inside the
+    window, which is the same loss retention exists to bound.
+    """
+    try:
+        mtime = os.stat(path).st_mtime
+    except OSError:
+        # No active file yet, or an unreadable log directory: nothing to dispose, and
+        # it must not take the handler (or the process) down.
+        return
+    if datetime.fromtimestamp(mtime, timezone.utc).date() > _retention_cutoff():
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        # Another process's handler on the same file may have removed it first.
+        # Disposal is the goal; who performed it does not matter.
+        pass
+
+
+class ExpiringTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
+    """Daily rotation that disposes by AGE as well as by file count.
+
+    `backupCount` bounds the NUMBER of rotated files, which equals a number of days
+    only while the service rotates every day. Rotation happens when a record is
+    emitted after the boundary, so a service that is down -- or one that logs
+    nothing for a stretch -- rotates less often, and `backupCount` files then hold
+    lines far older than the window. The disposal duty D5 is open for is stated in
+    days (GLBA Safeguards Rule 314.4(c)(6), PCI-DSS 3.1), so nominate by the file's
+    own date too: a rotated file goes at the first rollover on or after the day its
+    oldest line turns LOG_RETENTION_DAYS old. Under daily rotation the date rule and
+    `backupCount` nominate the same file; the date rule is what holds when rotation
+    is sparse, and it is the one the retention claim in docs/debt-log.md states.
+
+    Residual, stated because the claim depends on it: stdlib deletes only inside
+    doRollover(), which runs from emit(), so an idle process disposes of nothing.
+    __init__ therefore disposes twice for that reason -- every service builds its
+    loggers at import -- once for the rotated backups and once for the ACTIVE file,
+    which no backup glob can match. That bounds the gap to one process lifetime
+    rather than to the next record written.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        # Before super() opens the stream: removing an already-open file leaves the
+        # handler appending to an unlinked inode, so the active file is graded first.
+        filename = kwargs.get("filename", args[0] if args else None)
+        if filename is not None:
+            _dispose_overdue_active_file(os.fspath(filename))
+        super().__init__(*args, **kwargs)
+        for path in self._expired_files():
+            try:
+                os.remove(path)
+            except OSError:
+                # Another process's handler on the same file may have removed it
+                # first. Disposal is the goal; who performed it does not matter.
+                pass
+
+    def _expired_files(self) -> list[str]:
+        """Rotated files whose oldest line is at least LOG_RETENTION_DAYS old."""
+        cutoff = _retention_cutoff()
+        directory = os.path.dirname(self.baseFilename)
+        prefix = os.path.basename(self.baseFilename) + "."
+        expired: list[str] = []
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            # Unreadable log directory disposes of nothing; it must not take the
+            # rollover (or the process) down with it.
+            return expired
+        for name in names:
+            if not name.startswith(prefix):
+                continue
+            try:
+                # self.suffix, not a literal: it is what named the file.
+                stamped = datetime.strptime(name[len(prefix) :], self.suffix).date()
+            except ValueError:
+                continue  # not one of our dated backups
+            if stamped <= cutoff:
+                expired.append(os.path.join(directory, name))
+        return expired
+
+    def getFilesToDelete(self) -> list[str]:
+        return sorted(set(super().getFilesToDelete()) | set(self._expired_files()))
+
+
+# One rotating writer per log path, shared by every logger in this process.
+# get_logger installs handlers per LOGGER, and a service creates several named
+# loggers (intake, assistant, clients, ...), so a handler each meant several
+# rotating writers on one file. The first to cross midnight renames the file and
+# reopens it; the others keep the old file descriptor -- now the dated backup --
+# and stdlib doRollover() returns early once that backup exists, BEFORE closing the
+# stream and BEFORE advancing rolloverAt, so they keep appending to the rotated
+# file and retry the rollover on every record. Retention then holds nothing: the
+# lines sit in a file named for a day they were not written on, and disposal of
+# that file destroys current logs while the active file is missing them.
+#
+# The cache's scope is the process, and that is the whole fix only because every
+# service runs a single uvicorn process (no --workers, no gunicorn, in any
+# services/*/Dockerfile). Adding a worker flag puts one writer per worker back on
+# one file and needs a per-worker log path or a QueueHandler, not this dict.
+_FILE_HANDLERS: dict[str, ExpiringTimedRotatingFileHandler] = {}
+_FILE_HANDLERS_LOCK = threading.Lock()
+
+
+def _shared_file_handler(
+    path: str, fmt: logging.Formatter
+) -> ExpiringTimedRotatingFileHandler:
+    """The one handler for `path`, creating it on first use. Thread-safe: two
+    loggers built concurrently must not each create a writer on the same file."""
+    with _FILE_HANDLERS_LOCK:
+        handler = _FILE_HANDLERS.get(path)
+        if handler is None:
+            handler = ExpiringTimedRotatingFileHandler(
+                path, when="midnight", backupCount=LOG_RETENTION_DAYS, utc=True
+            )
+            handler.setFormatter(fmt)
+            _FILE_HANDLERS[path] = handler
+        return handler
 
 
 class RedactingFormatter(logging.Formatter):
@@ -68,9 +215,9 @@ def get_logger(name: str) -> logging.Logger:
         try:
             log_dir = os.getenv("LOG_DIR", "logs")
             os.makedirs(log_dir, exist_ok=True)
-            fh = logging.FileHandler(os.path.join(log_dir, "decision-service.log"))
-            fh.setFormatter(fmt)
-            logger.addHandler(fh)
+            logger.addHandler(
+                _shared_file_handler(os.path.join(log_dir, "decision-service.log"), fmt)
+            )
         except OSError:
             pass
 
