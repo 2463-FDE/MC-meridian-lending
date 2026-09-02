@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (a847abd)` — a847abd 2026-09-01 Merge pull request #144 from 2463-FDE/fix/adjust-balance-compare-and-set
+Base: `origin/main (0615836)` — 0615836 2026-09-01 Merge pull request #147 from 2463-FDE/feat/disclosure-narration-judge
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #147 | `0615836` | 2026-09-01 | Merge pull request #147 from 2463-FDE/feat/disclosure-narration-judge |
 | #144 | `a847abd` | 2026-09-01 | Merge pull request #144 from 2463-FDE/fix/adjust-balance-compare-and-set |
 | #145 | `558d048` | 2026-09-01 | Merge pull request #145 from 2463-FDE/test/disclosure-narration-fixtures |
 | #142 | `25157e4` | 2026-09-01 | Merge pull request #142 from 2463-FDE/fix/ssn-at-rest |
