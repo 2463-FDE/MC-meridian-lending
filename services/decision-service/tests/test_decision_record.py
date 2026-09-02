@@ -9,6 +9,7 @@ by the smoke test against the compose stack).
 import contextlib
 import json
 
+import httpx
 import pytest
 
 from app import config, decision, model_vendor
@@ -113,6 +114,64 @@ def test_persisted_inputs_are_identifier_free(synthetic_mode, captured_events):
     inputs = json.loads(params[5])
     assert "ssn" not in inputs and "name" not in inputs
     assert inputs["bureau_score"] == 612  # model inputs are recorded
+
+
+def test_persisted_inputs_carry_feature_provenance(synthetic_mode, captured_events):
+    """D26 rung 1: the record must distinguish the credit-derived feature from the
+    three applicant-stated ones — nothing on the row did before.
+
+    D26 review: synthetic_mode is the accepted demo configuration
+    (docker-compose.demo.yml sets ENVIRONMENT=development + ALLOW_SYNTHETIC_CREDIT), so
+    no bureau saw this score and the row must not claim one did."""
+    decision.decide(STRONG_APP)
+    (params,) = captured_events
+    inputs = json.loads(params[5])
+    assert inputs["feature_provenance"] == {
+        "delinquency_history": "synthetic_credit",
+        "payment_burden": "applicant_stated",
+        "income_sufficiency": "applicant_stated",
+        "employment_tenure": "applicant_stated",
+    }
+    assert "bureau_verified" not in inputs["feature_provenance"].values()
+
+
+def test_persisted_provenance_claims_bureau_verified_on_a_real_pull(
+    monkeypatch, captured_events
+):
+    """The mirror of the test above: with a configured key and a bureau call that
+    succeeds, the row DOES claim bureau_verified — so the fix is a real source label,
+    not a blanket downgrade to synthetic."""
+    monkeypatch.setattr(config, "EXPERIAN_KEY", "sk-test-key")
+    monkeypatch.setattr(config, "ENVIRONMENT", "production")
+    monkeypatch.setattr(config, "ALLOW_SYNTHETIC_CREDIT", False)
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        request = httpx.Request("GET", url)
+        return httpx.Response(200, request=request, json={"score": 760})
+
+    monkeypatch.setattr(decision.httpx, "get", _fake_get)
+    decision.decide(STRONG_APP)
+    (params,) = captured_events
+    inputs = json.loads(params[5])
+    assert inputs["bureau_score"] == 760
+    assert inputs["feature_provenance"]["delinquency_history"] == "bureau_verified"
+
+
+def test_persisted_provenance_marks_a_failed_bureau_fallback(
+    synthetic_mode, monkeypatch, captured_events
+):
+    """A configured key whose pull fails, with synthetic enabled: the score is
+    synthetic and the record says the bureau was tried and failed."""
+    monkeypatch.setattr(config, "EXPERIAN_KEY", "sk-test-key")
+
+    def _boom(url, params=None, headers=None, timeout=None):
+        raise httpx.ConnectError("bureau down")
+
+    monkeypatch.setattr(decision.httpx, "get", _boom)
+    decision.decide(STRONG_APP)
+    (params,) = captured_events
+    provenance = json.loads(params[5])["feature_provenance"]
+    assert provenance["delinquency_history"] == "synthetic_credit_bureau_failed"
 
 
 def test_persist_failure_refuses_the_decision(synthetic_mode, monkeypatch):
@@ -393,7 +452,9 @@ def test_refer_with_no_negative_drivers_is_decisionable(
 ):
     # H1: the original rule refused this applicant class forever (503 + a fresh
     # bureau pull per retry). Refer routes to manual review; empty reasons are honest.
-    monkeypatch.setattr(decision, "_pull_credit", lambda ssn: 650)
+    # (score, source) — this test runs under synthetic_mode, so "synthetic" is the
+    # truthful source for the stubbed score.
+    monkeypatch.setattr(decision, "_pull_credit", lambda ssn: (650, "synthetic"))
     result = decision.decide(BORDERLINE_APP)
     assert result["decision"] == "refer"
     assert result["principal_reasons"] == []
@@ -806,4 +867,6 @@ def test_unmapped_feature_returns_typed_503(synthetic_mode, monkeypatch):
         },
     )
     assert resp.status_code == 503
-    assert "no mapped adverse-action reason" in resp.json()["detail"]
+    # D26 review: the detail names the class of refusal, because
+    # feature_provenance raises the same type — see reasons.UnmappedFeatureError.
+    assert "is not mapped" in resp.json()["detail"]
