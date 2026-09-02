@@ -134,6 +134,40 @@ jobs:
           pip install -r requirements.txt pytest
           python -m pytest tests/test_logging_redaction.py -q
 
+  log-rotation-gate:
+    # The other half of the D5 log control. `redaction-tests` above keeps PII out of
+    # a log LINE; this keeps the log FILE bounded and disposes of it on a schedule.
+    # GLBA Safeguards Rule 314.4(c)(6) and PCI-DSS 3.1 both require a written
+    # retention and disposal procedure, and a file nothing ever truncates cannot
+    # satisfy one — so a revert from TimedRotatingFileHandler to logging.FileHandler
+    # reopens a named control requirement, not a style regression.
+    #
+    # This needs its own blocking job for two reasons. (1) The `backend` matrix runs
+    # these tests under continue-on-error plus `|| true`, so the revert passes there.
+    # (2) Unlike redactor.py, logging_config.py is NOT a synced copy — each service
+    # names its own log file — so `redactor-drift` cannot cover it, and a revert in
+    # one service alone is invisible to every other job in this file.
+    #
+    # One matrix leg per service rather than seven steps in one job: steps in a single
+    # job share a Python environment, which is how kyc-enforcement-gate once passed on
+    # a package no manifest in its own service declared. A leg installs only its own
+    # service's requirements, so an under-declared manifest fails here at collection.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [gateway, origination-service, servicing-service, kyc-service, decision-service, disclosure-service, payment-service]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ${{ matrix.service }} log rotation + 30-day retention
+        run: |
+          cd services/${{ matrix.service }}
+          pip install -r requirements.txt pytest
+          python -m pytest tests/test_log_rotation.py -q
+
   synthetic-credit-gate:
     # Fail-closed synthetic credit is a security control (approving loans on fake
     # scores). Like redaction-tests, this MUST block the build — the `backend` job
