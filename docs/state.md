@@ -8,12 +8,15 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (8f35c6f)` — 8f35c6f 2026-09-02 Merge pull request #152 from 2463-FDE/docs/limiter-fleet-residual
+Base: `origin/main (f4fb151)` — f4fb151 2026-09-02 Merge pull request #153 from 2463-FDE/docs/red-team-2026-09-02
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #153 | `f4fb151` | 2026-09-02 | Merge pull request #153 from 2463-FDE/docs/red-team-2026-09-02 |
+| #155 | `5a46acf` | 2026-09-02 | Merge pull request #155 from 2463-FDE/test/characterization-signatures |
+| #151 | `d4d9efb` | 2026-09-02 | Merge pull request #151 from 2463-FDE/feat/assistant-metrics |
 | #152 | `8f35c6f` | 2026-09-02 | Merge pull request #152 from 2463-FDE/docs/limiter-fleet-residual |
 | #150 | `161974c` | 2026-09-02 | Merge pull request #150 from 2463-FDE/docs/backup-retention-debt |
 | #149 | `d107323` | 2026-09-02 | Merge pull request #149 from 2463-FDE/feat/decision-input-provenance |
