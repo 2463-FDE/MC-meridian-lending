@@ -8,12 +8,14 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (0615836)` — 0615836 2026-09-01 Merge pull request #147 from 2463-FDE/feat/disclosure-narration-judge
+Base: `origin/main (021789a)` — 021789a 2026-09-01 Merge pull request #148 from 2463-FDE/docs/adr23-merge-status
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #148 | `021789a` | 2026-09-01 | Merge pull request #148 from 2463-FDE/docs/adr23-merge-status |
+| #146 | `56230f2` | 2026-09-01 | Merge pull request #146 from 2463-FDE/docs/regulator-watch-2026-09-01 |
 | #147 | `0615836` | 2026-09-01 | Merge pull request #147 from 2463-FDE/feat/disclosure-narration-judge |
 | #144 | `a847abd` | 2026-09-01 | Merge pull request #144 from 2463-FDE/fix/adjust-balance-compare-and-set |
 | #145 | `558d048` | 2026-09-01 | Merge pull request #145 from 2463-FDE/test/disclosure-narration-fixtures |
@@ -194,6 +196,7 @@ A job is BLOCKING unless its body carries `continue-on-error` or `|| true`.
 - **soft** — `backend`
 - **BLOCKING** — `redactor-drift`
 - **BLOCKING** — `redaction-tests`
+- **BLOCKING** — `log-rotation-gate`
 - **BLOCKING** — `synthetic-credit-gate`
 - **BLOCKING** — `decision-idempotency-gate`
 - **BLOCKING** — `offer-guard-gate`
