@@ -9,10 +9,11 @@ as a proposal. B, C and D are still deferred and rejected in the state described
 ## Business problem
 
 `assistant_runs` records one row per officer assistant request, served or refused, and has
-done so since migration `db/migrations/0021_assistant_runs.sql`. Nothing reads it. There is
-no answer today to "what fraction of assistant requests refused last week", "which refusal
-code dominates", or "how slow is the loop under real use" — the data exists and no path
-reaches it.
+done so since migration `db/migrations/0021_assistant_runs.sql`. Until PR #151, nothing read
+it: there was no answer to "what fraction of assistant requests refused last week", "which
+refusal code dominates", or "how slow is the loop under real use" — the data existed and no
+path reached it. That is the problem this decision addresses. The reader that closes it is the
+officer-gated `GET /assistant/metrics` recorded under "What shipped" below.
 
 ## Why LangSmith cannot answer this
 
@@ -60,7 +61,9 @@ That last rule is still unwritten as a decision. `scripts/spec_gate_map.txt` lea
 rather than closing it, recording that this is the second time the surface moved ahead of it.
 The privacy and export rules (`application_id` stored with no foreign key, aggregation as the
 export boundary), the hand-applied-migration parity requirement, and this vocabulary mask are
-owed an ADR. Nobody owns it.
+owed an ADR. The exception itself is owned — `scripts/spec_gate_map.txt` line 320 names
+maha-c, and `docs/kb.md` records the gap as a named exception with an owner — but no owner
+distinct from the repo owner exists to escalate to, and nothing schedules the ADR.
 
 ## Options considered
 
@@ -92,11 +95,17 @@ Deferred for four reasons, in order of weight:
    that errors would also blank the applications and loans tables. The panel needs
    `Promise.allSettled` or its own loader — small, but it is a change to working code, not an
    addition beside it.
-3. **No chart library.** `frontend/package.json` declares `next`, `react` and `react-dom` and
-   nothing else. Stat tiles and CSS bars are buildable today; a time series is a dependency
-   conversation, and a time series is the first thing anyone asks for after seeing tiles.
-4. **`make prove` cannot prove the frontend half.** It is pytest-only and aborts on `.tsx`,
-   so a panel's regression evidence is hand-run.
+3. **No chart library.** `frontend/package.json` declares `next`, `react` and `react-dom` as
+   its only runtime dependencies; the devDependencies are TypeScript and the
+   vitest/testing-library stack, nothing that draws. Stat tiles and CSS bars are buildable
+   today; a time series is a dependency conversation, and a time series is the first thing
+   anyone asks for after seeing tiles.
+4. **`make prove` cannot prove the frontend half.** It rolls back any tracked source file,
+   `.tsx` included, but it only *executes* Python tests, so a commit whose only test is a
+   `.tsx` file aborts as "changes no test file" (`scripts/prove_test.sh`). A panel test would
+   still run blocking — the `frontend` job runs `npm run build` and `npm test` (vitest) with no
+   `continue-on-error`, beside four existing `.test.tsx` suites — it just would not carry the
+   red-without-fix / green-with-fix proof this project requires of a regression test.
 
 None of 2–4 is disqualifying. The endpoint is the half that has to exist first either way,
 and building it alone makes the panel a genuinely small follow-up.
