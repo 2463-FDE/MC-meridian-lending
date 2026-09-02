@@ -19,9 +19,16 @@ Brownfield consumer personal-installment-loan platform. A Loan Origination Syste
 System (LSS) behind one BFF gateway, plus a Next.js portal. Seven Python 3.12 / FastAPI backend services, one
 shared Postgres schema (ADR 0002), partial SQLAlchemy migration with money-moving writes still on raw psycopg2.
 
-The engagement has run weeks 1–10. Weeks 4–10 are merged to `main`. Weeks 5 and the original week 6 landed as
-spec/ADR packages with **no code behind them** — `docs/specs/payments-week5.md` and
-`docs/reports/servicing-money-comprehension-week6.md` are the sources of truth for what is specified but unbuilt.
+The engagement has run weeks 1–10, and **every week has merged to `main`** — verified against the merged-PR
+ledger in `docs/state.md`: week 1 as PRs #1 (`aa955dc`) and #3 (`295ac2d`) plus the PII-redaction and
+secret-purge PRs #2 (`1f89ac1`) and #4 (`ed2cb35`); week 2 as #5 (`ed23759`) and #6 (`84015d4`); week 3 as #7
+(`2ecdb27`); week 4 as #12 (`6b395cb`); and weeks 5–10 thereafter.
+
+Merged is not the same as built. **Week 5 and the original week 6 landed as spec/ADR packages with no
+`services/` or `db/` change behind them** — `docs/specs/payments-week5.md` and
+`docs/reports/servicing-money-comprehension-week6.md` are the sources of truth for what is specified but
+unbuilt. Week 6's follow-on authz fix is real code (`services/servicing-service/app/authz.py`), so what stays
+unbuilt from that week is maker-checker and the append-only ledger. Weeks 1–4, 7, 8, 9 and 10 are real code.
 
 There are 23 ADRs, `adr/0001-record-architecture-decisions.md` through `adr/0023-applicant-ssn-at-rest.md`. **The next free number is 0024.**
 
