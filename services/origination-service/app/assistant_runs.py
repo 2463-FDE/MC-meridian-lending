@@ -100,3 +100,45 @@ def record(
         # The class name only. The psycopg2 message for a constraint violation echoes the
         # offending row, which would put the recorded values into a log line.
         log.error("assistant_runs write failed: %s", exc.__class__.__name__)
+
+
+# The windows an aggregate may be asked for. `window` reaches a Postgres `interval` cast,
+# so it is the one injection surface this read has. It is bound as a parameter (psycopg2
+# renders a quoted literal, never string interpolation) AND checked against this tuple, so
+# no caller -- route, test, or a later in-process one -- can put an arbitrary string into
+# the cast. A value off the list is refused; there is no silent fall back to the default,
+# which would answer a different question than the one asked.
+WINDOWS = ("1 day", "7 days", "30 days")
+
+_AGGREGATE = """
+    SELECT task, http_status, refusal_code, outcome, policy_band,
+           count(*) AS runs,
+           percentile_disc(0.5)  WITHIN GROUP (ORDER BY latency_ms) AS p50_ms,
+           percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95_ms
+    FROM assistant_runs
+    WHERE created_at >= now() - %s::interval
+    GROUP BY task, http_status, refusal_code, outcome, policy_band
+    ORDER BY runs DESC, task, http_status
+"""
+
+
+def aggregate(window: str) -> list[dict]:
+    """Group the recorded runs in `window`. RAISES, unlike `record()`.
+
+    The asymmetry is deliberate. `record()` swallows because a telemetry write must never
+    500 an officer's answer. A read has no such duty, and a swallowed read returns a
+    well-formed zero from a query that failed -- the silent-regression shape ADR 0015
+    names, and the one an operator cannot tell from a quiet week.
+
+    `application_id` and `trace_id` are NEVER selected. Both are per-run, useless to an
+    aggregate, and either one turns a PII-free response into rows linkable to a customer:
+    `application_id` names the customer's application directly, and `trace_id` is the key
+    into a vendor's copy of the same run. `idx_assistant_runs_created` covers the range
+    scan; the GROUP BY sorts on top of it, which is fine at present volume and unmeasured
+    beyond it.
+    """
+    if window not in WINDOWS:
+        # Not an HTTPException: this is the module's invariant, held for every caller.
+        # The route checks first and answers 422 with the vocabulary.
+        raise ValueError(f"window must be one of {WINDOWS}")
+    return db.query(_AGGREGATE, (window,))

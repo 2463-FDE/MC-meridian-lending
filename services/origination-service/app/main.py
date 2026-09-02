@@ -217,6 +217,90 @@ def assistant_explain(
     return _run_assistant(app_id, client, "explain", policy_topic=policy_topic)
 
 
+class AssistantMetricsGroup(BaseModel):
+    """One GROUP BY row. Enum codes, integers and booleans only -- the content rule
+    app/assistant_runs.py states for the write path, re-stated at the read boundary.
+
+    Declared as a model rather than passed through as a dict so `application_id` and
+    `trace_id` cannot re-enter this response by being added to the SELECT: FastAPI drops
+    any key the model does not name. The query already omits them; this is the second
+    lock, because the change that would break it ("just add the app id for debugging")
+    edits the SQL and not this file.
+    """
+
+    task: str
+    http_status: int
+    refusal_code: str | None
+    outcome: str | None
+    policy_band: str | None
+    runs: int
+    p50_ms: int | None
+    p95_ms: int | None
+
+
+class AssistantMetrics(BaseModel):
+    """`refusal_rate_among_recorded_runs` is named in full on purpose.
+
+    Three separate reasons an officer request exists with no row behind it, so the
+    denominator is recorded runs and not requests: `assistant_runs.record` swallows every
+    write failure by design (a telemetry outage reads as low volume, never as an error), a
+    refusal code outside `ck_assistant_runs_refusal_code` is swallowed the same way, and a
+    refusal raised above the loop is never recorded at all -- including the 403 this route
+    itself raises. The shortened label "refusal rate" is what a later UI would copy, so the
+    long name lives in the response key rather than in a comment.
+
+    NULL, not 0.0, when nothing was recorded: a zero rate over a zero denominator is a
+    claim about a population that was never observed. `config._run_database_probe` carries
+    the readiness rung for the table, so an unapplied migration 0021 surfaces at /health --
+    that is the thing to check first when this reads empty.
+    """
+
+    window: str
+    recorded_runs: int
+    refusals_among_recorded_runs: int
+    refusal_rate_among_recorded_runs: float | None
+    groups: list[AssistantMetricsGroup]
+
+
+@app.get("/assistant/metrics", response_model=AssistantMetrics)
+def assistant_metrics(
+    window: str = Query(default="7 days"),
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+):
+    """Aggregate the recorded assistant runs. Read-only; nothing is scored or written.
+
+    Officer-gated in the route body because it has to be: the gateway proxies
+    `GET /los/{path:path}` anonymously (origination is borrower-facing by design) and does
+    not enforce role authz on those paths, so without `require_officer` this answers an
+    unauthenticated caller. What would leak is operational rather than PII -- the table is
+    PII-free by construction -- but five sibling routes already carry the same line.
+
+    The 403 and the 422 below are pre-funnel refusals: they are not `_refused_before_loop`
+    calls, because that helper records an assistant run, and neither of these is one. So
+    this route's own refusals are invisible to the numbers it serves, which is exactly what
+    `refusal_rate_among_recorded_runs` is named for.
+    """
+    authz.require_officer(x_user_role)
+    if window not in assistant_runs.WINDOWS:
+        raise HTTPException(
+            status_code=422,
+            detail="unknown window; choose one of: " + ", ".join(assistant_runs.WINDOWS),
+        )
+    rows = assistant_runs.aggregate(window)
+    recorded = sum(row["runs"] for row in rows)
+    # `ck_assistant_runs_refusal_matches_status` makes http_status = 200 true if and only
+    # if refusal_code IS NULL, so either column alone counts refusals exactly.
+    refusals = sum(row["runs"] for row in rows if row["refusal_code"] is not None)
+    return AssistantMetrics(
+        window=window,
+        recorded_runs=recorded,
+        refusals_among_recorded_runs=refusals,
+        refusal_rate_among_recorded_runs=(refusals / recorded) if recorded else None,
+        groups=[AssistantMetricsGroup(**row) for row in rows],
+    )
+
+
+
 @app.get("/applications/{app_id}/summary")
 def summarize_application(
     app_id: int,
