@@ -39,7 +39,7 @@ rather than being fixed.
 ```
                           ┌──────────────────────┐
   Next.js portal  ───────►│   gateway (BFF)      │  :8000
-  (apply + servicing)     │   session auth/roles │
+  (apply + servicing)     │   session auth only  │
                           └─────────┬────────────┘
                                     │  /auth · /los · /lss · /kyc
                                     │  /decision · /disclosure · /payments
@@ -87,7 +87,7 @@ and a borrower login `maria`.
 | Path | Service | Port | Notes |
 |------|---------|------|-------|
 | `frontend/` | Next.js 15 portal | 3000 | application wizard + servicing dashboard |
-| `services/gateway/` | FastAPI BFF | 8000 | session auth/roles; routes to LOS/LSS + KYC/decision/disclosure/payments |
+| `services/gateway/` | FastAPI BFF | 8000 | session auth only; forwards the resolved identity as `X-User-Id`/`X-User-Role` and strips any client-supplied copies. Authz on money actions is enforced downstream in two services, not here (ADR 0014): `services/payment-service/app/authz.py` gates the `POST /payments` the gateway and portal actually call, and `services/servicing-service/app/authz.py` gates servicing's own `POST /payments` — both require a money role (`csr`/`admin`) **or** the borrower who owns the loan, denied as 404 — plus money-role-only `adjust-balance` and `waive-fee`. Routes to LOS/LSS + KYC/decision/disclosure/payments |
 | `services/origination-service/` | FastAPI (LOS) | 8001 | intake + LOS→LSS boarding orchestrator; calls KYC/decision/disclosure over HTTP |
 | `services/servicing-service/` | FastAPI (LSS) | 8002 | balances, schedule, delinquency, reconciliation, `apply-payment` |
 | `services/kyc-service/` | FastAPI | 8003 | CIP identity check; persists `kyc_checks` |
@@ -106,10 +106,17 @@ and a card-entry surface, and neither exists). The CVV column was deleted by mig
 SSNs are also stored in plaintext (debt D33), which the **GLBA Safeguards Rule**
 (16 CFR Part 314 §314.4(c)(3), encryption of customer information at rest) is the rule on
 point for — the most directly applicable regime to this platform's data and the one this
-section previously did not name at all. Adverse-action notices follow ECOA/Reg B.
+section previously did not name at all. Under ECOA/Reg B the platform computes
+adverse-action **reasons** but delivers no notice: `services/decision-service/app/reasons.py`
+maps a deny or refer to specific principal reasons taken from the model's own top negative
+attributions (ADR 0009 §3, for 12 CFR 1002.9), and no code generates or sends the notice
+itself. Those reason texts still carry the compliance/legal review ADR 0009 records as
+pending before production use.
 TILA/Reg-Z APR is computed actuarially against pinned test vectors (`tila-vectors-gate`).
-SOX audit coverage is partial: credit decisions are append-only, money movement is not yet
-a full ledger.
+SOX audit coverage is partial: `decision_events` and `audit_logs` are both append-only at
+the database (triggers in `db/init/001_schema.sql`, debt D20) and each payment application
+is recorded once in `payment_applications` (ADR 0020), but `balances` is still a single
+mutable column, so money movement is not a full ledger.
 Compliance contact: Dana (VP Lending Ops). For SOX/reconciliation questions: Sam
 (Controller). For fair-lending/BSA: Priya (Compliance Officer).
 

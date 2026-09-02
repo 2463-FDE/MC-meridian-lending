@@ -5,9 +5,11 @@ layer: `/auth/*` for login/logout, and a guard on the servicing (`/lss/*`) route
 resolved identity is forwarded downstream as `X-User-Id` / `X-User-Role` headers.
 
 NOTE (brownfield): the gateway authenticates the caller but does NOT enforce role
-authorization on money-moving servicing actions — that is left to the downstream
-servicing-service, which also doesn't check. Any authenticated user can adjust balances
-or waive fees. (weak authz — kept on purpose)
+authorization on money-moving actions — that is left to the downstream services, which
+DO check (ADR 0014 Decision 1, debt D8(b)): payment-service's POST /payments and
+servicing-service's own POST /payments require a money role (csr/admin) or the borrower
+who owns the loan, and servicing's adjust-balance and waive-fee require a money role.
+Still open here: maker-checker — one money role both makes and approves an adjustment.
 """
 
 import asyncio
