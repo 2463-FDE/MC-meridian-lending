@@ -87,7 +87,7 @@ and a borrower login `maria`.
 | Path | Service | Port | Notes |
 |------|---------|------|-------|
 | `frontend/` | Next.js 15 portal | 3000 | application wizard + servicing dashboard |
-| `services/gateway/` | FastAPI BFF | 8000 | session auth only; forwards the resolved identity as `X-User-Id`/`X-User-Role`. Role authz on money actions is enforced downstream in `services/servicing-service/app/authz.py` (ADR 0014), not here. Routes to LOS/LSS + KYC/decision/disclosure/payments |
+| `services/gateway/` | FastAPI BFF | 8000 | session auth only; forwards the resolved identity as `X-User-Id`/`X-User-Role` and strips any client-supplied copies. Authz on money actions is enforced downstream in two services, not here (ADR 0014): `services/payment-service/app/authz.py` gates the `POST /payments` the gateway and portal actually call, and `services/servicing-service/app/authz.py` gates servicing's own `POST /payments` — both require a money role (`csr`/`admin`) **or** the borrower who owns the loan, denied as 404 — plus money-role-only `adjust-balance` and `waive-fee`. Routes to LOS/LSS + KYC/decision/disclosure/payments |
 | `services/origination-service/` | FastAPI (LOS) | 8001 | intake + LOS→LSS boarding orchestrator; calls KYC/decision/disclosure over HTTP |
 | `services/servicing-service/` | FastAPI (LSS) | 8002 | balances, schedule, delinquency, reconciliation, `apply-payment` |
 | `services/kyc-service/` | FastAPI | 8003 | CIP identity check; persists `kyc_checks` |
