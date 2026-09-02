@@ -10,6 +10,8 @@ What is pinned:
   - waive_fee reduces past_due only, never balance
   - apply_payment reduces balance only, never past_due
   - assess_late_fee adds a flat $35 to past_due and does not touch updated_at
+  - apply_payment and late_fee are internal-caller-only (ADR 0013, ADR 0014
+    Decision 1): their route signatures carry x_internal_service, not a role header
   - no money path writes any audit or ledger row, EXCEPT apply_payment, which since
     D3 (ADR 0020) writes payment_applications in the same statement as the movement
 
@@ -234,18 +236,30 @@ def test_waive_fee_route_allows_a_money_role(db_spy):
     assert out == {"loan_id": 1, "past_due": pytest.approx(0.0)}
 
 
-def test_apply_payment_route_takes_no_caller_identity_at_all():
-    # Not even a header to ignore: the signature is (loan_id, body). ADR 0013 makes
-    # this internal-service only, which changes this signature.
+def test_apply_payment_route_requires_internal_caller_identity():
+    # ADR 0013 landed and changed this signature, which is the signal this file exists
+    # to produce: the route is internal-service-only and grew x_internal_service (plus
+    # x_request_id for span correlation) rather than staying the bare (loan_id, body)
+    # this test used to pin.
     import inspect
 
-    assert list(inspect.signature(main.apply_payment).parameters) == ["loan_id", "body"]
+    assert list(inspect.signature(main.apply_payment).parameters) == [
+        "loan_id",
+        "body",
+        "x_internal_service",
+        "x_request_id",
+    ]
 
 
-def test_late_fee_route_takes_no_caller_identity_at_all():
+def test_late_fee_route_requires_internal_caller_identity():
+    # Rule-driven with no operator-chosen amount, so ADR 0014 Decision 1 makes it
+    # internal-only rather than role-gated: the same header, and still no role header.
     import inspect
 
-    assert list(inspect.signature(main.late_fee).parameters) == ["loan_id"]
+    assert list(inspect.signature(main.late_fee).parameters) == [
+        "loan_id",
+        "x_internal_service",
+    ]
 
 
 # --- nothing records the movement -----------------------------------------
