@@ -71,3 +71,22 @@ rag_eval/eval_report.md
 !.claude/skills/
 !.claude/skills/**
 !.claude/settings.json
+
+# feature-status-tracker.md is a personal working log — candid review histories, brief
+# corrections and defect post-mortems that must not reach the remote. The canonical copy
+# moved outside the repo to
+# ~/.claude/projects/-Users-maha-Desktop-revature-MC-meridian-lending/feature-status-tracker.md
+# on 2026-08-13, and what stayed tracked here was a 7-line 3-row decoy of it whose rows
+# said PR-Raised for weeks 2 and 3 long after #6 and #7 merged. Ignored so no branch can
+# carry a decoy to origin again, and so the file cannot fork per branch (an untracked
+# file has no per-branch identity). It is also what kept the tree chronically dirty,
+# which made `make prove` abort.
+#
+# Ignoring it does NOT affect doc-path-lint: is_pathish() in scripts/check_doc_paths.sh
+# requires a candidate to contain a slash, so a bare root-level filename was never
+# graded as a path — see the comment at the head of that script.
+#
+# git overwrites an ignored file without warning on a branch switch. The canonical copy
+# is outside the repo, so there is nothing here to lose; if you start keeping local rows
+# in this path anyway, copy them out before switching branches.
+feature-status-tracker.md

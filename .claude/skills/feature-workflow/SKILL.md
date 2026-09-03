@@ -18,7 +18,7 @@ These are the concrete repo files and commands the stages below assume. Confirm 
 
 - Base branch: `main`. Feature work happens on a feature branch off `main` (Stage 0).
 - ADRs: `adr/` at the repo root — sequential `NNNN-short-title.md` (highest existing is 0010+; increment it). NOT `docs/adr/`. If `adr/` is missing, ask the user where ADRs live before writing one.
-- Feature tracker: `feature-status-tracker.md` at the repo root (Stage 9). Create with a header row if absent.
+- Feature tracker: the canonical one lives OUTSIDE the repo, at `~/.claude/projects/-Users-maha-Desktop-revature-MC-meridian-lending/feature-status-tracker.md` (Stage 9). Create it with a header row if absent. A `feature-status-tracker.md` at the repo root is `.gitignore`d and is never committed — do not write status there and do not try to commit it.
 - Live stack: `make up` / `make down` / `make logs` / `make ps` (Stage 8). Portal on :3000, gateway on :8000. `make seed` re-applies seed data.
 - Tests: `make test` runs pytest across all 7 services (each `|| true`, never blocks). Per-service: `cd services/<svc> && python -m pytest -q`. Frontend: `cd frontend && npm run build && npm run lint`.
 - Prove gate: `make prove` (Stage 6/10 regression proof — rolls source to the parent commit, requires red-without-fix / green-with-fix). If the Makefile has no `prove` target on this branch, say so explicitly and skip the gate — it may be an uncommitted local addition; do NOT claim it passed.
@@ -99,7 +99,7 @@ Run ONLY when the change touches a regulated, money-moving, PII, authz, or idemp
 
 1. Confirm: all commits are in place, teeth passed, unit + integration + smoke tests pass, ADRs are committed, and every spec acceptance item is satisfied.
 2. Produce a PR-ready summary: the branch name, the base (main), a proposed PR title and description, the spec requirements covered, the ADRs added, and the test results.
-3. Update the feature status tracker: append/update this feature's entry in feature-status-tracker.md at the repo root (create the file with a header row if it does not exist). Set status to PR-Raised. Each entry records: feature name, branch, base (main), spec file path, ADRs added, teeth verdict, unit/integration/smoke test status, date, and status. Use one entry per feature and update it in place across its lifecycle — do not create duplicate rows for the same feature. Commit this tracker update.
+3. Update the feature status tracker: append/update this feature's entry in the canonical tracker outside the repo (path in *Project anchors* above; create the file with a header row if it does not exist). Set status to PR-Raised. Each entry records: feature name, branch, base (main), spec file path, ADRs added, teeth verdict, unit/integration/smoke test status, date, and status. Use one entry per feature and update it in place across its lifecycle — do not create duplicate rows for the same feature. This file is outside git; there is nothing to commit.
 4. Give the user the exact commands to push and open the PR — but DO NOT run them. Pushing and opening the PR is the user's action.
 5. STOP. Tell the user the branch is PR-ready and that you'll resume when they return with review comments.
 
@@ -108,7 +108,7 @@ Run ONLY when the change touches a regulated, money-moving, PII, authz, or idemp
 1. This stage runs only when the user comes back and pastes review comments.
 2. Invoke the address-pr skill with the pasted comments. It verifies each comment against the local branch (diffing against main), triages (ACCEPT/PARTIAL/REJECT/STALE/CLARIFY), implements the accepted fixes, and reports.
 3. After address-pr implements fixes, re-run the relevant gates: teeth on changed areas (Stage 5), then unit + integration tests (Stages 6-7), then smoke/browser against the live stack (Stage 8). Re-confirm spec acceptance.
-4. Update the feature status tracker: set this feature's entry in feature-status-tracker.md to Comments-Resolved, refreshing the teeth verdict, test status, and date. Commit this tracker update.
+4. Update the feature status tracker: set this feature's entry in the canonical tracker outside the repo to Comments-Resolved, refreshing the teeth verdict, test status, and date. This file is outside git; there is nothing to commit.
 5. Return to PR-ready state (Stage 9) with an updated summary of what changed in response to the comments.
 
 ## Operating rules across all stages

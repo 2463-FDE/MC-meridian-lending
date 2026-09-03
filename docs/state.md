@@ -8,12 +8,15 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (75c6f87)` — 75c6f87 2026-09-02 Merge pull request #160 from 2463-FDE/docs/fde-project-handoff
+Base: `origin/main (d5e2b53)` — d5e2b53 2026-09-02 Merge pull request #163 from 2463-FDE/docs/readme-compliance-claims
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #163 | `d5e2b53` | 2026-09-02 | Merge pull request #163 from 2463-FDE/docs/readme-compliance-claims |
+| #162 | `2751524` | 2026-09-02 | Merge pull request #162 from 2463-FDE/docs/model-risk-watch-row |
+| #161 | `e3f72ef` | 2026-09-02 | Merge pull request #161 from 2463-FDE/docs/dti-band-debt |
 | #160 | `75c6f87` | 2026-09-02 | Merge pull request #160 from 2463-FDE/docs/fde-project-handoff |
 | #159 | `00211db` | 2026-09-02 | Merge pull request #159 from 2463-FDE/docs/kb-adr-0023-sync |
 | #158 | `10d13ca` | 2026-09-02 | Merge pull request #158 from 2463-FDE/docs/policy-corpus-residuals |
