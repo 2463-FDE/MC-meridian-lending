@@ -42,8 +42,8 @@ def _document(figures=None) -> str:
             "heading": "Truth in Lending Disclosure",
             "figures": figures or FIGURES,
             # Digit-free: the prose fields carry no figures (see the maker prompt) —
-            # a restated amount is both an unchecked second copy and, concatenated
-            # with its neighbours, a Luhn-valid run the PII leak guard masks.
+            # a restated amount is an unchecked second copy of a figure stage 4a
+            # compares field by field.
             "payment_terms": "Equal monthly payments, due the same day each month.",
             "prepayment": "No penalty for early payoff.",
         }
@@ -554,15 +554,18 @@ class TestProseFieldsCarryNoDigits:
     """Found by running the maker against a real model on Bedrock, not FakeAdapter.
 
     Haiku wrote a borrower summary restating four money figures in one sentence. The PII
-    leak guard runs the redactor over the model's output, and the redactor's PAN scan is
-    deliberately separator-free within a single quoted value — so the concatenated digits
-    of "17460.00 ... 3628.71 ... 21088.71 ... 439.35" formed an 18-digit run that passed
-    Luhn and was masked as a card number. `guard_output` then rejected the whole document
-    and the endpoint returned 503.
+    leak guard runs the redactor over the model's output, and the redactor's PAN scan was
+    then separator-free within a single quoted value — so the concatenated digits of
+    "17460.00 ... 3628.71 ... 21088.71 ... 439.35" formed an 18-digit run that passed Luhn
+    and was masked as a card number. `guard_output` then rejected the whole document and
+    the endpoint returned 503. Canned FakeAdapter responses never produced prose with
+    enough figures to collide.
 
-    Roughly one in ten such runs is Luhn-valid, so the failure is intermittent: the same
-    loan renders on one attempt and fails on the next. Canned FakeAdapter responses never
-    produced prose with enough figures to collide.
+    That collision is now closed at its source: the per-value scan caps the separator RUN
+    between two digits (`redactor.py::_MAX_SEPARATOR_RUN`), and the prose between two
+    money figures is far longer than any separator a real card is written with. The
+    digit-free contract stays, on the reason that was always the load-bearing one — a
+    figure restated in prose is a second copy stage 4a does not check.
     """
 
     def test_the_schema_forbids_digits_in_the_prose_fields(self):
@@ -608,14 +611,14 @@ class TestProseFieldsCarryNoDigits:
         assert "pattern" in str(excinfo.value)
         assert calls["persist"] == 0, "a rejected document must never be persisted"
 
-    def test_the_exact_output_that_broke_the_live_run_is_masked_as_a_pan(self):
+    def test_the_exact_output_that_broke_the_live_run_no_longer_globs_as_a_pan(self):
         """The collision itself, pinned, in the shape it actually occurred.
 
-        The PAN scan runs per QUOTED value, which is why the model's JSON is the trigger
-        and a bare sentence is not: the quotes delimit one field, and the whole field's
-        digits are Luhn-checked as a single run. If the heuristic ever stops globbing
-        these, this test says so rather than the digit-free rule quietly becoming cargo
-        cult.
+        This asserted the OPPOSITE — that the redactor masks this sentence — until the
+        per-value scan capped the separator run (`redactor.py::_MAX_SEPARATOR_RUN`). The
+        same glob was 503-ing the officer loan summary, where no digit-free contract is
+        available: the officer is reading the figures. Pinned rather than deleted, so
+        lifting the cap fails here instead of silently reopening both routes.
         """
         from app.redactor import PiiRedactor
 
@@ -627,8 +630,7 @@ class TestProseFieldsCarryNoDigits:
                 )
             }
         )
-        assert PiiRedactor.redact(output) != output
-        assert "(PAN)" in PiiRedactor.redact(output)
+        assert PiiRedactor.redact(output) == output
 
     def test_an_individual_figure_is_not_masked(self):
         """The constraint is about several figures sharing one value, not about digits
