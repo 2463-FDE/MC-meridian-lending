@@ -29,6 +29,12 @@ class PiiRedactor:
         r"|acct[_ ]?(?:number|no|num)|primary[_ ]?account[_ ]?number)"
     )
 
+    # Longest run of separator characters allowed BETWEEN two digits of one
+    # candidate card number in the per-quoted-value / per-token scans (rules 1d
+    # and 1e). See _mask_pan_in_value for why this is bounded, and what escapes
+    # because of it.
+    _MAX_SEPARATOR_RUN = 8
+
     @staticmethod
     def _mask_pan_value(value: str) -> str:
         """Mask a labeled card-field value of ANY internal format, keeping last 4 digits.
@@ -99,11 +105,26 @@ class PiiRedactor:
         runs longer than 3 (4111====1111...).
 
         Matches a maximal run of digits-plus-separators and Luhn-checks the run's
-        extracted digits (via _redact_if_pan). BOUND-FREE on separators, but safe
-        ONLY because redact() applies it per quoted value (step 1d), never across
-        a whole log line: the quote delimits a single field, so digits from
-        separate fields are never globbed into a false PAN. A <13-digit value
-        skips the scan.
+        extracted digits (via _redact_if_pan). Any character may separate two
+        digits, but one RUN of separators is capped at _MAX_SEPARATOR_RUN chars.
+
+        The scan was once bound-free, on the reasoning that redact() applies it per
+        quoted value (step 1d) and a quote delimits a single field, so digits from
+        separate fields are never globbed. That holds for a logged request-payload
+        dict. It does NOT hold when the quoted value is a PARAGRAPH — an LLM summary
+        restating loan figures — where an unbounded run strips the prose between
+        unrelated numbers, globs their digits into one 13-19 digit run and hits Luhn
+        by chance (~1 in 10 per candidate window, and a paragraph offers dozens).
+        That masked an officer loan summary as a card number and failed it closed at
+        validator.guard_output, 503-ing every summary of an application that had an
+        offer. The cap sits above every separator run in this redactor's own bypass
+        vectors (longest: 7) and below the shortest prose gap between two money
+        figures (25).
+
+        RESIDUAL: a PAN padded with separator runs LONGER than the cap, inside one
+        quoted value, escapes this pass. Rules 1a/1b/1c/1e still scan that value.
+
+        A <13-digit value skips the scan.
 
         Consistent with the redactor's whole-run Luhn design, this checks the
         exact digit run — it does NOT slide sub-windows (which would false-mask
@@ -114,7 +135,11 @@ class PiiRedactor:
         """
         if sum(c.isdigit() for c in value) < 13:
             return value
-        return re.sub(r"\d(?:\D*\d){12,18}", PiiRedactor._redact_if_pan, value)
+        return re.sub(
+            rf"\d(?:\D{{0,{PiiRedactor._MAX_SEPARATOR_RUN}}}\d){{12,18}}",
+            PiiRedactor._redact_if_pan,
+            value,
+        )
 
     @staticmethod
     def _percent_decode(s: str) -> str:
@@ -267,7 +292,7 @@ class PiiRedactor:
         # words, and allowing them would glob digits across unrelated fields
         # (`4111 and card 1111...`) or across `&`/`=` query boundaries. Multi-letter
         # separators in an UNQUOTED value are handled by rule 1e below (token-bounded
-        # bound-free scan); a quoted value is covered by rule 1d.
+        # scan); a quoted value is covered by rule 1d.
         text = re.sub(
             r"\b\d(?:(?:[^0-9A-Za-z]{0,3}|[A-Za-z])\d){12,18}\b",
             PiiRedactor._redact_if_pan,
@@ -284,10 +309,14 @@ class PiiRedactor:
         # KYC log whole request-payload dicts through this formatter (str(dict) →
         # 'name': '<value>'), so a reconstructable card can hide in a name/address
         # value and reach the log. We scan WITHIN each quoted value only: inside a
-        # quote every non-digit is a separator (bound-free), but the match cannot
-        # cross the closing quote, so PANs are caught regardless of separator while
-        # digits from other fields are never globbed together. Both ' and " (and
-        # escaped inner quotes) are handled — Python repr uses ', JSON uses ".
+        # quote every non-digit is a separator, and the match cannot cross the
+        # closing quote, so PANs are caught regardless of separator CHARACTER while
+        # digits from other fields are never globbed together. A separator RUN is
+        # capped at _MAX_SEPARATOR_RUN — one quoted value is not always one field
+        # (an LLM summary is a paragraph), and an uncapped run globbed digits from
+        # unrelated money figures across the prose between them; see
+        # _mask_pan_in_value. Both ' and " (and escaped inner quotes) are handled —
+        # Python repr uses ', JSON uses ".
         text = re.sub(
             r'(["\'])((?:(?!\1)[^\\]|\\.)*)\1',
             lambda m: (
@@ -297,15 +326,15 @@ class PiiRedactor:
         )
         # 1e. PAN in UNQUOTED structured text (access-log request lines / URL query
         # strings). Rule 1b bounds a free-text separator to a single letter, and the
-        # bound-free scan (1d) runs only inside quotes — so a card split by MULTI-
+        # per-quoted-value scan (1d) runs only inside quotes — so a card split by MULTI-
         # letter separators in an unquoted value (?name=4111xx1111xx1111xx1111, which
         # configure_uvicorn writes to the uvicorn access log) escaped both. Scan each
         # STRUCTURAL TOKEN — a maximal run holding no URL/log field delimiter
-        # ([whitespace " ' ? & = / # ; , :]) — bound-free via _mask_pan_in_value.
+        # ([whitespace " ' ? & = / # ; , :]) — via _mask_pan_in_value.
         # Those delimiters bound each query value, path segment, and log field, so a
         # match cannot glob digits across fields (the reason 1b had to stay single-
-        # letter); WITHIN a token any separator is allowed, closing the multi-letter
-        # bypass. Luhn-gated, so unrelated long digit runs are left alone; a token
+        # letter); WITHIN a token any separator CHARACTER is allowed (in a run up to
+        # _MAX_SEPARATOR_RUN long), closing the multi-letter bypass. Luhn-gated, so unrelated long digit runs are left alone; a token
         # with <13 digits is a no-op. Each token is also percent-decoded for
         # detection (_mask_pan_token), so a PAN whose separators — or whole value —
         # are URL-encoded (?name=4111%2D1111%2D1111%2D1111) is caught too; the

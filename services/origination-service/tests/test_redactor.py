@@ -180,6 +180,37 @@ class TestPiiRedactorPan:
         doc2 = str({"ref": "1234567890123456"})
         assert PiiRedactor.redact(doc2) == doc2
 
+    def test_prose_value_money_figures_not_masked_as_pan(self):
+        # Regression: the per-value scan (1d) is bound-free on separators because a
+        # quote "delimits a single field". That assumption fails when the quoted
+        # value is a PARAGRAPH: the scan strips the prose between unrelated money
+        # figures, globs their digits into one run, and Luhn-hits by chance. This is
+        # the verbatim `loan_application_summary` output for application 7333, which
+        # `validator.guard_output` rejected ("model output contains PII"), turning
+        # every officer Summarize click into a 503 once the application had an offer.
+        # Masked run was 072 + 46998 + 236915 -> 7246998236915 (Luhn-valid).
+        text = (
+            '{"summary": "Applicant requests $15,000 over 36 months for debt '
+            "consolidation on a $75,000 annual income with $800 monthly debt "
+            "obligations. Employment tenure is 2 years. Proposed APR is 10.072% "
+            "with monthly payment of $469.98. Total finance charge is $2,369.15. "
+            'Identity verification (name, DOB, SSN) completed successfully.", '
+            '"risk_flags": ["monthly_debt_to_income_ratio_elevated"], '
+            '"recommended_next_step": "approve_review"}'
+        )
+        assert PiiRedactor.redact(text) == text
+
+    def test_payload_value_separator_run_at_bound_still_masked(self):
+        # The bound that makes the prose case above safe must stay wider than every
+        # separator run the 1d bypass vectors use (longest today: 7, in
+        # test_payload_value_pan_letter_and_long_separators_masked). A PAN split by
+        # 8-char runs is still a PAN, not prose.
+        pan = "4111{s}1111{s}1111{s}1111".format(s="=" * 8)
+        result = PiiRedactor.redact('{"name":"%s"}' % pan)
+        assert "4111" not in result, f"PAN prefix leaked: {result!r}"
+        assert "411111111111" not in result
+        assert "1111" in result  # last 4 preserved
+
     # Access-log request-target query strings are dropped WHOLESALE (rule 0) — both
     # param names AND values — keeping only the path. A client controls the whole
     # request target, so a PAN split across values, across param NAMES, padded with

@@ -447,8 +447,8 @@ def test_an_unexpected_document_field_is_refused(client):
         # `^\D*$` pattern exists to prevent, and the figure gate does not see prose.
         ("payment_terms", "You will make 48 monthly payments of 439.35."),
         ("prepayment", "Repay early; there is no penalty of 0."),
-        # A single digit is enough — the concatenated digits of restated figures are a
-        # 13-19 digit run and roughly one in ten is Luhn-valid (a card number in prose).
+        # A single digit is enough — the contract is the pattern, not a judgement about
+        # which numbers are safe to restate.
         ("payment_terms", "Payment number 1 is due next month."),
         ("prepayment", "See section 4 for details."),
         # The heading is borrower-facing text outside the figures check, same footing as

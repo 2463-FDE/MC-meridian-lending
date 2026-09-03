@@ -108,11 +108,10 @@ def _check(node, schema, path: str) -> None:
         if not isinstance(node, str):
             raise ValidationFailed(f"{path}: expected string")
         # `pattern` is the only string facet enforced here. It exists because the
-        # disclosure maker's prose fields must contain no digits — a sentence restating
-        # several money figures is one quoted value whose concatenated digits can be a
-        # Luhn-valid run, and the PII leak guard then masks the document as a card number
-        # (see prompts/disclosure_assemble.py). A constraint that only lives in the prompt
-        # is a request; this makes it a contract.
+        # disclosure maker's prose fields must contain no digits — a figure restated in
+        # prose is a second copy the stage-4a figure gate does not compare (see
+        # prompts/disclosure_assemble.py). A constraint that only lives in the prompt is
+        # a request; this makes it a contract.
         #
         # NOTE: `maxLength` is declared by several prompts and is NOT enforced — a
         # pre-existing gap, left alone here rather than silently tightening prompts this
