@@ -92,6 +92,29 @@ ROLE_BY_MESSAGE_TYPE = {"ai": "assistant", "tool": "user", "human": "user"}
 QUERY_TOOL = "search_policy"
 
 
+def _replayed_input(name: str, args: Any, policy_topic: str | None) -> dict:
+    """The `input` a replayed tool call carries back to the model.
+
+    For every tool but `search_policy` this is the model's own arguments, which are
+    protocol enums and integers the allowlist admits. For `search_policy` the
+    model-authored query is stripped (above), which left the replayed block reading as
+    a call with no argument at all: MEASURED against Haiku 4.5 on `task=explain` with a
+    `policy_topic`, the model searched, read the record, then searched three more times
+    and never answered -- its own history showed `search_policy` called with nothing, so
+    the answer it had was indistinguishable from a call it had failed to make.
+
+    The officer's `policy_topic` stands in that slot. It is a code from a closed
+    vocabulary, allowlisted in `llm/request_builder._SAFE_CATEGORICAL` under this exact
+    key, so it survives the boundary where the query cannot -- and it is the officer's
+    own, never model-authored. Absent when the officer asked no policy question: an
+    empty input is what the block carried before, and the provider pairs turns by id,
+    not by input.
+    """
+    if name == QUERY_TOOL:
+        return {"policy_topic": policy_topic} if policy_topic else {}
+    return args if isinstance(args, dict) else {}
+
+
 def _declared_tool_names() -> list[str]:
     """The tool names `decision_assistant`'s output schema admits.
 
@@ -163,7 +186,9 @@ class MeridianChatModel(BaseChatModel):
 
     # ---- framework -> ClaudeClient ------------------------------------------------
 
-    def _turn_content(self, message: BaseMessage) -> Any:
+    def _turn_content(
+        self, message: BaseMessage, policy_topic: str | None = None
+    ) -> Any:
         """One history turn, in the protocol shape the hand-rolled loop emits.
 
         An assistant tool call becomes `{"action": "tool", "tool": ..., "input": ...}`;
@@ -234,9 +259,7 @@ class MeridianChatModel(BaseChatModel):
                 # that holds only because the redactor catches it is one allowlist
                 # entry from leaking. The provider pairs turns by id, not by input, so
                 # sending the block with no input is well-formed.
-                block_input = (
-                    args if name != QUERY_TOOL and isinstance(args, dict) else {}
-                )
+                block_input = _replayed_input(name, args, policy_topic)
                 return [
                     {
                         "type": "tool_use",
@@ -246,8 +269,9 @@ class MeridianChatModel(BaseChatModel):
                     }
                 ]
             action: dict[str, Any] = {"action": "tool", "tool": name}
-            if name != QUERY_TOOL and isinstance(args, dict):
-                action["input"] = args
+            replayed = _replayed_input(name, args, policy_topic)
+            if replayed:
+                action["input"] = replayed
             return json.dumps(action)
 
         if self.bound_tools:
@@ -309,13 +333,39 @@ class MeridianChatModel(BaseChatModel):
                 "the officer's request message must carry a non-empty string"
             )
 
+        # Read off the OFFICER's request, never off the model's echoed tool input --
+        # same rule as `_officer_context` below, and for the same reason: the value
+        # goes back to the model as the argument its own search is replayed with.
+        policy_topic = self._officer_policy_topic(request_json)
+
         history = []
         for message in messages[first_human + 1 :]:
             role = ROLE_BY_MESSAGE_TYPE.get(message.type)
             if role is None:
                 raise LLMError(f"unsupported message type {message.type!r} in history")
-            history.append({"role": role, "content": self._turn_content(message)})
+            history.append(
+                {"role": role, "content": self._turn_content(message, policy_topic)}
+            )
         return request_json, history
+
+    @staticmethod
+    def _officer_policy_topic(request_json: str) -> str | None:
+        """The officer's policy topic code, or None when they asked no policy question.
+
+        Tolerant on purpose: `_officer_context` is the one that refuses a malformed
+        request, and it runs on the same string a few lines later in `_generate`. A
+        second raise here would only change which message an operator sees. An
+        unlisted code is not filtered here either -- `_redacted_tool_use` masks it at
+        the boundary, which is where the vocabulary lives.
+        """
+        try:
+            parsed = json.loads(request_json)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        topic = parsed.get("policy_topic")
+        return topic if isinstance(topic, str) and topic else None
 
     # ---- ClaudeClient -> framework ------------------------------------------------
 
