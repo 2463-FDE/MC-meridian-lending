@@ -8,12 +8,13 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (d5e2b53)` — d5e2b53 2026-09-02 Merge pull request #163 from 2463-FDE/docs/readme-compliance-claims
+Base: `origin/main (2fce051)` — 2fce051 2026-09-03 Merge pull request #164 from 2463-FDE/chore/untrack-status-tracker-v2
 
 ## Merged pull requests
 
 | PR | merge | date | subject |
 |---|---|---|---|
+| #164 | `2fce051` | 2026-09-03 | Merge pull request #164 from 2463-FDE/chore/untrack-status-tracker-v2 |
 | #163 | `d5e2b53` | 2026-09-02 | Merge pull request #163 from 2463-FDE/docs/readme-compliance-claims |
 | #162 | `2751524` | 2026-09-02 | Merge pull request #162 from 2463-FDE/docs/model-risk-watch-row |
 | #161 | `e3f72ef` | 2026-09-02 | Merge pull request #161 from 2463-FDE/docs/dti-band-debt |

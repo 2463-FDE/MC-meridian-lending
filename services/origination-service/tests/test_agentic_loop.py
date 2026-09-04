@@ -419,3 +419,90 @@ def test_the_query_bound_matches_the_prompt_schema():
     assert assistant._QUERY_MAX_LENGTH == advertised == 200
     bound = assistant._PolicyQuery.model_json_schema()["properties"]["query"]
     assert bound["maxLength"] == advertised
+
+
+# --- interlock 5: a repeat search must be legible to the model ----------------------
+
+
+def _tool_results(adapter, name: str) -> list[dict]:
+    """Every `tool_result` payload for one tool, as the provider would have read it.
+
+    Walks the outbound requests rather than the seam's intent, same rule as
+    `_outbound`: the model's view of its own history is exactly what this asserts on,
+    and pairing is by the `tool_use` block's id because that is how the provider pairs
+    them.
+    """
+    assert adapter.calls, "nothing reached the adapter — assert against a real request"
+    # The LAST request only. Every turn re-sends the whole history, so collecting
+    # across all of them counts the first search once per later turn.
+    messages = adapter.calls[-1].messages
+    blocks = [
+        block
+        for message in messages
+        if isinstance(message.get("content"), list)
+        for block in message["content"]
+    ]
+    ids = {
+        block["id"]
+        for block in blocks
+        if block.get("type") == "tool_use" and block.get("name") == name
+    }
+    return [
+        json.loads(block["content"])
+        for block in blocks
+        if block.get("type") == "tool_result" and block.get("tool_use_id") in ids
+    ]
+
+
+def test_a_search_result_names_the_topic_it_searched(dispatched, monkeypatch):
+    """Interlock 5 caps retrieval at one search per run and serves the repeat from the
+    cache -- but a cached repeat that reads IDENTICALLY to the first search tells the
+    model nothing about whether it has already searched. The model-authored query is
+    stripped from the replayed `tool_use` block, so the only thing left to distinguish
+    them is the result. MEASURED against Haiku 4.5 on app 7332 (`task=explain`,
+    `policy_topic=debt_to_income`): search, record, then four more searches and no
+    final answer -- `_MAX_STEPS` spent on a run whose first search returned
+    `policy_hit`. Echoing the officer's own topic code is what closed it."""
+    monkeypatch.setitem(
+        assistant._TOOLS,
+        "search_policy",
+        lambda query, task: assistant.policy_retrieval.PolicyAnswer(
+            status="policy_hit",
+            score=0.5303,
+            chunk_id="underwriting_guidelines#debt-to-income-dti",
+            text="DTI above 43% is referred.",
+        ),
+    )
+    client, adapter = _client(SEARCH, SEARCH, FINAL)
+    assistant.run(42, client, task="explain", policy_topic="debt_to_income")
+
+    results = _tool_results(adapter, "search_policy")
+    assert len(results) == 2, "both searches must reach the model's history"
+    for result in results:
+        assert result["policy_topic"] == "debt_to_income", (
+            "the search result does not say which topic it searched, so the model "
+            "cannot tell a repeat from a first search"
+        )
+        assert result["status"] == "policy_hit"
+
+
+def test_a_search_result_carries_no_topic_when_the_officer_named_none(
+    dispatched, monkeypatch
+):
+    """The topic is the OFFICER's code, not a field the model gets to see invented: a
+    run with no policy question must not grow one. Absent, never null -- the same rule
+    the root span applies to the same value."""
+    monkeypatch.setitem(
+        assistant._TOOLS,
+        "search_policy",
+        lambda query, task: assistant.policy_retrieval.PolicyAnswer(
+            status="policy_abstain", reason="below_threshold", score=0.11
+        ),
+    )
+    client, adapter = _client(SEARCH, FINAL)
+    assistant.run(42, client, task="explain")
+
+    results = _tool_results(adapter, "search_policy")
+    assert results, "the search result never reached the model's history"
+    for result in results:
+        assert "policy_topic" not in result

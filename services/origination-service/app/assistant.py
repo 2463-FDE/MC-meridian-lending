@@ -382,13 +382,19 @@ class _PolicyQuery(BaseModel):
     )
 
 
-def _framework_tools(application_id: int, request_id: str, task: str):
+def _framework_tools(
+    application_id: int, request_id: str, task: str, policy_topic: str | None = None
+):
     """The three tools, closed over this request, plus the state the answer needs.
 
     Returns `(tools, state)`. `state` collects what the officer-facing answer is built
     from -- the citations, every search attempt, and whether the regulated decision
     ran -- because the framework owns the message list and none of that can be read
     back out of it.
+
+    `policy_topic` is the officer's code (already validated against
+    `policy_retrieval.POLICY_TOPICS` by `run`), echoed back to the model in the
+    search_policy result -- see `_policy_result`.
     """
     state: dict = {"score": None, "citations": [], "searches": []}
 
@@ -432,6 +438,31 @@ def _framework_tools(application_id: int, request_id: str, task: str):
             record(result)
             return json.dumps(result)
 
+    def _policy_result(answer) -> dict:
+        """The model-visible projection of one search, plus the topic it was for.
+
+        `PolicyAnswer.tool_result()` carries the status and the score and nothing
+        else, so two searches in one run are indistinguishable in the history the
+        model then reasons over: the model-authored `query` is stripped from the
+        replayed `tool_use` block (`llm/chat_model._turn_content`) and would be
+        masked as free text at the boundary anyway. MEASURED against Haiku 4.5 on
+        `task=explain` with a `policy_topic`: the model searched, read the record,
+        then searched four more times and never answered, spending `_MAX_STEPS` on a
+        run whose first search had already returned `policy_hit`. Echoing the
+        officer's own topic is what closes that: it is a code from
+        `policy_retrieval.POLICY_TOPICS`, allowlisted in
+        `llm/request_builder._SAFE_CATEGORICAL` under this exact key, so it survives
+        the boundary intact where the query cannot.
+
+        The chunk text and the query still stay on the officer's side of the boundary
+        (ADR 0019 decision 3) -- this adds the officer's code, nothing the model or
+        the corpus authored.
+        """
+        result = answer.tool_result()
+        if policy_topic is not None:
+            result["policy_topic"] = policy_topic
+        return result
+
     def _policy(query: str = "") -> str:
         # Interlock 5 (PT-001): search_policy is honoured AT MOST ONCE per run, the same
         # cap as the regulated score, so the model cannot compound retrieval calls or
@@ -441,18 +472,16 @@ def _framework_tools(application_id: int, request_id: str, task: str):
         with _tool_span("search_policy") as record:
             if state["searches"]:
                 answer = state["searches"][-1]
-                record(answer.tool_result(), served_from_cache=True)
-                return json.dumps(answer.tool_result())
+                record(_policy_result(answer), served_from_cache=True)
+                return json.dumps(_policy_result(answer))
             answer = _call("search_policy", query, task)
-            record(answer.tool_result(), served_from_cache=False)
+            record(_policy_result(answer), served_from_cache=False)
         state["searches"].append(answer)
         if answer.is_hit and all(
             c.chunk_id != answer.chunk_id for c in state["citations"]
         ):
             state["citations"].append(answer)
-        # Only the allowlisted status + score go back to the model; the chunk text
-        # stays on the officer's side of the boundary (ADR 0019 decision 3).
-        return json.dumps(answer.tool_result())
+        return json.dumps(_policy_result(answer))
 
     tools = [
         StructuredTool.from_function(
@@ -698,7 +727,7 @@ def run(
     # The per-run caps that were loop-local before the swap now live in the tool
     # closures, which is where a framework can still see them: `create_agent` binds
     # tools once, so a check in the loop body would have nowhere to run.
-    tools, state = _framework_tools(application_id, request_id, task)
+    tools, state = _framework_tools(application_id, request_id, task, policy_topic)
     agent = _build_agent(client, tools)
     # Root of the trace. `request_id` is the decision idempotency key forwarded to
     # decision-service, so it still ties this run to the exact decision_events row

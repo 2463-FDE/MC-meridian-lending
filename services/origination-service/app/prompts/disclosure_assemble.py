@@ -15,14 +15,15 @@ and `prepayment`: borrower-facing text outside the `figures` check, so both reas
 apply to it. Two reasons, both found by running this against a real model rather than
 FakeAdapter:
 
-1. *The leak guard globs numbers.* `guard_output` runs the PII redactor over the model's
-   output, and the redactor's PAN scan is deliberately separator-free within a single
-   quoted value (`redactor.py::_mask_pan_in_value`) — safe for a log field, but a prose
-   sentence restating four money figures is one quoted value whose concatenated digits
-   are a 13-19 digit run. Roughly one in ten such runs is Luhn-valid, so the sentence
-   "You are borrowing 17460.00. You will pay a finance charge of 3628.71..." is masked as
-   a card number and the whole document is rejected. That failure is intermittent by
-   construction — the same loan generates on one attempt and 503s on the next.
+1. *The leak guard globbed numbers.* CLOSED at the source, kept here as the reason this
+   rule was written. `guard_output` runs the PII redactor over the model's output, and
+   the redactor's PAN scan was separator-free within a single quoted value — safe for a
+   log field, but a prose sentence restating four money figures is one quoted value whose
+   concatenated digits are a 13-19 digit run, roughly one in ten of them Luhn-valid. The
+   sentence "You are borrowing 17460.00. You will pay a finance charge of 3628.71..." was
+   masked as a card number and the whole document rejected, intermittently. The scan now
+   caps the separator run between two digits (`redactor.py::_MAX_SEPARATOR_RUN`), so
+   prose no longer globs. Reason 2 is what keeps this rule.
 2. *One number, one home.* Stage 4a compares `figures` field by field. A figure restated
    in prose is a second copy the gate does not check, which is exactly the drift this
    pipeline exists to prevent.
