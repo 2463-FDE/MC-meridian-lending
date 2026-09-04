@@ -8,7 +8,7 @@ lives in `docs/kb.md` and is deliberately absent here.
 
 ## Base tip
 
-Base: `origin/main (2fce051)` — 2fce051 2026-09-03 Merge pull request #164 from 2463-FDE/chore/untrack-status-tracker-v2
+Base: `origin/main (f625be4)` — f625be4 2026-09-03 chore(kb): regenerate docs/state.md for base 2fce051
 
 ## Merged pull requests
 
