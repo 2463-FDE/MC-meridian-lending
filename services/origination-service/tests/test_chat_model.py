@@ -502,3 +502,51 @@ def test_an_unknown_action_is_refused():
     model, _ = _model('{"action": "wander"}')
     with pytest.raises(LLMError):
         model.invoke([HumanMessage(content=json.dumps(APPLICANT))])
+
+
+def test_a_replayed_search_names_the_officers_topic_not_an_empty_input():
+    """A replayed `search_policy` carries the officer's topic code, not `{}`.
+
+    The model-authored query is stripped (the test above), which left the replayed
+    `tool_use` block reading as a call the model never gave an argument to: MEASURED
+    against Haiku 4.5 on `task=explain` with a `policy_topic`, the model searched,
+    read the record, then searched three more times and spent the whole step budget
+    without answering, because its own history showed `search_policy` called with
+    nothing. The officer's `policy_topic` is a code from a closed vocabulary
+    (`_SAFE_CATEGORICAL`), so it can stand in that slot where the query cannot.
+    """
+    model, adapter = _model(FINAL_ACTION)
+    bound = model.bind_tools(_declared_tools())
+    bound.invoke(
+        [
+            HumanMessage(
+                content=json.dumps(
+                    {
+                        "application_id": 42,
+                        "task": "explain",
+                        "policy_topic": "fee_schedule",
+                    }
+                )
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_policy",
+                        "args": {"query": "late fee waiver policy"},
+                        "id": "c1",
+                    }
+                ],
+            ),
+        ]
+    )
+    blob = json.dumps(_sent(adapter).messages)
+    assert "late fee waiver" not in blob
+    blocks = [
+        block
+        for message in _sent(adapter).messages
+        if isinstance(message["content"], list)
+        for block in message["content"]
+        if block.get("type") == "tool_use"
+    ]
+    assert [b["input"] for b in blocks] == [{"policy_topic": "fee_schedule"}]
